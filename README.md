@@ -20,7 +20,11 @@ Play offline while this is in use, and back up saves. Multiplayer has not been t
 
 The first log lines in `DSR-FPS-Unlock.log` should include the simulation step. The incoming value on that build is `0.016666668` (one sixtieth of a second). The corrected value is `1 / TargetFPS`.
 
-Movement, rolls, and animation time follow that step. Some actions are still counted once per displayed frame. Sliding down a ladder, jump distance, weapon durability, and hit windows are the ones worth checking first. Menu navigation and mouse look are scaled back toward the 60 FPS rate. Cloth uses the same scale on the separate Havok step.
+Movement, rolls, and animation time follow that step. The sprint-slowdown check is the same idea as Dark Souls III: it treats a short step as "stuck on geometry" and multiplies sprint speed by 0.8. Retail compares the step against 1/60 of a unit. The mod compares it against the real frame time, and stretches the 0.8 slowdown and 1.2 recovery so they still take the same amount of real time. Above 90 FPS the distance test has 20% of slack and recovery compounds from 1.5 instead of 1.2, so leaving a wall does not sit in the slow sprint.
+
+Starting a sprint raises a blend weight by 1/60 on every displayed frame. The same function already has the real frame time and uses it for a second timer. The weight now uses that frame time too, so the blend still takes about a second instead of a quarter of a second at 240 FPS. Weapon toggling does not raise the weight.
+
+Some actions are still counted once per displayed frame. Sliding down a ladder, jump distance, weapon durability, and hit windows are the ones worth checking. Menu navigation and mouse look are scaled back toward the 60 FPS rate. Cloth uses the same scale on the separate Havok step. The sprint constants are written a few seconds after startup, once the executable will keep a code edit.
 
 ## Build
 

@@ -20,7 +20,7 @@ DWORD WINAPI worker(void*) {
     wchar_t dll_path[MAX_PATH];
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path);
-    LOG_INFO("DSR-FPS-Unlock v0.1.0");
+    LOG_INFO("DSR-FPS-Unlock v0.1.3");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);

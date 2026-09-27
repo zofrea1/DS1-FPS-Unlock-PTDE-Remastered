@@ -393,6 +393,274 @@ bool patch_menu() {
     return true;
 }
 
+// Grazing a wall, or just sprinting at a high frame rate, used to slam the
+// character into a slow run. The check is length(position delta this frame) * 60 < 1,
+// and 60 is the retail rate, so a 240 FPS step is four times more likely to fail it.
+// The same test at any rate is length * (1 / frame_time) < 1. The 0.8 slowdown and
+// 1.2 recovery are per frame, so they are raised to frame_time * 60.
+constexpr uint32_t kSpeedMul = 0x379B9B;
+constexpr uint32_t kSpeedDecay = 0x379BB9;
+constexpr uint32_t kSpeedRecover = 0x379BEC;
+
+// The move-state timeline is called with the real frame time in xmm1, then
+// replaces it with a hardcoded 1/60 before advancing the blend. At 240 FPS that
+// plays the walk-to-run camera blend four times too fast.
+constexpr uint32_t kTimelineUseSavedDt = 0x379D94;
+constexpr uint32_t kTimelineKeepIncomingDt = 0x379DF2;
+// Camera channels at +0x190 and +0x1A4 ease toward their targets by 1/60 of the
+// gap per call. The call is once per displayed frame, so the ease has to shrink
+// with the frame.
+constexpr uint32_t kCameraEaseA = 0x239641;
+constexpr uint32_t kCameraEaseB = 0x239669;
+// The walk-to-run parameter blend at +0x30 steps by a hardcoded 1/60 per call.
+// The same function already integrates the real frame time, in xmm1, into +0x34.
+constexpr uint32_t kBlendStepUp = 0x3C3337;
+constexpr uint32_t kBlendStepDown = 0x3C3357;
+
+float* g_speed_cave = nullptr;
+float* g_camera_alpha = nullptr;
+int64_t g_speed_last_qpc = 0;
+int64_t g_speed_qpc_freq = 0;
+std::atomic<int> g_speed_state{0};
+std::atomic<int> g_speed_logged{0};
+std::atomic<int> g_timeline_state{0};
+std::atomic<int> g_camera_state{0};
+std::atomic<int> g_blend_state{0};
+
+bool write_disp32(uint8_t* disp, uint8_t* next_ip, const void* target) {
+    const intptr_t rel = static_cast<const uint8_t*>(target) - next_ip;
+    if (rel < INT32_MIN || rel > INT32_MAX) {
+        return false;
+    }
+    const auto value = static_cast<int32_t>(rel);
+    DWORD old = 0;
+    if (!VirtualProtect(disp, 4, PAGE_EXECUTE_READWRITE, &old)) {
+        return false;
+    }
+    std::memcpy(disp, &value, sizeof(value));
+    DWORD ignored = 0;
+    VirtualProtect(disp, 4, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), disp, 4);
+    return true;
+}
+
+bool rip_mulss_is(const uint8_t* insn, float expected) {
+    if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != 0x59 || insn[3] != 0x05) {
+        return false;
+    }
+    int32_t disp = 0;
+    std::memcpy(&disp, insn + 4, sizeof(disp));
+    const auto* constant = reinterpret_cast<const float*>(insn + 8 + disp);
+    return std::fabs(*constant - expected) < 0.0001f;
+}
+
+void write_speed_factors(float dt) {
+    const float target = static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
+    const bool high = target >= 90.0f;
+    const float leniency = high ? 1.2f : 1.0f;
+    const float recover_base = high ? 1.5f : 1.2f;
+    if (dt < 1.0f / 480.0f) {
+        dt = 1.0f / 480.0f;
+    }
+    if (dt > 0.05f) {
+        dt = 1.0f / target;
+    }
+    g_speed_cave[0] = (1.0f / dt) * leniency;
+    g_speed_cave[1] = std::exp(std::log(0.8f) * dt * 60.0f);
+    g_speed_cave[2] = std::exp(std::log(recover_base) * dt * 60.0f);
+}
+
+float sample_frame_dt(bool* measured) {
+    if (g_speed_qpc_freq == 0) {
+        LARGE_INTEGER freq{};
+        QueryPerformanceFrequency(&freq);
+        g_speed_qpc_freq = freq.QuadPart;
+    }
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    const float nominal = 1.0f / static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
+    float dt = nominal;
+    *measured = false;
+    if (g_speed_last_qpc != 0 && g_speed_qpc_freq != 0) {
+        const float sample = static_cast<float>(static_cast<double>(now.QuadPart - g_speed_last_qpc) /
+                                                 static_cast<double>(g_speed_qpc_freq));
+        if (sample >= 1.0f / 480.0f && sample <= 0.05f) {
+            dt = sample;
+            *measured = true;
+        }
+    }
+    g_speed_last_qpc = now.QuadPart;
+    return dt;
+}
+
+void write_camera_alpha(float dt) {
+    // current += (target - current) * alpha, once per displayed frame.
+    // alpha = 1/60 at a 60 Hz frame. Raise 59/60 to the power of dt*60 so a
+    // burst of shorter frames eases the same amount of real time.
+    const float keep = 1.0f - (1.0f / 60.0f);
+    const float alpha = 1.0f - std::exp(std::log(keep) * dt * 60.0f);
+    *g_camera_alpha = alpha;
+}
+
+void update_speed_factors() {
+    if (!g_speed_cave && !g_camera_alpha) {
+        return;
+    }
+    bool measured = false;
+    const float dt = sample_frame_dt(&measured);
+    if (g_speed_cave) {
+        write_speed_factors(dt);
+        if (measured && g_speed_logged.exchange(1) == 0) {
+            LOG_INFO("Sprint graze using frame time %.3f ms, scale %.3f, decay %.4f, recover %.4f", dt * 1000.0f,
+                     g_speed_cave[0], g_speed_cave[1], g_speed_cave[2]);
+        }
+    }
+    if (g_camera_alpha) {
+        write_camera_alpha(dt);
+    }
+}
+
+bool patch_speed() {
+    auto* mul = image_rva(kSpeedMul);
+    auto* decay = image_rva(kSpeedDecay);
+    auto* recover = image_rva(kSpeedRecover);
+    if (!rip_mulss_is(mul, 60.0f) || !rip_mulss_is(decay, 0.8f) || !rip_mulss_is(recover, 1.2f)) {
+        LOG_ERROR("Sprint graze check does not match this build");
+        return false;
+    }
+    void* page = alloc_near(mul);
+    if (!page) {
+        LOG_ERROR("Could not allocate sprint constants (Win32=%lu)", GetLastError());
+        return false;
+    }
+    g_speed_cave = static_cast<float*>(page);
+    write_speed_factors(1.0f / static_cast<float>(g_target_fps.load(std::memory_order_relaxed)));
+    if (!write_disp32(mul + 4, mul + 8, g_speed_cave) ||
+        !write_disp32(decay + 4, decay + 8, g_speed_cave + 1) ||
+        !write_disp32(recover + 4, recover + 8, g_speed_cave + 2)) {
+        g_speed_cave = nullptr;
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not retarget the sprint graze multiplies");
+        return false;
+    }
+    LOG_INFO("Sprint graze check retargeted (vanilla multiplier 60, decay 0.8, recover 1.2)");
+    return true;
+}
+
+bool patch_bytes(uint8_t* address, const uint8_t* expected, const uint8_t* replacement, size_t size) {
+    if (std::memcmp(address, expected, size) != 0) {
+        return false;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &old)) {
+        return false;
+    }
+    std::memcpy(address, replacement, size);
+    DWORD ignored = 0;
+    VirtualProtect(address, size, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), address, size);
+    return true;
+}
+
+bool patch_move_timeline() {
+    // movss xmm1, [1/60] is 8 bytes. The saved frame time is in xmm6.
+    auto* saved = image_rva(kTimelineUseSavedDt);
+    auto* incoming = image_rva(kTimelineKeepIncomingDt);
+    auto load_is_one_sixtieth = [](const uint8_t* insn) {
+        if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != 0x10 || insn[3] != 0x0D) {
+            return false;
+        }
+        int32_t disp = 0;
+        std::memcpy(&disp, insn + 4, sizeof(disp));
+        const auto* constant = reinterpret_cast<const float*>(insn + 8 + disp);
+        return std::fabs(*constant - (1.0f / 60.0f)) < 0.000001f;
+    };
+    if (!load_is_one_sixtieth(saved) || !load_is_one_sixtieth(incoming)) {
+        LOG_ERROR("Move-state timeline does not match this build");
+        return false;
+    }
+    // movss xmm1, xmm6. The other copy still holds the caller's xmm1, so it becomes nops.
+    const uint8_t use_saved[8] = {0xF3, 0x0F, 0x10, 0xCE, 0x90, 0x90, 0x90, 0x90};
+    const uint8_t keep_incoming[8] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+    uint8_t saved_bytes[8];
+    uint8_t incoming_bytes[8];
+    std::memcpy(saved_bytes, saved, 8);
+    std::memcpy(incoming_bytes, incoming, 8);
+    if (!patch_bytes(saved, saved_bytes, use_saved, 8) ||
+        !patch_bytes(incoming, incoming_bytes, keep_incoming, 8)) {
+        LOG_ERROR("Could not retarget the move-state timeline");
+        return false;
+    }
+    LOG_INFO("Move-state timeline steps with the real frame time");
+    return true;
+}
+
+bool patch_camera_ease() {
+    auto* ease_a = image_rva(kCameraEaseA);
+    auto* ease_b = image_rva(kCameraEaseB);
+    auto is_ease = [](const uint8_t* insn) {
+        // mulss xmm1, dword ptr [rip+disp]
+        if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != 0x59 || insn[3] != 0x0D) {
+            return false;
+        }
+        int32_t disp = 0;
+        std::memcpy(&disp, insn + 4, sizeof(disp));
+        const auto* constant = reinterpret_cast<const float*>(insn + 8 + disp);
+        return std::fabs(*constant - (1.0f / 60.0f)) < 0.000001f;
+    };
+    if (!is_ease(ease_a) || !is_ease(ease_b)) {
+        LOG_ERROR("Camera ease does not match this build");
+        return false;
+    }
+    void* page = alloc_near(ease_a);
+    if (!page) {
+        LOG_ERROR("Could not allocate the camera ease factor (Win32=%lu)", GetLastError());
+        return false;
+    }
+    g_camera_alpha = static_cast<float*>(page);
+    write_camera_alpha(1.0f / static_cast<float>(g_target_fps.load(std::memory_order_relaxed)));
+    if (!write_disp32(ease_a + 4, ease_a + 8, g_camera_alpha) ||
+        !write_disp32(ease_b + 4, ease_b + 8, g_camera_alpha)) {
+        g_camera_alpha = nullptr;
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not retarget the camera ease");
+        return false;
+    }
+    LOG_INFO("Camera ease retargeted (vanilla step 1/60 of the remaining gap)");
+    return true;
+}
+
+bool patch_blend_step() {
+    auto* up = image_rva(kBlendStepUp);
+    auto* down = image_rva(kBlendStepDown);
+    // addss/subss xmm0, [1/60], 8 bytes. xmm1 is the frame time.
+    const uint8_t add_dt[8] = {0xF3, 0x0F, 0x58, 0xC1, 0x90, 0x90, 0x90, 0x90};
+    const uint8_t sub_dt[8] = {0xF3, 0x0F, 0x5C, 0xC1, 0x90, 0x90, 0x90, 0x90};
+    auto is_one_sixtieth = [](const uint8_t* insn, uint8_t opcode) {
+        if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != opcode || insn[3] != 0x05) {
+            return false;
+        }
+        int32_t disp = 0;
+        std::memcpy(&disp, insn + 4, sizeof(disp));
+        const auto* constant = reinterpret_cast<const float*>(insn + 8 + disp);
+        return std::fabs(*constant - (1.0f / 60.0f)) < 0.000001f;
+    };
+    if (!is_one_sixtieth(up, 0x58) || !is_one_sixtieth(down, 0x5C)) {
+        LOG_ERROR("Walk-to-run blend step does not match this build");
+        return false;
+    }
+    uint8_t up_bytes[8];
+    uint8_t down_bytes[8];
+    std::memcpy(up_bytes, up, 8);
+    std::memcpy(down_bytes, down, 8);
+    if (!patch_bytes(up, up_bytes, add_dt, 8) || !patch_bytes(down, down_bytes, sub_dt, 8)) {
+        LOG_ERROR("Could not retarget the walk-to-run blend step");
+        return false;
+    }
+    LOG_INFO("Walk-to-run blend steps by the frame time instead of 1/60");
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -408,6 +676,26 @@ void try_delayed_patches() {
     if (g_menu_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_menu();
         g_menu_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_speed_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_speed();
+        g_speed_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_timeline_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_move_timeline();
+        g_timeline_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_camera_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_camera_ease();
+        g_camera_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_blend_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_blend_step();
+        g_blend_state.store(ok ? 2 : -1);
     }
 }
 
@@ -476,6 +764,7 @@ void hook_sim(void* step, float frame_time) {
         return;
     }
     try_delayed_patches();
+    update_speed_factors();
     const float corrected = scaled_frame(frame_time);
     if (g_sim_logged.exchange(1) == 0) {
         LOG_INFO("Simulation step: incoming=%.9f corrected=%.9f target=%u", frame_time, corrected,
@@ -764,6 +1053,6 @@ bool patches_apply() {
         rollback();
         return false;
     }
-    LOG_INFO("DSR-FPS-Unlock v0.1.0 active. Step scale is 60/%u.", g_target_fps.load());
+    LOG_INFO("DSR-FPS-Unlock v0.1.3 active. Step scale is 60/%u.", g_target_fps.load());
     return true;
 }
