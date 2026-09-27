@@ -1,0 +1,8 @@
+build/
+*.obj
+*.ilk
+*.pdb
+*.exp
+*.lib
+*.log
+*.user
