@@ -393,6 +393,127 @@ bool patch_menu() {
     return true;
 }
 
+// Grazing a wall, or just sprinting at a high frame rate, used to slam the
+// character into a slow run. The check is length(position delta this frame) * 60 < 1,
+// and 60 is the retail rate, so a 240 FPS step is four times more likely to fail it.
+// The same test at any rate is length * (1 / frame_time) < 1. The 0.8 slowdown and
+// 1.2 recovery are per frame, so they are raised to frame_time * 60.
+constexpr uint32_t kSpeedMul = 0x379B9B;
+constexpr uint32_t kSpeedDecay = 0x379BB9;
+constexpr uint32_t kSpeedRecover = 0x379BEC;
+
+float* g_speed_cave = nullptr;
+int64_t g_speed_last_qpc = 0;
+int64_t g_speed_qpc_freq = 0;
+std::atomic<int> g_speed_state{0};
+std::atomic<int> g_speed_logged{0};
+
+bool write_disp32(uint8_t* disp, uint8_t* next_ip, const void* target) {
+    const intptr_t rel = static_cast<const uint8_t*>(target) - next_ip;
+    if (rel < INT32_MIN || rel > INT32_MAX) {
+        return false;
+    }
+    const auto value = static_cast<int32_t>(rel);
+    DWORD old = 0;
+    if (!VirtualProtect(disp, 4, PAGE_EXECUTE_READWRITE, &old)) {
+        return false;
+    }
+    std::memcpy(disp, &value, sizeof(value));
+    DWORD ignored = 0;
+    VirtualProtect(disp, 4, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), disp, 4);
+    return true;
+}
+
+bool rip_mulss_is(const uint8_t* insn, float expected) {
+    if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != 0x59 || insn[3] != 0x05) {
+        return false;
+    }
+    int32_t disp = 0;
+    std::memcpy(&disp, insn + 4, sizeof(disp));
+    const auto* constant = reinterpret_cast<const float*>(insn + 8 + disp);
+    return std::fabs(*constant - expected) < 0.0001f;
+}
+
+void write_speed_factors(float dt) {
+    const float target = static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
+    const bool high = target >= 90.0f;
+    const float leniency = high ? 1.2f : 1.0f;
+    const float recover_base = high ? 1.5f : 1.2f;
+    if (dt < 1.0f / 480.0f) {
+        dt = 1.0f / 480.0f;
+    }
+    if (dt > 0.05f) {
+        dt = 1.0f / target;
+    }
+    g_speed_cave[0] = (1.0f / dt) * leniency;
+    g_speed_cave[1] = std::exp(std::log(0.8f) * dt * 60.0f);
+    g_speed_cave[2] = std::exp(std::log(recover_base) * dt * 60.0f);
+}
+
+float sample_frame_dt(bool* measured) {
+    if (g_speed_qpc_freq == 0) {
+        LARGE_INTEGER freq{};
+        QueryPerformanceFrequency(&freq);
+        g_speed_qpc_freq = freq.QuadPart;
+    }
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    const float nominal = 1.0f / static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
+    float dt = nominal;
+    *measured = false;
+    if (g_speed_last_qpc != 0 && g_speed_qpc_freq != 0) {
+        const float sample = static_cast<float>(static_cast<double>(now.QuadPart - g_speed_last_qpc) /
+                                                 static_cast<double>(g_speed_qpc_freq));
+        if (sample >= 1.0f / 480.0f && sample <= 0.05f) {
+            dt = sample;
+            *measured = true;
+        }
+    }
+    g_speed_last_qpc = now.QuadPart;
+    return dt;
+}
+
+void update_speed_factors() {
+    if (!g_speed_cave) {
+        return;
+    }
+    bool measured = false;
+    const float dt = sample_frame_dt(&measured);
+    write_speed_factors(dt);
+    if (measured && g_speed_logged.exchange(1) == 0) {
+        LOG_INFO("Sprint graze using frame time %.3f ms, scale %.3f, decay %.4f, recover %.4f", dt * 1000.0f,
+                 g_speed_cave[0], g_speed_cave[1], g_speed_cave[2]);
+    }
+}
+
+bool patch_speed() {
+    auto* mul = image_rva(kSpeedMul);
+    auto* decay = image_rva(kSpeedDecay);
+    auto* recover = image_rva(kSpeedRecover);
+    if (!rip_mulss_is(mul, 60.0f) || !rip_mulss_is(decay, 0.8f) || !rip_mulss_is(recover, 1.2f)) {
+        LOG_ERROR("Sprint graze check does not match this build");
+        return false;
+    }
+    void* page = alloc_near(mul);
+    if (!page) {
+        LOG_ERROR("Could not allocate sprint constants (Win32=%lu)", GetLastError());
+        return false;
+    }
+    g_speed_cave = static_cast<float*>(page);
+    write_speed_factors(1.0f / static_cast<float>(g_target_fps.load(std::memory_order_relaxed)));
+    if (!write_disp32(mul + 4, mul + 8, g_speed_cave) ||
+        !write_disp32(decay + 4, decay + 8, g_speed_cave + 1) ||
+        !write_disp32(recover + 4, recover + 8, g_speed_cave + 2)) {
+        g_speed_cave = nullptr;
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not retarget the sprint graze multiplies");
+        return false;
+    }
+    LOG_INFO("Sprint graze check retargeted (vanilla multiplier 60, decay 0.8, recover 1.2)");
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -408,6 +529,11 @@ void try_delayed_patches() {
     if (g_menu_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_menu();
         g_menu_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_speed_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_speed();
+        g_speed_state.store(ok ? 2 : -1);
     }
 }
 
@@ -476,6 +602,7 @@ void hook_sim(void* step, float frame_time) {
         return;
     }
     try_delayed_patches();
+    update_speed_factors();
     const float corrected = scaled_frame(frame_time);
     if (g_sim_logged.exchange(1) == 0) {
         LOG_INFO("Simulation step: incoming=%.9f corrected=%.9f target=%u", frame_time, corrected,
@@ -764,6 +891,6 @@ bool patches_apply() {
         rollback();
         return false;
     }
-    LOG_INFO("DSR-FPS-Unlock v0.1.0 active. Step scale is 60/%u.", g_target_fps.load());
+    LOG_INFO("DS1 Remastered FPS Unlock v0.0.1 active. Step scale is 60/%u.", g_target_fps.load());
     return true;
 }
