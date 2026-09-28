@@ -1,8 +1,8 @@
 # DS1 Remastered FPS Unlock
 
-Unlocks the framerate in Dark Souls Remastered and keeps gameplay, particles, cloth, and cinematics on the same clock as the displayed frames.
+Unlocks the framerate in Dark Souls Remastered and keeps gameplay, particles, cloth, cinematics, and menus on the same clock as the displayed frames.
 
-The retail game is capped at 60. Its frame pacer multiplies the performance counter by 60, and the simulation, effect, and Havok steps are still given a fixed 1/60 second on every displayed frame. This mod raises that pace to `TargetFPS` and scales those steps by `60 / TargetFPS`.
+The retail game is capped at 60. Its frame pacer multiplies the performance counter by 60, and the simulation, effect, Havok, and menu steps are still given a fixed 1/60 second on every displayed frame. This mod raises that pace to `TargetFPS` and scales those steps by `60 / TargetFPS`.
 
 Supported executable: Steam build SHA-1 `9150CC63C617332ED3C2C66E7566ED67E3292DA0` (1.03.1, 2022-10-11). The file on disk is not modified.
 
@@ -24,7 +24,7 @@ Movement, rolls, and animation time follow that step. The sprint-slowdown check 
 
 The first walk-to-run after you have been standing still has a short hitch in the original game. At a high frame rate that hitch reads as a brief freeze of the character and the camera together. Toggling a weapon once warms it, and it stays gone until you stop moving completely. This release leaves that behavior as it is.
 
-Some actions are still counted once per displayed frame. Sliding down a ladder, jump distance, weapon durability, and hit windows are the ones worth checking. Menu navigation and mouse look are scaled back toward the 60 FPS rate. Cloth uses the same scale on the separate Havok step. The sprint constants are written a few seconds after startup, once the executable will keep a code edit.
+Some actions are still counted once per displayed frame. Sliding down a ladder, jump distance, weapon durability, and hit windows are the ones worth checking. Menu and HUD animations take the scaled menu step, so they keep the retail pace. Menu navigation and mouse look are scaled back toward the 60 FPS rate. Cloth uses the same scale on the separate Havok step. The sprint constants are written a few seconds after startup, once the executable will keep a code edit.
 
 ## Build
 

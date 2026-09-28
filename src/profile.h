@@ -37,6 +37,12 @@ struct BuildProfile {
     uint32_t havok_fn;
     uint32_t flipper60_vtable;
     uint32_t flipper140_vtable;
+    uint32_t common_menu_vtable;
+    uint32_t common_menu_fn;
+    uint32_t ingame_menu_vtable;
+    uint32_t ingame_menu_fn;
+    uint32_t title_menu_vtable;
+    uint32_t title_menu_fn;
 };
 
 inline constexpr BuildProfile kBuild{
@@ -70,4 +76,10 @@ inline constexpr BuildProfile kBuild{
     0x2A31D0,
     0x12AB268,
     0x12AB2C0,
+    0x1300D20,
+    0x285680,
+    0x13012E0,
+    0x286F80,
+    0x1301A98,
+    0x289360,
 };

@@ -24,12 +24,16 @@ using RemoFn = void (*)(void*, float, void*);
 using MenuFn = uint8_t (*)(void*, int);
 using InputFn = void (*)(void*, void*, void*, void*, float);
 using LookupFn = void* (*)(void*, int);
+using MenuStepFn = void (*)(void*, float, void*);
 
 QpcFn g_qpc = nullptr;
 SimFn g_sim = nullptr;
 FxFn g_fx = nullptr;
 RemoFn g_remo = nullptr;
 MenuFn g_menu = nullptr;
+MenuStepFn g_common_menu = nullptr;
+MenuStepFn g_ingame_menu = nullptr;
+MenuStepFn g_title_menu = nullptr;
 InputFn g_press = nullptr;
 InputFn g_press_alt = nullptr;
 InputFn g_repeat = nullptr;
@@ -47,11 +51,15 @@ void** g_press_slot = nullptr;
 void** g_press_alt_slot = nullptr;
 void** g_repeat_slot = nullptr;
 void** g_repeat_alt_slot = nullptr;
+void** g_common_menu_slot = nullptr;
+void** g_ingame_menu_slot = nullptr;
+void** g_title_menu_slot = nullptr;
 
 std::atomic<int64_t> g_pacer_anchor{0};
 std::atomic<int> g_sim_logged{0};
 std::atomic<int> g_fx_logged{0};
 std::atomic<int> g_remo_logged{0};
+std::atomic<int> g_menu_step_logged{0};
 std::atomic<int> g_pacer_logged{0};
 std::atomic<int> g_repeat_logged{0};
 std::atomic<int> g_havok_state{0};
@@ -177,6 +185,9 @@ bool validate_static_sites() {
         {"press-alt", kBuild.press_alt_vtable, kBuild.press_alt_fn},
         {"repeat", kBuild.repeat_vtable, kBuild.repeat_fn},
         {"repeat-alt", kBuild.repeat_alt_vtable, kBuild.repeat_alt_fn},
+        {"common-menu", kBuild.common_menu_vtable, kBuild.common_menu_fn},
+        {"ingame-menu", kBuild.ingame_menu_vtable, kBuild.ingame_menu_fn},
+        {"title-menu", kBuild.title_menu_vtable, kBuild.title_menu_fn},
     };
     for (const Slot& slot : slots) {
         void* value = *reinterpret_cast<void**>(image_rva(slot.slot));
@@ -611,6 +622,32 @@ void hook_sim(void* step, float frame_time) {
     g_sim(step, corrected);
 }
 
+// Title, common, and in-game menus are their own scheduler steps. Each still
+// receives a fixed 1/60 on every displayed frame, so widget animation runs at
+// TargetFPS/60. Scale that step the same way as simulation.
+float menu_step_time(float frame_time) {
+    if (g_scheduler_active.load(std::memory_order_acquire) == 0) {
+        return frame_time;
+    }
+    const float corrected = scaled_frame(frame_time);
+    if (g_menu_step_logged.exchange(1) == 0) {
+        LOG_INFO("Menu animation step: incoming=%.9f corrected=%.9f", frame_time, corrected);
+    }
+    return corrected;
+}
+
+void hook_common_menu(void* step, float frame_time, void* context) {
+    g_common_menu(step, menu_step_time(frame_time), context);
+}
+
+void hook_ingame_menu(void* step, float frame_time, void* context) {
+    g_ingame_menu(step, menu_step_time(frame_time), context);
+}
+
+void hook_title_menu(void* step, float frame_time, void* context) {
+    g_title_menu(step, menu_step_time(frame_time), context);
+}
+
 void hook_fx(void* manager, float frame_time) {
     try_delayed_patches();
     if (g_scheduler_active.load(std::memory_order_acquire) == 0) {
@@ -775,6 +812,15 @@ void rollback() {
     if (g_repeat_alt_slot && g_repeat_alt) {
         patch_pointer(g_repeat_alt_slot, reinterpret_cast<void*>(g_repeat_alt));
     }
+    if (g_common_menu_slot && g_common_menu) {
+        patch_pointer(g_common_menu_slot, reinterpret_cast<void*>(g_common_menu));
+    }
+    if (g_ingame_menu_slot && g_ingame_menu) {
+        patch_pointer(g_ingame_menu_slot, reinterpret_cast<void*>(g_ingame_menu));
+    }
+    if (g_title_menu_slot && g_title_menu) {
+        patch_pointer(g_title_menu_slot, reinterpret_cast<void*>(g_title_menu));
+    }
     if (g_remo_slot && g_remo) {
         patch_pointer(g_remo_slot, reinterpret_cast<void*>(g_remo));
     }
@@ -861,6 +907,9 @@ bool patches_apply() {
     g_press_alt_slot = reinterpret_cast<void**>(image_rva(kBuild.press_alt_vtable));
     g_repeat_slot = reinterpret_cast<void**>(image_rva(kBuild.repeat_vtable));
     g_repeat_alt_slot = reinterpret_cast<void**>(image_rva(kBuild.repeat_alt_vtable));
+    g_common_menu_slot = reinterpret_cast<void**>(image_rva(kBuild.common_menu_vtable));
+    g_ingame_menu_slot = reinterpret_cast<void**>(image_rva(kBuild.ingame_menu_vtable));
+    g_title_menu_slot = reinterpret_cast<void**>(image_rva(kBuild.title_menu_vtable));
 
     g_qpc = reinterpret_cast<QpcFn>(*g_qpc_iat);
     g_sim = reinterpret_cast<SimFn>(*g_sim_slot);
@@ -870,6 +919,9 @@ bool patches_apply() {
     g_press_alt = reinterpret_cast<InputFn>(*g_press_alt_slot);
     g_repeat = reinterpret_cast<InputFn>(*g_repeat_slot);
     g_repeat_alt = reinterpret_cast<InputFn>(*g_repeat_alt_slot);
+    g_common_menu = reinterpret_cast<MenuStepFn>(*g_common_menu_slot);
+    g_ingame_menu = reinterpret_cast<MenuStepFn>(*g_ingame_menu_slot);
+    g_title_menu = reinterpret_cast<MenuStepFn>(*g_title_menu_slot);
     g_press_lookup = reinterpret_cast<LookupFn>(image_rva(kBuild.press_lookup));
     g_press_alt_lookup = reinterpret_cast<LookupFn>(image_rva(kBuild.press_alt_lookup));
     g_repeat_lookup = reinterpret_cast<LookupFn>(image_rva(kBuild.repeat_lookup));
@@ -882,7 +934,10 @@ bool patches_apply() {
         !patch_pointer(g_press_slot, reinterpret_cast<void*>(hook_press)) ||
         !patch_pointer(g_press_alt_slot, reinterpret_cast<void*>(hook_press_alt)) ||
         !patch_pointer(g_repeat_slot, reinterpret_cast<void*>(hook_repeat)) ||
-        !patch_pointer(g_repeat_alt_slot, reinterpret_cast<void*>(hook_repeat_alt))) {
+        !patch_pointer(g_repeat_alt_slot, reinterpret_cast<void*>(hook_repeat_alt)) ||
+        !patch_pointer(g_common_menu_slot, reinterpret_cast<void*>(hook_common_menu)) ||
+        !patch_pointer(g_ingame_menu_slot, reinterpret_cast<void*>(hook_ingame_menu)) ||
+        !patch_pointer(g_title_menu_slot, reinterpret_cast<void*>(hook_title_menu))) {
         LOG_ERROR("Could not install a vtable hook (Win32=%lu)", GetLastError());
         rollback();
         return false;
