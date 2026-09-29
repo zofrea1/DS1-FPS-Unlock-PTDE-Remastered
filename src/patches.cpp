@@ -1528,6 +1528,6 @@ bool patches_apply() {
         rollback();
         return false;
     }
-    LOG_INFO("DS1 Remastered FPS Unlock v0.0.1 active. Step scale is 60/%u.", g_target_fps.load());
+    LOG_INFO("DS1 Remastered FPS Unlock v1.0.0 active. Step scale is 60/%u.", g_target_fps.load());
     return true;
 }

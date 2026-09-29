@@ -24,7 +24,22 @@ Movement, rolls, and animation time follow that step. The sprint-slowdown check 
 
 The first walk-to-run after you have been standing still has a short hitch in the original game. At a high frame rate that hitch reads as a brief freeze of the character and the camera together. Toggling a weapon once warms it, and it stays gone until you stop moving completely. This release leaves that behavior as it is.
 
-Some actions are still counted once per displayed frame. Sliding down a ladder, jump distance, weapon durability, and hit windows are the ones worth checking. Menu and HUD animations take the scaled menu step, so they keep the retail pace. Menu navigation and mouse look are scaled back toward the 60 FPS rate. Cloth uses the same scale on the separate Havok step. The sprint constants are written a few seconds after startup, once the executable will keep a code edit.
+## Physics
+
+Several movement systems in the retail game are counted once per displayed frame instead of per second, so they misbehave above 60 FPS. This release corrects the ones that were found:
+
+- **Airborne momentum.** Jump distance and walk-off momentum decayed several times too fast. The per-frame damping is now raised to `60 / TargetFPS`.
+- **Slope slide.** The slide gravity and its air friction were per frame. They are scaled the same way.
+- **Ladders.** The slide-down used a fixed 1/60 step, and at the bottom the ground snap pulled the character through the floor. Both are fixed, so sliding down a ladder no longer drops you out of the world.
+- **Ledges and lips.** The ground snap-down could keep the character glued to a curved lip and slide it down several times faster than at 60. It now follows retail's limit of 0.4 units of drop per 1/60 s, so a single step is still caught in one frame and a lip is released at the retail rate.
+
+`FixMoveDt` and `FixStepDown` in the INI switch the last two on and off for comparison.
+
+**Accuracy.** Physics is very close to the game running at 60 FPS, and more than good enough for casual and serious play. It is not a perfect 1:1 match: retail decides some of these things on a 1/60 s frame grid, so a borderline slope or lip can behave slightly differently at 180 or 240 FPS. Speedrunners and anyone who needs stock-exact precision should not use this.
+
+Weapon durability and hit windows are still worth checking. Menu and HUD animations take the scaled menu step, so they keep the retail pace. Menu navigation and mouse look are scaled back toward the 60 FPS rate. Cloth uses the same scale on the separate Havok step. The sprint and movement constants are written a few seconds after startup, once the executable will keep a code edit.
+
+`Trace` and `Watch` in the INI are diagnostics for development. Leave them off.
 
 ## Build
 

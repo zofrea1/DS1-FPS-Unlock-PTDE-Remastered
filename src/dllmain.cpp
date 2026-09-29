@@ -22,7 +22,7 @@ DWORD WINAPI worker(void*) {
     wchar_t dll_path[MAX_PATH];
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path);
-    LOG_INFO("DS1 Remastered FPS Unlock v0.0.1");
+    LOG_INFO("DS1 Remastered FPS Unlock v1.0.0");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
