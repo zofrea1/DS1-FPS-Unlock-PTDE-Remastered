@@ -526,6 +526,63 @@ bool patch_speed() {
     return true;
 }
 
+// Airborne momentum: fn 0x2bbe40 damps body velocity by 0.975 per FRAME,
+// loaded from [body+0xf0] at 0x2bc24b. Retail only ran at sixty frames a
+// second, so 0.975 per frame was 0.975 per 1/60 s of wall time. At TargetFPS
+// the same per-frame factor decays that much faster per wall second - four
+// times faster at 240 - which drains walk-off momentum and the back half of
+// a jump before it can play out. Point the load at a cave float holding
+// 0.975 ^ (60 / TargetFPS): exactly 0.975 at 60 FPS, and the factor raised
+// to TargetFPS equals 0.975 raised to 60 per second, so the wall-time decay
+// matches retail at any target.
+constexpr uint32_t kDecaySite = 0x2BC24B;
+
+std::atomic<int> g_decay_state{0};
+
+bool patch_decay() {
+    auto* site = image_rva(kDecaySite);
+    // movss xmm3, dword ptr [rbx + 0xf0] (f3 0f 10 9b f0 00 00 00), preceded
+    // by xorps xmm1, xmm1 and followed by movaps xmm2, xmm5.
+    static constexpr uint8_t kExpected[] = {0xF3, 0x0F, 0x10, 0x9B, 0xF0, 0x00, 0x00, 0x00};
+    if (site[-3] != 0x0F || site[-2] != 0x57 || site[-1] != 0xC9 ||
+        std::memcmp(site, kExpected, sizeof(kExpected)) != 0 || site[8] != 0x0F || site[9] != 0x28 ||
+        site[10] != 0xD5) {
+        LOG_ERROR("Velocity damp load does not match this build");
+        return false;
+    }
+    void* page = alloc_near(site);
+    if (!page) {
+        LOG_ERROR("Could not allocate the damp constant (Win32=%lu)", GetLastError());
+        return false;
+    }
+    const double target = static_cast<double>(g_target_fps.load(std::memory_order_relaxed));
+    auto* factor = static_cast<float*>(page);
+    *factor = static_cast<float>(std::exp(std::log(0.975) * 60.0 / target));
+
+    // Same length both ways: [rbx + disp32] becomes [rip + disp32] by
+    // changing only the ModRM byte (mod=00, reg=xmm3, rm=101), then the
+    // displacement is retargeted at the cave.
+    DWORD old = 0;
+    if (!VirtualProtect(site + 3, 1, PAGE_EXECUTE_READWRITE, &old)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not unprotect the velocity damp load (Win32=%lu)", GetLastError());
+        return false;
+    }
+    site[3] = 0x1D;
+    DWORD ignored = 0;
+    VirtualProtect(site + 3, 1, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), site + 3, 1);
+    if (!write_disp32(site + 4, site + 8, factor)) {
+        site[3] = 0x9B;
+        FlushInstructionCache(GetCurrentProcess(), site + 3, 1);
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not retarget the velocity damp load");
+        return false;
+    }
+    LOG_INFO("Velocity damp retargeted (per-frame factor %.6f instead of 0.975)", *factor);
+    return true;
+}
+
 // Movement tracer, only installed when the INI asks for Trace=1.
 //
 // ChrIns::Update(chr, dt) runs once per displayed frame with the real (already
@@ -700,6 +757,11 @@ void try_delayed_patches() {
     if (g_speed_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_speed();
         g_speed_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_decay_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_decay();
+        g_decay_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_trace_state.compare_exchange_strong(expected, 1)) {

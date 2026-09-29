@@ -17,8 +17,9 @@ std::mutex g_mu;
 uint64_t g_start_qpc = 0;
 double g_qpc_to_ms = 1.0;
 uint32_t g_rows = 0;
+bool g_cap_logged = false;
 
-constexpr uint32_t kMaxRows = 500000;
+constexpr uint32_t kMaxRows = 5000000;
 constexpr size_t kCacheSize = 1024;
 
 struct Entry {
@@ -62,7 +63,10 @@ const char* kHeader =
     "physx,physy,physz,pposx,pposy,pposz,pflag,"
     "c140x,c140y,c140z,c2c0x,c2c0y,c2c0z,"
     "ctimer,cmode,cdt,rdt,"
-    "velx,vely,velz,mvx,mvy,mvz,airt,pflags\n";
+    "velx,vely,velz,mvx,mvy,mvz,airt,"
+    "m150x,m150y,m150z,m160x,m160y,m160z,cmdx,cmdy,cmdz,"
+    "p130x,p130y,p130z,p140x,p140y,p140z,p150x,p150y,p150z,"
+    "p1ax,p1ay,p1az,p1dx,p1dy,p1dz,pflags\n";
 
 }  // namespace
 
@@ -126,7 +130,14 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
     const uint32_t action = *reinterpret_cast<const uint32_t*>(base + 0x354);
 
     std::lock_guard<std::mutex> lock(g_mu);
-    if (!g_file || g_rows >= kMaxRows) {
+    if (!g_file) {
+        return;
+    }
+    if (g_rows >= kMaxRows) {
+        if (!g_cap_logged) {
+            g_cap_logged = true;
+            LOG_ERROR("Trace row cap of %u reached; further rows are dropped", kMaxRows);
+        }
         return;
     }
     Entry* entry = find_entry(chr);
@@ -168,16 +179,30 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
 
     // Probe: physics velocity (vec3 at phys+0x120), move-control input vector
     // (mc+0x140), the phys airborne accumulator (+0x1B0) and the byte flags
-    // that gate fn 0x2bbe40's velocity damp paths.
+    // that gate fn 0x2bbe40's velocity damp paths. The extra vec3 probes cover
+    // the move pipeline (mc+0xA0 move command, mc+0x150/0x160) and the phys
+    // internal velocity/displacement slots (+0x130/+0x140/+0x150/+0x1A0/+0xD0)
+    // so a per-frame displacement bug shows its carrier column directly.
     const float* vel = reinterpret_cast<const float*>(phys + 0x120);
     const float* mv = reinterpret_cast<const float*>(mc + 0x140);
     const float airt = *reinterpret_cast<const float*>(phys + 0x1B0);
+    const float* m150 = reinterpret_cast<const float*>(mc + 0x150);
+    const float* m160 = reinterpret_cast<const float*>(mc + 0x160);
+    const float* mcmd = reinterpret_cast<const float*>(mc + 0xA0);
+    const float* p130 = reinterpret_cast<const float*>(phys + 0x130);
+    const float* p140 = reinterpret_cast<const float*>(phys + 0x140);
+    const float* p150 = reinterpret_cast<const float*>(phys + 0x150);
+    const float* p1a0 = reinterpret_cast<const float*>(phys + 0x1A0);
+    const float* p0d0 = reinterpret_cast<const float*>(phys + 0xD0);
     uint8_t pflags = 0;
     if (*reinterpret_cast<const uint8_t*>(phys + 0x33)) pflags |= 1u;
     if (*reinterpret_cast<const uint8_t*>(phys + 0xEC)) pflags |= 2u;
     if (*reinterpret_cast<const uint8_t*>(phys + 0xED)) pflags |= 4u;
     if (*reinterpret_cast<const uint8_t*>(phys + 0x1F2)) pflags |= 8u;
     if (*reinterpret_cast<const uint8_t*>(phys + 0x1F5)) pflags |= 16u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x1F0)) pflags |= 32u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x6D)) pflags |= 64u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x1F4)) pflags |= 128u;
 
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
@@ -190,14 +215,35 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
                  "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%u,"
                  "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,"
                  "%.6f,%u,%.6f,%.6f,"
-                 "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.6f,%u\n",
+                 "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.6f,"
+                 "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,"
+                 "%.5f,%.5f,%.5f,"
+                 "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,"
+                 "%.5f,%.5f,%.5f,"
+                 "%.5f,%.5f,%.5f,"
+                 "%.5f,%.5f,%.5f,%u\n",
                  g_rows, ms, static_cast<unsigned long long>(site), phase,
                  static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(chr)), dt, anim, action, idx,
                  action_type, action_flags, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(mc)),
                  mstate, mstate2, mflags, mspeed, mthresh, pos[0], pos[1], pos[2], prev[0], prev[1], prev[2],
                  pflag, c140[0], c140[1], c140[2], c2c0[0], c2c0[1], c2c0[2], ctimer, cmode, cdt, rdt,
-                 vel[0], vel[1], vel[2], mv[0], mv[1], mv[2], airt, pflags);
+                 vel[0], vel[1], vel[2], mv[0], mv[1], mv[2], airt, m150[0], m150[1], m150[2], m160[0],
+                 m160[1], m160[2], mcmd[0], mcmd[1], mcmd[2], p130[0], p130[1], p130[2], p140[0], p140[1],
+                 p140[2], p150[0], p150[1], p150[2], p1a0[0], p1a0[1], p1a0[2], p0d0[0], p0d0[1], p0d0[2],
+                 pflags);
     if ((g_rows & 0x3FF) == 0) {
         std::fflush(g_file);
+    }
+}
+
+void trace_stop() {
+    // Called from DllMain during process detach, by which point the other
+    // threads are already gone, so the lock is not taken: flush the tail the
+    // periodic fflush never reached.
+    FILE* file = g_file;
+    g_file = nullptr;
+    if (file) {
+        std::fflush(file);
+        std::fclose(file);
     }
 }
