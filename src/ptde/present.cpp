@@ -1,6 +1,5 @@
 #include "present.h"
 
-#include "intro.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -125,7 +124,6 @@ LONGLONG stamp() {
 
 #define HOOK_P3(NAME, SITE)                                                             \
     int __fastcall NAME(void* c, void* e, int a, int b, int d) {                        \
-        if (g_intro_skipping) return 0;                                                 \
         const LONGLONG t0 = stamp();                                                    \
         const int r = reinterpret_cast<P3Fn>(g_orig[SITE])(c, e, a, b, d);              \
         note(SITE, t0);                                                                 \
@@ -133,7 +131,6 @@ LONGLONG stamp() {
     }
 #define HOOK_P0(NAME, SITE)                                                             \
     int __fastcall NAME(void* c, void* e) {                                             \
-        if (g_intro_skipping) return 0;                                                 \
         const LONGLONG t0 = stamp();                                                    \
         const int r = reinterpret_cast<P0Fn>(g_orig[SITE])(c, e);                       \
         note(SITE, t0);                                                                 \
@@ -146,7 +143,6 @@ HOOK_P0(hook_p0_direct, kP0Direct)
 HOOK_P0(hook_p0_repeat, kP0Repeat)
 
 int __fastcall hook_p2(void* c, void* e, int a, int b) {
-    if (g_intro_skipping) return 0;
     const LONGLONG t0 = stamp();
     const int r = reinterpret_cast<P2Fn>(g_orig[kP2])(c, e, a, b);
     note(kP2, t0);
@@ -212,7 +208,7 @@ bool present_install(const Settings& settings) {
         }
     }
 
-    if (settings.survey_seconds > 0 || settings.skip_intro) {
+    if (settings.survey_seconds > 0) {
         int hooked = 0;
         hooked += patch_call_site(kP3Early, reinterpret_cast<void*>(&hook_p3_early)) ? 1 : 0;
         hooked += patch_call_site(kP3Frame, reinterpret_cast<void*>(&hook_p3_frame)) ? 1 : 0;

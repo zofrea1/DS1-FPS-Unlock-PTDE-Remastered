@@ -14,8 +14,6 @@ struct Settings {
     int fullscreen_refresh = -1;
     // Press F10 in a busy scene to sample the render thread for 15 s and log where the time goes.
     bool profile = false;
-    // Skip the startup intro logos.
-    bool skip_intro = false;
     // Disable the game's catch-up loop that re-presents a frame until the display's
     // vblank counter reaches its 30 FPS schedule.
     bool skip_present_repeat = false;

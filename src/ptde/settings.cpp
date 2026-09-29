@@ -82,8 +82,6 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fullscreen_refresh = std::atoi(val.c_str());
         } else if (key == "profile") {
             s.profile = parse_bool(val);
-        } else if (key == "skipintro") {
-            s.skip_intro = parse_bool(val);
         } else if (key == "skippresentrepeat") {
             s.skip_present_repeat = parse_bool(val);
         } else if (key == "borderlessfullscreen") {
