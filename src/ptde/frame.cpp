@@ -3,10 +3,12 @@
 #include "intro.h"
 #include "log.h"
 #include "present.h"
+#include "waits.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <mmsystem.h>
+#include <tlhelp32.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -43,6 +45,7 @@ GetCmdFn g_orig = nullptr;
 }  // namespace
 
 volatile long g_intro_skipping = 0;
+volatile long g_intro_state = 0;
 
 namespace {
 
@@ -113,6 +116,82 @@ void wait_until(LONGLONG deadline) {
     }
 }
 
+// Per-thread CPU use over the last survey window, to tell a CPU-bound render thread
+// (its own CPU time is close to the frame time) from one that is waiting on the GPU
+// or the driver (its CPU time is a small fraction of it).
+struct ThreadPrev {
+    DWORD tid;
+    ULONGLONG cpu;
+};
+ThreadPrev g_thread_prev[1024];
+int g_thread_prev_count = 0;
+bool g_thread_primed = false;
+
+void thread_cpu_summary(double window_s, char* out, size_t cap) {
+    struct Top {
+        DWORD tid;
+        double pct;
+    } top[4] = {};
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        out[0] = 0;
+        return;
+    }
+    const DWORD pid = GetCurrentProcessId();
+    THREADENTRY32 te{};
+    te.dwSize = sizeof(te);
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != pid) {
+                continue;
+            }
+            HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+            if (!h) {
+                continue;
+            }
+            FILETIME create{}, exit{}, kernel{}, user{};
+            if (GetThreadTimes(h, &create, &exit, &kernel, &user)) {
+                const ULONGLONG cpu = ((static_cast<ULONGLONG>(kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime) +
+                                      ((static_cast<ULONGLONG>(user.dwHighDateTime) << 32) | user.dwLowDateTime);
+                int idx = -1;
+                for (int i = 0; i < g_thread_prev_count; ++i) {
+                    if (g_thread_prev[i].tid == te.th32ThreadID) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx < 0 && g_thread_prev_count < 1024) {
+                    idx = g_thread_prev_count++;
+                    g_thread_prev[idx] = {te.th32ThreadID, cpu};
+                }
+                if (idx >= 0) {
+                    const double pct = 100.0 * static_cast<double>(cpu - g_thread_prev[idx].cpu) / 1e7 / window_s;
+                    g_thread_prev[idx].cpu = cpu;
+                    for (int t = 0; t < 4; ++t) {
+                        if (pct > top[t].pct) {
+                            for (int m = 3; m > t; --m) top[m] = top[m - 1];
+                            top[t] = {te.th32ThreadID, pct};
+                            break;
+                        }
+                    }
+                }
+            }
+            CloseHandle(h);
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+    if (!g_thread_primed) {
+        g_thread_primed = true;
+        out[0] = 0;
+        return;
+    }
+    const DWORD self = GetCurrentThreadId();
+    int n = std::snprintf(out, cap, " | thread cpu%%:");
+    for (int t = 0; t < 4 && top[t].tid; ++t) {
+        n += std::snprintf(out + n, cap - n, " %lu%s=%.0f", top[t].tid, top[t].tid == self ? "(draw)" : "", top[t].pct);
+    }
+}
+
 void survey_report(LONGLONG now) {
     if (g.cfg.survey_seconds <= 0 || g.survey_done) {
         return;
@@ -121,7 +200,7 @@ void survey_report(LONGLONG now) {
     if (window < 1.0) {
         return;
     }
-    char line[400];
+    char line[700];
     int n = std::snprintf(line, sizeof(line), "%.2fs: frames=%d (%.1f fps)", window, g.frames, g.frames / window);
     if (g.frames > 0) {
         n += std::snprintf(line + n, sizeof(line) - n, " dt avg %.3f min %.3f max %.3f ms, step written %.6f s",
@@ -135,6 +214,7 @@ void survey_report(LONGLONG now) {
     for (int i = 0; i < kCommands; ++i) {
         n += std::snprintf(line + n, sizeof(line) - n, " c%d=%d", i, g.count[i]);
     }
+    thread_cpu_summary(window, line + n, sizeof(line) - n);
     LOG_INFO("%s", line);
     std::memset(g.count, 0, sizeof(g.count));
     g.frames = 0;
@@ -204,6 +284,7 @@ int __fastcall hook_getcmd(void* self, void* edx) {
     }
     if (cmd == 5 && g.intro_state == 0) {
         g.intro_state = 1;
+        g_intro_state = 1;
         LARGE_INTEGER stamp{};
         QueryPerformanceCounter(&stamp);
         g.intro_start = stamp.QuadPart;
@@ -214,11 +295,13 @@ int __fastcall hook_getcmd(void* self, void* edx) {
         LOG_INFO("Startup intro run began (skip=%s)", g.cfg.skip_intro ? "on" : "off");
     } else if (cmd == 2 && g.intro_state == 1) {
         g.intro_state = 2;
+        g_intro_state = 2;
         g_intro_skipping = 0;
         LARGE_INTEGER stamp{};
         QueryPerformanceCounter(&stamp);
         LOG_INFO("Startup intro run ended after %.0f ms and %d frames", ms_between(g.intro_start, stamp.QuadPart),
                  g.intro_frames);
+        waits_report();
     }
     if (cmd == 2 || cmd == 5) {
         frame_boundary();
@@ -329,5 +412,8 @@ bool frame_install(const Settings& settings) {
              kDispatchCall, g.driver ? "on" : "off", settings.target_fps, settings.vblank_patch ? "on" : "off",
              settings.survey_seconds);
     present_install(settings);
+    if (settings.skip_intro || settings.survey_seconds > 0) {
+        waits_install();
+    }
     return true;
 }

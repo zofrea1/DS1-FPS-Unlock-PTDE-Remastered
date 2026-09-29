@@ -23,6 +23,10 @@ void log_init(const wchar_t* dll_path, const wchar_t* file_name) {
     }
     wchar_t full[MAX_PATH];
     _snwprintf_s(full, _TRUNCATE, L"%s%s", path, file_name);
+    // Keep the previous run's log next to this one.
+    wchar_t previous[MAX_PATH];
+    _snwprintf_s(previous, _TRUNCATE, L"%s.prev", full);
+    MoveFileExW(full, previous, MOVEFILE_REPLACE_EXISTING);
     g_file = _wfsopen(full, L"w", _SH_DENYNO);
 }
 
