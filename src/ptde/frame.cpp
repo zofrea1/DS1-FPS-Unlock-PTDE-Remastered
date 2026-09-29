@@ -1,5 +1,6 @@
 #include "frame.h"
 
+#include "intro.h"
 #include "log.h"
 #include "present.h"
 
@@ -39,9 +40,22 @@ constexpr uint32_t kVblankImmVa = 0x00FFB68E;
 using GetCmdFn = int(__fastcall*)(void* self, void* edx);
 GetCmdFn g_orig = nullptr;
 
+}  // namespace
+
+volatile long g_intro_skipping = 0;
+
+namespace {
+
 constexpr int kCommands = 6;
 constexpr float kMinStep = 1.0f / 1000.0f;
 constexpr float kMaxStep = 1.0f / 10.0f;
+
+// Startup intro: after a first splash frame the game renders its logos as a run of
+// command-5 frames; command-2 frames resume at the title screen. While skipping, the
+// step is set this large so any game-time logo timers finish in a few frames, and the
+// real Present is swallowed. A timeout guarantees the skip always ends.
+constexpr float kIntroStep = 0.5f;
+constexpr double kIntroTimeoutMs = 25000.0;
 
 struct State {
     Settings cfg;
@@ -70,6 +84,11 @@ struct State {
     double span_sum = 0.0;
     double span_max = 0.0;
     double wait_sum = 0.0;
+
+    // 0 = waiting for the first command 5, 1 = in the intro run, 2 = done.
+    int intro_state = 0;
+    LONGLONG intro_start = 0;
+    int intro_frames = 0;
 } g;
 
 double ms_between(LONGLONG a, LONGLONG b) {
@@ -138,7 +157,16 @@ void frame_boundary() {
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     LONGLONG t = now.QuadPart;
-    if (g.driver && g.last != 0 && g.period > 0) {
+    const bool intro_skip = g.intro_state == 1 && g_intro_skipping != 0;
+    if (g.intro_state == 1) {
+        ++g.intro_frames;
+        if (g_intro_skipping != 0 && ms_between(g.intro_start, t) > kIntroTimeoutMs) {
+            g_intro_skipping = 0;
+            LOG_ERROR("Intro skip timed out after %.0f ms; giving up so the game can continue",
+                      ms_between(g.intro_start, t));
+        }
+    }
+    if (g.driver && !intro_skip && g.last != 0 && g.period > 0) {
         const LONGLONG deadline = g.last + g.period;
         if (t < deadline) {
             const LONGLONG before = t;
@@ -158,6 +186,7 @@ void frame_boundary() {
             float dt = static_cast<float>(dt_ms / 1000.0);
             if (dt < kMinStep) dt = kMinStep;
             if (dt > kMaxStep) dt = kMaxStep;
+            if (intro_skip) dt = kIntroStep;
             *g.step = dt;
             g.written = dt;
         }
@@ -172,6 +201,24 @@ int __fastcall hook_getcmd(void* self, void* edx) {
     const int cmd = g_orig(self, edx);
     if (cmd >= 0 && cmd < kCommands) {
         ++g.count[cmd];
+    }
+    if (cmd == 5 && g.intro_state == 0) {
+        g.intro_state = 1;
+        LARGE_INTEGER stamp{};
+        QueryPerformanceCounter(&stamp);
+        g.intro_start = stamp.QuadPart;
+        g.intro_frames = 0;
+        if (g.cfg.skip_intro) {
+            g_intro_skipping = 1;
+        }
+        LOG_INFO("Startup intro run began (skip=%s)", g.cfg.skip_intro ? "on" : "off");
+    } else if (cmd == 2 && g.intro_state == 1) {
+        g.intro_state = 2;
+        g_intro_skipping = 0;
+        LARGE_INTEGER stamp{};
+        QueryPerformanceCounter(&stamp);
+        LOG_INFO("Startup intro run ended after %.0f ms and %d frames", ms_between(g.intro_start, stamp.QuadPart),
+                 g.intro_frames);
     }
     if (cmd == 2 || cmd == 5) {
         frame_boundary();
