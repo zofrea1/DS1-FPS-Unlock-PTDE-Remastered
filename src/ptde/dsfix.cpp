@@ -55,6 +55,8 @@ DsfixInfo dsfix_probe(const wchar_t* game_dir) {
                 info.unlock_fps = std::atoi(value.c_str()) != 0;
             } else if (key == "FPSlimit") {
                 info.fps_limit = std::atoi(value.c_str());
+            } else if (key == "borderlessFullscreen") {
+                info.borderless = std::atoi(value.c_str()) != 0;
             }
         }
     }

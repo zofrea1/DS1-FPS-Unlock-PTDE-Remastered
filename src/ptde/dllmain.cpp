@@ -3,6 +3,7 @@
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
+#include "window.h"
 #include "xinput_proxy.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -65,6 +66,13 @@ DWORD WINAPI worker(void*) {
     }
     if (patches_probe(settings)) {
         frame_install(settings);
+    }
+    if (settings.borderless) {
+        if (dsfix.borderless) {
+            LOG_INFO("DSfix's own borderlessFullscreen is on; leaving the window to DSfix.");
+        } else {
+            borderless_start();
+        }
     }
     return 0;
 }

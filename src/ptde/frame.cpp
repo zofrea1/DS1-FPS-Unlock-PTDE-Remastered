@@ -60,6 +60,15 @@ struct State {
     double dt_sum = 0.0;
     float written = 0.0f;
     bool survey_done = false;
+
+    // Render-thread busy time: command 2 (start of the frame's render work) to
+    // command 4 (end of it), and how long the limiter waited. Together they show
+    // how much of the frame budget the CPU actually uses.
+    LONGLONG t_cmd2 = 0;
+    int spans = 0;
+    double span_sum = 0.0;
+    double span_max = 0.0;
+    double wait_sum = 0.0;
 } g;
 
 double ms_between(LONGLONG a, LONGLONG b) {
@@ -98,6 +107,10 @@ void survey_report(LONGLONG now) {
         n += std::snprintf(line + n, sizeof(line) - n, " dt avg %.3f min %.3f max %.3f ms, step written %.6f s",
                            g.dt_sum / g.frames, g.dt_min, g.dt_max, g.written);
     }
+    if (g.spans > 0) {
+        n += std::snprintf(line + n, sizeof(line) - n, " | render busy avg %.3f max %.3f ms, limiter wait avg %.3f ms",
+                           g.span_sum / g.spans, g.span_max, g.frames ? g.wait_sum / g.frames : 0.0);
+    }
     n += std::snprintf(line + n, sizeof(line) - n, " | cmds");
     for (int i = 0; i < kCommands; ++i) {
         n += std::snprintf(line + n, sizeof(line) - n, " c%d=%d", i, g.count[i]);
@@ -108,6 +121,10 @@ void survey_report(LONGLONG now) {
     g.dt_min = 1e9;
     g.dt_max = 0.0;
     g.dt_sum = 0.0;
+    g.spans = 0;
+    g.span_sum = 0.0;
+    g.span_max = 0.0;
+    g.wait_sum = 0.0;
     g.report = now;
     if (ms_between(g.start, now) / 1000.0 >= g.cfg.survey_seconds) {
         g.survey_done = true;
@@ -123,9 +140,11 @@ void frame_boundary() {
     if (g.driver && g.last != 0 && g.period > 0) {
         const LONGLONG deadline = g.last + g.period;
         if (t < deadline) {
+            const LONGLONG before = t;
             wait_until(deadline);
             QueryPerformanceCounter(&now);
             t = now.QuadPart;
+            g.wait_sum += ms_between(before, t);
         }
     }
     if (g.last != 0) {
@@ -155,6 +174,18 @@ int __fastcall hook_getcmd(void* self, void* edx) {
     }
     if (cmd == 2 || cmd == 5) {
         frame_boundary();
+        if (cmd == 2) {
+            LARGE_INTEGER stamp{};
+            QueryPerformanceCounter(&stamp);
+            g.t_cmd2 = stamp.QuadPart;
+        }
+    } else if (cmd == 4 && g.t_cmd2 != 0) {
+        LARGE_INTEGER stamp{};
+        QueryPerformanceCounter(&stamp);
+        const double span = ms_between(g.t_cmd2, stamp.QuadPart);
+        ++g.spans;
+        g.span_sum += span;
+        if (span > g.span_max) g.span_max = span;
     }
     return cmd;
 }

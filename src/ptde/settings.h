@@ -9,6 +9,9 @@ struct Settings {
     // Change the game's swap-interval bookkeeping the way DSfix does (2 -> 5) so the
     // render thread stops waiting for two vertical blanks per frame.
     bool vblank_patch = true;
+    // Make the game window borderless and cover its monitor. Needs the game set to
+    // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
+    bool borderless = false;
     // Log a per-command summary for this many seconds after start (0 = off).
     int survey_seconds = 30;
 };

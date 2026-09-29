@@ -8,6 +8,7 @@ struct DsfixInfo {
     bool ini_found = false;
     bool unlock_fps = false;   // DSfix.ini has "unlockFPS 1"
     int fps_limit = 0;         // DSfix.ini "FPSlimit", 0 if not set
+    bool borderless = false;   // DSfix.ini "borderlessFullscreen 1"
 };
 
 DsfixInfo dsfix_probe(const wchar_t* game_dir);
