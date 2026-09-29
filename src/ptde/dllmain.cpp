@@ -1,4 +1,5 @@
 #include "dsfix.h"
+#include "frame.h"
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
@@ -62,7 +63,9 @@ DWORD WINAPI worker(void*) {
         LOG_ERROR("TargetFPS must be from 31 to 1000. The game is unchanged.");
         return 0;
     }
-    patches_probe(settings);
+    if (patches_probe(settings)) {
+        frame_install(settings);
+    }
     return 0;
 }
 
