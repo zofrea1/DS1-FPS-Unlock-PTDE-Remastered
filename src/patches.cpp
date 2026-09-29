@@ -583,6 +583,51 @@ bool patch_decay() {
     return true;
 }
 
+// Move-control dispatch: two call paths load a hardcoded 1/60 into xmm1 right
+// before the action functions run, so anything they scale by dt (ladder slide
+// speed, for one) moves 4x too far per frame at 240 FPS. In both places the real
+// frame time is already sitting in xmm6 (saved from the incoming xmm1), so the
+// 8-byte `movss xmm1, [rip+disp]` becomes `movaps xmm1, xmm6` plus NOPs.
+constexpr uint32_t kMoveDtSites[] = {0x379D94, 0x379DF2};
+
+std::atomic<int> g_move_dt_state{0};
+
+bool patch_move_dt() {
+    if (g_fix_move_dt.load(std::memory_order_relaxed) == 0) {
+        LOG_INFO("Move-control dt fix disabled by FixMoveDt=false");
+        return true;
+    }
+    for (uint32_t rva : kMoveDtSites) {
+        auto* site = image_rva(rva);
+        if (site[0] != 0xF3 || site[1] != 0x0F || site[2] != 0x10 || site[3] != 0x0D) {
+            LOG_ERROR("Move-control dt load at 0x%08X does not match this build", rva);
+            return false;
+        }
+        int32_t disp = 0;
+        std::memcpy(&disp, site + 4, sizeof(disp));
+        const auto* constant = reinterpret_cast<const float*>(site + 8 + disp);
+        if (std::fabs(*constant - 1.0f / 60.0f) > 0.000001f) {
+            LOG_ERROR("Move-control dt load at 0x%08X is not 1/60", rva);
+            return false;
+        }
+    }
+    static constexpr uint8_t kPatch[8] = {0x0F, 0x10, 0xCE, 0x90, 0x90, 0x90, 0x90, 0x90};
+    for (uint32_t rva : kMoveDtSites) {
+        auto* site = image_rva(rva);
+        DWORD old = 0;
+        if (!VirtualProtect(site, sizeof(kPatch), PAGE_EXECUTE_READWRITE, &old)) {
+            LOG_ERROR("Could not unprotect the move-control dt load (Win32=%lu)", GetLastError());
+            return false;
+        }
+        std::memcpy(site, kPatch, sizeof(kPatch));
+        FlushInstructionCache(GetCurrentProcess(), site, sizeof(kPatch));
+        DWORD ignored = 0;
+        VirtualProtect(site, sizeof(kPatch), old, &ignored);
+    }
+    LOG_INFO("Move-control dispatch now uses the real frame time (2 sites)");
+    return true;
+}
+
 // Movement tracer, only installed when the INI asks for Trace=1.
 //
 // ChrIns::Update(chr, dt) runs once per displayed frame with the real (already
@@ -762,6 +807,11 @@ void try_delayed_patches() {
     if (g_decay_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_decay();
         g_decay_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_move_dt_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_move_dt();
+        g_move_dt_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_trace_state.compare_exchange_strong(expected, 1)) {
