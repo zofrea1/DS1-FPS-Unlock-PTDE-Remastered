@@ -78,6 +78,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.driver = parse_bool(val);
         } else if (key == "vblankpatch") {
             s.vblank_patch = parse_bool(val);
+        } else if (key == "fullscreenrefreshrate") {
+            s.fullscreen_refresh = std::atoi(val.c_str());
         } else if (key == "skipintro") {
             s.skip_intro = parse_bool(val);
         } else if (key == "skippresentrepeat") {

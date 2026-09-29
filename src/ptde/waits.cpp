@@ -25,10 +25,6 @@ SleepFn g_sleep = nullptr;
 WfsoFn g_wfso = nullptr;
 WfmoFn g_wfmo = nullptr;
 
-// While the intro is being skipped, waits of 20..300 ms are cut to 1 ms.
-constexpr DWORD kAccelMin = 20;
-constexpr DWORD kAccelMax = 300;
-
 LARGE_INTEGER g_freq{};
 
 struct Entry {
@@ -67,10 +63,10 @@ bool recording() {
     return g_intro_state == 1;
 }
 
+// Shortening waits does not help: the intro sleeps in a loop until a real-time deadline, so
+// the loop just spins faster. The intro is paced by the engine frame limiter instead
+// (see limiter.cpp), so waits are only recorded here.
 DWORD effective(DWORD ms) {
-    if (g_intro_skipping && ms >= kAccelMin && ms <= kAccelMax) {
-        return 1;
-    }
     return ms;
 }
 

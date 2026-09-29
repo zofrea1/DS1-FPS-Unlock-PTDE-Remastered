@@ -1,3 +1,4 @@
+#include "d3d.h"
 #include "dsfix.h"
 #include "frame.h"
 #include "log.h"
@@ -88,6 +89,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         if (!filename_is_game(exe_path)) {
             return TRUE;
         }
+        // Before the game calls Direct3DCreate9: wraps it to override the fullscreen refresh rate.
+        d3d_install_early(instance);
         HANDLE thread = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
         if (thread) {
             CloseHandle(thread);

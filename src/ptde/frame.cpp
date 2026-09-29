@@ -1,6 +1,7 @@
 #include "frame.h"
 
 #include "intro.h"
+#include "limiter.h"
 #include "log.h"
 #include "present.h"
 #include "waits.h"
@@ -414,6 +415,9 @@ bool frame_install(const Settings& settings) {
     present_install(settings);
     if (settings.skip_intro || settings.survey_seconds > 0) {
         waits_install();
+    }
+    if (settings.skip_intro) {
+        limiter_install();
     }
     return true;
 }

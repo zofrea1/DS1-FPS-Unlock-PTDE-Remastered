@@ -9,6 +9,9 @@ struct Settings {
     // Change the game's swap-interval bookkeeping the way DSfix does (2 -> 5) so the
     // render thread stops waiting for two vertical blanks per frame.
     bool vblank_patch = true;
+    // Exclusive fullscreen refresh rate: -1 leaves the game's choice alone, 0 uses the
+    // highest rate the display offers at the game's resolution, N asks for N Hz.
+    int fullscreen_refresh = -1;
     // Skip the startup intro logos.
     bool skip_intro = false;
     // Disable the game's catch-up loop that re-presents a frame until the display's
