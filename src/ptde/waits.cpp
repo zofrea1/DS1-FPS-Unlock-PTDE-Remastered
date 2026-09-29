@@ -19,6 +19,7 @@ constexpr uint32_t kIatWfso = 0x010CC234;
 constexpr uint32_t kIatWfmo = 0x010CC15C;
 constexpr uint32_t kIatQpc = 0x010CC250;
 constexpr uint32_t kIatTimeGetTime = 0x010CC334;
+constexpr uint32_t kIatGetTickCount = 0x010CC134;
 
 using SleepFn = VOID(WINAPI*)(DWORD);
 using WfsoFn = DWORD(WINAPI*)(HANDLE, DWORD);
@@ -30,6 +31,7 @@ WfsoFn g_wfso = nullptr;
 WfmoFn g_wfmo = nullptr;
 QpcFn g_qpc = nullptr;
 TimeFn g_time = nullptr;
+TimeFn g_tick = nullptr;
 
 LARGE_INTEGER g_freq{};
 
@@ -86,8 +88,12 @@ DWORD effective(DWORD ms) {
 // Timer warp: while the intro is skipped, QueryPerformanceCounter callers with a shallow stack
 // (the intro's own polling loops, as opposed to deep engine code) see time jump forward by
 // 1/50 s per call. The added offset is kept afterwards so time stays monotonic.
-volatile LONGLONG g_qpc_warp = 0;
-constexpr int kShallowDepth = 3;
+volatile LONGLONG g_qpc_warp = 0;      // QueryPerformanceCounter ticks added
+volatile LONG g_ms_warp = 0;           // milliseconds added to timeGetTime / GetTickCount
+volatile LONG g_warped_qpc = 0;
+volatile LONG g_warped_ms = 0;
+// Every game-side caller is warped, regardless of stack depth: a depth test decided nothing
+// last time and the number of qualifying calls was never logged.
 
 LONGLONG stamp() {
     LARGE_INTEGER t{};
@@ -164,9 +170,10 @@ BOOL WINAPI hook_qpc(LARGE_INTEGER* counter) {
         void* frames[8];
         const USHORT depth = CaptureStackBackTrace(1, 8, frames, nullptr);
         note_time(ra, 3, depth);
-        if (g_intro_skipping && depth < kShallowDepth) {
-            InterlockedExchangeAdd64(&g_qpc_warp, g_freq.QuadPart / 50);
-        }
+    }
+    if (g_intro_skipping) {
+        InterlockedExchangeAdd64(&g_qpc_warp, g_freq.QuadPart / 50);
+        InterlockedIncrement(&g_warped_qpc);
     }
     if (ok && counter) {
         counter->QuadPart += InterlockedCompareExchange64(&g_qpc_warp, 0, 0);
@@ -180,7 +187,24 @@ DWORD WINAPI hook_time() {
         const USHORT depth = CaptureStackBackTrace(1, 8, frames, nullptr);
         note_time(_ReturnAddress(), 4, depth);
     }
-    return g_time();
+    if (g_intro_skipping) {
+        InterlockedExchangeAdd(&g_ms_warp, 20);
+        InterlockedIncrement(&g_warped_ms);
+    }
+    return g_time() + static_cast<DWORD>(g_ms_warp);
+}
+
+DWORD WINAPI hook_tick() {
+    if (g_intro_state == 1) {
+        void* frames[8];
+        const USHORT depth = CaptureStackBackTrace(1, 8, frames, nullptr);
+        note_time(_ReturnAddress(), 5, depth);
+    }
+    if (g_intro_skipping) {
+        InterlockedExchangeAdd(&g_ms_warp, 20);
+        InterlockedIncrement(&g_warped_ms);
+    }
+    return g_tick() + static_cast<DWORD>(g_ms_warp);
 }
 
 template <typename T>
@@ -212,15 +236,18 @@ bool waits_install() {
     const bool c = hook_iat(kIatWfmo, &hook_wfmo, &g_wfmo, L"kernel32.dll", "WaitForMultipleObjects");
     const bool d = hook_iat(kIatQpc, &hook_qpc, &g_qpc, L"kernel32.dll", "QueryPerformanceCounter");
     const bool e = hook_iat(kIatTimeGetTime, &hook_time, &g_time, L"winmm.dll", "timeGetTime");
-    LOG_INFO("Wait/time hooks installed: Sleep=%d WaitForSingleObject=%d WaitForMultipleObjects=%d QPC=%d timeGetTime=%d",
-             a, b, c, d, e);
-    return a && b && c && d && e;
+    const bool f = hook_iat(kIatGetTickCount, &hook_tick, &g_tick, L"kernel32.dll", "GetTickCount");
+    LOG_INFO("Wait/time hooks installed: Sleep=%d WaitForSingleObject=%d WaitForMultipleObjects=%d QPC=%d timeGetTime=%d "
+             "GetTickCount=%d", a, b, c, d, e, f);
+    return a && b && c && d && e && f;
 }
 
 void waits_report() {
-    static const char* const kNames[5] = {"Sleep", "WaitForSingleObject", "WaitForMultipleObjects", "QueryPerformanceCounter", "timeGetTime"};
+    static const char* const kNames[6] = {"Sleep", "WaitForSingleObject", "WaitForMultipleObjects", "QueryPerformanceCounter", "timeGetTime", "GetTickCount"};
     // Busiest first by measured wait time.
     bool used[kEntries] = {};
+    LOG_INFO("Timer warp during the intro: %ld QueryPerformanceCounter calls warped (+%.1f s), %ld timeGetTime/GetTickCount calls warped (+%ld ms)",
+             g_warped_qpc, static_cast<double>(g_qpc_warp) / static_cast<double>(g_freq.QuadPart), g_warped_ms, g_ms_warp);
     LOG_INFO("Waits recorded during the intro run (call site RVA = return address - 0x400000):");
     for (int rank = 0; rank < 16; ++rank) {
         int best = -1;
