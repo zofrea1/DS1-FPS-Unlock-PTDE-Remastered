@@ -78,6 +78,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.driver = parse_bool(val);
         } else if (key == "vblankpatch") {
             s.vblank_patch = parse_bool(val);
+        } else if (key == "skippresentrepeat") {
+            s.skip_present_repeat = parse_bool(val);
         } else if (key == "borderlessfullscreen") {
             s.borderless = parse_bool(val);
         } else if (key == "survey") {

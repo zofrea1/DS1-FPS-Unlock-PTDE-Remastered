@@ -9,6 +9,9 @@ struct Settings {
     // Change the game's swap-interval bookkeeping the way DSfix does (2 -> 5) so the
     // render thread stops waiting for two vertical blanks per frame.
     bool vblank_patch = true;
+    // Disable the game's catch-up loop that re-presents a frame until the display's
+    // vblank counter reaches its 30 FPS schedule.
+    bool skip_present_repeat = false;
     // Make the game window borderless and cover its monitor. Needs the game set to
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
     bool borderless = false;

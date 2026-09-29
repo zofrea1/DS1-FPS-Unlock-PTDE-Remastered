@@ -1,6 +1,7 @@
 #include "frame.h"
 
 #include "log.h"
+#include "present.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -280,5 +281,6 @@ bool frame_install(const Settings& settings) {
     LOG_INFO("Frame hook installed at %08X: driver=%s target=%d FPS vblank_patch=%s survey=%ds",
              kDispatchCall, g.driver ? "on" : "off", settings.target_fps, settings.vblank_patch ? "on" : "off",
              settings.survey_seconds);
+    present_install(settings);
     return true;
 }
