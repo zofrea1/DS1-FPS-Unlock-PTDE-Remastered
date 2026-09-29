@@ -12,6 +12,8 @@ struct Settings {
     // Exclusive fullscreen refresh rate: -1 leaves the game's choice alone, 0 uses the
     // highest rate the display offers at the game's resolution, N asks for N Hz.
     int fullscreen_refresh = -1;
+    // Press F10 in a busy scene to sample the render thread for 15 s and log where the time goes.
+    bool profile = false;
     // Skip the startup intro logos.
     bool skip_intro = false;
     // Disable the game's catch-up loop that re-presents a frame until the display's

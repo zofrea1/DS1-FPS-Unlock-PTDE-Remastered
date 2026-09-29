@@ -17,13 +17,19 @@ namespace {
 constexpr uint32_t kIatSleep = 0x010CC208;
 constexpr uint32_t kIatWfso = 0x010CC234;
 constexpr uint32_t kIatWfmo = 0x010CC15C;
+constexpr uint32_t kIatQpc = 0x010CC250;
+constexpr uint32_t kIatTimeGetTime = 0x010CC334;
 
 using SleepFn = VOID(WINAPI*)(DWORD);
 using WfsoFn = DWORD(WINAPI*)(HANDLE, DWORD);
 using WfmoFn = DWORD(WINAPI*)(DWORD, const HANDLE*, BOOL, DWORD);
+using QpcFn = BOOL(WINAPI*)(LARGE_INTEGER*);
+using TimeFn = DWORD(WINAPI*)();
 SleepFn g_sleep = nullptr;
 WfsoFn g_wfso = nullptr;
 WfmoFn g_wfmo = nullptr;
+QpcFn g_qpc = nullptr;
+TimeFn g_time = nullptr;
 
 LARGE_INTEGER g_freq{};
 
@@ -35,6 +41,7 @@ struct Entry {
     volatile LONG actual_ms;   // sum of measured wait durations
     volatile LONG max_req;
     volatile LONG infinite;    // calls with an INFINITE timeout
+    volatile LONG min_depth;   // shallowest stack seen (QueryPerformanceCounter / timeGetTime)
 };
 constexpr int kEntries = 128;
 Entry g_table[kEntries];
@@ -49,6 +56,7 @@ Entry* slot_for(LONG ra, LONG kind) {
         if (e.ra == 0) {
             if (InterlockedCompareExchange(&e.ra, ra, 0) == 0) {
                 e.kind = kind;
+                e.min_depth = 99;
                 return &e;
             }
             if (e.ra == ra && e.kind == kind) {
@@ -63,12 +71,23 @@ bool recording() {
     return g_intro_state == 1;
 }
 
-// Shortening waits does not help: the intro sleeps in a loop until a real-time deadline, so
-// the loop just spins faster. The intro is paced by the engine frame limiter instead
-// (see limiter.cpp), so waits are only recorded here.
+// The intro sleeps in loops until a real-time deadline. Shortening the sleeps alone only makes
+// those loops spin faster, so this is paired with the timer warp below (which moves the
+// deadline closer on every spin): waits of 20..300 ms become 1 ms while the intro is skipped.
+constexpr DWORD kAccelMin = 20;
+constexpr DWORD kAccelMax = 300;
 DWORD effective(DWORD ms) {
+    if (g_intro_skipping && ms >= kAccelMin && ms <= kAccelMax) {
+        return 1;
+    }
     return ms;
 }
+
+// Timer warp: while the intro is skipped, QueryPerformanceCounter callers with a shallow stack
+// (the intro's own polling loops, as opposed to deep engine code) see time jump forward by
+// 1/50 s per call. The added offset is kept afterwards so time stays monotonic.
+volatile LONGLONG g_qpc_warp = 0;
+constexpr int kShallowDepth = 3;
 
 LONGLONG stamp() {
     LARGE_INTEGER t{};
@@ -127,13 +146,50 @@ DWORD WINAPI hook_wfmo(DWORD n, const HANDLE* handles, BOOL all, DWORD ms) {
     return r;
 }
 
+void note_time(void* ra, LONG kind, USHORT depth) {
+    Entry* e = slot_for(reinterpret_cast<LONG>(ra), kind);
+    if (!e) {
+        return;
+    }
+    InterlockedIncrement(&e->count);
+    if (static_cast<LONG>(depth) < e->min_depth) {
+        e->min_depth = static_cast<LONG>(depth);
+    }
+}
+
+BOOL WINAPI hook_qpc(LARGE_INTEGER* counter) {
+    const BOOL ok = g_qpc(counter);
+    if (g_intro_state == 1) {
+        void* ra = _ReturnAddress();
+        void* frames[8];
+        const USHORT depth = CaptureStackBackTrace(1, 8, frames, nullptr);
+        note_time(ra, 3, depth);
+        if (g_intro_skipping && depth < kShallowDepth) {
+            InterlockedExchangeAdd64(&g_qpc_warp, g_freq.QuadPart / 50);
+        }
+    }
+    if (ok && counter) {
+        counter->QuadPart += InterlockedCompareExchange64(&g_qpc_warp, 0, 0);
+    }
+    return ok;
+}
+
+DWORD WINAPI hook_time() {
+    if (g_intro_state == 1) {
+        void* frames[8];
+        const USHORT depth = CaptureStackBackTrace(1, 8, frames, nullptr);
+        note_time(_ReturnAddress(), 4, depth);
+    }
+    return g_time();
+}
+
 template <typename T>
-bool hook_iat(uint32_t slot_va, T detour, T* original, const char* name) {
+bool hook_iat(uint32_t slot_va, T detour, T* original, const wchar_t* module, const char* name) {
     auto* slot = reinterpret_cast<void**>(slot_va);
     *original = reinterpret_cast<T>(*slot);
-    void* expected = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), name));
+    void* expected = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(module), name));
     if (*slot != expected) {
-        LOG_INFO("IAT %s at %08X holds %p (kernel32 export is %p); chaining to whatever is there", name, slot_va,
+        LOG_INFO("IAT %s at %08X holds %p (export is %p); chaining to whatever is there", name, slot_va,
                  *slot, expected);
     }
     DWORD old = 0;
@@ -151,22 +207,27 @@ bool hook_iat(uint32_t slot_va, T detour, T* original, const char* name) {
 
 bool waits_install() {
     QueryPerformanceFrequency(&g_freq);
-    const bool a = hook_iat(kIatSleep, &hook_sleep, &g_sleep, "Sleep");
-    const bool b = hook_iat(kIatWfso, &hook_wfso, &g_wfso, "WaitForSingleObject");
-    const bool c = hook_iat(kIatWfmo, &hook_wfmo, &g_wfmo, "WaitForMultipleObjects");
-    LOG_INFO("Wait hooks installed: Sleep=%d WaitForSingleObject=%d WaitForMultipleObjects=%d", a, b, c);
-    return a && b && c;
+    const bool a = hook_iat(kIatSleep, &hook_sleep, &g_sleep, L"kernel32.dll", "Sleep");
+    const bool b = hook_iat(kIatWfso, &hook_wfso, &g_wfso, L"kernel32.dll", "WaitForSingleObject");
+    const bool c = hook_iat(kIatWfmo, &hook_wfmo, &g_wfmo, L"kernel32.dll", "WaitForMultipleObjects");
+    const bool d = hook_iat(kIatQpc, &hook_qpc, &g_qpc, L"kernel32.dll", "QueryPerformanceCounter");
+    const bool e = hook_iat(kIatTimeGetTime, &hook_time, &g_time, L"winmm.dll", "timeGetTime");
+    LOG_INFO("Wait/time hooks installed: Sleep=%d WaitForSingleObject=%d WaitForMultipleObjects=%d QPC=%d timeGetTime=%d",
+             a, b, c, d, e);
+    return a && b && c && d && e;
 }
 
 void waits_report() {
-    static const char* const kNames[3] = {"Sleep", "WaitForSingleObject", "WaitForMultipleObjects"};
+    static const char* const kNames[5] = {"Sleep", "WaitForSingleObject", "WaitForMultipleObjects", "QueryPerformanceCounter", "timeGetTime"};
     // Busiest first by measured wait time.
     bool used[kEntries] = {};
     LOG_INFO("Waits recorded during the intro run (call site RVA = return address - 0x400000):");
-    for (int rank = 0; rank < 10; ++rank) {
+    for (int rank = 0; rank < 16; ++rank) {
         int best = -1;
         for (int i = 0; i < kEntries; ++i) {
-            if (g_table[i].ra != 0 && !used[i] && (best < 0 || g_table[i].actual_ms > g_table[best].actual_ms)) {
+            if (g_table[i].ra != 0 && !used[i] &&
+                (best < 0 || (g_table[i].kind >= 3 ? g_table[i].count / 4 : g_table[i].actual_ms) >
+                                 (g_table[best].kind >= 3 ? g_table[best].count / 4 : g_table[best].actual_ms))) {
                 best = i;
             }
         }
@@ -175,6 +236,11 @@ void waits_report() {
         }
         used[best] = true;
         const Entry& e = g_table[best];
+        if (e.kind >= 3) {
+            LOG_INFO("  %-24s from %08lX: calls=%ld, shallowest stack depth %ld", kNames[e.kind],
+                     static_cast<unsigned long>(static_cast<ULONG>(e.ra)), e.count, e.min_depth);
+            continue;
+        }
         LOG_INFO("  %-22s from %08lX: calls=%ld, requested avg %.1f ms (max %ld, %ld infinite), measured avg %.1f ms, "
                  "total %ld ms",
                  kNames[e.kind], static_cast<unsigned long>(static_cast<ULONG>(e.ra)), e.count,
