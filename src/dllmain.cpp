@@ -49,6 +49,7 @@ DWORD WINAPI worker(void*) {
     }
     g_target_fps.store(static_cast<uint32_t>(settings.target_fps), std::memory_order_relaxed);
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
+    g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
     if (!patches_apply()) {
         LOG_ERROR("FPS unlock was not installed.");
     }

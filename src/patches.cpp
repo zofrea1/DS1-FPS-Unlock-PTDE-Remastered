@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 
 #pragma comment(lib, "user32.lib")
 
@@ -642,6 +643,210 @@ bool patch_slide() {
     return true;
 }
 
+struct CaveEmitter {
+    uint8_t* buf;
+    size_t len = 0;
+
+    void put(const void* p, size_t n) {
+        std::memcpy(buf + len, p, n);
+        len += n;
+    }
+    void b(uint8_t v) {
+        put(&v, 1);
+    }
+    void d(uint32_t v) {
+        put(&v, 4);
+    }
+    void q(uint64_t v) {
+        put(&v, 8);
+    }
+    size_t imm32() {
+        const size_t at = len;
+        d(0);
+        return at;
+    }
+    size_t imm64() {
+        const size_t at = len;
+        q(0);
+        return at;
+    }
+    void fix32(size_t at, const void* target) {
+        const auto rel = static_cast<int32_t>(static_cast<const uint8_t*>(target) - (buf + at + 4));
+        std::memcpy(buf + at, &rel, sizeof(rel));
+    }
+    void fix64(size_t at, uint64_t value) {
+        std::memcpy(buf + at, &value, sizeof(value));
+    }
+};
+
+// Ground snap ("step down"): every frame the physics body is lifted by the step
+// height [phys+0xE4] (0.31), moved, then snapped back down onto whatever ground is
+// within reach (fn 0x2BCB00 -> setPosition at 0x2BC7E9). Reach below the lifted
+// position is [phys+0xE4] + [phys+0x228]; [phys+0x228] (0.4) is therefore the
+// most the character can be pulled down in ONE FRAME. At retail's 60 FPS that is
+// 24 u/s, so a surface that drops away faster than that lets the character leave
+// the ground. At TargetFPS it is TargetFPS/60 times faster (96 u/s at 240), and
+// the character stays glued to a lip and rides it down like a slide - the drop
+// boost seen at every walk-off, and the 0.35-per-step fall through the floor at
+// the bottom of a ladder. The value is (re)written by the move-control setter at
+// 0x37ACA0 as `[phys+0x228] = xmm2 * [param+0xB4]`; scale it there by 60/TargetFPS
+// so every reader (four sites in the ground check) sees the per-frame amount that
+// matches 24 u/s. The step-up lift is a geometric height, not a rate, so it stays.
+constexpr uint32_t kStepDownSite = 0x37ACA0;
+
+std::atomic<int> g_step_down_state{0};
+
+bool patch_step_down() {
+    auto* site = image_rva(kStepDownSite);
+    // mulss xmm2, [rax+0xB4] ; movss [rcx+0x228], xmm2
+    static constexpr uint8_t kExpected[16] = {0xF3, 0x0F, 0x59, 0x90, 0xB4, 0x00, 0x00, 0x00,
+                                              0xF3, 0x0F, 0x11, 0x91, 0x28, 0x02, 0x00, 0x00};
+    if (std::memcmp(site, kExpected, sizeof(kExpected)) != 0) {
+        LOG_ERROR("Step-down setter does not match this build");
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the step-down cave (Win32=%lu)", GetLastError());
+        return false;
+    }
+    const float scale = 60.0f / static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
+    // 0x00: mulss xmm2,[rax+0xB4]   0x08: mulss xmm2,[rip+scale]
+    // 0x10: movss [rcx+0x228],xmm2  0x18: ret        0x20: scale
+    static constexpr uint8_t kCode[] = {
+        0xF3, 0x0F, 0x59, 0x90, 0xB4, 0x00, 0x00, 0x00,  // mulss xmm2, [rax+0xB4]
+        0xF3, 0x0F, 0x59, 0x15, 0x0C, 0x00, 0x00, 0x00,  // mulss xmm2, [rip+0x0C] -> 0x20
+        0xF3, 0x0F, 0x11, 0x91, 0x28, 0x02, 0x00, 0x00,  // movss [rcx+0x228], xmm2
+        0xC3,                                            // ret
+    };
+    std::memcpy(page, kCode, sizeof(kCode));
+    std::memcpy(page + 0x20, &scale, sizeof(scale));
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not protect the step-down cave (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+
+    uint8_t patch[16];
+    std::memset(patch, 0x90, sizeof(patch));
+    patch[0] = 0xE8;
+    const intptr_t rel = page - (site + 5);
+    if (rel < INT32_MIN || rel > INT32_MAX) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Step-down cave is out of range");
+        return false;
+    }
+    const auto rel32 = static_cast<int32_t>(rel);
+    std::memcpy(patch + 1, &rel32, sizeof(rel32));
+    DWORD old = 0;
+    if (!VirtualProtect(site, sizeof(patch), PAGE_EXECUTE_READWRITE, &old)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not unprotect the step-down setter (Win32=%lu)", GetLastError());
+        return false;
+    }
+    std::memcpy(site, patch, sizeof(patch));
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(patch));
+    DWORD ignored = 0;
+    VirtualProtect(site, sizeof(patch), old, &ignored);
+    LOG_INFO("Ground step-down allowance scaled by %.6f (60/TargetFPS)", scale);
+    return true;
+}
+
+// Ladder exit: the ground snap is applied at 0x2BC7E9 as a raw position offset
+// ([phys+0xC4], -0.31 in this state). Normally it undoes that frame's step-height
+// lift, so the pair nets to zero. In the last ~0.033 s of a ladder slide the lift
+// is skipped but the snap is still applied, so the body is pulled down 0.31 per
+// FRAME: two frames (0.62) at 60 FPS, eight (2.5) at 240, which drops the
+// character through the floor. Where the lift did not happen (0x1F4 set and the
+// proxy is not ~0.31 above the frame-start height [phys+0x14]) scale the snap by
+// 60*dt, so the same 0.62 is applied over the same 0.033 s at any frame rate.
+constexpr uint32_t kSnapApplySite = 0x2BC7E9;
+
+bool patch_unlifted_snap() {
+    auto* site = image_rva(kSnapApplySite);
+    // movss xmm1, [rbx+0xC4] followed by xorps xmm3, xmm3
+    static constexpr uint8_t kExpected[11] = {0xF3, 0x0F, 0x10, 0x8B, 0xC4, 0x00, 0x00, 0x00,
+                                              0x0F, 0x57, 0xDB};
+    if (std::memcmp(site, kExpected, sizeof(kExpected)) != 0) {
+        LOG_ERROR("Snap apply site does not match this build");
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the snap cave (Win32=%lu)", GetLastError());
+        return false;
+    }
+    constexpr size_t kData = 0x80;
+    const float k_lifted = 0.15f, k60 = 60.0f, k1 = 1.0f;
+    std::memcpy(page + kData + 0, &k_lifted, 4);
+    std::memcpy(page + kData + 4, &k60, 4);
+    std::memcpy(page + kData + 8, &k1, 4);
+
+    CaveEmitter e{page};
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x8B, 0xC4, 0x00, 0x00, 0x00}) e.b(b);   // movss xmm1,[rbx+0xC4]
+    for (uint8_t b : {0x80, 0xBB, 0xF4, 0x01, 0x00, 0x00, 0x00}) e.b(b);          // cmp byte [rbx+0x1F4],0
+    e.b(0x74);                                                                    // je done
+    const size_t je1 = e.len;
+    e.b(0);
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x44, 0x24, 0x24}) e.b(b);                // movss xmm0,[rsp+0x24]
+    for (uint8_t b : {0xF3, 0x0F, 0x5C, 0x43, 0x14}) e.b(b);                      // subss xmm0,[rbx+0x14]
+    e.b(0x0F); e.b(0x2F); e.b(0x05);                                              // comiss xmm0,[rip+k_lifted]
+    const size_t d0 = e.imm32();
+    e.fix32(d0, page + kData + 0);
+    e.b(0x73);                                                                    // jae done
+    const size_t je2 = e.len;
+    e.b(0);
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x47, 0x08}) e.b(b);                      // movss xmm0,[rdi+8]  (dt)
+    e.b(0xF3); e.b(0x0F); e.b(0x59); e.b(0x05);                                   // mulss xmm0,[rip+60]
+    const size_t d1 = e.imm32();
+    e.fix32(d1, page + kData + 4);
+    e.b(0xF3); e.b(0x0F); e.b(0x5D); e.b(0x05);                                   // minss xmm0,[rip+1.0]
+    const size_t d2 = e.imm32();
+    e.fix32(d2, page + kData + 8);
+    for (uint8_t b : {0xF3, 0x0F, 0x59, 0xC8}) e.b(b);                            // mulss xmm1,xmm0
+    const size_t done = e.len;
+    page[je1] = static_cast<uint8_t>(done - (je1 + 1));
+    page[je2] = static_cast<uint8_t>(done - (je2 + 1));
+    e.b(0xE9);                                                                    // jmp back
+    const size_t jb = e.imm32();
+    e.fix32(jb, site + 8);
+    if (e.len > kData) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Snap cave did not fit");
+        return false;
+    }
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not protect the snap cave (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+
+    const intptr_t rel = page - (site + 5);
+    if (rel < INT32_MIN || rel > INT32_MAX) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        return false;
+    }
+    uint8_t patch[8] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+    const auto rel32 = static_cast<int32_t>(rel);
+    std::memcpy(patch + 1, &rel32, sizeof(rel32));
+    DWORD old = 0;
+    if (!VirtualProtect(site, sizeof(patch), PAGE_EXECUTE_READWRITE, &old)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not unprotect the snap apply site (Win32=%lu)", GetLastError());
+        return false;
+    }
+    std::memcpy(site, patch, sizeof(patch));
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(patch));
+    DWORD ignored = 0;
+    VirtualProtect(site, sizeof(patch), old, &ignored);
+    LOG_INFO("Ladder-exit snap scaled to frame time where the lift is skipped");
+    return true;
+}
+
 // Move-control dispatch: two call paths load a hardcoded 1/60 into xmm1 right
 // before the action functions run, so anything they scale by dt (ladder slide
 // speed, for one) moves 4x too far per frame at 240 FPS. In both places the real
@@ -700,42 +905,6 @@ constexpr uint32_t kChrUpdate = 0x320AE0;
 constexpr uint32_t kChrUpdateSites[] = {0x36FBBD, 0x36FD49, 0x36FF2A};
 
 std::atomic<int> g_trace_state{0};
-
-struct CaveEmitter {
-    uint8_t* buf;
-    size_t len = 0;
-
-    void put(const void* p, size_t n) {
-        std::memcpy(buf + len, p, n);
-        len += n;
-    }
-    void b(uint8_t v) {
-        put(&v, 1);
-    }
-    void d(uint32_t v) {
-        put(&v, 4);
-    }
-    void q(uint64_t v) {
-        put(&v, 8);
-    }
-    size_t imm32() {
-        const size_t at = len;
-        d(0);
-        return at;
-    }
-    size_t imm64() {
-        const size_t at = len;
-        q(0);
-        return at;
-    }
-    void fix32(size_t at, const void* target) {
-        const auto rel = static_cast<int32_t>(static_cast<const uint8_t*>(target) - (buf + at + 4));
-        std::memcpy(buf + at, &rel, sizeof(rel));
-    }
-    void fix64(size_t at, uint64_t value) {
-        std::memcpy(buf + at, &value, sizeof(value));
-    }
-};
 
 bool build_trace_cave(uint8_t* page, const void* update_fn) {
     CaveEmitter e{page};
@@ -871,6 +1040,12 @@ void try_delayed_patches() {
     if (g_slide_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_slide();
         g_slide_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_step_down_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = !g_fix_step_down.load(std::memory_order_relaxed) ||
+                        (patch_step_down() & patch_unlifted_snap());
+        g_step_down_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_move_dt_state.compare_exchange_strong(expected, 1)) {

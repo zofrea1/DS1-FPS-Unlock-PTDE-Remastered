@@ -9,6 +9,9 @@ struct Settings {
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;
+    // Scales the ground step-down allowance to the frame rate (ledge/lip drop
+    // boost and ladder fall-through at high FPS). Set false to A/B test.
+    bool fix_step_down = true;
     // Hardware write-watch on character height (implies trace). Diagnostic only.
     bool watch = false;
 };
