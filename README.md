@@ -49,7 +49,14 @@ Visual Studio 2022:
 build.bat
 ```
 
-`build\dinput8.dll` is the proxy.
+builds both targets. `build_dsr.bat` and `build_ptde.bat` build one each.
+
+| Game | Output | Notes |
+| --- | --- | --- |
+| Dark Souls Remastered (64-bit) | `build\dsr\dinput8.dll` | released as v1.0.0 |
+| Dark Souls: Prepare to Die Edition (32-bit) | `build\ptde\xinput1_3.dll` | in development, observes only |
+
+The PTDE build loads as `xinput1_3.dll`, not `dinput8.dll`, so it can sit next to DSfix, which uses `DINPUT8.dll`.
 
 ## License
 

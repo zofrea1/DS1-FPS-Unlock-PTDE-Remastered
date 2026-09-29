@@ -1,6 +1,7 @@
 #pragma once
 
-void log_init(const wchar_t* dll_path);
+// Opens `file_name` next to the DLL (truncating any previous run).
+void log_init(const wchar_t* dll_path, const wchar_t* file_name);
 void log_write(const char* level, const char* fmt, ...);
 void log_close();
 

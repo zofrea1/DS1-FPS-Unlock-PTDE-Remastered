@@ -12,7 +12,7 @@ FILE* g_file = nullptr;
 std::mutex g_mu;
 }  // namespace
 
-void log_init(const wchar_t* dll_path) {
+void log_init(const wchar_t* dll_path, const wchar_t* file_name) {
     wchar_t path[MAX_PATH];
     lstrcpynW(path, dll_path, MAX_PATH);
     wchar_t* slash = wcsrchr(path, L'\\');
@@ -22,7 +22,7 @@ void log_init(const wchar_t* dll_path) {
         path[0] = 0;
     }
     wchar_t full[MAX_PATH];
-    _snwprintf_s(full, _TRUNCATE, L"%sDSR-FPS-Unlock.log", path);
+    _snwprintf_s(full, _TRUNCATE, L"%s%s", path, file_name);
     g_file = _wfsopen(full, L"w", _SH_DENYNO);
 }
 
