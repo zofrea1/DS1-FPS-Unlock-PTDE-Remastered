@@ -77,6 +77,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.target_fps = std::atoi(val.c_str());
         } else if (key == "trace") {
             s.trace = parse_bool(val);
+        } else if (key == "watch") {
+            s.watch = parse_bool(val);
         } else if (key == "fixmovedt") {
             s.fix_move_dt = parse_bool(val);
         }

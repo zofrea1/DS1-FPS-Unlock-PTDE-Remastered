@@ -9,6 +9,8 @@ struct Settings {
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;
+    // Hardware write-watch on character height (implies trace). Diagnostic only.
+    bool watch = false;
 };
 
 // Reads DSR-FPS-Unlock.ini from the same directory as the DLL.

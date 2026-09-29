@@ -583,6 +583,65 @@ bool patch_decay() {
     return true;
 }
 
+// Ground slide: the same controller step (fn 0x2bbe40) keeps a slide velocity in
+// [body+0x120] that is fed into the velocity handed to the physics proxy.
+//  * While the body touches a slope, 0x2BBF5F adds a tangential gravity term of
+//    0.5 (u/s) per FRAME (it is projected off the contact normal, so it is zero
+//    on flat floor and non-zero on slopes, lips and curves).
+//  * While it is not touching, 0x2BC094 multiplies the slide velocity by 0.65
+//    per FRAME.
+// Neither uses dt, so at TargetFPS they run TargetFPS/60 times too often: slopes
+// and lips build downward speed several times faster (the character "snaps" off
+// them), and leftover slide speed dies several times faster once airborne.
+// Point both loads at cave floats holding the same amounts per 1/60 s:
+// 0.5 * 60/TargetFPS and 0.65 ^ (60/TargetFPS).
+constexpr uint32_t kSlideGravSite = 0x2BBF5F;
+constexpr uint32_t kSlideFrictionSite = 0x2BC094;
+
+std::atomic<int> g_slide_state{0};
+
+// `movss xmmN, dword ptr [rip + disp32]` (F3 0F 10 modrm, mod=00 rm=101) whose
+// current value is `expected`; retargets the load at a cave float.
+bool retarget_movss_const(uint32_t rva, float expected, float replacement, const char* what) {
+    auto* site = image_rva(rva);
+    if (site[0] != 0xF3 || site[1] != 0x0F || site[2] != 0x10 || (site[3] & 0xC7) != 0x05) {
+        LOG_ERROR("%s load at 0x%08X does not match this build", what, rva);
+        return false;
+    }
+    int32_t disp = 0;
+    std::memcpy(&disp, site + 4, sizeof(disp));
+    const auto* constant = reinterpret_cast<const float*>(site + 8 + disp);
+    if (std::fabs(*constant - expected) > 0.0001f) {
+        LOG_ERROR("%s constant at 0x%08X is %.6f, expected %.6f", what, rva, *constant, expected);
+        return false;
+    }
+    void* page = alloc_near(site);
+    if (!page) {
+        LOG_ERROR("Could not allocate the %s constant (Win32=%lu)", what, GetLastError());
+        return false;
+    }
+    *static_cast<float*>(page) = replacement;
+    if (!write_disp32(site + 4, site + 8, page)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not retarget the %s load", what);
+        return false;
+    }
+    return true;
+}
+
+bool patch_slide() {
+    const double target = static_cast<double>(g_target_fps.load(std::memory_order_relaxed));
+    const float grav = static_cast<float>(0.5 * 60.0 / target);
+    const float friction = static_cast<float>(std::exp(std::log(0.65) * 60.0 / target));
+    if (!retarget_movss_const(kSlideGravSite, 0.5f, grav, "slide gravity") ||
+        !retarget_movss_const(kSlideFrictionSite, 0.65f, friction, "slide friction")) {
+        return false;
+    }
+    LOG_INFO("Ground slide retargeted (gravity %.5f per frame instead of 0.5, friction %.5f instead of 0.65)", grav,
+             friction);
+    return true;
+}
+
 // Move-control dispatch: two call paths load a hardcoded 1/60 into xmm1 right
 // before the action functions run, so anything they scale by dt (ladder slide
 // speed, for one) moves 4x too far per frame at 240 FPS. In both places the real
@@ -807,6 +866,11 @@ void try_delayed_patches() {
     if (g_decay_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_decay();
         g_decay_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_slide_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_slide();
+        g_slide_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_move_dt_state.compare_exchange_strong(expected, 1)) {

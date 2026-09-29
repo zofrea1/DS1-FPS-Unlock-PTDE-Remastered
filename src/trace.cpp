@@ -1,6 +1,7 @@
 #include "trace.h"
 
 #include "log.h"
+#include "watch.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -125,6 +126,9 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
         return;
     }
 
+    if (phase == 0) {
+        watch_note(chr, phys);
+    }
     const float* pos = reinterpret_cast<const float*>(phys + 0x10);
     const uint32_t anim = *reinterpret_cast<const uint32_t*>(base + 0xD0);
     const uint32_t action = *reinterpret_cast<const uint32_t*>(base + 0x354);
