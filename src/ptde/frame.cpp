@@ -371,6 +371,7 @@ bool frame_install(const Settings& settings) {
     }
     if (settings.skip_intro) {
         limiter_install();
+        intro_timer_install();
     }
     if (settings.profile) {
         profile_start();

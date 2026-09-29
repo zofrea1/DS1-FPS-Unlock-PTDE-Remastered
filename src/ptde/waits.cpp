@@ -171,14 +171,7 @@ BOOL WINAPI hook_qpc(LARGE_INTEGER* counter) {
         const USHORT depth = CaptureStackBackTrace(1, 8, frames, nullptr);
         note_time(ra, 3, depth);
     }
-    if (g_intro_skipping) {
-        InterlockedExchangeAdd64(&g_qpc_warp, g_freq.QuadPart / 50);
-        InterlockedIncrement(&g_warped_qpc);
-    }
-    if (ok && counter) {
-        counter->QuadPart += InterlockedCompareExchange64(&g_qpc_warp, 0, 0);
-    }
-    return ok;
+    return ok;  // recording only: warping is done by the process-wide hook below
 }
 
 DWORD WINAPI hook_time() {
@@ -205,6 +198,24 @@ DWORD WINAPI hook_tick() {
         InterlockedIncrement(&g_warped_ms);
     }
     return g_tick() + static_cast<DWORD>(g_ms_warp);
+}
+
+// ---- process-wide QueryPerformanceCounter hot patch --------------------------------------
+constexpr LONGLONG kMaxWarpSeconds = 30;
+QpcFn g_qpc_real = nullptr;
+
+BOOL WINAPI hook_qpc_global(LARGE_INTEGER* counter) {
+    const BOOL ok = g_qpc_real(counter);
+    if (g_intro_skipping) {
+        if (InterlockedCompareExchange64(&g_qpc_warp, 0, 0) < kMaxWarpSeconds * g_freq.QuadPart) {
+            InterlockedExchangeAdd64(&g_qpc_warp, g_freq.QuadPart / 50);
+        }
+        InterlockedIncrement(&g_warped_qpc);
+    }
+    if (ok && counter) {
+        counter->QuadPart += InterlockedCompareExchange64(&g_qpc_warp, 0, 0);
+    }
+    return ok;
 }
 
 template <typename T>
@@ -274,4 +285,44 @@ void waits_report() {
                  e.count > e.infinite ? static_cast<double>(e.req_ms) / (e.count - e.infinite) : 0.0, e.max_req,
                  e.infinite, e.count ? static_cast<double>(e.actual_ms) / e.count : 0.0, e.actual_ms);
     }
+}
+
+bool intro_timer_install() {
+    QueryPerformanceFrequency(&g_freq);
+    auto* target = reinterpret_cast<uint8_t*>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "QueryPerformanceCounter"));
+    if (!target) {
+        LOG_ERROR("Could not find kernel32!QueryPerformanceCounter");
+        return false;
+    }
+    // mov edi,edi / push ebp / mov ebp,esp, with a run of int3 padding in front: the Windows
+    // hot-patch layout. A jump into the padding plus a two-byte short jump over the first
+    // instruction can be applied while other threads are running the function.
+    static const uint8_t kPrologue[5] = {0x8B, 0xFF, 0x55, 0x8B, 0xEC};
+    static const uint8_t kPadding[5] = {0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
+    if (std::memcmp(target, kPrologue, sizeof(kPrologue)) != 0 || std::memcmp(target - 5, kPadding, 5) != 0) {
+        LOG_ERROR("kernel32!QueryPerformanceCounter is not in the hot-patch layout (%02X %02X %02X %02X %02X). "
+                  "Not hooking it.", target[0], target[1], target[2], target[3], target[4]);
+        return false;
+    }
+    g_qpc_real = reinterpret_cast<QpcFn>(target + 2);  // the mov edi,edi is a no-op, so start after it
+    DWORD old = 0;
+    if (!VirtualProtect(target - 5, 8, PAGE_EXECUTE_READWRITE, &old)) {
+        LOG_ERROR("Could not unprotect kernel32!QueryPerformanceCounter (Win32=%lu)", GetLastError());
+        return false;
+    }
+    uint8_t jump[5] = {0xE9, 0, 0, 0, 0};
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&hook_qpc_global) -
+                                              reinterpret_cast<uint32_t>(target));
+    std::memcpy(jump + 1, &rel, sizeof(rel));
+    std::memcpy(target - 5, jump, sizeof(jump));  // the long jump, into the padding
+    FlushInstructionCache(GetCurrentProcess(), target - 5, 5);
+    const uint16_t short_jump = 0xF9EB;           // EB F9: jmp -7, back into the padding
+    InterlockedExchange16(reinterpret_cast<SHORT*>(target), static_cast<SHORT>(short_jump));
+    FlushInstructionCache(GetCurrentProcess(), target, 2);
+    DWORD ignored = 0;
+    VirtualProtect(target - 5, 8, old, &ignored);
+    LOG_INFO("Process-wide QueryPerformanceCounter hook installed at %p (intro warp capped at %lld s)", target,
+             kMaxWarpSeconds);
+    return true;
 }
