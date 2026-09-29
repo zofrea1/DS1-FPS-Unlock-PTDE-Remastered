@@ -17,6 +17,7 @@ namespace {
 constexpr uint32_t kDispatchCall = 0x00BAC4ED;        // absolute VA of the call
 constexpr uint32_t kGetCmdFn = 0x00578190;            // absolute VA of the callee
 constexpr uint32_t kImageBase = 0x00400000;  // this build has a fixed base; addresses above are absolute
+constexpr uint32_t kImageSize = 0x011C2000;
 
 using GetCmdFn = int(__fastcall*)(void* self, void* edx);
 GetCmdFn g_orig = nullptr;
@@ -110,8 +111,15 @@ bool frame_install(const Settings&) {
     int32_t rel = 0;
     std::memcpy(&rel, site + 1, sizeof(rel));
     const uint32_t target = kDispatchCall + 5 + static_cast<uint32_t>(rel);
-    if (target != kGetCmdFn) {
-        LOG_ERROR("Draw-thread fetch call goes to %08X, expected %08X", target, kGetCmdFn);
+    if (target == kGetCmdFn) {
+        LOG_INFO("Draw-thread fetch call is unhooked (goes to the game's own getter)");
+    } else if (target < kImageBase || target >= kImageBase + kImageSize) {
+        // DSfix (or another tool) already detoured this call. Sit in front of it and
+        // forward, so both work and neither depends on load order.
+        LOG_INFO("Draw-thread fetch call is already detoured to %08X; chaining in front of it", target);
+    } else {
+        LOG_ERROR("Draw-thread fetch call goes to %08X inside the game, expected %08X. Not hooking.", target,
+                  kGetCmdFn);
         return false;
     }
     g_orig = reinterpret_cast<GetCmdFn>(target);
