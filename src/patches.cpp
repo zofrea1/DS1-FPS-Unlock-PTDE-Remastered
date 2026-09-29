@@ -679,124 +679,74 @@ struct CaveEmitter {
     }
 };
 
-// Ground snap ("step down"): every frame the physics body is lifted by the step
-// height [phys+0xE4] (0.31), moved, then snapped back down onto whatever ground is
-// within reach (fn 0x2BCB00 -> setPosition at 0x2BC7E9). Reach below the lifted
-// position is [phys+0xE4] + [phys+0x228]; [phys+0x228] (0.4) is therefore the
-// most the character can be pulled down in ONE FRAME. At retail's 60 FPS that is
-// 24 u/s, so a surface that drops away faster than that lets the character leave
-// the ground. At TargetFPS it is TargetFPS/60 times faster (96 u/s at 240), and
-// the character stays glued to a lip and rides it down like a slide - the drop
-// boost seen at every walk-off. The field is written once by a setter that does
-// not run every frame, so scale it where the ground check READS it instead: four
-// loads in fn 0x2BCB00, each replaced by a call to a cave that applies 60/TargetFPS.
-// The step-up lift is a geometric height, not a rate, so it stays.
+// Ground snap ("step down"). Every frame the physics body is lifted by the step
+// height [phys+0xE4] (0.31), moved, then snapped back down onto ground within
+// reach (fn 0x2BCB00, applied by setPosition at 0x2BC7E9). Reach below the lifted
+// position is [phys+0xE4] + [phys+0x228]; [phys+0x228] (0.4) is the most the body
+// can be pulled down in ONE FRAME.
+//
+// That 0.4 plays two roles that only coincide at 60 FPS:
+//  * a geometric step-down height (walking off a 0.2 tread must be caught in one
+//    frame at any frame rate), and
+//  * a rate limit: a surface that drops away faster than 0.4 per frame (24 u/s)
+//    lets the character leave the ground. At TargetFPS the same surface drops
+//    1/N as much per frame, so the character stays glued to a curved lip and
+//    rides it down at up to 0.4/dt - the drop boost at every walk-off.
+//
+// Scaling the field by 60/TargetFPS fixed the boost but broke role one: steps
+// were no longer caught in a frame and the player fell for a few frames. So keep
+// the retail 0.4 for a fresh drop, and use the frame-scaled value only while the
+// body is already in a CHAINED descent (previous frame lost more than 0.02 of
+// height with no lift). A single step is caught exactly as in retail; a lip is
+// followed for one frame and then released at retail's per-second rate.
+//
+// The field is written once by a setter that does not run every frame, so it is
+// managed from the snap-apply cave, which runs every frame with real dt: the
+// original ("base") value is remembered per physics object and the scaled or full
+// value is written back for the next frame's ground check.
+constexpr uint32_t kSnapApplySite = 0x2BC7E9;
+constexpr uint32_t kReachOffset = 0x228;
+
 std::atomic<int> g_step_down_state{0};
 
-bool patch_step_down() {
-    struct Site {
-        uint32_t rva;
-        size_t len;
-        uint8_t bytes[9];
-    };
-    // movss xmm9,[rcx+0x228] / addss xmm1,[rbx+0x228] / addss xmm0,[rbx+0x228] / addss xmm7,[rbx+0x228]
-    static const Site sites[4] = {
-        {0x2BCB74, 9, {0xF3, 0x44, 0x0F, 0x10, 0x89, 0x28, 0x02, 0x00, 0x00}},
-        {0x2BCD9F, 8, {0xF3, 0x0F, 0x58, 0x8B, 0x28, 0x02, 0x00, 0x00}},
-        {0x2BCE8C, 8, {0xF3, 0x0F, 0x58, 0x83, 0x28, 0x02, 0x00, 0x00}},
-        {0x2BCF32, 8, {0xF3, 0x0F, 0x58, 0xBB, 0x28, 0x02, 0x00, 0x00}},
-    };
-    for (const Site& s : sites) {
-        if (std::memcmp(image_rva(s.rva), s.bytes, s.len) != 0) {
-            LOG_ERROR("Ground reach load at 0x%08X does not match this build", s.rva);
-            return false;
-        }
-    }
-    auto* page = static_cast<uint8_t*>(alloc_near(image_rva(sites[0].rva)));
-    if (!page) {
-        LOG_ERROR("Could not allocate the reach caves (Win32=%lu)", GetLastError());
-        return false;
-    }
-    const float scale = 60.0f / static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
-    constexpr size_t kData = 0x100;
-    std::memcpy(page + kData, &scale, sizeof(scale));
+struct GroundState {
+    std::atomic<const void*> phys{nullptr};
+    float base = 0.0f;
+    float written = -1.0f;
+    int streak = 0;
+    ULONGLONG last_ms = 0;
+};
+constexpr size_t kGroundSlots = 512;
+GroundState g_ground[kGroundSlots];
 
-    size_t entry[4] = {};
-    CaveEmitter e{page};
-    // Cave 0: movss xmm9,[rcx+0x228] ; mulss xmm9,[rip+scale] ; ret
-    entry[0] = e.len;
-    for (uint8_t b : {0xF3, 0x44, 0x0F, 0x10, 0x89, 0x28, 0x02, 0x00, 0x00}) e.b(b);
-    for (uint8_t b : {0xF3, 0x44, 0x0F, 0x59, 0x0D}) e.b(b);
-    e.fix32(e.imm32(), page + kData);
-    e.b(0xC3);
-    // Caves 1-3: save xmm15 (callee-saved, unused here), xmm15 = [rbx+0x228]*scale,
-    // dest += xmm15, restore. lea keeps EFLAGS untouched.
-    const uint8_t add_dest[3][5] = {
-        {0xF3, 0x41, 0x0F, 0x58, 0xCF},  // addss xmm1,xmm15
-        {0xF3, 0x41, 0x0F, 0x58, 0xC7},  // addss xmm0,xmm15
-        {0xF3, 0x41, 0x0F, 0x58, 0xFF},  // addss xmm7,xmm15
-    };
-    for (int i = 0; i < 3; ++i) {
-        entry[i + 1] = e.len;
-        for (uint8_t b : {0x48, 0x8D, 0x64, 0x24, 0xE8}) e.b(b);                          // lea rsp,[rsp-0x18]
-        for (uint8_t b : {0x44, 0x0F, 0x11, 0x3C, 0x24}) e.b(b);                          // movups [rsp],xmm15
-        for (uint8_t b : {0xF3, 0x44, 0x0F, 0x10, 0xBB, 0x28, 0x02, 0x00, 0x00}) e.b(b);  // movss xmm15,[rbx+0x228]
-        for (uint8_t b : {0xF3, 0x44, 0x0F, 0x59, 0x3D}) e.b(b);                          // mulss xmm15,[rip+scale]
-        e.fix32(e.imm32(), page + kData);
-        for (uint8_t b : add_dest[i]) e.b(b);
-        for (uint8_t b : {0x44, 0x0F, 0x10, 0x3C, 0x24}) e.b(b);                          // movups xmm15,[rsp]
-        for (uint8_t b : {0x48, 0x8D, 0x64, 0x24, 0x18}) e.b(b);                          // lea rsp,[rsp+0x18]
-        e.b(0xC3);
-    }
-    if (e.len > kData) {
-        VirtualFree(page, 0, MEM_RELEASE);
-        LOG_ERROR("Reach caves did not fit");
-        return false;
-    }
-    DWORD protect = 0;
-    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
-        VirtualFree(page, 0, MEM_RELEASE);
-        LOG_ERROR("Could not protect the reach caves (Win32=%lu)", GetLastError());
-        return false;
-    }
-    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
-
-    for (int i = 0; i < 4; ++i) {
-        uint8_t* site = image_rva(sites[i].rva);
-        const intptr_t rel = (page + entry[i]) - (site + 5);
-        if (rel < INT32_MIN || rel > INT32_MAX) {
-            LOG_ERROR("Reach cave is out of range");
-            return false;
+GroundState* ground_slot(const void* phys, ULONGLONG now) {
+    const size_t start = ((reinterpret_cast<uintptr_t>(phys) >> 4) * 2654435761u) & (kGroundSlots - 1);
+    for (size_t n = 0; n < 64; ++n) {
+        GroundState& s = g_ground[(start + n) & (kGroundSlots - 1)];
+        const void* cur = s.phys.load(std::memory_order_acquire);
+        if (cur == phys) {
+            return &s;
         }
-        uint8_t patch[9];
-        std::memset(patch, 0x90, sizeof(patch));
-        patch[0] = 0xE8;
-        const auto rel32 = static_cast<int32_t>(rel);
-        std::memcpy(patch + 1, &rel32, sizeof(rel32));
-        DWORD old = 0;
-        if (!VirtualProtect(site, sites[i].len, PAGE_EXECUTE_READWRITE, &old)) {
-            LOG_ERROR("Could not unprotect the reach load at 0x%08X (Win32=%lu)", sites[i].rva, GetLastError());
-            return false;
+        // Claim a free slot, or one whose object has not updated for a minute.
+        if (!cur || now - s.last_ms > 60000) {
+            const void* expected = cur;
+            if (s.phys.compare_exchange_strong(expected, phys)) {
+                s.base = 0.0f;
+                s.written = -1.0f;
+                s.streak = 0;
+                s.last_ms = now;
+                return &s;
+            }
         }
-        std::memcpy(site, patch, sites[i].len);
-        FlushInstructionCache(GetCurrentProcess(), site, sites[i].len);
-        DWORD ignored = 0;
-        VirtualProtect(site, sites[i].len, old, &ignored);
     }
-    LOG_INFO("Ground reach padding scaled by %.6f (60/TargetFPS) at 4 loads", scale);
-    return true;
+    return nullptr;
 }
 
-// Ladder exit: the ground snap is applied at 0x2BC7E9 as a raw position offset
-// ([phys+0xC4], -0.31 in this state). Normally it undoes that frame's step-height
-// lift, so the pair nets to zero. At the bottom of a ladder slide the lift is
-// skipped but the snap is still applied, pulling the body down 0.31 per FRAME
-// through the collision floor until it reaches a lower one (2+ units at 240 FPS).
-// Where the lift did not happen (0x1F4 set and the proxy is not ~0.31 above the
-// frame-start height [phys+0x14]) the snap is capped at one retail frame's worth
-// (0.31) per episode, spread over frames by 60*dt. Balanced frames are untouched.
-constexpr uint32_t kSnapApplySite = 0x2BC7E9;
-
+// Ladder exit: the same snap is applied unbalanced (lift skipped) at the bottom of
+// a ladder slide, pulling the body down 0.31 per FRAME through the collision
+// floor until it reaches a lower one (2+ units at 240 FPS). Where 0x1F4 is set and
+// the proxy is not ~0.31 above the frame-start height, cap the snap at one retail
+// frame's worth (0.31) per episode, spread over frames by 60*dt.
 struct SnapEpisode {
     const void* phys = nullptr;
     float applied = 0.0f;
@@ -848,7 +798,45 @@ float ladder_snap_factor(const void* phys, float dt, float lift_height) {
     return factor;
 }
 
-bool patch_unlifted_snap() {
+// Called by the snap-apply cave once per physics update, right before the snap is
+// added to the proxy position. `snap` is the vertical offset about to be applied.
+void ground_snap_step(const void* phys, float dt, float proxy_y, float start_y, float* snap) {
+    auto* bytes = static_cast<const uint8_t*>(phys);
+    const ULONGLONG now = GetTickCount64();
+
+    if (bytes[0x1F4] != 0) {
+        *snap *= ladder_snap_factor(phys, dt, proxy_y - start_y);
+    }
+
+    GroundState* state = ground_slot(phys, now);
+    if (!state) {
+        return;
+    }
+    // Net height change this frame: proxy after the move, plus the snap, versus
+    // where the body started the frame. (The lift is already inside proxy_y.)
+    const float net = proxy_y + *snap - start_y;
+    state->last_ms = now;
+    state->streak = net < -0.02f ? state->streak + 1 : 0;
+
+    auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(bytes) + kReachOffset);
+    const float current = *reach;
+    if (current != state->written) {
+        state->base = current;  // the game (re)wrote it: that is the retail value
+    }
+    float scale = 1.0f;
+    if (state->streak > 0) {
+        scale = dt * 60.0f;
+        if (scale > 1.0f) {
+            scale = 1.0f;
+        } else if (scale < 0.05f) {
+            scale = 0.05f;
+        }
+    }
+    state->written = state->base * scale;
+    *reach = state->written;
+}
+
+bool patch_ground_snap() {
     auto* site = image_rva(kSnapApplySite);
     // movss xmm1, [rbx+0xC4] followed by xorps xmm3, xmm3
     static constexpr uint8_t kExpected[11] = {0xF3, 0x0F, 0x10, 0x8B, 0xC4, 0x00, 0x00, 0x00,
@@ -864,26 +852,20 @@ bool patch_unlifted_snap() {
     }
     CaveEmitter e{page};
     for (uint8_t b : {0xF3, 0x0F, 0x10, 0x8B, 0xC4, 0x00, 0x00, 0x00}) e.b(b);   // movss xmm1,[rbx+0xC4]
-    for (uint8_t b : {0x80, 0xBB, 0xF4, 0x01, 0x00, 0x00, 0x00}) e.b(b);          // cmp byte [rbx+0x1F4],0
-    e.b(0x74);                                                                    // je done
-    const size_t je1 = e.len;
-    e.b(0);
-    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x44, 0x24, 0x24}) e.b(b);                // movss xmm0,[rsp+0x24] (proxy y)
-    for (uint8_t b : {0xF3, 0x0F, 0x5C, 0x43, 0x14}) e.b(b);                      // subss xmm0,[rbx+0x14] (frame-start y)
     for (uint8_t b : {0x48, 0x83, 0xEC, 0x40}) e.b(b);                            // sub rsp,0x40 (16-aligned here)
     for (uint8_t b : {0xF3, 0x0F, 0x11, 0x4C, 0x24, 0x30}) e.b(b);                // movss [rsp+0x30],xmm1 (snap)
-    for (uint8_t b : {0x0F, 0x28, 0xD0}) e.b(b);                                  // movaps xmm2,xmm0 (height)
-    for (uint8_t b : {0x48, 0x89, 0xD9}) e.b(b);                                  // mov rcx,rbx
-    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x4F, 0x08}) e.b(b);                      // movss xmm1,[rdi+8] (dt)
-    e.b(0x48); e.b(0xB8);                                                         // mov rax, ladder_snap_factor
+    for (uint8_t b : {0x48, 0x89, 0xD9}) e.b(b);                                  // mov rcx,rbx           (phys)
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x4F, 0x08}) e.b(b);                      // movss xmm1,[rdi+8]    (dt)
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x54, 0x24, 0x64}) e.b(b);                // movss xmm2,[rsp+0x64] (proxy y, was rsp+0x24)
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x5B, 0x14}) e.b(b);                      // movss xmm3,[rbx+0x14] (frame-start y)
+    for (uint8_t b : {0x48, 0x8D, 0x44, 0x24, 0x30}) e.b(b);                      // lea rax,[rsp+0x30]
+    for (uint8_t b : {0x48, 0x89, 0x44, 0x24, 0x20}) e.b(b);                      // mov [rsp+0x20],rax    (5th arg: &snap)
+    e.b(0x48); e.b(0xB8);                                                         // mov rax, ground_snap_step
     const size_t fn = e.imm64();
-    e.fix64(fn, reinterpret_cast<uint64_t>(&ladder_snap_factor));
+    e.fix64(fn, reinterpret_cast<uint64_t>(&ground_snap_step));
     e.b(0xFF); e.b(0xD0);                                                         // call rax
-    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x4C, 0x24, 0x30}) e.b(b);                // movss xmm1,[rsp+0x30]
-    for (uint8_t b : {0xF3, 0x0F, 0x59, 0xC8}) e.b(b);                            // mulss xmm1,xmm0
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x4C, 0x24, 0x30}) e.b(b);                // movss xmm1,[rsp+0x30] (snap, maybe scaled)
     for (uint8_t b : {0x48, 0x83, 0xC4, 0x40}) e.b(b);                            // add rsp,0x40
-    const size_t done = e.len;
-    page[je1] = static_cast<uint8_t>(done - (je1 + 1));
     e.b(0xE9);                                                                    // jmp back
     const size_t jb = e.imm32();
     e.fix32(jb, site + 8);
@@ -918,7 +900,7 @@ bool patch_unlifted_snap() {
     FlushInstructionCache(GetCurrentProcess(), site, sizeof(patch));
     DWORD ignored = 0;
     VirtualProtect(site, sizeof(patch), old, &ignored);
-    LOG_INFO("Ladder-exit snap capped at one retail frame (0.31) per episode");
+    LOG_INFO("Ground snap managed per frame (chained-descent reach scaling, ladder-exit cap)");
     return true;
 }
 
@@ -1119,7 +1101,7 @@ void try_delayed_patches() {
     expected = 0;
     if (g_step_down_state.compare_exchange_strong(expected, 1)) {
         const bool ok = !g_fix_step_down.load(std::memory_order_relaxed) ||
-                        (patch_step_down() & patch_unlifted_snap());
+                        patch_ground_snap();
         g_step_down_state.store(ok ? 2 : -1);
     }
     expected = 0;
