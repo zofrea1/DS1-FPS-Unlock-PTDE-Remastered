@@ -74,6 +74,12 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fps_unlock = parse_bool(val);
         } else if (key == "targetfps") {
             s.target_fps = std::atoi(val.c_str());
+        } else if (key == "driver") {
+            s.driver = parse_bool(val);
+        } else if (key == "vblankpatch") {
+            s.vblank_patch = parse_bool(val);
+        } else if (key == "survey") {
+            s.survey_seconds = std::atoi(val.c_str());
         }
     }
     return s;

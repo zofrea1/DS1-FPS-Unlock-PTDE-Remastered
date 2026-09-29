@@ -3,9 +3,13 @@
 #include "settings.h"
 
 // Hooks the draw thread's command fetch, the one place that runs once per rendered
-// frame, so the mod can see (and later drive) frame timing.
+// frame, and drives frame timing from it:
+//  * limits the frame rate to TargetFPS with a precise wait;
+//  * writes the measured frame time into the engine's fixed 1/30 step constant, so
+//    game speed stays correct at any frame rate (and when the frame rate drops);
+//  * optionally stops the render thread from waiting two vertical blanks per frame.
+// It also logs a per-second survey for the first `survey_seconds`.
 //
-// Phase 1b: survey only. Counts each of the six draw-thread commands and the time
-// between them and logs a summary once a second, to find which command marks a
-// frame boundary. The game is not changed.
+// Works with or without DSfix: if the call is already detoured by DSfix's FPS
+// unlock, this hook sits in front, forwards to it, and writes its value afterwards.
 bool frame_install(const Settings& settings);

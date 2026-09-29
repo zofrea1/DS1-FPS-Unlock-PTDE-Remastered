@@ -4,101 +4,197 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <mmsystem.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 
+#pragma comment(lib, "winmm.lib")
+
 namespace {
 
-// The draw thread's dispatcher (0xBAC4D0) fetches a command with `call 0x578190`
-// and switches on the result (0..5), invoking one of six virtual methods on the
-// render executor. That call site is a 5-byte relative call.
-constexpr uint32_t kDispatchCall = 0x00BAC4ED;        // absolute VA of the call
-constexpr uint32_t kGetCmdFn = 0x00578190;            // absolute VA of the callee
-constexpr uint32_t kImageBase = 0x00400000;  // this build has a fixed base; addresses above are absolute
+// Fixed-base 32-bit image (checked at install). All addresses are absolute.
+constexpr uint32_t kImageBase = 0x00400000;
 constexpr uint32_t kImageSize = 0x011C2000;
+
+// The draw thread's dispatcher (0xBAC4D0) fetches a command with `call 0x578190` and
+// switches on it (0..5). During gameplay commands 2, 3 and 4 each fire once per
+// frame; command 5 fires instead in loading screens. Command 2 is used as the frame
+// boundary (and 5, so loading screens keep a sane step).
+constexpr uint32_t kDispatchCall = 0x00BAC4ED;
+constexpr uint32_t kGetCmdFn = 0x00578190;
+
+// The engine's 1/30 second step, one pooled float in .rdata loaded directly by 37
+// pieces of code.
+constexpr uint32_t kTimestepVa = 0x011E7E90;
+
+// `mov dword ptr [esi+0x248], 2` in the swap-interval setter (0xFFB640). DSfix
+// rewrites the immediate to 5; without it the render thread waits two vertical
+// blanks per frame, which is the 30 FPS lock.
+constexpr uint32_t kVblankStoreVa = 0x00FFB688;
+constexpr uint32_t kVblankImmVa = 0x00FFB68E;
 
 using GetCmdFn = int(__fastcall*)(void* self, void* edx);
 GetCmdFn g_orig = nullptr;
 
 constexpr int kCommands = 6;
-constexpr double kSurveySeconds = 30.0;
+constexpr float kMinStep = 1.0f / 1000.0f;
+constexpr float kMaxStep = 1.0f / 10.0f;
 
-struct Survey {
+struct State {
+    Settings cfg;
+    float* step = nullptr;
     LARGE_INTEGER freq{};
-    LARGE_INTEGER start{};
-    LARGE_INTEGER last_report{};
-    LARGE_INTEGER last_seen[kCommands]{};
-    int count[kCommands]{};
-    double min_gap[kCommands];
-    double max_gap[kCommands];
-    double sum_gap[kCommands]{};
-    int gaps[kCommands]{};
-    bool active = false;
-    bool done = false;
-} g_survey;
+    LONGLONG period = 0;      // ticks per target frame
+    LONGLONG last = 0;        // tick of the previous frame boundary
+    LONGLONG start = 0;
+    LONGLONG report = 0;
+    bool driver = false;
 
-void survey_reset_window() {
-    for (int i = 0; i < kCommands; ++i) {
-        g_survey.count[i] = 0;
-        g_survey.min_gap[i] = 1e9;
-        g_survey.max_gap[i] = 0.0;
-        g_survey.sum_gap[i] = 0.0;
-        g_survey.gaps[i] = 0;
+    // per-window survey
+    int count[kCommands]{};
+    int frames = 0;
+    double dt_min = 1e9;
+    double dt_max = 0.0;
+    double dt_sum = 0.0;
+    float written = 0.0f;
+    bool survey_done = false;
+} g;
+
+double ms_between(LONGLONG a, LONGLONG b) {
+    return 1000.0 * static_cast<double>(b - a) / static_cast<double>(g.freq.QuadPart);
+}
+
+// Wait until `deadline`: sleep while it is far away, spin for the last stretch.
+void wait_until(LONGLONG deadline) {
+    for (;;) {
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        const LONGLONG remaining = deadline - now.QuadPart;
+        if (remaining <= 0) {
+            return;
+        }
+        const double remaining_ms = 1000.0 * static_cast<double>(remaining) / static_cast<double>(g.freq.QuadPart);
+        if (remaining_ms > 2.5) {
+            Sleep(1);
+        } else {
+            YieldProcessor();
+        }
     }
 }
 
-void survey_note(int cmd) {
-    if (!g_survey.active || g_survey.done || cmd < 0 || cmd >= kCommands) {
+void survey_report(LONGLONG now) {
+    if (g.cfg.survey_seconds <= 0 || g.survey_done) {
         return;
     }
+    const double window = ms_between(g.report, now) / 1000.0;
+    if (window < 1.0) {
+        return;
+    }
+    char line[400];
+    int n = std::snprintf(line, sizeof(line), "%.2fs: frames=%d (%.1f fps)", window, g.frames, g.frames / window);
+    if (g.frames > 0) {
+        n += std::snprintf(line + n, sizeof(line) - n, " dt avg %.3f min %.3f max %.3f ms, step written %.6f s",
+                           g.dt_sum / g.frames, g.dt_min, g.dt_max, g.written);
+    }
+    n += std::snprintf(line + n, sizeof(line) - n, " | cmds");
+    for (int i = 0; i < kCommands; ++i) {
+        n += std::snprintf(line + n, sizeof(line) - n, " c%d=%d", i, g.count[i]);
+    }
+    LOG_INFO("%s", line);
+    std::memset(g.count, 0, sizeof(g.count));
+    g.frames = 0;
+    g.dt_min = 1e9;
+    g.dt_max = 0.0;
+    g.dt_sum = 0.0;
+    g.report = now;
+    if (ms_between(g.start, now) / 1000.0 >= g.cfg.survey_seconds) {
+        g.survey_done = true;
+        LOG_INFO("Survey finished");
+    }
+}
+
+// Runs on the draw thread at every frame boundary.
+void frame_boundary() {
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
-    if (g_survey.last_seen[cmd].QuadPart != 0) {
-        const double gap_ms = 1000.0 * static_cast<double>(now.QuadPart - g_survey.last_seen[cmd].QuadPart) /
-                              static_cast<double>(g_survey.freq.QuadPart);
-        g_survey.sum_gap[cmd] += gap_ms;
-        ++g_survey.gaps[cmd];
-        if (gap_ms < g_survey.min_gap[cmd]) g_survey.min_gap[cmd] = gap_ms;
-        if (gap_ms > g_survey.max_gap[cmd]) g_survey.max_gap[cmd] = gap_ms;
-    }
-    g_survey.last_seen[cmd] = now;
-    ++g_survey.count[cmd];
-
-    const double since_report = static_cast<double>(now.QuadPart - g_survey.last_report.QuadPart) /
-                                static_cast<double>(g_survey.freq.QuadPart);
-    if (since_report >= 1.0) {
-        char line[512];
-        int n = 0;
-        n += std::snprintf(line + n, sizeof(line) - n, "draw-thread commands in %.2fs:", since_report);
-        for (int i = 0; i < kCommands; ++i) {
-            const double avg = g_survey.gaps[i] ? g_survey.sum_gap[i] / g_survey.gaps[i] : 0.0;
-            n += std::snprintf(line + n, sizeof(line) - n, " c%d=%d(gap avg %.2f min %.2f max %.2f ms)", i,
-                               g_survey.count[i], avg, g_survey.gaps[i] ? g_survey.min_gap[i] : 0.0,
-                               g_survey.max_gap[i]);
-        }
-        LOG_INFO("%s", line);
-        survey_reset_window();
-        g_survey.last_report = now;
-        const double total = static_cast<double>(now.QuadPart - g_survey.start.QuadPart) /
-                             static_cast<double>(g_survey.freq.QuadPart);
-        if (total >= kSurveySeconds) {
-            g_survey.done = true;
-            LOG_INFO("Survey finished");
+    LONGLONG t = now.QuadPart;
+    if (g.driver && g.last != 0 && g.period > 0) {
+        const LONGLONG deadline = g.last + g.period;
+        if (t < deadline) {
+            wait_until(deadline);
+            QueryPerformanceCounter(&now);
+            t = now.QuadPart;
         }
     }
+    if (g.last != 0) {
+        const double dt_ms = ms_between(g.last, t);
+        ++g.frames;
+        g.dt_sum += dt_ms;
+        if (dt_ms < g.dt_min) g.dt_min = dt_ms;
+        if (dt_ms > g.dt_max) g.dt_max = dt_ms;
+        if (g.driver) {
+            float dt = static_cast<float>(dt_ms / 1000.0);
+            if (dt < kMinStep) dt = kMinStep;
+            if (dt > kMaxStep) dt = kMaxStep;
+            *g.step = dt;
+            g.written = dt;
+        }
+    }
+    g.last = t;
+    survey_report(t);
 }
 
 int __fastcall hook_getcmd(void* self, void* edx) {
+    // Forward first: if DSfix's FPS unlock is on it writes its own step in here, and
+    // ours (written afterwards) is the one the game sees.
     const int cmd = g_orig(self, edx);
-    survey_note(cmd);
+    if (cmd >= 0 && cmd < kCommands) {
+        ++g.count[cmd];
+    }
+    if (cmd == 2 || cmd == 5) {
+        frame_boundary();
+    }
     return cmd;
+}
+
+bool make_writable(void* address, size_t size) {
+    DWORD old = 0;
+    return VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &old) != 0;
+}
+
+bool apply_vblank_patch() {
+    static constexpr uint8_t kPrefix[6] = {0xC7, 0x86, 0x48, 0x02, 0x00, 0x00};
+    auto* store = reinterpret_cast<uint8_t*>(kVblankStoreVa);
+    if (std::memcmp(store, kPrefix, sizeof(kPrefix)) != 0) {
+        LOG_ERROR("Swap-interval store at %08X does not match this build. Not patching.", kVblankStoreVa);
+        return false;
+    }
+    uint32_t imm = 0;
+    std::memcpy(&imm, store + 6, sizeof(imm));
+    if (imm == 5) {
+        LOG_INFO("Swap-interval bookkeeping is already 5 (DSfix patched it first)");
+        return true;
+    }
+    if (imm != 2) {
+        LOG_ERROR("Swap-interval immediate is %u, expected 2. Not patching.", imm);
+        return false;
+    }
+    if (!make_writable(store + 6, 4)) {
+        LOG_ERROR("Could not unprotect the swap-interval store (Win32=%lu)", GetLastError());
+        return false;
+    }
+    const uint32_t five = 5;
+    std::memcpy(store + 6, &five, sizeof(five));
+    FlushInstructionCache(GetCurrentProcess(), store, 10);
+    LOG_INFO("Swap-interval bookkeeping changed from 2 to 5 at %08X", kVblankImmVa);
+    return true;
 }
 
 }  // namespace
 
-bool frame_install(const Settings&) {
+bool frame_install(const Settings& settings) {
     if (reinterpret_cast<uint32_t>(GetModuleHandleW(nullptr)) != kImageBase) {
         LOG_ERROR("The game image is not loaded at its preferred base; absolute hook addresses are invalid");
         return false;
@@ -114,8 +210,6 @@ bool frame_install(const Settings&) {
     if (target == kGetCmdFn) {
         LOG_INFO("Draw-thread fetch call is unhooked (goes to the game's own getter)");
     } else if (target < kImageBase || target >= kImageBase + kImageSize) {
-        // DSfix (or another tool) already detoured this call. Sit in front of it and
-        // forward, so both work and neither depends on load order.
         LOG_INFO("Draw-thread fetch call is already detoured to %08X; chaining in front of it", target);
     } else {
         LOG_ERROR("Draw-thread fetch call goes to %08X inside the game, expected %08X. Not hooking.", target,
@@ -124,22 +218,36 @@ bool frame_install(const Settings&) {
     }
     g_orig = reinterpret_cast<GetCmdFn>(target);
 
-    QueryPerformanceFrequency(&g_survey.freq);
-    QueryPerformanceCounter(&g_survey.start);
-    g_survey.last_report = g_survey.start;
-    survey_reset_window();
-    g_survey.active = true;
+    g.cfg = settings;
+    QueryPerformanceFrequency(&g.freq);
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    g.start = now.QuadPart;
+    g.report = now.QuadPart;
+    g.period = g.freq.QuadPart / settings.target_fps;
+    g.step = reinterpret_cast<float*>(kTimestepVa);
+
+    if (settings.driver) {
+        if (!make_writable(g.step, sizeof(float))) {
+            LOG_ERROR("Could not unprotect the timestep constant (Win32=%lu)", GetLastError());
+        } else {
+            timeBeginPeriod(1);
+            g.driver = true;
+        }
+        if (settings.vblank_patch) {
+            apply_vblank_patch();
+        }
+    }
 
     const int32_t new_rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&hook_getcmd) - (kDispatchCall + 5));
-    DWORD old = 0;
-    if (!VirtualProtect(site + 1, 4, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!make_writable(site + 1, 4)) {
         LOG_ERROR("Could not unprotect the draw-thread fetch call (Win32=%lu)", GetLastError());
         return false;
     }
     std::memcpy(site + 1, &new_rel, sizeof(new_rel));
     FlushInstructionCache(GetCurrentProcess(), site, 5);
-    DWORD ignored = 0;
-    VirtualProtect(site + 1, 4, old, &ignored);
-    LOG_INFO("Draw-thread command survey installed at %08X (30 s, observation only)", kDispatchCall);
+    LOG_INFO("Frame hook installed at %08X: driver=%s target=%d FPS vblank_patch=%s survey=%ds",
+             kDispatchCall, g.driver ? "on" : "off", settings.target_fps, settings.vblank_patch ? "on" : "off",
+             settings.survey_seconds);
     return true;
 }
