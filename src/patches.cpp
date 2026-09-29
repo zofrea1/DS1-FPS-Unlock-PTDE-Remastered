@@ -694,11 +694,15 @@ struct CaveEmitter {
 //    rides it down at up to 0.4/dt - the drop boost at every walk-off.
 //
 // Scaling the field by 60/TargetFPS fixed the boost but broke role one: steps
-// were no longer caught in a frame and the player fell for a few frames. So keep
-// the retail 0.4 for a fresh drop, and use the frame-scaled value only while the
-// body is already in a CHAINED descent (previous frame lost more than 0.02 of
-// height with no lift). A single step is caught exactly as in retail; a lip is
-// followed for one frame and then released at retail's per-second rate.
+// were no longer caught in a frame and the player fell for a few frames. Retail's
+// actual rule is "the body may drop at most 0.4 over one 1/60 s frame". Emulate
+// exactly that: keep a short history of each frame's net descent and give the next
+// frame a reach of (0.4 * tolerance - descent over the last k-1 frames), capped at
+// the retail 0.4, where k = frames per 1/60 s (4 at 240 FPS, 1 at 60/61). A fresh
+// step-down has no recent descent, so it gets the full retail reach; a lip that has
+// already used up its budget over the last 1/60 s is released, at retail's rate.
+// The sliding window is slightly stricter than retail's frame-grid-aligned one, so
+// a small tolerance keeps borderline slopes attached the way they are at 61 FPS.
 //
 // The field is written once by a setter that does not run every frame, so it is
 // managed from the snap-apply cave, which runs every frame with real dt: the
@@ -713,7 +717,8 @@ struct GroundState {
     std::atomic<const void*> phys{nullptr};
     float base = 0.0f;
     float written = -1.0f;
-    int streak = 0;
+    float drop[8] = {};  // net descent per recent frame (>= 0), newest at (head - 1)
+    unsigned head = 0;
     ULONGLONG last_ms = 0;
 };
 constexpr size_t kGroundSlots = 512;
@@ -733,7 +738,8 @@ GroundState* ground_slot(const void* phys, ULONGLONG now) {
             if (s.phys.compare_exchange_strong(expected, phys)) {
                 s.base = 0.0f;
                 s.written = -1.0f;
-                s.streak = 0;
+                std::memset(s.drop, 0, sizeof(s.drop));
+                s.head = 0;
                 s.last_ms = now;
                 return &s;
             }
@@ -816,23 +822,31 @@ void ground_snap_step(const void* phys, float dt, float proxy_y, float start_y, 
     // where the body started the frame. (The lift is already inside proxy_y.)
     const float net = proxy_y + *snap - start_y;
     state->last_ms = now;
-    state->streak = net < -0.02f ? state->streak + 1 : 0;
+    state->drop[state->head & 7] = net < 0.0f ? -net : 0.0f;
+    state->head++;
 
     auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(bytes) + kReachOffset);
     const float current = *reach;
     if (current != state->written) {
         state->base = current;  // the game (re)wrote it: that is the retail value
     }
-    float scale = 1.0f;
-    if (state->streak > 0) {
-        scale = dt * 60.0f;
-        if (scale > 1.0f) {
-            scale = 1.0f;
-        } else if (scale < 0.05f) {
-            scale = 0.05f;
-        }
+    // Frames per retail 1/60 s frame at this frame time (1 at <= 60 FPS).
+    int window = dt > 0.0f ? static_cast<int>(1.0f / (60.0f * dt) + 0.5f) : 1;
+    window = window < 1 ? 1 : (window > 8 ? 8 : window);
+    float recent = 0.0f;  // descent over the last (window - 1) frames, incl. the one just done
+    for (int i = 0; i < window - 1; ++i) {
+        recent += state->drop[(state->head - 1 - i) & 7];
     }
-    state->written = state->base * scale;
+    constexpr float kTolerance = 1.2f;
+    float allowed = state->base * kTolerance - recent;
+    if (allowed > state->base) {
+        allowed = state->base;
+    }
+    const float floor_reach = state->base * 0.05f;
+    if (allowed < floor_reach) {
+        allowed = floor_reach;
+    }
+    state->written = allowed;
     *reach = state->written;
 }
 
