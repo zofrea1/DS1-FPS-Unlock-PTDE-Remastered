@@ -18,7 +18,7 @@ namespace {
 constexpr int kSlots = 4;
 constexpr int kCandidates = 64;
 constexpr uint32_t kArmCalls = 1500;
-constexpr float kBigStep = 0.15f;
+constexpr float kBigStep = 0.05f;
 constexpr int kMaxLines = 40000;
 
 struct Candidate {
@@ -33,6 +33,7 @@ std::atomic<int> g_lock{0};
 struct Slot {
     std::atomic<void*> addr{nullptr};
     const void* chr = nullptr;
+    const uint8_t* proxy = nullptr;
     volatile float last = 0.0f;
 };
 
@@ -80,9 +81,14 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
         }
         g_lines.fetch_add(1);
         const auto image = reinterpret_cast<uintptr_t>(g_image);
-        std::fprintf(g_out, "%llu chr=%p y %.5f -> %.5f (%.5f) tid=%lu rip=%llX stack:",
+        float pvy = 0.0f;
+        __try {
+            pvy = *reinterpret_cast<const float*>(g_slot[i].proxy + 0x64);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        std::fprintf(g_out, "%llu chr=%p y %.5f -> %.5f (%.5f) proxyvely=%.4f tid=%lu rip=%llX stack:",
                      static_cast<unsigned long long>(GetTickCount64() - g_start_ms), g_slot[i].chr, before, now,
-                     now - before, GetCurrentThreadId(),
+                     now - before, pvy, GetCurrentThreadId(),
                      static_cast<unsigned long long>(ctx->Rip - image));
         const auto* sp = reinterpret_cast<const uintptr_t*>(ctx->Rsp);
         int shown = 0;
@@ -189,12 +195,33 @@ DWORD WINAPI watch_thread(void*) {
         if (found == 0) {
             continue;
         }
+        int armed = 0;
         for (int i = 0; i < found; ++i) {
-            auto* y = reinterpret_cast<float*>(static_cast<uint8_t*>(best[i].phys) + 0x14);
-            g_slot[i].chr = best[i].chr;
-            g_slot[i].last = *y;
-            g_slot[i].addr.store(y);
-            LOG_INFO("Watch: slot %d chr=%p phys=%p (calls=%u)", i, best[i].chr, best[i].phys, best[i].calls);
+            // phys+0x38 is the character proxy; its phantom's transform
+            // translation (see fn 0xA79AC0) is the Havok-side position.
+            float* y = nullptr;
+            const uint8_t* proxy = nullptr;
+            __try {
+                proxy = *reinterpret_cast<uint8_t* const*>(static_cast<uint8_t*>(best[i].phys) + 0x38);
+                const uint8_t* phantom = *reinterpret_cast<uint8_t* const*>(proxy + 0x80);
+                const uint8_t* xform = *reinterpret_cast<uint8_t* const*>(phantom + 0x30);
+                y = reinterpret_cast<float*>(const_cast<uint8_t*>(xform) + 0x30 + 4);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                y = nullptr;
+            }
+            if (!y) {
+                continue;
+            }
+            g_slot[armed].chr = best[i].chr;
+            g_slot[armed].proxy = proxy;
+            g_slot[armed].last = *y;
+            g_slot[armed].addr.store(y);
+            LOG_INFO("Watch: slot %d chr=%p proxy=%p phantom y at %p (calls=%u)", armed, best[i].chr, proxy, y,
+                     best[i].calls);
+            ++armed;
+        }
+        if (armed == 0) {
+            continue;
         }
         apply_to_all_threads();
         g_armed.store(1);
