@@ -687,82 +687,166 @@ struct CaveEmitter {
 // 24 u/s, so a surface that drops away faster than that lets the character leave
 // the ground. At TargetFPS it is TargetFPS/60 times faster (96 u/s at 240), and
 // the character stays glued to a lip and rides it down like a slide - the drop
-// boost seen at every walk-off, and the 0.35-per-step fall through the floor at
-// the bottom of a ladder. The value is (re)written by the move-control setter at
-// 0x37ACA0 as `[phys+0x228] = xmm2 * [param+0xB4]`; scale it there by 60/TargetFPS
-// so every reader (four sites in the ground check) sees the per-frame amount that
-// matches 24 u/s. The step-up lift is a geometric height, not a rate, so it stays.
-constexpr uint32_t kStepDownSite = 0x37ACA0;
-
+// boost seen at every walk-off. The field is written once by a setter that does
+// not run every frame, so scale it where the ground check READS it instead: four
+// loads in fn 0x2BCB00, each replaced by a call to a cave that applies 60/TargetFPS.
+// The step-up lift is a geometric height, not a rate, so it stays.
 std::atomic<int> g_step_down_state{0};
 
 bool patch_step_down() {
-    auto* site = image_rva(kStepDownSite);
-    // mulss xmm2, [rax+0xB4] ; movss [rcx+0x228], xmm2
-    static constexpr uint8_t kExpected[16] = {0xF3, 0x0F, 0x59, 0x90, 0xB4, 0x00, 0x00, 0x00,
-                                              0xF3, 0x0F, 0x11, 0x91, 0x28, 0x02, 0x00, 0x00};
-    if (std::memcmp(site, kExpected, sizeof(kExpected)) != 0) {
-        LOG_ERROR("Step-down setter does not match this build");
-        return false;
+    struct Site {
+        uint32_t rva;
+        size_t len;
+        uint8_t bytes[9];
+    };
+    // movss xmm9,[rcx+0x228] / addss xmm1,[rbx+0x228] / addss xmm0,[rbx+0x228] / addss xmm7,[rbx+0x228]
+    static const Site sites[4] = {
+        {0x2BCB74, 9, {0xF3, 0x44, 0x0F, 0x10, 0x89, 0x28, 0x02, 0x00, 0x00}},
+        {0x2BCD9F, 8, {0xF3, 0x0F, 0x58, 0x8B, 0x28, 0x02, 0x00, 0x00}},
+        {0x2BCE8C, 8, {0xF3, 0x0F, 0x58, 0x83, 0x28, 0x02, 0x00, 0x00}},
+        {0x2BCF32, 8, {0xF3, 0x0F, 0x58, 0xBB, 0x28, 0x02, 0x00, 0x00}},
+    };
+    for (const Site& s : sites) {
+        if (std::memcmp(image_rva(s.rva), s.bytes, s.len) != 0) {
+            LOG_ERROR("Ground reach load at 0x%08X does not match this build", s.rva);
+            return false;
+        }
     }
-    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    auto* page = static_cast<uint8_t*>(alloc_near(image_rva(sites[0].rva)));
     if (!page) {
-        LOG_ERROR("Could not allocate the step-down cave (Win32=%lu)", GetLastError());
+        LOG_ERROR("Could not allocate the reach caves (Win32=%lu)", GetLastError());
         return false;
     }
     const float scale = 60.0f / static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
-    // 0x00: mulss xmm2,[rax+0xB4]   0x08: mulss xmm2,[rip+scale]
-    // 0x10: movss [rcx+0x228],xmm2  0x18: ret        0x20: scale
-    static constexpr uint8_t kCode[] = {
-        0xF3, 0x0F, 0x59, 0x90, 0xB4, 0x00, 0x00, 0x00,  // mulss xmm2, [rax+0xB4]
-        0xF3, 0x0F, 0x59, 0x15, 0x0C, 0x00, 0x00, 0x00,  // mulss xmm2, [rip+0x0C] -> 0x20
-        0xF3, 0x0F, 0x11, 0x91, 0x28, 0x02, 0x00, 0x00,  // movss [rcx+0x228], xmm2
-        0xC3,                                            // ret
+    constexpr size_t kData = 0x100;
+    std::memcpy(page + kData, &scale, sizeof(scale));
+
+    size_t entry[4] = {};
+    CaveEmitter e{page};
+    // Cave 0: movss xmm9,[rcx+0x228] ; mulss xmm9,[rip+scale] ; ret
+    entry[0] = e.len;
+    for (uint8_t b : {0xF3, 0x44, 0x0F, 0x10, 0x89, 0x28, 0x02, 0x00, 0x00}) e.b(b);
+    for (uint8_t b : {0xF3, 0x44, 0x0F, 0x59, 0x0D}) e.b(b);
+    e.fix32(e.imm32(), page + kData);
+    e.b(0xC3);
+    // Caves 1-3: save xmm15 (callee-saved, unused here), xmm15 = [rbx+0x228]*scale,
+    // dest += xmm15, restore. lea keeps EFLAGS untouched.
+    const uint8_t add_dest[3][5] = {
+        {0xF3, 0x41, 0x0F, 0x58, 0xCF},  // addss xmm1,xmm15
+        {0xF3, 0x41, 0x0F, 0x58, 0xC7},  // addss xmm0,xmm15
+        {0xF3, 0x41, 0x0F, 0x58, 0xFF},  // addss xmm7,xmm15
     };
-    std::memcpy(page, kCode, sizeof(kCode));
-    std::memcpy(page + 0x20, &scale, sizeof(scale));
+    for (int i = 0; i < 3; ++i) {
+        entry[i + 1] = e.len;
+        for (uint8_t b : {0x48, 0x8D, 0x64, 0x24, 0xE8}) e.b(b);                          // lea rsp,[rsp-0x18]
+        for (uint8_t b : {0x44, 0x0F, 0x11, 0x3C, 0x24}) e.b(b);                          // movups [rsp],xmm15
+        for (uint8_t b : {0xF3, 0x44, 0x0F, 0x10, 0xBB, 0x28, 0x02, 0x00, 0x00}) e.b(b);  // movss xmm15,[rbx+0x228]
+        for (uint8_t b : {0xF3, 0x44, 0x0F, 0x59, 0x3D}) e.b(b);                          // mulss xmm15,[rip+scale]
+        e.fix32(e.imm32(), page + kData);
+        for (uint8_t b : add_dest[i]) e.b(b);
+        for (uint8_t b : {0x44, 0x0F, 0x10, 0x3C, 0x24}) e.b(b);                          // movups xmm15,[rsp]
+        for (uint8_t b : {0x48, 0x8D, 0x64, 0x24, 0x18}) e.b(b);                          // lea rsp,[rsp+0x18]
+        e.b(0xC3);
+    }
+    if (e.len > kData) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Reach caves did not fit");
+        return false;
+    }
     DWORD protect = 0;
     if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
         VirtualFree(page, 0, MEM_RELEASE);
-        LOG_ERROR("Could not protect the step-down cave (Win32=%lu)", GetLastError());
+        LOG_ERROR("Could not protect the reach caves (Win32=%lu)", GetLastError());
         return false;
     }
     FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
 
-    uint8_t patch[16];
-    std::memset(patch, 0x90, sizeof(patch));
-    patch[0] = 0xE8;
-    const intptr_t rel = page - (site + 5);
-    if (rel < INT32_MIN || rel > INT32_MAX) {
-        VirtualFree(page, 0, MEM_RELEASE);
-        LOG_ERROR("Step-down cave is out of range");
-        return false;
+    for (int i = 0; i < 4; ++i) {
+        uint8_t* site = image_rva(sites[i].rva);
+        const intptr_t rel = (page + entry[i]) - (site + 5);
+        if (rel < INT32_MIN || rel > INT32_MAX) {
+            LOG_ERROR("Reach cave is out of range");
+            return false;
+        }
+        uint8_t patch[9];
+        std::memset(patch, 0x90, sizeof(patch));
+        patch[0] = 0xE8;
+        const auto rel32 = static_cast<int32_t>(rel);
+        std::memcpy(patch + 1, &rel32, sizeof(rel32));
+        DWORD old = 0;
+        if (!VirtualProtect(site, sites[i].len, PAGE_EXECUTE_READWRITE, &old)) {
+            LOG_ERROR("Could not unprotect the reach load at 0x%08X (Win32=%lu)", sites[i].rva, GetLastError());
+            return false;
+        }
+        std::memcpy(site, patch, sites[i].len);
+        FlushInstructionCache(GetCurrentProcess(), site, sites[i].len);
+        DWORD ignored = 0;
+        VirtualProtect(site, sites[i].len, old, &ignored);
     }
-    const auto rel32 = static_cast<int32_t>(rel);
-    std::memcpy(patch + 1, &rel32, sizeof(rel32));
-    DWORD old = 0;
-    if (!VirtualProtect(site, sizeof(patch), PAGE_EXECUTE_READWRITE, &old)) {
-        VirtualFree(page, 0, MEM_RELEASE);
-        LOG_ERROR("Could not unprotect the step-down setter (Win32=%lu)", GetLastError());
-        return false;
-    }
-    std::memcpy(site, patch, sizeof(patch));
-    FlushInstructionCache(GetCurrentProcess(), site, sizeof(patch));
-    DWORD ignored = 0;
-    VirtualProtect(site, sizeof(patch), old, &ignored);
-    LOG_INFO("Ground step-down allowance scaled by %.6f (60/TargetFPS)", scale);
+    LOG_INFO("Ground reach padding scaled by %.6f (60/TargetFPS) at 4 loads", scale);
     return true;
 }
 
 // Ladder exit: the ground snap is applied at 0x2BC7E9 as a raw position offset
 // ([phys+0xC4], -0.31 in this state). Normally it undoes that frame's step-height
-// lift, so the pair nets to zero. In the last ~0.033 s of a ladder slide the lift
-// is skipped but the snap is still applied, so the body is pulled down 0.31 per
-// FRAME: two frames (0.62) at 60 FPS, eight (2.5) at 240, which drops the
-// character through the floor. Where the lift did not happen (0x1F4 set and the
-// proxy is not ~0.31 above the frame-start height [phys+0x14]) scale the snap by
-// 60*dt, so the same 0.62 is applied over the same 0.033 s at any frame rate.
+// lift, so the pair nets to zero. At the bottom of a ladder slide the lift is
+// skipped but the snap is still applied, pulling the body down 0.31 per FRAME
+// through the collision floor until it reaches a lower one (2+ units at 240 FPS).
+// Where the lift did not happen (0x1F4 set and the proxy is not ~0.31 above the
+// frame-start height [phys+0x14]) the snap is capped at one retail frame's worth
+// (0.31) per episode, spread over frames by 60*dt. Balanced frames are untouched.
 constexpr uint32_t kSnapApplySite = 0x2BC7E9;
+
+struct SnapEpisode {
+    const void* phys = nullptr;
+    float applied = 0.0f;
+    ULONGLONG last_ms = 0;
+};
+SnapEpisode g_snap_episodes[8];
+
+float ladder_snap_factor(const void* phys, float dt, float lift_height) {
+    const ULONGLONG now = GetTickCount64();
+    SnapEpisode* slot = nullptr;
+    SnapEpisode* stale = &g_snap_episodes[0];
+    for (auto& s : g_snap_episodes) {
+        if (s.phys == phys) {
+            slot = &s;
+            break;
+        }
+        if (s.last_ms < stale->last_ms) {
+            stale = &s;
+        }
+    }
+    if (!slot) {
+        slot = stale;
+        slot->phys = phys;
+        slot->applied = 0.0f;
+    }
+    if (lift_height >= 0.15f) {  // the lift happened: balanced frame, new episode next time
+        slot->applied = 0.0f;
+        slot->last_ms = now;
+        return 1.0f;
+    }
+    if (now - slot->last_ms > 250) {
+        slot->applied = 0.0f;
+    }
+    slot->last_ms = now;
+    constexpr float kStep = 0.31f;
+    constexpr float kCap = 0.31f;
+    float factor = dt * 60.0f;
+    if (factor > 1.0f) {
+        factor = 1.0f;
+    }
+    const float remaining = kCap - slot->applied;
+    if (remaining <= 0.0f) {
+        return 0.0f;
+    }
+    if (kStep * factor > remaining) {
+        factor = remaining / kStep;
+    }
+    slot->applied += kStep * factor;
+    return factor;
+}
 
 bool patch_unlifted_snap() {
     auto* site = image_rva(kSnapApplySite);
@@ -778,41 +862,32 @@ bool patch_unlifted_snap() {
         LOG_ERROR("Could not allocate the snap cave (Win32=%lu)", GetLastError());
         return false;
     }
-    constexpr size_t kData = 0x80;
-    const float k_lifted = 0.15f, k60 = 60.0f, k1 = 1.0f;
-    std::memcpy(page + kData + 0, &k_lifted, 4);
-    std::memcpy(page + kData + 4, &k60, 4);
-    std::memcpy(page + kData + 8, &k1, 4);
-
     CaveEmitter e{page};
     for (uint8_t b : {0xF3, 0x0F, 0x10, 0x8B, 0xC4, 0x00, 0x00, 0x00}) e.b(b);   // movss xmm1,[rbx+0xC4]
     for (uint8_t b : {0x80, 0xBB, 0xF4, 0x01, 0x00, 0x00, 0x00}) e.b(b);          // cmp byte [rbx+0x1F4],0
     e.b(0x74);                                                                    // je done
     const size_t je1 = e.len;
     e.b(0);
-    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x44, 0x24, 0x24}) e.b(b);                // movss xmm0,[rsp+0x24]
-    for (uint8_t b : {0xF3, 0x0F, 0x5C, 0x43, 0x14}) e.b(b);                      // subss xmm0,[rbx+0x14]
-    e.b(0x0F); e.b(0x2F); e.b(0x05);                                              // comiss xmm0,[rip+k_lifted]
-    const size_t d0 = e.imm32();
-    e.fix32(d0, page + kData + 0);
-    e.b(0x73);                                                                    // jae done
-    const size_t je2 = e.len;
-    e.b(0);
-    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x47, 0x08}) e.b(b);                      // movss xmm0,[rdi+8]  (dt)
-    e.b(0xF3); e.b(0x0F); e.b(0x59); e.b(0x05);                                   // mulss xmm0,[rip+60]
-    const size_t d1 = e.imm32();
-    e.fix32(d1, page + kData + 4);
-    e.b(0xF3); e.b(0x0F); e.b(0x5D); e.b(0x05);                                   // minss xmm0,[rip+1.0]
-    const size_t d2 = e.imm32();
-    e.fix32(d2, page + kData + 8);
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x44, 0x24, 0x24}) e.b(b);                // movss xmm0,[rsp+0x24] (proxy y)
+    for (uint8_t b : {0xF3, 0x0F, 0x5C, 0x43, 0x14}) e.b(b);                      // subss xmm0,[rbx+0x14] (frame-start y)
+    for (uint8_t b : {0x48, 0x83, 0xEC, 0x40}) e.b(b);                            // sub rsp,0x40 (16-aligned here)
+    for (uint8_t b : {0xF3, 0x0F, 0x11, 0x4C, 0x24, 0x30}) e.b(b);                // movss [rsp+0x30],xmm1 (snap)
+    for (uint8_t b : {0x0F, 0x28, 0xD0}) e.b(b);                                  // movaps xmm2,xmm0 (height)
+    for (uint8_t b : {0x48, 0x89, 0xD9}) e.b(b);                                  // mov rcx,rbx
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x4F, 0x08}) e.b(b);                      // movss xmm1,[rdi+8] (dt)
+    e.b(0x48); e.b(0xB8);                                                         // mov rax, ladder_snap_factor
+    const size_t fn = e.imm64();
+    e.fix64(fn, reinterpret_cast<uint64_t>(&ladder_snap_factor));
+    e.b(0xFF); e.b(0xD0);                                                         // call rax
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x4C, 0x24, 0x30}) e.b(b);                // movss xmm1,[rsp+0x30]
     for (uint8_t b : {0xF3, 0x0F, 0x59, 0xC8}) e.b(b);                            // mulss xmm1,xmm0
+    for (uint8_t b : {0x48, 0x83, 0xC4, 0x40}) e.b(b);                            // add rsp,0x40
     const size_t done = e.len;
     page[je1] = static_cast<uint8_t>(done - (je1 + 1));
-    page[je2] = static_cast<uint8_t>(done - (je2 + 1));
     e.b(0xE9);                                                                    // jmp back
     const size_t jb = e.imm32();
     e.fix32(jb, site + 8);
-    if (e.len > kData) {
+    if (e.len > 0x100) {
         VirtualFree(page, 0, MEM_RELEASE);
         LOG_ERROR("Snap cave did not fit");
         return false;
@@ -843,7 +918,7 @@ bool patch_unlifted_snap() {
     FlushInstructionCache(GetCurrentProcess(), site, sizeof(patch));
     DWORD ignored = 0;
     VirtualProtect(site, sizeof(patch), old, &ignored);
-    LOG_INFO("Ladder-exit snap scaled to frame time where the lift is skipped");
+    LOG_INFO("Ladder-exit snap capped at one retail frame (0.31) per episode");
     return true;
 }
 
