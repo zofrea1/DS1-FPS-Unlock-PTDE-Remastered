@@ -2,6 +2,7 @@
 #include "patches.h"
 #include "settings.h"
 #include "state.h"
+#include "trace.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -31,6 +32,9 @@ DWORD WINAPI worker(void*) {
     const Settings settings = settings_load(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("TargetFPS: %d", settings.target_fps);
+    if (settings.trace && !trace_start(dll_path)) {
+        LOG_ERROR("Trace was requested but the CSV could not be opened");
+    }
     if (!settings.fps_unlock) {
         LOG_INFO("FPSUnlock is false. The game is unchanged.");
         return 0;

@@ -75,6 +75,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fps_unlock = parse_bool(val);
         } else if (key == "targetfps") {
             s.target_fps = std::atoi(val.c_str());
+        } else if (key == "trace") {
+            s.trace = parse_bool(val);
         }
     }
     return s;

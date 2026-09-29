@@ -3,6 +3,7 @@
 #include "log.h"
 #include "profile.h"
 #include "state.h"
+#include "trace.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -525,6 +526,160 @@ bool patch_speed() {
     return true;
 }
 
+// Movement tracer, only installed when the INI asks for Trace=1.
+//
+// ChrIns::Update(chr, dt) runs once per displayed frame with the real (already
+// scaled) dt, so anything inside it that assumes sixty steps a second shows up
+// as a per-frame error at a high target FPS. The cave logs the character,
+// move-control and physics state immediately before and after the original
+// call: the difference between a pre row and the previous post row is what the
+// physics step did, and the difference between a pre row and its own post row
+// is what the update itself did. Three call sites are retargeted at the cave.
+constexpr uint32_t kChrUpdate = 0x320AE0;
+constexpr uint32_t kChrUpdateSites[] = {0x36FBBD, 0x36FD49, 0x36FF2A};
+
+std::atomic<int> g_trace_state{0};
+
+struct CaveEmitter {
+    uint8_t* buf;
+    size_t len = 0;
+
+    void put(const void* p, size_t n) {
+        std::memcpy(buf + len, p, n);
+        len += n;
+    }
+    void b(uint8_t v) {
+        put(&v, 1);
+    }
+    void d(uint32_t v) {
+        put(&v, 4);
+    }
+    void q(uint64_t v) {
+        put(&v, 8);
+    }
+    size_t imm32() {
+        const size_t at = len;
+        d(0);
+        return at;
+    }
+    size_t imm64() {
+        const size_t at = len;
+        q(0);
+        return at;
+    }
+    void fix32(size_t at, const void* target) {
+        const auto rel = static_cast<int32_t>(static_cast<const uint8_t*>(target) - (buf + at + 4));
+        std::memcpy(buf + at, &rel, sizeof(rel));
+    }
+    void fix64(size_t at, uint64_t value) {
+        std::memcpy(buf + at, &value, sizeof(value));
+    }
+};
+
+bool build_trace_cave(uint8_t* page, const void* update_fn) {
+    CaveEmitter e{page};
+    e.b(0x50);        // push rax
+    e.b(0x51);        // push rcx
+    e.b(0x52);        // push rdx
+    e.b(0x41); e.b(0x50);   // push r8
+    e.b(0x41); e.b(0x51);   // push r9
+    e.b(0x41); e.b(0x52);   // push r10
+    e.b(0x41); e.b(0x53);   // push r11
+    e.b(0x48); e.b(0x81); e.b(0xEC); e.d(0xC0);                  // sub rsp, 0xC0
+    e.b(0x48); e.b(0x89); e.b(0x8C); e.b(0x24); e.d(0xB0);       // mov [rsp+0xB0], rcx   (chr)
+    e.b(0x48); e.b(0x8B); e.b(0x84); e.b(0x24); e.d(0xF8);       // mov rax, [rsp+0xF8]   (return address)
+    e.b(0x48); e.b(0x83); e.b(0xE8); e.b(0x05);                  // sub rax, 5            (call site)
+    e.b(0x48); e.b(0x89); e.b(0x84); e.b(0x24); e.d(0xB8);       // mov [rsp+0xB8], rax
+    for (int n = 0; n < 8; ++n) {                                // movdqu [rsp+0x30+n*0x10], xmmN
+        e.b(0xF3); e.b(0x0F); e.b(0x7F);
+        e.b(static_cast<uint8_t>(0x84 | (n << 3))); e.b(0x24);
+        e.d(static_cast<uint32_t>(0x30 + n * 0x10));
+    }
+    // trace_log(chr, dt, site, 0). MSVC maps parameters positionally: arg3
+    // (site) lands in r8 and arg4 (phase) in r9, not rdx/r8.
+    e.b(0x48); e.b(0x8B); e.b(0x8C); e.b(0x24); e.d(0xB0);       // mov rcx, [rsp+0xB0]
+    e.b(0xF3); e.b(0x0F); e.b(0x10); e.b(0x4C); e.b(0x24); e.b(0x40);  // movss xmm1, [rsp+0x40]
+    e.b(0x4C); e.b(0x8B); e.b(0x84); e.b(0x24); e.d(0xB8);       // mov r8, [rsp+0xB8]
+    e.b(0x45); e.b(0x31); e.b(0xC9);                              // xor r9d, r9d
+    e.b(0x48); e.b(0xB8); const size_t fn_pre = e.imm64();        // mov rax, trace_log
+    e.b(0xFF); e.b(0xD0);                                         // call rax
+    // ChrIns::Update(chr, dt)
+    e.b(0x48); e.b(0x8B); e.b(0x8C); e.b(0x24); e.d(0xB0);
+    e.b(0xF3); e.b(0x0F); e.b(0x10); e.b(0x4C); e.b(0x24); e.b(0x40);
+    e.b(0xE8); const size_t call_update = e.imm32();               // call ChrIns::Update
+    // trace_log(chr, dt, site, 1)
+    e.b(0x48); e.b(0x8B); e.b(0x8C); e.b(0x24); e.d(0xB0);
+    e.b(0xF3); e.b(0x0F); e.b(0x10); e.b(0x4C); e.b(0x24); e.b(0x40);
+    e.b(0x4C); e.b(0x8B); e.b(0x84); e.b(0x24); e.d(0xB8);   // mov r8, [rsp+0xB8]
+    e.b(0x41); e.b(0xB9); e.d(1);                              // mov r9d, 1
+    e.b(0x48); e.b(0xB8); const size_t fn_post = e.imm64();
+    e.b(0xFF); e.b(0xD0);
+    for (int n = 0; n < 8; ++n) {                                  // movdqu xmmN, [rsp+0x30+n*0x10]
+        e.b(0xF3); e.b(0x0F); e.b(0x6F);
+        e.b(static_cast<uint8_t>(0x84 | (n << 3))); e.b(0x24);
+        e.d(static_cast<uint32_t>(0x30 + n * 0x10));
+    }
+    e.b(0x48); e.b(0x81); e.b(0xC4); e.d(0xC0);                    // add rsp, 0xC0
+    e.b(0x41); e.b(0x5B); e.b(0x41); e.b(0x5A);                    // pop r11, r10
+    e.b(0x41); e.b(0x59); e.b(0x41); e.b(0x58);                    // pop r9, r8
+    e.b(0x5A); e.b(0x59); e.b(0x58);                               // pop rdx, rcx, rax
+    e.b(0xC3);                                                     // ret
+    if (e.len > 0xF00) {
+        return false;
+    }
+    e.fix32(call_update, update_fn);
+    e.fix64(fn_pre, reinterpret_cast<uint64_t>(&trace_log));
+    e.fix64(fn_post, reinterpret_cast<uint64_t>(&trace_log));
+    return true;
+}
+
+bool patch_trace() {
+    auto* update = image_rva(kChrUpdate);
+    if (std::memcmp(update, "\x48\x89\x5C\x24\x18", 5) != 0) {
+        LOG_ERROR("ChrIns::Update prologue does not match this build");
+        return false;
+    }
+    for (uint32_t rva : kChrUpdateSites) {
+        auto* site = image_rva(rva);
+        if (site[0] != 0xE8) {
+            LOG_ERROR("Chr update call at 0x%08X has opcode %02X", rva, site[0]);
+            return false;
+        }
+        int32_t disp = 0;
+        std::memcpy(&disp, site + 1, sizeof(disp));
+        if (site + 5 + disp != update) {
+            LOG_ERROR("Chr update call at 0x%08X has an unexpected target", rva);
+            return false;
+        }
+    }
+    uint8_t* page = static_cast<uint8_t*>(alloc_near(image_rva(kChrUpdateSites[0])));
+    if (!page) {
+        LOG_ERROR("Could not allocate the movement trace cave (Win32=%lu)", GetLastError());
+        return false;
+    }
+    if (!build_trace_cave(page, update)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Movement trace cave did not fit");
+        return false;
+    }
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not protect the movement trace cave (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    for (uint32_t rva : kChrUpdateSites) {
+        auto* site = image_rva(rva);
+        if (!write_disp32(site + 1, site + 5, page)) {
+            LOG_ERROR("Could not retarget the Chr update call at 0x%08X", rva);
+            return false;
+        }
+    }
+    LOG_INFO("Movement trace active (3 ChrIns::Update call sites)");
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -545,6 +700,11 @@ void try_delayed_patches() {
     if (g_speed_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_speed();
         g_speed_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_trace_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = !trace_active() || patch_trace();
+        g_trace_state.store(ok ? 2 : -1);
     }
 }
 
