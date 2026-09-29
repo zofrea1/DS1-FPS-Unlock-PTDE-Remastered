@@ -63,6 +63,13 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
     CONTEXT* ctx = info->ContextRecord;
     const DWORD64 dr6 = ctx->Dr6;
     if ((dr6 & 0xF) == 0) {
+        // A watchpoint trap can be delivered with DR6 cleared when it races the
+        // register update done from the re-arm thread. If one of our slots is
+        // enabled on this thread and nobody is single-stepping (TF clear), it is
+        // ours: swallow it. Passing it on gets it reported as a crash.
+        if ((ctx->Dr7 & 0x55) != 0 && (ctx->EFlags & 0x100) == 0) {
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
         return EXCEPTION_CONTINUE_SEARCH;
     }
     for (int i = 0; i < kSlots; ++i) {
@@ -148,7 +155,6 @@ void apply_to_all_threads() {
                         dr7 |= (1ull << (i * 2)) | (1ull << (16 + i * 4)) | (3ull << (18 + i * 4));
                     }
                     ctx.Dr7 = dr7;
-                    ctx.Dr6 = 0;
                     if (SetThreadContext(thread, &ctx)) {
                         ++applied;
                     }
@@ -163,6 +169,7 @@ void apply_to_all_threads() {
 }
 
 DWORD WINAPI watch_thread(void*) {
+    ULONGLONG last_apply_ms = 0;
     while (g_run.load()) {
         Sleep(2000);
         Candidate best[kSlots];
@@ -200,11 +207,17 @@ DWORD WINAPI watch_thread(void*) {
             continue;
         }
         {
+            // Same set of characters (in any order) is nothing to do; and never
+            // rewrite debug registers more than once per 10 s.
             bool same = g_armed.load() != 0;
             for (int i = 0; same && i < found; ++i) {
-                same = g_slot[i].chr == best[i].chr;
+                bool present = false;
+                for (int k = 0; k < kSlots; ++k) {
+                    present |= g_slot[k].addr.load() != nullptr && g_slot[k].chr == best[i].chr;
+                }
+                same = present;
             }
-            if (same) {
+            if (same || GetTickCount64() - last_apply_ms < 10000) {
                 continue;
             }
         }
@@ -240,6 +253,7 @@ DWORD WINAPI watch_thread(void*) {
             g_slot[i].addr.store(nullptr);
         }
         apply_to_all_threads();
+        last_apply_ms = GetTickCount64();
         g_armed.store(1);
     }
     return 0;
