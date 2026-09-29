@@ -67,7 +67,8 @@ const char* kHeader =
     "velx,vely,velz,mvx,mvy,mvz,airt,"
     "m150x,m150y,m150z,m160x,m160y,m160z,cmdx,cmdy,cmdz,"
     "p130x,p130y,p130z,p140x,p140y,p140z,p150x,p150y,p150z,"
-    "p1ax,p1ay,p1az,p1dx,p1dy,p1dz,pflags\n";
+    "p1ax,p1ay,p1az,p1dx,p1dy,p1dz,pflags,"
+    "c0x,c0y,c0z,p154,e4,e8,f228,f1e4,f1e0,fl\n";
 
 }  // namespace
 
@@ -208,6 +209,28 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
     if (*reinterpret_cast<const uint8_t*>(phys + 0x6D)) pflags |= 64u;
     if (*reinterpret_cast<const uint8_t*>(phys + 0x1F4)) pflags |= 128u;
 
+    // Ground snap probe (fn 0x2BCB00 / 0x2BC650): the per-frame snap vector
+    // (+0xC0), the extra offset (+0x154), step heights (+0xE4/+0xE8), reach
+    // padding (+0x228), the 0x1E4/0x1E0 gates and the state bytes.
+    const float* snap = reinterpret_cast<const float*>(phys + 0xC0);
+    const float p154 = *reinterpret_cast<const float*>(phys + 0x154);
+    const float e4 = *reinterpret_cast<const float*>(phys + 0xE4);
+    const float e8 = *reinterpret_cast<const float*>(phys + 0xE8);
+    const float f228 = *reinterpret_cast<const float*>(phys + 0x228);
+    const float f1e4 = *reinterpret_cast<const float*>(phys + 0x1E4);
+    const float f1e0 = *reinterpret_cast<const float*>(phys + 0x1E0);
+    uint32_t fl = 0;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x1F1)) fl |= 1u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x1F3)) fl |= 2u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x34)) fl |= 4u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0xEE)) fl |= 8u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x6C)) fl |= 16u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x1F8)) fl |= 32u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x240)) fl |= 64u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x241)) fl |= 128u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x31)) fl |= 256u;
+    if (*reinterpret_cast<const uint8_t*>(phys + 0x30)) fl |= 512u;
+
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     const double ms = static_cast<double>(now.QuadPart - g_start_qpc) * g_qpc_to_ms;
@@ -225,7 +248,8 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
                  "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,"
                  "%.5f,%.5f,%.5f,"
                  "%.5f,%.5f,%.5f,"
-                 "%.5f,%.5f,%.5f,%u\n",
+                 "%.5f,%.5f,%.5f,%u,"
+                 "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%u\n",
                  g_rows, ms, static_cast<unsigned long long>(site), phase,
                  static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(chr)), dt, anim, action, idx,
                  action_type, action_flags, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(mc)),
@@ -234,7 +258,7 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
                  vel[0], vel[1], vel[2], mv[0], mv[1], mv[2], airt, m150[0], m150[1], m150[2], m160[0],
                  m160[1], m160[2], mcmd[0], mcmd[1], mcmd[2], p130[0], p130[1], p130[2], p140[0], p140[1],
                  p140[2], p150[0], p150[1], p150[2], p1a0[0], p1a0[1], p1a0[2], p0d0[0], p0d0[1], p0d0[2],
-                 pflags);
+                 pflags, snap[0], snap[1], snap[2], p154, e4, e8, f228, f1e4, f1e0, fl);
     if ((g_rows & 0x3FF) == 0) {
         std::fflush(g_file);
     }

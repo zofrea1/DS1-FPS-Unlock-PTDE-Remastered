@@ -17,7 +17,7 @@ namespace {
 
 constexpr int kSlots = 4;
 constexpr int kCandidates = 64;
-constexpr uint32_t kArmCalls = 1500;
+constexpr uint32_t kArmCalls = 200;
 constexpr float kBigStep = 0.05f;
 constexpr int kMaxLines = 40000;
 
@@ -164,10 +164,7 @@ void apply_to_all_threads() {
 
 DWORD WINAPI watch_thread(void*) {
     while (g_run.load()) {
-        Sleep(1000);
-        if (g_armed.load() != 0) {
-            continue;
-        }
+        Sleep(2000);
         Candidate best[kSlots];
         int found = 0;
         spin(g_lock);
@@ -191,9 +188,25 @@ DWORD WINAPI watch_thread(void*) {
             }
             best[found++] = g_cand[top];
         }
+        for (auto& c : g_cand) {
+            if (c.calls == 0) {
+                c.chr = nullptr;  // not updated during the window: gone (new session)
+                c.phys = nullptr;
+            }
+            c.calls = 0;
+        }
         unspin(g_lock);
         if (found == 0) {
             continue;
+        }
+        {
+            bool same = g_armed.load() != 0;
+            for (int i = 0; same && i < found; ++i) {
+                same = g_slot[i].chr == best[i].chr;
+            }
+            if (same) {
+                continue;
+            }
         }
         int armed = 0;
         for (int i = 0; i < found; ++i) {
@@ -222,6 +235,9 @@ DWORD WINAPI watch_thread(void*) {
         }
         if (armed == 0) {
             continue;
+        }
+        for (int i = armed; i < kSlots; ++i) {
+            g_slot[i].addr.store(nullptr);
         }
         apply_to_all_threads();
         g_armed.store(1);
@@ -260,7 +276,7 @@ void watch_stop() {
 }
 
 void watch_note(const void* chr, void* phys) {
-    if (!g_run.load(std::memory_order_relaxed) || g_armed.load(std::memory_order_relaxed) != 0) {
+    if (!g_run.load(std::memory_order_relaxed)) {
         return;
     }
     spin(g_lock);
