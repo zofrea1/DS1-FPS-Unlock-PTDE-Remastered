@@ -17,7 +17,7 @@ namespace {
 
 constexpr int kSlots = 4;
 constexpr int kCandidates = 64;
-constexpr uint32_t kArmCalls = 200;
+constexpr uint32_t kArmCalls = 60;
 constexpr float kBigStep = 0.05f;
 constexpr int kMaxLines = 40000;
 
