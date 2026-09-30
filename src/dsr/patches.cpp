@@ -1598,6 +1598,28 @@ bool wait_for_window(DWORD timeout_ms) {
 
 constexpr DWORD kSearchTimeoutMs = 150000;
 
+uint8_t* g_scheduler_object = nullptr;
+LONG* g_scheduler_mode = nullptr;
+
+// One line of flipper state for the heartbeat: a rest or a map reload may replace the scheduler
+// object, and this shows whether the one the mod switched is still the active one.
+void describe_flipper(char* out, unsigned size) {
+    uintptr_t vtable = 0;
+    LONG mode = -1;
+    bool ok = true;
+    __try {
+        vtable = *reinterpret_cast<uintptr_t*>(g_scheduler_object);
+        mode = *g_scheduler_mode;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    const uintptr_t v60 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper60_vtable));
+    const uintptr_t v140 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper140_vtable));
+    std::snprintf(out, size, "flipper %s, mode %ld, menu queries suppressed %llu",
+                  !ok ? "unreadable" : (vtable == v140 ? "140 Hz (switched)" : (vtable == v60 ? "60 Hz (NOT switched)" : "other")),
+                  mode, static_cast<unsigned long long>(g_menu_suppressed.load(std::memory_order_relaxed)));
+}
+
 bool activate_scheduler() {
     const uintptr_t vtable60 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper60_vtable));
     const uintptr_t vtable140 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper140_vtable));
@@ -1631,6 +1653,8 @@ bool activate_scheduler() {
                     patch_pointer(reinterpret_cast<void**>(scheduler), reinterpret_cast<void*>(vtable140));
                     InterlockedExchange(mode, 5);
                     if (*reinterpret_cast<uintptr_t*>(scheduler) == vtable140 && *mode == 5) {
+                        g_scheduler_object = scheduler;
+                        g_scheduler_mode = mode;
                         g_scheduler_active.store(1, std::memory_order_release);
                         LOG_INFO("Flipper switched at %p. Owner mode at %p is 5. TargetFPS=%u", scheduler, mode,
                                  g_target_fps.load());
@@ -1750,10 +1774,7 @@ bool patches_apply() {
     diag_watchdog_start(
         [] { return g_sim_count.load(std::memory_order_relaxed); },
         [] { return g_frame_dt.load(std::memory_order_relaxed) * 1000.0f; },
-        [](char* out, unsigned size) {
-            std::snprintf(out, size, "menu queries suppressed %llu",
-                          static_cast<unsigned long long>(g_menu_suppressed.load(std::memory_order_relaxed)));
-        });
+        describe_flipper);
     LOG_INFO("DS1 Remastered FPS Unlock v1.1.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
              g_variable_dt.load() ? "measured frame time" : "fixed 1/TargetFPS");
     return true;
