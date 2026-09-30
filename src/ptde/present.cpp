@@ -66,7 +66,9 @@ const char* const kBucketNames[kBuckets] = {"<1", "1-3.5", "3.5-4.8", "4.8-7.5",
 int g_hist[kBuckets]{};
 int g_total_presents = 0;
 int g_same_content = 0;
-unsigned long long g_prev_hash = 0;
+int g_same_small = 0;
+int g_same_big = 0;
+unsigned long long g_prev_hash = 0, g_prev_small = 0, g_prev_big = 0;
 
 double ms_between(LONGLONG a, LONGLONG b) {
     return 1000.0 * static_cast<double>(b - a) / static_cast<double>(g_freq.QuadPart);
@@ -84,7 +86,8 @@ void report(LONGLONG now) {
                                g_stat[i].count, g_stat[i].ms / g_stat[i].count, g_stat[i].max_ms);
         }
     }
-    n += std::snprintf(line + n, sizeof(line) - n, " | same-content presents=%d |", g_same_content);
+    n += std::snprintf(line + n, sizeof(line) - n, " | same-content presents=%d (small uploads %d, big uploads %d) |", g_same_content, g_same_small,
+                      g_same_big);
     n += std::snprintf(line + n, sizeof(line) - n, " gaps ms:");
     for (int i = 0; i < kBuckets; ++i) {
         if (g_hist[i]) {
@@ -96,6 +99,8 @@ void report(LONGLONG now) {
     std::memset(g_hist, 0, sizeof(g_hist));
     g_total_presents = 0;
     g_same_content = 0;
+    g_same_small = 0;
+    g_same_big = 0;
     g_window = now;
     if (ms_between(g_start, now) / 1000.0 >= g_survey_seconds) {
         g_done = true;
@@ -112,9 +117,14 @@ void note(Site site, LONGLONG t0) {
     if (blocked > s.max_ms) s.max_ms = blocked;
     ++g_total_presents;
     {
-        const unsigned long long h = d3d_take_frame_hash();
+        unsigned long long small_hash = 0, big_hash = 0;
+        const unsigned long long h = d3d_take_frame_hash(&small_hash, &big_hash);
         if (h == g_prev_hash) ++g_same_content;
+        if (small_hash == g_prev_small) ++g_same_small;
+        if (big_hash == g_prev_big) ++g_same_big;
         g_prev_hash = h;
+        g_prev_small = small_hash;
+        g_prev_big = big_hash;
     }
     if (g_last_present != 0) {
         const double gap = ms_between(g_last_present, t0);

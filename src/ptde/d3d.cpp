@@ -34,6 +34,8 @@ constexpr int kSetVsConstSlot = 94;    // IDirect3DDevice9::SetVertexShaderConst
 using SetVsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
 SetVsConstFn g_set_vs_const = nullptr;
 unsigned long long g_frame_hash = 1469598103934665603ull;
+unsigned long long g_small_hash = 1469598103934665603ull;  // uploads of up to 8 registers (camera, world matrices)
+unsigned long long g_big_hash = 1469598103934665603ull;    // larger uploads (skinning palettes)
 
 HRESULT WINAPI hook_set_vs_const(IDirect3DDevice9* device, UINT start, const float* data, UINT count) {
     if (data && count >= 3 && count < 512) {
@@ -44,6 +46,13 @@ HRESULT WINAPI hook_set_vs_const(IDirect3DDevice9* device, UINT start, const flo
             h = (h ^ bytes[i]) * 1099511628211ull;
         }
         g_frame_hash = h;
+        unsigned long long& part = count <= 8 ? g_small_hash : g_big_hash;
+        unsigned long long p = part ^ start;
+        p *= 1099511628211ull;
+        for (UINT i = 0; i < count * 16; ++i) {
+            p = (p ^ bytes[i]) * 1099511628211ull;
+        }
+        part = p;
     }
     return g_set_vs_const(device, start, data, count);
 }
@@ -235,8 +244,10 @@ void d3d_install_early(HMODULE self) {
     VirtualProtect(slot, sizeof(void*), old, &ignored);
 }
 
-unsigned long long d3d_take_frame_hash() {
+unsigned long long d3d_take_frame_hash(unsigned long long* small_hash, unsigned long long* big_hash) {
     const unsigned long long h = g_frame_hash;
-    g_frame_hash = 1469598103934665603ull;
+    *small_hash = g_small_hash;
+    *big_hash = g_big_hash;
+    g_frame_hash = g_small_hash = g_big_hash = 1469598103934665603ull;
     return h;
 }
