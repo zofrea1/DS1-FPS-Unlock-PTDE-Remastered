@@ -1,5 +1,6 @@
 #include "present.h"
 
+#include "d3d.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -64,6 +65,8 @@ const double kEdges[kBuckets - 1] = {1.0, 3.5, 4.8, 7.5, 9.5, 15.0, 18.5};
 const char* const kBucketNames[kBuckets] = {"<1", "1-3.5", "3.5-4.8", "4.8-7.5", "7.5-9.5", "9.5-15", "15-18.5", ">18.5"};
 int g_hist[kBuckets]{};
 int g_total_presents = 0;
+int g_same_content = 0;
+unsigned long long g_prev_hash = 0;
 
 double ms_between(LONGLONG a, LONGLONG b) {
     return 1000.0 * static_cast<double>(b - a) / static_cast<double>(g_freq.QuadPart);
@@ -81,7 +84,8 @@ void report(LONGLONG now) {
                                g_stat[i].count, g_stat[i].ms / g_stat[i].count, g_stat[i].max_ms);
         }
     }
-    n += std::snprintf(line + n, sizeof(line) - n, " | gaps ms:");
+    n += std::snprintf(line + n, sizeof(line) - n, " | same-content presents=%d |", g_same_content);
+    n += std::snprintf(line + n, sizeof(line) - n, " gaps ms:");
     for (int i = 0; i < kBuckets; ++i) {
         if (g_hist[i]) {
             n += std::snprintf(line + n, sizeof(line) - n, " %s=%d", kBucketNames[i], g_hist[i]);
@@ -91,6 +95,7 @@ void report(LONGLONG now) {
     std::memset(g_stat, 0, sizeof(g_stat));
     std::memset(g_hist, 0, sizeof(g_hist));
     g_total_presents = 0;
+    g_same_content = 0;
     g_window = now;
     if (ms_between(g_start, now) / 1000.0 >= g_survey_seconds) {
         g_done = true;
@@ -106,6 +111,11 @@ void note(Site site, LONGLONG t0) {
     s.ms += blocked;
     if (blocked > s.max_ms) s.max_ms = blocked;
     ++g_total_presents;
+    {
+        const unsigned long long h = d3d_take_frame_hash();
+        if (h == g_prev_hash) ++g_same_content;
+        g_prev_hash = h;
+    }
     if (g_last_present != 0) {
         const double gap = ms_between(g_last_present, t0);
         int b = 0;

@@ -29,6 +29,24 @@ ResetFn g_reset = nullptr;
 
 constexpr int kCreateDeviceSlot = 16;  // IDirect3D9::CreateDevice
 constexpr int kResetSlot = 16;         // IDirect3DDevice9::Reset
+constexpr int kSetVsConstSlot = 94;    // IDirect3DDevice9::SetVertexShaderConstantF
+
+using SetVsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
+SetVsConstFn g_set_vs_const = nullptr;
+unsigned long long g_frame_hash = 1469598103934665603ull;
+
+HRESULT WINAPI hook_set_vs_const(IDirect3DDevice9* device, UINT start, const float* data, UINT count) {
+    if (data && count >= 3 && count < 512) {
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
+        unsigned long long h = g_frame_hash ^ start;
+        h *= 1099511628211ull;
+        for (UINT i = 0; i < count * 16; ++i) {
+            h = (h ^ bytes[i]) * 1099511628211ull;
+        }
+        g_frame_hash = h;
+    }
+    return g_set_vs_const(device, start, data, count);
+}
 
 const Settings& settings() {
     if (g_settings_state != 2) {
@@ -149,6 +167,11 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             g_reset = reinterpret_cast<ResetFn>(original);
             LOG_INFO("Device Reset hooked");
         }
+        void* vs = patch_slot(*out, kSetVsConstSlot, reinterpret_cast<void*>(&hook_set_vs_const));
+        if (vs && !g_set_vs_const) {
+            g_set_vs_const = reinterpret_cast<SetVsConstFn>(vs);
+            LOG_INFO("Device SetVertexShaderConstantF hooked (content-cadence probe)");
+        }
     }
     return hr;
 }
@@ -210,4 +233,10 @@ void d3d_install_early(HMODULE self) {
     InterlockedExchangePointer(slot, reinterpret_cast<void*>(&hook_direct3d_create9));
     DWORD ignored = 0;
     VirtualProtect(slot, sizeof(void*), old, &ignored);
+}
+
+unsigned long long d3d_take_frame_hash() {
+    const unsigned long long h = g_frame_hash;
+    g_frame_hash = 1469598103934665603ull;
+    return h;
 }

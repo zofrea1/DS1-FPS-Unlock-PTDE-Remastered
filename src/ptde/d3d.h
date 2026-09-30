@@ -13,3 +13,8 @@
 // replaced with the chosen one (the highest the display offers at that resolution, or
 // the configured rate).
 void d3d_install_early(HMODULE self);
+
+// Content-cadence probe: a hash of every vertex shader constant upload since the previous call
+// (matrices, skinning palettes). The present hooks compare consecutive frames to see how often
+// the scene actually changes, which tells a 30 Hz update from a 120 Hz one.
+unsigned long long d3d_take_frame_hash();
