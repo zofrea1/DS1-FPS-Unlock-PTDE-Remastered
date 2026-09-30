@@ -176,7 +176,8 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             g_reset = reinterpret_cast<ResetFn>(original);
             LOG_INFO("Device Reset hooked");
         }
-        void* vs = patch_slot(*out, kSetVsConstSlot, reinterpret_cast<void*>(&hook_set_vs_const));
+        void* vs = settings().content_probe ? patch_slot(*out, kSetVsConstSlot, reinterpret_cast<void*>(&hook_set_vs_const))
+                                            : nullptr;
         if (vs && !g_set_vs_const) {
             g_set_vs_const = reinterpret_cast<SetVsConstFn>(vs);
             LOG_INFO("Device SetVertexShaderConstantF hooked (content-cadence probe)");

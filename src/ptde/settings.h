@@ -24,6 +24,9 @@ struct Settings {
     // Diagnostic: F9 records the player's state to a CSV; F4/F5/F6/F7 switch the frame
     // rate live to 30/60/120/240 FPS.
     bool trace = false;
+    // Diagnostic: hash every vertex shader constant upload to count presents whose content did
+    // not change. Costs noticeable CPU per frame; leave off for normal play.
+    bool content_probe = false;
     // Diagnostic: hardware write watchpoints on player fields, e.g. "c:1B8,p:180". F8 arms/reports.
     char watch[96] = {};
     // Disable the game's catch-up loop that re-presents a frame until the display's

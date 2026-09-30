@@ -208,6 +208,12 @@ void arm() {
             LOG_INFO("%s", line);
         }
     }
+    // CameraMan ([0x137847C]) holds two camera objects: "j" = the first, "k" = the second (the
+    // one whose matrix the game renders with).
+    const uint8_t* cman = static_cast<const uint8_t*>(rd_ptr(reinterpret_cast<const void*>(0x0137847C)));
+    const uint8_t* camera0 = static_cast<const uint8_t*>(rd_ptr(cman ? cman + 4 : nullptr));
+    const uint8_t* camera1 = static_cast<const uint8_t*>(rd_ptr(cman ? cman + 8 : nullptr));
+    LOG_INFO("Watch: camera objects %p %p", camera0, camera1);
     g_nhits = 0;
     for (int i = 0; i < kSlots; ++i) {
         g_addr[i] = nullptr;
@@ -217,6 +223,8 @@ void arm() {
                               : g_spec[i].base == 'y' ? proxy_pos
                               : g_spec[i].base == 'v' ? proxy_vel
                               : g_spec[i].base == 'x' ? nullptr
+                              : g_spec[i].base == 'k' ? camera1
+                              : g_spec[i].base == 'j' ? camera0
                                                       : phys;
         g_addr[i] = const_cast<uint8_t*>(base + g_spec[i].offset);
         LOG_INFO("Watch: slot %d = %c+0x%X at %p", i, g_spec[i].base, g_spec[i].offset, g_addr[i]);

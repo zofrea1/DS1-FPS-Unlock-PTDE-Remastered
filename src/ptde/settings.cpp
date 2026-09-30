@@ -92,6 +92,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_graze = parse_bool(val);
         } else if (key == "fixsmoothing") {
             s.fix_smoothing = parse_bool(val);
+        } else if (key == "contentprobe") {
+            s.content_probe = parse_bool(val);
         } else if (key == "watch") {
             std::strncpy(s.watch, val.c_str(), sizeof(s.watch) - 1);
         } else if (key == "trace") {
