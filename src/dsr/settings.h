@@ -3,6 +3,12 @@
 struct Settings {
     bool fps_unlock = true;
     int target_fps = 120;
+    // Hand the game the measured frame time instead of a fixed 1/TargetFPS. TargetFPS then
+    // only caps the frame rate, and the game keeps real-time speed when the rate dips.
+    bool variable_frame_time = true;
+    // De-duplicates menu button presses so one press is not seen several times per frame at
+    // high frame rates. Turn off if menus ever stop responding.
+    bool menu_input_filter = true;
     // Writes DSR-FPS-Unlock-trace.csv with per-character update samples. Off by
     // default: the file is large and the hook costs a little per update.
     bool trace = false;

@@ -1,3 +1,4 @@
+#include "diag.h"
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
@@ -22,7 +23,8 @@ DWORD WINAPI worker(void*) {
     wchar_t dll_path[MAX_PATH];
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"DSR-FPS-Unlock.log");
-    LOG_INFO("DS1 Remastered FPS Unlock v1.0.0");
+    diag_install(dll_path, L"DSR-FPS-Unlock-crash.dmp");
+    LOG_INFO("DS1 Remastered FPS Unlock v1.1.0");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
@@ -48,6 +50,11 @@ DWORD WINAPI worker(void*) {
         return 0;
     }
     g_target_fps.store(static_cast<uint32_t>(settings.target_fps), std::memory_order_relaxed);
+    g_variable_dt.store(settings.variable_frame_time ? 1 : 0, std::memory_order_relaxed);
+    g_frame_dt.store(1.0f / static_cast<float>(settings.target_fps), std::memory_order_relaxed);
+    LOG_INFO("VariableFrameTime: %s", settings.variable_frame_time ? "true" : "false");
+    g_menu_filter.store(settings.menu_input_filter ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("MenuInputFilter: %s", settings.menu_input_filter ? "true" : "false");
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
     if (!patches_apply()) {

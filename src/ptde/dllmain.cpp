@@ -1,4 +1,5 @@
 #include "d3d.h"
+#include "diag.h"
 #include "dsfix.h"
 #include "frame.h"
 #include "log.h"
@@ -28,6 +29,7 @@ DWORD WINAPI worker(void*) {
     wchar_t dll_path[MAX_PATH];
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"PTDE-FPS-Unlock.log");
+    diag_install(dll_path, L"PTDE-FPS-Unlock-crash.dmp");
     LOG_INFO("DS1 PTDE FPS Unlock (development build)");
 
     wchar_t exe_path[MAX_PATH];

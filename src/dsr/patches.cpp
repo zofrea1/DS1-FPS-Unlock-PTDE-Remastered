@@ -1,5 +1,6 @@
 #include "patches.h"
 
+#include "diag.h"
 #include "log.h"
 #include "profile.h"
 #include "state.h"
@@ -12,6 +13,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 
@@ -127,9 +129,14 @@ bool patch_pointer(void** slot, void* value) {
     return true;
 }
 
+// The step handed to the game for the frame in flight (see advance_frame_dt): the measured
+// frame time, or 1/TargetFPS when VariableFrameTime is off.
+float current_step() {
+    return g_frame_dt.load(std::memory_order_relaxed);
+}
+
 float scaled_frame(float frame_time) {
-    const float target = static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
-    return frame_time * 60.0f / target;
+    return frame_time * 60.0f * current_step();
 }
 
 // The retail scheduler hands every displayed frame a 1/60 step, including the
@@ -138,10 +145,10 @@ float correct_repeat_time(float frame_time) {
     if (g_scheduler_active.load(std::memory_order_acquire) == 0) {
         return frame_time;
     }
-    const float target = static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
+    const float step = current_step();
     const float native_dt = std::fabs(frame_time - (1.0f / 60.0f));
-    const float target_dt = std::fabs(frame_time - (1.0f / target));
-    const float corrected = native_dt < target_dt ? frame_time * 60.0f / target : frame_time;
+    const float target_dt = std::fabs(frame_time - step);
+    const float corrected = native_dt < target_dt ? frame_time * 60.0f * step : frame_time;
     if (g_repeat_logged.exchange(1) == 0) {
         LOG_INFO("Input repeat step: incoming=%.9f corrected=%.9f", frame_time, corrected);
     }
@@ -253,6 +260,66 @@ void* alloc_near(uint8_t* site) {
     return nullptr;
 }
 
+// Constants the game reads every frame, recomputed from the frame time by apply_frame_step().
+float* g_havok_cell = nullptr;     // Havok step scale (RW page, read by the relay)
+float* g_decay_cave = nullptr;     // airborne momentum damp per frame
+float* g_grav_cave = nullptr;      // slide gravity per frame
+float* g_friction_cave = nullptr;  // slide friction per frame
+
+constexpr float kMinStep = 1.0f / 2000.0f;
+constexpr float kMaxStep = 1.0f / 20.0f;
+
+int64_t g_dt_last_qpc = 0;
+int64_t g_dt_freq = 0;
+std::atomic<int> g_dt_logged{0};
+
+// Computes the step for this frame. With VariableFrameTime on it is the wall-clock time
+// since the previous simulation step, clamped so a hitch (loading, alt-tab) becomes one slow
+// frame instead of a physics explosion; off, it is the fixed 1/TargetFPS of the original
+// design. Called once per frame from the simulation hook.
+float advance_frame_dt() {
+    const float nominal = 1.0f / static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
+    float dt = nominal;
+    if (g_variable_dt.load(std::memory_order_relaxed) != 0) {
+        if (g_dt_freq == 0) {
+            LARGE_INTEGER freq{};
+            QueryPerformanceFrequency(&freq);
+            g_dt_freq = freq.QuadPart;
+        }
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        if (g_dt_last_qpc != 0 && g_dt_freq != 0) {
+            const float sample = static_cast<float>(static_cast<double>(now.QuadPart - g_dt_last_qpc) /
+                                                     static_cast<double>(g_dt_freq));
+            dt = sample < kMinStep ? kMinStep : (sample > kMaxStep ? kMaxStep : sample);
+        }
+        g_dt_last_qpc = now.QuadPart;
+    }
+    g_frame_dt.store(dt, std::memory_order_relaxed);
+    if (g_dt_logged.fetch_add(1) == 120) {
+        LOG_INFO("Frame step after 120 frames: %.3f ms (%s)", dt * 1000.0f,
+                 g_variable_dt.load(std::memory_order_relaxed) != 0 ? "measured" : "fixed");
+    }
+    return dt;
+}
+
+// Pushes the frame time into every cave the game reads.
+void apply_frame_step(float dt) {
+    const double scale = static_cast<double>(dt) * 60.0;
+    if (g_havok_cell) {
+        *g_havok_cell = static_cast<float>(scale);
+    }
+    if (g_decay_cave) {
+        *g_decay_cave = static_cast<float>(std::exp(std::log(0.975) * scale));
+    }
+    if (g_grav_cave) {
+        *g_grav_cave = static_cast<float>(0.5 * scale);
+    }
+    if (g_friction_cave) {
+        *g_friction_cave = static_cast<float>(std::exp(std::log(0.65) * scale));
+    }
+}
+
 // Havok is stepped from a separate call with a fixed 1/60 in xmm1. The call
 // target is an Arxan stub, so the scale is applied in a nearby relay and the
 // stub is entered with the adjusted register. .text writes during the first
@@ -276,21 +343,33 @@ bool patch_havok() {
         return false;
     }
 
-    const float scale = 60.0f / static_cast<float>(g_target_fps.load());
-    uint8_t code[17] = {
-        0xF3, 0x0F, 0x59, 0x0D, 0x05, 0x00, 0x00, 0x00,  // mulss xmm1, [rip+5]
-        0xE9, 0x00, 0x00, 0x00, 0x00,                    // jmp stub
-    };
-    const intptr_t jump = target - (static_cast<uint8_t*>(g_havok_relay) + 13);
-    if (jump < INT32_MIN || jump > INT32_MAX) {
+    // The scale lives in its own read/write page so it can follow the frame time.
+    auto* cell = static_cast<float*>(alloc_near(site));
+    if (!cell) {
         VirtualFree(g_havok_relay, 0, MEM_RELEASE);
         g_havok_relay = nullptr;
-        LOG_ERROR("Havok stub is out of range of the relay");
+        LOG_ERROR("Could not allocate the Havok scale cell (Win32=%lu)", GetLastError());
         return false;
     }
+    const float scale = current_step() * 60.0f;
+    *cell = scale;
+    uint8_t code[13] = {
+        0xF3, 0x0F, 0x59, 0x0D, 0x00, 0x00, 0x00, 0x00,  // mulss xmm1, [rip+disp] (the scale cell)
+        0xE9, 0x00, 0x00, 0x00, 0x00,                    // jmp stub
+    };
+    const intptr_t cell_disp = reinterpret_cast<uint8_t*>(cell) - (static_cast<uint8_t*>(g_havok_relay) + 8);
+    const intptr_t jump = target - (static_cast<uint8_t*>(g_havok_relay) + 13);
+    if (jump < INT32_MIN || jump > INT32_MAX || cell_disp < INT32_MIN || cell_disp > INT32_MAX) {
+        VirtualFree(cell, 0, MEM_RELEASE);
+        VirtualFree(g_havok_relay, 0, MEM_RELEASE);
+        g_havok_relay = nullptr;
+        LOG_ERROR("Havok stub or scale cell is out of range of the relay");
+        return false;
+    }
+    const auto cell_rel = static_cast<int32_t>(cell_disp);
     const auto rel = static_cast<int32_t>(jump);
+    std::memcpy(code + 4, &cell_rel, sizeof(cell_rel));
     std::memcpy(code + 9, &rel, sizeof(rel));
-    std::memcpy(code + 13, &scale, sizeof(scale));
     std::memcpy(g_havok_relay, code, sizeof(code));
     DWORD protect = 0;
     if (!VirtualProtect(g_havok_relay, 0x1000, PAGE_EXECUTE_READ, &protect)) {
@@ -317,7 +396,8 @@ bool patch_havok() {
     FlushInstructionCache(GetCurrentProcess(), site, 5);
     DWORD ignored = 0;
     VirtualProtect(site, 5, old, &ignored);
-    LOG_INFO("Havok step scaled by %.6f", scale);
+    g_havok_cell = cell;
+    LOG_INFO("Havok step scaled by %.6f (follows the frame time)", scale);
     return true;
 }
 
@@ -358,10 +438,17 @@ uint8_t hook_menu(void* menu, int action) {
         consumer->generation = generation;
     }
     spin_unlock(g_consumer_lock);
+    if (suppress) {
+        g_menu_suppressed.fetch_add(1, std::memory_order_relaxed);
+    }
     return suppress ? 0 : active;
 }
 
 bool patch_menu() {
+    if (g_menu_filter.load(std::memory_order_relaxed) == 0) {
+        LOG_INFO("Menu input filter disabled by MenuInputFilter=false");
+        return true;
+    }
     auto* target = image_rva(kBuild.menu_query);
     static const uint8_t kPrologue[15] = {0x40, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0xC7,
                                            0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF};
@@ -556,9 +643,8 @@ bool patch_decay() {
         LOG_ERROR("Could not allocate the damp constant (Win32=%lu)", GetLastError());
         return false;
     }
-    const double target = static_cast<double>(g_target_fps.load(std::memory_order_relaxed));
     auto* factor = static_cast<float*>(page);
-    *factor = static_cast<float>(std::exp(std::log(0.975) * 60.0 / target));
+    *factor = static_cast<float>(std::exp(std::log(0.975) * 60.0 * static_cast<double>(current_step())));
 
     // Same length both ways: [rbx + disp32] becomes [rip + disp32] by
     // changing only the ModRM byte (mod=00, reg=xmm3, rm=101), then the
@@ -580,7 +666,8 @@ bool patch_decay() {
         LOG_ERROR("Could not retarget the velocity damp load");
         return false;
     }
-    LOG_INFO("Velocity damp retargeted (per-frame factor %.6f instead of 0.975)", *factor);
+    g_decay_cave = factor;
+    LOG_INFO("Velocity damp retargeted (per-frame factor %.6f instead of 0.975, follows the frame time)", *factor);
     return true;
 }
 
@@ -603,7 +690,7 @@ std::atomic<int> g_slide_state{0};
 
 // `movss xmmN, dword ptr [rip + disp32]` (F3 0F 10 modrm, mod=00 rm=101) whose
 // current value is `expected`; retargets the load at a cave float.
-bool retarget_movss_const(uint32_t rva, float expected, float replacement, const char* what) {
+bool retarget_movss_const(uint32_t rva, float expected, float replacement, const char* what, float** cave_out) {
     auto* site = image_rva(rva);
     if (site[0] != 0xF3 || site[1] != 0x0F || site[2] != 0x10 || (site[3] & 0xC7) != 0x05) {
         LOG_ERROR("%s load at 0x%08X does not match this build", what, rva);
@@ -627,17 +714,24 @@ bool retarget_movss_const(uint32_t rva, float expected, float replacement, const
         LOG_ERROR("Could not retarget the %s load", what);
         return false;
     }
+    if (cave_out) {
+        *cave_out = static_cast<float*>(page);
+    }
     return true;
 }
 
 bool patch_slide() {
-    const double target = static_cast<double>(g_target_fps.load(std::memory_order_relaxed));
-    const float grav = static_cast<float>(0.5 * 60.0 / target);
-    const float friction = static_cast<float>(std::exp(std::log(0.65) * 60.0 / target));
-    if (!retarget_movss_const(kSlideGravSite, 0.5f, grav, "slide gravity") ||
-        !retarget_movss_const(kSlideFrictionSite, 0.65f, friction, "slide friction")) {
+    const double scale = 60.0 * static_cast<double>(current_step());
+    const float grav = static_cast<float>(0.5 * scale);
+    const float friction = static_cast<float>(std::exp(std::log(0.65) * scale));
+    float* grav_cave = nullptr;
+    float* friction_cave = nullptr;
+    if (!retarget_movss_const(kSlideGravSite, 0.5f, grav, "slide gravity", &grav_cave) ||
+        !retarget_movss_const(kSlideFrictionSite, 0.65f, friction, "slide friction", &friction_cave)) {
         return false;
     }
+    g_grav_cave = grav_cave;
+    g_friction_cave = friction_cave;
     LOG_INFO("Ground slide retargeted (gravity %.5f per frame instead of 0.5, friction %.5f instead of 0.65)", grav,
              friction);
     return true;
@@ -1130,8 +1224,8 @@ void try_delayed_patches() {
     }
 }
 
-void note_presses(void* detector, void* input_state, void* resolved, size_t stride, size_t action_offset,
-                  size_t bits_offset, uint8_t kind) {
+void note_presses_impl(void* detector, void* input_state, void* resolved, size_t stride, size_t action_offset,
+                       size_t bits_offset, uint8_t kind, bool* held) {
     if (g_scheduler_active.load(std::memory_order_acquire) == 0 || !detector || !input_state || !resolved) {
         return;
     }
@@ -1144,6 +1238,7 @@ void note_presses(void* detector, void* input_state, void* resolved, size_t stri
     }
 
     spin_lock(g_pulse_lock);
+    *held = true;
     PulseSource* source = nullptr;
     for (auto& candidate : g_sources) {
         if ((candidate.detector == detector && candidate.kind == kind) || !candidate.detector) {
@@ -1156,6 +1251,7 @@ void note_presses(void* detector, void* input_state, void* resolved, size_t stri
         }
     }
     if (!source) {
+        *held = false;
         spin_unlock(g_pulse_lock);
         return;
     }
@@ -1186,7 +1282,26 @@ void note_presses(void* detector, void* input_state, void* resolved, size_t stri
         g_action_generation[action].store(generation, std::memory_order_relaxed);
         g_action_ms[action].store(static_cast<int64_t>(now), std::memory_order_relaxed);
     }
+    *held = false;
     spin_unlock(g_pulse_lock);
+}
+
+// The input structures belong to the game; if one of them is ever not what the layout above
+// expects, skip the pulse instead of faulting inside the game's input thread.
+void note_presses(void* detector, void* input_state, void* resolved, size_t stride, size_t action_offset,
+                  size_t bits_offset, uint8_t kind) {
+    bool held = false;
+    __try {
+        note_presses_impl(detector, input_state, resolved, stride, action_offset, bits_offset, kind, &held);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (held) {
+            spin_unlock(g_pulse_lock);
+        }
+        static std::atomic<int> reported{0};
+        if (reported.fetch_add(1) < 3) {
+            LOG_ERROR("Input pulse read faulted and was skipped (layout mismatch?)");
+        }
+    }
 }
 
 void hook_sim(void* step, float frame_time) {
@@ -1194,12 +1309,16 @@ void hook_sim(void* step, float frame_time) {
         g_sim(step, frame_time);
         return;
     }
+    g_sim_count.fetch_add(1, std::memory_order_relaxed);
+    // Measure first: the work below (first-time patching, logging) must not count as frame time.
+    const float dt = advance_frame_dt();
+    apply_frame_step(dt);
     try_delayed_patches();
     update_speed_factors();
     const float corrected = scaled_frame(frame_time);
     if (g_sim_logged.exchange(1) == 0) {
-        LOG_INFO("Simulation step: incoming=%.9f corrected=%.9f target=%u", frame_time, corrected,
-                 g_target_fps.load());
+        LOG_INFO("Simulation step: incoming=%.9f corrected=%.9f target=%u variable=%d", frame_time, corrected,
+                 g_target_fps.load(), g_variable_dt.load());
     }
     g_sim(step, corrected);
 }
@@ -1231,7 +1350,8 @@ void hook_title_menu(void* step, float frame_time, void* context) {
 }
 
 void hook_fx(void* manager, float frame_time) {
-    try_delayed_patches();
+    // Code patches are applied only from the simulation hook (the thread that runs the patched
+    // code), never from here, so no other thread can be executing a site while it is rewritten.
     if (g_scheduler_active.load(std::memory_order_acquire) == 0) {
         g_fx(manager, frame_time);
         return;
@@ -1284,7 +1404,56 @@ bool writable_private(const MEMORY_BASIC_INFORMATION& info) {
            (info.Protect & PAGE_GUARD) == 0;
 }
 
-uint8_t* find_scheduler(uintptr_t vtable, bool preferred_heap) {
+// Memory scans. The game keeps allocating and releasing memory while these walk it, so a page
+// that VirtualQuery reported as committed can be gone by the time it is read. Every read here is
+// inside a structured-exception guard: a vanished page ends that region's scan instead of taking
+// the game down with an access violation (the most likely cause of start-up crashes).
+struct ScanStats {
+    unsigned regions = 0;
+    unsigned faults = 0;
+    uint64_t bytes = 0;
+};
+
+uint8_t* scan_region_for_scheduler(uintptr_t begin, uintptr_t end, uintptr_t vtable, bool* faulted) {
+    uint8_t* found = nullptr;
+    __try {
+        auto cursor = (begin + 7) & ~uintptr_t{7};
+        for (; cursor + 16 <= end; cursor += 8) {
+            auto* candidate = reinterpret_cast<uintptr_t*>(cursor);
+            if (candidate[0] == vtable && candidate[1] == 0) {
+                found = reinterpret_cast<uint8_t*>(candidate);
+                break;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *faulted = true;
+    }
+    return found;
+}
+
+LONG* scan_region_for_mode(uintptr_t begin, uintptr_t end, const uint8_t* scheduler, bool* faulted) {
+    LONG* found = nullptr;
+    __try {
+        auto cursor = (begin + 15) & ~uintptr_t{7};
+        for (; cursor + 8 <= end; cursor += 8) {
+            if (*reinterpret_cast<uint8_t**>(cursor) == scheduler && *reinterpret_cast<LONG*>(cursor - 8) == 4) {
+                found = reinterpret_cast<LONG*>(cursor - 8);
+                break;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *faulted = true;
+    }
+    return found;
+}
+
+// Walks the writable private regions. `preferred_heap` restricts the walk to the game's
+// 0x02001000-byte heap block (fast); otherwise every other writable private region up to
+// `max_region` bytes is walked. The retail layout keeps the object in the first kind or in a
+// small region; larger limits are only used after the quick passes have failed for a while.
+constexpr uint64_t kQuickRegionLimit = 0x08000000;
+constexpr uint64_t kAnyRegionLimit = ~uint64_t{0};
+uint8_t* find_scheduler(uintptr_t vtable, bool preferred_heap, uint64_t max_region, ScanStats* stats) {
     uintptr_t address = 0x10000;
     MEMORY_BASIC_INFORMATION info{};
     while (VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) && info.RegionSize) {
@@ -1293,15 +1462,17 @@ uint8_t* find_scheduler(uintptr_t vtable, bool preferred_heap) {
             break;
         }
         const bool size_ok = preferred_heap ? info.RegionSize == 0x02001000
-                                             : info.RegionSize != 0x02001000 && info.RegionSize <= 0x08000000;
+                                             : info.RegionSize != 0x02001000 && info.RegionSize <= max_region;
         if (writable_private(info) && size_ok) {
-            auto cursor = (reinterpret_cast<uintptr_t>(info.BaseAddress) + 7) & ~uintptr_t{7};
-            const uintptr_t end = next;
-            for (; cursor + 16 <= end; cursor += 8) {
-                auto* candidate = reinterpret_cast<uintptr_t*>(cursor);
-                if (candidate[0] == vtable && candidate[1] == 0) {
-                    return reinterpret_cast<uint8_t*>(candidate);
-                }
+            bool faulted = false;
+            stats->regions++;
+            stats->bytes += info.RegionSize;
+            uint8_t* hit = scan_region_for_scheduler(reinterpret_cast<uintptr_t>(info.BaseAddress), next, vtable, &faulted);
+            if (faulted) {
+                stats->faults++;
+            }
+            if (hit) {
+                return hit;
             }
         }
         address = next;
@@ -1309,7 +1480,7 @@ uint8_t* find_scheduler(uintptr_t vtable, bool preferred_heap) {
     return nullptr;
 }
 
-LONG* find_mode(uint8_t* scheduler) {
+LONG* find_mode(uint8_t* scheduler, uint64_t max_region, ScanStats* stats) {
     uintptr_t address = 0x10000;
     MEMORY_BASIC_INFORMATION info{};
     while (VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) && info.RegionSize) {
@@ -1318,13 +1489,16 @@ LONG* find_mode(uint8_t* scheduler) {
         if (next <= address) {
             break;
         }
-        if (writable_private(info) && info.RegionSize <= 0x08000000) {
-            auto cursor = (base + 15) & ~uintptr_t{7};
-            for (; cursor + 8 <= next; cursor += 8) {
-                if (*reinterpret_cast<uint8_t**>(cursor) == scheduler &&
-                    *reinterpret_cast<LONG*>(cursor - 8) == 4) {
-                    return reinterpret_cast<LONG*>(cursor - 8);
-                }
+        if (writable_private(info) && info.RegionSize <= max_region) {
+            bool faulted = false;
+            stats->regions++;
+            stats->bytes += info.RegionSize;
+            LONG* hit = scan_region_for_mode(base, next, scheduler, &faulted);
+            if (faulted) {
+                stats->faults++;
+            }
+            if (hit) {
+                return hit;
             }
         }
         address = next;
@@ -1409,38 +1583,66 @@ void rollback() {
     g_scheduler_active.store(0, std::memory_order_release);
 }
 
+// Waits for the game's window. The hooks below are installed only once it exists, so nothing is
+// modified while the game (and its copy protection) is still starting up.
+bool wait_for_window(DWORD timeout_ms) {
+    for (DWORD waited = 0; waited < timeout_ms; waited += 250) {
+        if (has_window()) {
+            LOG_INFO("Game window is up after %lu ms", waited);
+            return true;
+        }
+        Sleep(250);
+    }
+    return false;
+}
+
+constexpr DWORD kSearchTimeoutMs = 150000;
+
 bool activate_scheduler() {
     const uintptr_t vtable60 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper60_vtable));
-    void* vtable140 = image_rva(kBuild.flipper140_vtable);
-    bool saw_window = false;
+    const uintptr_t vtable140 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper140_vtable));
     bool remo_warned = false;
-    for (DWORD waited = 0; waited < 45000; waited += 250) {
+    bool logged_scheduler = false;
+    bool logged_no_mode = false;
+    ScanStats stats{};
+    unsigned passes = 0;
+    LOG_INFO("Looking for the 60 Hz flipper (for up to %lu s).", kSearchTimeoutMs / 1000);
+    for (DWORD waited = 0; waited < kSearchTimeoutMs;) {
         try_hook_remo();
-        if (!saw_window && has_window()) {
-            saw_window = true;
-            LOG_INFO("Game window is up. Looking for the 60 Hz flipper.");
+        ++passes;
+        // Quick passes cover the usual places; after 20 s, every fourth pass also walks regions of
+        // any size in case this system's allocator lays the heap out differently.
+        const bool wide = waited >= 20000 && passes % 4 == 0;
+        const uint64_t limit = wide ? kAnyRegionLimit : kQuickRegionLimit;
+        uint8_t* scheduler = find_scheduler(vtable60, true, limit, &stats);
+        if (!scheduler) {
+            scheduler = find_scheduler(vtable60, false, limit, &stats);
         }
-        if (saw_window) {
-            uint8_t* scheduler = find_scheduler(vtable60, true);
-            if (!scheduler) {
-                scheduler = find_scheduler(vtable60, false);
+        if (scheduler) {
+            if (!logged_scheduler) {
+                logged_scheduler = true;
+                LOG_INFO("60 Hz flipper object found at %p after %lu ms", scheduler, waited);
             }
-            if (scheduler) {
-                LONG* mode = find_mode(scheduler);
-                if (mode) {
-                    // The 140 Hz flipper writes the high-refresh timing constants.
-                    // Mode 4 is the retail 60 Hz owner state; 5 keeps that flipper selected.
-                    patch_pointer(reinterpret_cast<void**>(scheduler), vtable140);
+            LONG* mode = find_mode(scheduler, waited >= 20000 ? kAnyRegionLimit : kQuickRegionLimit, &stats);
+            if (mode) {
+                // The 140 Hz flipper writes the high-refresh timing constants.
+                // Mode 4 is the retail 60 Hz owner state; 5 keeps that flipper selected.
+                for (int attempt = 0; attempt < 5; ++attempt) {
+                    patch_pointer(reinterpret_cast<void**>(scheduler), reinterpret_cast<void*>(vtable140));
                     InterlockedExchange(mode, 5);
-                    if (*reinterpret_cast<void**>(scheduler) != vtable140 || *mode != 5) {
-                        LOG_ERROR("Flipper switch did not stick");
-                        return false;
+                    if (*reinterpret_cast<uintptr_t*>(scheduler) == vtable140 && *mode == 5) {
+                        g_scheduler_active.store(1, std::memory_order_release);
+                        LOG_INFO("Flipper switched at %p. Owner mode at %p is 5. TargetFPS=%u", scheduler, mode,
+                                 g_target_fps.load());
+                        return true;
                     }
-                    g_scheduler_active.store(1, std::memory_order_release);
-                    LOG_INFO("Flipper switched at %p. Owner mode at %p is 5. TargetFPS=%u", scheduler, mode,
-                             g_target_fps.load());
-                    return true;
+                    Sleep(100);
                 }
+                LOG_ERROR("Flipper switch did not stick (vtable %p, mode %ld); will look again",
+                          *reinterpret_cast<void**>(scheduler), *mode);
+            } else if (!logged_no_mode) {
+                logged_no_mode = true;
+                LOG_INFO("Found the flipper but not its owner mode yet (still starting up?); will keep looking");
             }
         }
         if (!g_remo && waited >= 30000 && !remo_warned) {
@@ -1448,10 +1650,22 @@ bool activate_scheduler() {
             LOG_INFO("Remo callback is %p (expected %p). Cinematics stay on the retail clock.",
                      *g_remo_slot, image_rva(kBuild.remo_fn));
         }
-        Sleep(250);
+        // Quick polling while the game is starting, then a gentler one.
+        const DWORD pause = waited < 20000 ? 250 : 1000;
+        Sleep(pause);
+        waited += pause;
     }
-    LOG_ERROR(saw_window ? "The 60 Hz flipper was not found within 45 seconds"
-                         : "The game window did not appear within 45 seconds");
+    // Explain the failure: is a 140 Hz flipper already selected (display frequency set high)?
+    ScanStats probe{};
+    uint8_t* already = find_scheduler(vtable140, true, kAnyRegionLimit, &probe);
+    if (!already) {
+        already = find_scheduler(vtable140, false, kAnyRegionLimit, &probe);
+    }
+    LOG_ERROR("The 60 Hz flipper was not found within %lu s (%u passes, %u regions, %u guarded faults). "
+              "A 140 Hz flipper object %s. In System > PC Settings > Display, set Frequency to your monitor's "
+              "refresh rate and Vertical sync to off, then restart the game.",
+              kSearchTimeoutMs / 1000, passes, stats.regions, stats.faults,
+              already ? "IS already present (the game selected it itself)" : "was not found either");
     return false;
 }
 
@@ -1509,6 +1723,11 @@ bool patches_apply() {
     g_repeat_lookup = reinterpret_cast<LookupFn>(image_rva(kBuild.repeat_lookup));
     g_repeat_alt_lookup = reinterpret_cast<LookupFn>(image_rva(kBuild.repeat_alt_lookup));
 
+    if (!wait_for_window(120000)) {
+        LOG_ERROR("The game window did not appear within 120 seconds");
+        return false;
+    }
+    Sleep(1500);  // let start-up settle before anything is modified
     g_install_ms = GetTickCount64();
     if (!patch_pointer(g_qpc_iat, reinterpret_cast<void*>(hook_qpc)) ||
         !patch_pointer(g_sim_slot, reinterpret_cast<void*>(hook_sim)) ||
@@ -1528,6 +1747,14 @@ bool patches_apply() {
         rollback();
         return false;
     }
-    LOG_INFO("DS1 Remastered FPS Unlock v1.0.0 active. Step scale is 60/%u.", g_target_fps.load());
+    diag_watchdog_start(
+        [] { return g_sim_count.load(std::memory_order_relaxed); },
+        [] { return g_frame_dt.load(std::memory_order_relaxed) * 1000.0f; },
+        [](char* out, unsigned size) {
+            std::snprintf(out, size, "menu queries suppressed %llu",
+                          static_cast<unsigned long long>(g_menu_suppressed.load(std::memory_order_relaxed)));
+        });
+    LOG_INFO("DS1 Remastered FPS Unlock v1.1.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
+             g_variable_dt.load() ? "measured frame time" : "fixed 1/TargetFPS");
     return true;
 }

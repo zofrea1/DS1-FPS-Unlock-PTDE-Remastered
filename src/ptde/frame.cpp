@@ -1,5 +1,6 @@
 #include "frame.h"
 
+#include "diag.h"
 #include "fixes.h"
 #include "log.h"
 #include "present.h"
@@ -62,6 +63,7 @@ struct State {
     LONGLONG report = 0;
     bool driver = false;
     int rate = 0;
+    double last_dt_ms = 0.0;
 
     // per-window survey
     int count[kCommands]{};
@@ -187,6 +189,7 @@ void frame_boundary() {
     }
     if (g.last != 0) {
         const double dt_ms = ms_between(g.last, t);
+        g.last_dt_ms = dt_ms;
         ++g.frames;
         g.dt_sum += dt_ms;
         if (dt_ms < g.dt_min) g.dt_min = dt_ms;
@@ -338,6 +341,8 @@ bool frame_install(const Settings& settings) {
     LOG_INFO("Frame hook installed at %08X: driver=%s target=%d FPS vblank_patch=%s survey=%ds",
              kDispatchCall, g.driver ? "on" : "off", settings.target_fps, settings.vblank_patch ? "on" : "off",
              settings.survey_seconds);
+    diag_watchdog_start([] { return static_cast<uint64_t>(g_cmd_totals[2]); },
+                        [] { return static_cast<float>(g.last_dt_ms); });
     watch_set_spec(settings.watch);
     if (settings.driver) {
         FixFlags flags;

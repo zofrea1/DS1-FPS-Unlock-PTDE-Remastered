@@ -3,6 +3,7 @@
 #include "log.h"
 #include "state.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -30,8 +31,12 @@ struct VtableHook {
 
 struct MouseDevice {
     void* device = nullptr;
-    int64_t x_remainder = 0;
-    int64_t y_remainder = 0;
+    double x_remainder = 0.0;
+    double y_remainder = 0.0;
+    int64_t last_state_qpc = 0;  // previous GetDeviceState call
+    int64_t last_data_qpc = 0;   // previous consuming GetDeviceData call
+    double last_state_step = 0.0;
+    double last_data_step = 0.0;
 };
 
 CreateFn g_create = nullptr;
@@ -85,22 +90,56 @@ bool patch_pointer(void** slot, void* value) {
     return true;
 }
 
-// Mouse deltas are sampled once per displayed frame and then multiplied by a
-// 1/60 step. Scale the counts by TargetFPS/60 so look speed stays put.
-LONG scale_axis(LONG value, int64_t* remainder) {
-    const int64_t target = g_target_fps.load(std::memory_order_relaxed);
-    const int64_t numerator = static_cast<int64_t>(value) * target + *remainder;
-    const int64_t scaled = numerator / 60;
-    *remainder = numerator - scaled * 60;
-    if (scaled > INT32_MAX) {
-        *remainder = 0;
+// Mouse deltas are sampled once per displayed frame and then multiplied by the frame step.
+// The counts are a displacement over one frame but the game wants a rate, so they are scaled
+// by 1 / (60 * step): TargetFPS/60 when the step is the fixed 1/TargetFPS. With a variable step
+// the divisor is the time the counts were actually collected over (the time since this device
+// was last polled), so a slow frame's larger counts are divided by its longer interval and the
+// camera does not jump. The fractional part is carried so that no counts are lost.
+LONG scale_axis(LONG value, double* remainder, double step) {
+    const double scale = 1.0 / (60.0 * step);
+    const double exact = static_cast<double>(value) * scale + *remainder;
+    const double whole = std::floor(exact);
+    if (whole > static_cast<double>(INT32_MAX)) {
+        *remainder = 0.0;
         return INT32_MAX;
     }
-    if (scaled < INT32_MIN) {
-        *remainder = 0;
+    if (whole < static_cast<double>(INT32_MIN)) {
+        *remainder = 0.0;
         return INT32_MIN;
     }
-    return static_cast<LONG>(scaled);
+    *remainder = exact - whole;
+    return static_cast<LONG>(whole);
+}
+
+// The interval the counts returned by a poll were collected over. `last` is the previous
+// qualifying poll of the same kind; `held_step` remembers the last sane interval so a burst of
+// polls inside one frame keeps using it.
+double poll_step(int64_t* last, double* held_step) {
+    static int64_t freq = 0;
+    if (freq == 0) {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        freq = f.QuadPart;
+    }
+    const double fixed = static_cast<double>(g_frame_dt.load(std::memory_order_relaxed));
+    if (g_variable_dt.load(std::memory_order_relaxed) == 0 || freq == 0) {
+        return fixed < 1.0 / 2000.0 ? 1.0 / 2000.0 : fixed;
+    }
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    double step = *held_step > 0.0 ? *held_step : fixed;
+    if (*last != 0) {
+        const double interval = static_cast<double>(now.QuadPart - *last) / static_cast<double>(freq);
+        if (interval >= 0.0015) {  // shorter gaps are repeat polls inside a frame
+            step = interval > 0.1 ? 0.1 : interval;
+            *held_step = step;
+            *last = now.QuadPart;
+        }
+    } else {
+        *last = now.QuadPart;
+    }
+    return step;
 }
 
 MouseDevice* find_mouse(void* device) {
@@ -131,10 +170,11 @@ HRESULT WINAPI hook_get_device_state(void* device, DWORD size, void* state) {
     if (SUCCEEDED(result) && state && mouse && (size == 16 || size == 20) &&
         g_scheduler_active.load(std::memory_order_acquire) != 0) {
         auto* axes = static_cast<LONG*>(state);
-        axes[0] = scale_axis(axes[0], &mouse->x_remainder);
-        axes[1] = scale_axis(axes[1], &mouse->y_remainder);
+        const double step = poll_step(&mouse->last_state_qpc, &mouse->last_state_step);
+        axes[0] = scale_axis(axes[0], &mouse->x_remainder, step);
+        axes[1] = scale_axis(axes[1], &mouse->y_remainder, step);
         if (g_mouse_logged.exchange(1) == 0) {
-            LOG_INFO("Mouse scale active (%u/60)", g_target_fps.load());
+            LOG_INFO("Mouse scale active (1/(60*step), step %.3f ms)", g_frame_dt.load() * 1000.0f);
         }
     }
     return result;
@@ -160,17 +200,22 @@ HRESULT WINAPI hook_get_device_data(void* device, DWORD object_size, void* objec
     if (SUCCEEDED(result) && objects && count && object_size >= 8 && mouse &&
         g_scheduler_active.load(std::memory_order_acquire) != 0) {
         auto* object = static_cast<uint8_t*>(objects);
+        // Peeking does not consume the buffer, so it does not start a new collection interval.
+        const bool peek = (flags & 1) != 0;  // DIGDD_PEEK
+        const double peek_step = mouse->last_data_step;
+        const double step = peek ? (peek_step > 0.0 ? peek_step : static_cast<double>(g_frame_dt.load()))
+                                 : poll_step(&mouse->last_data_qpc, &mouse->last_data_step);
         for (DWORD i = 0; i < *count; ++i, object += object_size) {
             const DWORD offset = *reinterpret_cast<DWORD*>(object);
             auto* value = reinterpret_cast<LONG*>(object + sizeof(DWORD));
             if (offset == 0) {
-                *value = scale_axis(*value, &mouse->x_remainder);
+                *value = scale_axis(*value, &mouse->x_remainder, step);
             } else if (offset == 4) {
-                *value = scale_axis(*value, &mouse->y_remainder);
+                *value = scale_axis(*value, &mouse->y_remainder, step);
             }
         }
         if (g_mouse_logged.exchange(1) == 0) {
-            LOG_INFO("Mouse scale active, buffered (%u/60)", g_target_fps.load());
+            LOG_INFO("Mouse scale active, buffered (1/(60*step), step %.3f ms)", g_frame_dt.load() * 1000.0f);
         }
     }
     return result;
@@ -222,8 +267,12 @@ bool hook_mouse_device(void* device) {
     for (auto& mouse : g_devices) {
         if (!mouse.device) {
             mouse.device = device;
-            mouse.x_remainder = 0;
-            mouse.y_remainder = 0;
+            mouse.x_remainder = 0.0;
+            mouse.y_remainder = 0.0;
+            mouse.last_state_qpc = 0;
+            mouse.last_data_qpc = 0;
+            mouse.last_state_step = 0.0;
+            mouse.last_data_step = 0.0;
             spin_unlock(g_mouse_lock);
             return true;
         }
