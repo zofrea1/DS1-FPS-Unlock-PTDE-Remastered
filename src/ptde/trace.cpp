@@ -26,7 +26,8 @@ bool g_down = false;
 
 constexpr int kChrWords = 0x100;   // chr[0 .. 0x400)
 constexpr int kMcWords = 0xC0;     // movement controller [0 .. 0x300)
-constexpr int kPhysWords = 0xC0;   // physics [0 .. 0x300)
+constexpr int kPhysWords = 0xC0;
+constexpr int kCamWords = 0x100;   // each camera object [0 .. 0x400)   // physics [0 .. 0x300)
 
 // Reads `words` dwords from `p`, zero-filled if the memory is not readable.
 bool read_words(const void* p, uint32_t* out, int words) {
@@ -118,6 +119,10 @@ void start_capture() {
     for (int i = 0; i < 6; ++i) std::fprintf(g_file, ",cmd%d", i);
     for (int i = 0; i < 0x20; ++i) std::fprintf(g_file, ",g1_%02X", i * 4);
     for (int i = 0; i < 0x10; ++i) std::fprintf(g_file, ",g2_%02X", i * 4);
+    for (int i = 0; i < 0x10; ++i) std::fprintf(g_file, ",cm_%02X", i * 4);
+    for (int k = 0; k < 2; ++k) {
+        for (int i = 0; i < kCamWords; ++i) std::fprintf(g_file, ",cam%d_%03X", k, i * 4);
+    }
     std::fprintf(g_file, "\n");
     g_row = 0;
     snapshot("start");
@@ -189,6 +194,19 @@ void trace_frame(double dt_ms, int target_fps) {
         read_words(read_ptr(reinterpret_cast<const void*>(0x0137CDFC)), g2, 0x10);
         for (int i = 0; i < 0x20; ++i) std::fprintf(g_file, ",%x", g1[i]);
         for (int i = 0; i < 0x10; ++i) std::fprintf(g_file, ",%x", g2[i]);
+    }
+    {
+        // CameraMan ([0x137847C]) holds two camera objects at +4 and +8.
+        static uint32_t cm[0x10], cam[2][kCamWords];
+        const uint8_t* cman = static_cast<const uint8_t*>(read_ptr(reinterpret_cast<const void*>(0x0137847C)));
+        read_words(cman, cm, 0x10);
+        for (int k = 0; k < 2; ++k) {
+            read_words(cman ? read_ptr(cman + 4 + 4 * k) : nullptr, cam[k], kCamWords);
+        }
+        for (int i = 0; i < 0x10; ++i) std::fprintf(g_file, ",%x", cm[i]);
+        for (int k = 0; k < 2; ++k) {
+            for (int i = 0; i < kCamWords; ++i) std::fprintf(g_file, ",%x", cam[k][i]);
+        }
     }
     std::fprintf(g_file, "\n");
 }
