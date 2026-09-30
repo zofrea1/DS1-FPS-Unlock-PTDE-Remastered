@@ -43,7 +43,12 @@ Only the current Steam builds are supported. Anything else is unsupported and ma
 - **Remastered:** Steam build, SHA-1 `9150CC63C617332ED3C2C66E7566ED67E3292DA0` (1.03.1, 2022-10-11).
 - **PTDE:** Steam build, `SizeOfImage` `0x11C2000`.
 
-Play offline while this is in use, and back up your saves. Multiplayer has not been tested.
+Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is well tested with DSfix.** Other multiplayer (the official servers) has not been tested, so play offline there.
+
+## Recommended display mode
+
+- **Remastered: borderless fullscreen** gives the best compatibility with monitors, frame pacing and VRR.
+- **PTDE: exclusive fullscreen** gives the best compatibility with monitors, frame pacing and VRR (with `FullscreenRefreshRate = 0` to use your display's real refresh rate).
 
 ## Install
 
