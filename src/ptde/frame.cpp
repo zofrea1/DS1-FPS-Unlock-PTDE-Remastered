@@ -1,6 +1,7 @@
 #include "frame.h"
 
 #include "camera.h"
+#include "deep.h"
 #include "diag.h"
 #include "fixes.h"
 #include "log.h"
@@ -217,6 +218,7 @@ void frame_boundary() {
         }
         trace_frame(g.last ? ms_between(g.last, t) : 0.0, g.rate);
         fixes_poll_hotkeys();
+        deep_frame(g.last ? ms_between(g.last, t) : 0.0, g.rate);
     }
     g.last = t;
     survey_report(t);

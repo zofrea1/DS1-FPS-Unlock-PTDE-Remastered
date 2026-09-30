@@ -1,4 +1,5 @@
 #include "d3d.h"
+#include "deep.h"
 #include "diag.h"
 #include "dsfix.h"
 #include "frame.h"
@@ -40,6 +41,7 @@ DWORD WINAPI worker(void*) {
 
     const Settings settings = settings_load(dll_path);
     trace_set_dir(dll_path);
+    deep_set_dir(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("TargetFPS: %d", settings.target_fps);
 
