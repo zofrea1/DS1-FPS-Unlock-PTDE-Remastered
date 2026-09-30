@@ -22,8 +22,8 @@ LARGE_INTEGER g_freq{}, g_t0{};
 bool g_down = false;
 
 constexpr int kChrWords = 0x100;   // chr[0 .. 0x400)
-constexpr int kMcWords = 0x40;     // movement controller [0 .. 0x100)
-constexpr int kPhysWords = 0x80;   // physics [0 .. 0x200)
+constexpr int kMcWords = 0xC0;     // movement controller [0 .. 0x300)
+constexpr int kPhysWords = 0xC0;   // physics [0 .. 0x300)
 
 // Reads `words` dwords from `p`, zero-filled if the memory is not readable.
 bool read_words(const void* p, uint32_t* out, int words) {

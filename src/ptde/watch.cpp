@@ -69,7 +69,9 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
     }
     for (int i = 0; i < kSlots; ++i) {
         if (!(dr6 & (1u << i)) || !g_addr[i]) continue;
-        const uint32_t v = *static_cast<volatile uint32_t*>(g_addr[i]);
+        const bool exec = g_spec[i].base == 'x';
+        if (exec) ctx->EFlags |= 0x10000;  // resume flag: run the instruction this time
+        const uint32_t v = exec ? 0 : *static_cast<volatile uint32_t*>(g_addr[i]);
         float f;
         std::memcpy(&f, &v, 4);
         while (g_lock.exchange(1, std::memory_order_acquire) != 0) YieldProcessor();
@@ -138,7 +140,11 @@ void apply_registers(bool enable) {
                     for (int i = 0; i < kSlots && enable; ++i) {
                         if (!g_addr[i]) continue;
                         *regs[i] = reinterpret_cast<DWORD>(g_addr[i]);
-                        dr7 |= (1u << (i * 2)) | (1u << (16 + i * 4)) | (3u << (18 + i * 4));
+                        if (g_spec[i].base == 'x') {
+                            dr7 |= (1u << (i * 2));  // execute breakpoint: RW = 00, LEN = 00
+                        } else {
+                            dr7 |= (1u << (i * 2)) | (1u << (16 + i * 4)) | (3u << (18 + i * 4));
+                        }
                     }
                     ctx.Dr7 = dr7;
                     ctx.Dr6 = 0;
@@ -175,7 +181,17 @@ void arm() {
         }
         proxy_pos = static_cast<const uint8_t*>(result);
     }
-    LOG_INFO("Watch: chr=%p mc=%p phys=%p proxy position=%p", chr, mc, phys, proxy_pos);
+    const uint8_t* proxy_vel = nullptr;
+    if (const void* proxy = rd_ptr(phys + 0x38)) {
+        void* result = nullptr;
+        __try {
+            using GetVel = void*(__fastcall*)(const void*, void*);
+            result = reinterpret_cast<GetVel>(0x008F23B0)(proxy, nullptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        proxy_vel = static_cast<const uint8_t*>(result);
+    }
+    LOG_INFO("Watch: chr=%p mc=%p phys=%p proxy position=%p velocity=%p", chr, mc, phys, proxy_pos, proxy_vel);
     {
         // The physics body, as floats and hex, to read fields that the CSV does not cover.
         char line[256];
@@ -196,7 +212,12 @@ void arm() {
     for (int i = 0; i < kSlots; ++i) {
         g_addr[i] = nullptr;
         if (i >= g_nspec) continue;
-        const uint8_t* base = g_spec[i].base == 'c' ? chr : g_spec[i].base == 'm' ? mc : g_spec[i].base == 'y' ? proxy_pos : phys;
+        const uint8_t* base = g_spec[i].base == 'c'   ? chr
+                              : g_spec[i].base == 'm' ? mc
+                              : g_spec[i].base == 'y' ? proxy_pos
+                              : g_spec[i].base == 'v' ? proxy_vel
+                              : g_spec[i].base == 'x' ? nullptr
+                                                      : phys;
         g_addr[i] = const_cast<uint8_t*>(base + g_spec[i].offset);
         LOG_INFO("Watch: slot %d = %c+0x%X at %p", i, g_spec[i].base, g_spec[i].offset, g_addr[i]);
     }
