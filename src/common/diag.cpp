@@ -22,6 +22,7 @@ LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
 uint64_t (*g_steps)() = nullptr;
 float (*g_frame_ms)() = nullptr;
 void (*g_extra)(char*, unsigned) = nullptr;
+void (*g_tick)() = nullptr;
 
 // "module.dll+0x1234" for an address, or "unbacked memory" for code we or the game allocated.
 void describe_address(const void* address, char* out, size_t size) {
@@ -109,6 +110,9 @@ DWORD WINAPI watchdog(void*) {
     for (;;) {
         Sleep(1000);
         ++since_heartbeat;
+        if (g_tick) {
+            g_tick();
+        }
         const uint64_t now = g_steps ? g_steps() : 0;
         if (now == 0) {
             since_heartbeat = 0;  // nothing is being stepped yet (startup, menus before the hook is active)
@@ -168,10 +172,12 @@ void diag_install(const wchar_t* dll_path, const wchar_t* dump_name) {
     g_previous_filter = SetUnhandledExceptionFilter(unhandled_filter);
 }
 
-void diag_watchdog_start(uint64_t (*steps)(), float (*frame_ms)(), void (*extra)(char* out, unsigned size)) {
+void diag_watchdog_start(uint64_t (*steps)(), float (*frame_ms)(), void (*extra)(char* out, unsigned size),
+                         void (*tick)()) {
     g_steps = steps;
     g_frame_ms = frame_ms;
     g_extra = extra;
+    g_tick = tick;
     HANDLE thread = CreateThread(nullptr, 0, watchdog, nullptr, 0, nullptr);
     if (thread) {
         SetThreadPriority(thread, THREAD_PRIORITY_BELOW_NORMAL);

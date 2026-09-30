@@ -17,4 +17,6 @@ void diag_install(const wchar_t* dll_path, const wchar_t* dump_name);
 // `steps` returns a counter that increases once per simulation/render step; `frame_ms`
 // returns the most recent frame time in milliseconds (for the heartbeat line).
 // `extra` (optional) appends mod-specific counters to the heartbeat line.
-void diag_watchdog_start(uint64_t (*steps)(), float (*frame_ms)(), void (*extra)(char* out, unsigned size) = nullptr);
+// `tick` (optional) runs once a second on the watchdog thread.
+void diag_watchdog_start(uint64_t (*steps)(), float (*frame_ms)(), void (*extra)(char* out, unsigned size) = nullptr,
+                         void (*tick)() = nullptr);

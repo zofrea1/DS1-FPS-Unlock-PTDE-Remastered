@@ -1760,6 +1760,33 @@ LONG* g_scheduler_mode = nullptr;
 
 // One line of flipper state for the heartbeat: a rest or a map reload may replace the scheduler
 // object, and this shows whether the one the mod switched is still the active one.
+// Once a second: log when the flipper object's state changes (the game switching it back, or
+// replacing the object after a rest or map load), with the time since the mod switched it.
+void flipper_tick() {
+    if (!g_scheduler_object) {
+        return;
+    }
+    static int last = -1;
+    static int lines = 0;
+    uintptr_t vtable = 0;
+    LONG mode = -1;
+    bool ok = true;
+    __try {
+        vtable = *reinterpret_cast<uintptr_t*>(g_scheduler_object);
+        mode = *g_scheduler_mode;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    const uintptr_t v60 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper60_vtable));
+    const uintptr_t v140 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper140_vtable));
+    const int state = !ok ? 3 : (vtable == v140 ? 1 : (vtable == v60 ? 0 : 2)) + 10 * static_cast<int>(mode);
+    if (state != last && lines < 30) {
+        ++lines;
+        last = state;
+        LOG_INFO("Flipper state: %s, mode %ld", !ok ? "unreadable" : (vtable == v140 ? "140 Hz" : (vtable == v60 ? "60 Hz" : "other")), mode);
+    }
+}
+
 void describe_flipper(char* out, unsigned size) {
     uintptr_t vtable = 0;
     LONG mode = -1;
@@ -1931,7 +1958,7 @@ bool patches_apply() {
     diag_watchdog_start(
         [] { return g_sim_count.load(std::memory_order_relaxed); },
         [] { return g_frame_dt.load(std::memory_order_relaxed) * 1000.0f; },
-        describe_flipper);
+        describe_flipper, flipper_tick);
     LOG_INFO("DS1 Remastered FPS Unlock v1.1.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
              g_variable_dt.load() ? "measured frame time" : "fixed 1/TargetFPS");
     return true;
