@@ -1175,6 +1175,158 @@ bool patch_trace() {
     return true;
 }
 
+// Lock-on camera. ChrFollowCam::Update (0x236C60; rcx = camera, xmm1 = step, r8 = character) smooths
+// the camera toward its target with blend weights applied once per frame and tuned for 60 FPS:
+// [camera+0x23C] for the lock-on yaw/pitch state and [camera+0x1BC] for the orientation filter
+// (both 0.1 in the retail constructor). At a higher frame rate the same per-frame weights finish
+// a pan in a fraction of the time, so switching targets snaps. The weights are replaced before
+// every update by the equivalent for this frame's step: k applied n = step * 60 times is
+// 1 - (1 - k)^n. Two call sites, both retargeted at a stub that does this and forwards.
+constexpr uint32_t kFollowUpdate = 0x236C60;
+constexpr uint32_t kFollowCallSites[] = {0x23518C, 0x23527A};
+constexpr uint32_t kFollowFields[] = {0x23C, 0x1BC};
+
+using FollowFn = void (*)(void*, float, void*, void*);
+FollowFn g_follow = nullptr;
+std::atomic<int> g_camera_state{0};
+
+struct FollowField {
+    float original = 0.0f;
+    float written = -1.0f;
+};
+struct FollowCamera {
+    void* object = nullptr;
+    FollowField field[2];
+    bool logged = false;
+};
+FollowCamera g_follow_cameras[4];
+
+FollowCamera* follow_slot(void* object) {
+    FollowCamera* free_slot = nullptr;
+    for (auto& c : g_follow_cameras) {
+        if (c.object == object) {
+            return &c;
+        }
+        if (!c.object && !free_slot) {
+            free_slot = &c;
+        }
+    }
+    if (!free_slot) {
+        free_slot = &g_follow_cameras[0];
+    }
+    *free_slot = FollowCamera();
+    free_slot->object = object;
+    return free_slot;
+}
+
+float scaled_weight(float original, double n) {
+    if (!(original > 0.0f) || original >= 1.0f) {
+        return original;
+    }
+    if (original <= 0.5f) {
+        return static_cast<float>(1.0 - std::pow(1.0 - static_cast<double>(original), n));
+    }
+    return static_cast<float>(std::pow(static_cast<double>(original), n));
+}
+
+bool follow_read(void* object, uint32_t offset, float* out) {
+    __try {
+        *out = *reinterpret_cast<volatile float*>(static_cast<uint8_t*>(object) + offset);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool follow_write(void* object, uint32_t offset, float value) {
+    __try {
+        *reinterpret_cast<volatile float*>(static_cast<uint8_t*>(object) + offset) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void scale_follow_camera(void* object, float step) {
+    if (!object) {
+        return;
+    }
+    double n = static_cast<double>(step) * 60.0;
+    if (n < 0.02) {
+        n = 0.02;
+    }
+    if (n > 10.0) {
+        n = 10.0;
+    }
+    FollowCamera* cam = follow_slot(object);
+    for (int i = 0; i < 2; ++i) {
+        float value = 0.0f;
+        if (!follow_read(object, kFollowFields[i], &value)) {
+            return;
+        }
+        FollowField& f = cam->field[i];
+        if (value != f.written) {
+            f.original = value;  // the game (re)wrote it: that is the 60 FPS value
+        }
+        const float target = scaled_weight(f.original, n);
+        f.written = target;
+        follow_write(object, kFollowFields[i], target);
+    }
+    if (!cam->logged) {
+        cam->logged = true;
+        LOG_INFO("Follow camera %p: blend weights +0x23C=%.4f +0x1BC=%.4f (60 FPS values)", object,
+                 cam->field[0].original, cam->field[1].original);
+    }
+}
+
+void hook_follow(void* camera, float step, void* chr, void* extra) {
+    scale_follow_camera(camera, step);
+    g_follow(camera, step, chr, extra);
+}
+
+bool patch_camera() {
+    if (g_fix_camera.load(std::memory_order_relaxed) == 0) {
+        LOG_INFO("Lock-on camera fix disabled by FixCamera=false");
+        return true;
+    }
+    for (uint32_t rva : kFollowCallSites) {
+        auto* site = image_rva(rva);
+        int32_t disp = 0;
+        std::memcpy(&disp, site + 1, sizeof(disp));
+        if (site[0] != 0xE8 || site + 5 + disp != image_rva(kFollowUpdate)) {
+            LOG_ERROR("Follow camera call at 0x%08X does not match this build", rva);
+            return false;
+        }
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(image_rva(kFollowCallSites[0])));
+    if (!page) {
+        LOG_ERROR("Could not allocate the follow camera stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    // jmp [rip+0] ; the address of hook_follow
+    const uint8_t jump[6] = {0xFF, 0x25, 0, 0, 0, 0};
+    void* target = reinterpret_cast<void*>(hook_follow);
+    std::memcpy(page, jump, sizeof(jump));
+    std::memcpy(page + sizeof(jump), &target, sizeof(target));
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not protect the follow camera stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, sizeof(jump) + sizeof(target));
+    g_follow = reinterpret_cast<FollowFn>(image_rva(kFollowUpdate));
+    for (uint32_t rva : kFollowCallSites) {
+        auto* site = image_rva(rva);
+        if (!write_disp32(site + 1, site + 5, page)) {
+            LOG_ERROR("Could not retarget the follow camera call at 0x%08X", rva);
+            return false;
+        }
+    }
+    LOG_INFO("Lock-on camera smoothing follows the frame time (2 call sites)");
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -1216,6 +1368,11 @@ void try_delayed_patches() {
     if (g_move_dt_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_move_dt();
         g_move_dt_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_camera_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_camera();
+        g_camera_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_trace_state.compare_exchange_strong(expected, 1)) {

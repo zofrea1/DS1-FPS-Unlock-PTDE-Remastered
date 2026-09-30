@@ -9,6 +9,7 @@ inline std::atomic<int> g_scheduler_active{0};
 inline std::atomic<int> g_is_game{0};
 inline std::atomic<int> g_fix_move_dt{1};
 inline std::atomic<int> g_fix_step_down{1};
+inline std::atomic<int> g_fix_camera{1};
 // 1 = the game's step is the measured frame time (TargetFPS only caps the frame rate);
 // 0 = the game's step is a fixed 1/TargetFPS (the game slows down when the rate is not held).
 inline std::atomic<int> g_variable_dt{1};

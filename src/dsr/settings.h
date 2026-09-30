@@ -18,6 +18,9 @@ struct Settings {
     // Scales the ground step-down allowance to the frame rate (ledge/lip drop
     // boost and ladder fall-through at high FPS). Set false to A/B test.
     bool fix_step_down = true;
+    // Makes the lock-on camera pan (target switches, locking onto an enemy near the edge of the
+    // screen) take the same time at any frame rate. Set false to A/B test.
+    bool fix_camera = true;
     // Hardware write-watch on character height (implies trace). Diagnostic only.
     bool watch = false;
 };
