@@ -1804,7 +1804,7 @@ void describe_flipper(char* out, unsigned size) {
     const uintptr_t v60 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper60_vtable));
     const uintptr_t v140 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper140_vtable));
     std::snprintf(out, size, "flipper %s, mode %ld, menu queries suppressed %llu",
-                  !ok ? "unreadable" : (vtable == v140 ? "140 Hz (switched)" : (vtable == v60 ? "60 Hz (NOT switched)" : "other")),
+                  !ok ? "unreadable" : (vtable == v140 ? "140 Hz (switched)" : (vtable == v60 ? "60 Hz (the game resets it right after the switch; normal)" : "other")),
                   mode, static_cast<unsigned long long>(g_menu_suppressed.load(std::memory_order_relaxed)));
 }
 
