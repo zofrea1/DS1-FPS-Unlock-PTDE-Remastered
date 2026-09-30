@@ -39,6 +39,72 @@ Episode g_episodes[16];
 volatile long g_capped = 0;
 volatile long g_enabled = 1;
 
+// Ground snap reach. Each frame the body is lifted by the step height [body+0xD4] (0.3), moved,
+// then pulled down onto ground within reach of the lifted position; the probe length comes
+// from [body+0x208] (0.4), the most the body can be pulled down in one frame. At 30 FPS that is
+// also a rate limit: a surface that drops away faster than 0.4 per 1/30 s lets the body leave
+// it. At 120 FPS the surface drops 1/4 as much per frame, so the body stays glued to a sloped
+// lip and rides it down at up to 0.4 per frame (a boost of over a metre in three frames). The
+// retail rule is "at most 0.4 over one 1/30 s frame", so each frame the reach is set to
+// 0.4 * tolerance minus the descent over the last (frames per 1/30 s - 1) frames, capped at 0.4.
+constexpr uint32_t kReachOffset = 0x208;
+
+struct GroundState {
+    const void* body = nullptr;
+    float base = 0.0f;
+    float written = -1.0f;
+    float drop[8] = {};
+    unsigned head = 0;
+    ULONGLONG last_ms = 0;
+};
+constexpr size_t kGroundSlots = 256;
+GroundState g_ground[kGroundSlots];
+
+GroundState* ground_slot(const void* body, ULONGLONG now) {
+    const size_t start = ((reinterpret_cast<uintptr_t>(body) >> 4) * 2654435761u) & (kGroundSlots - 1);
+    for (size_t n = 0; n < 32; ++n) {
+        GroundState& s = g_ground[(start + n) & (kGroundSlots - 1)];
+        if (s.body == body) return &s;
+        if (!s.body || now - s.last_ms > 60000) {
+            s = GroundState();
+            s.body = body;
+            s.last_ms = now;
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+void ground_reach_step(const void* body, float dt, float proxy_y, float start_y, float snap) {
+    const ULONGLONG now = GetTickCount64();
+    GroundState* state = ground_slot(body, now);
+    if (!state) return;
+    const float net = proxy_y + snap - start_y;  // the lift is already inside proxy_y
+    state->last_ms = now;
+    state->drop[state->head & 7] = net < 0.0f ? -net : 0.0f;
+    state->head++;
+
+    auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(static_cast<const uint8_t*>(body)) + kReachOffset);
+    const float current = *reach;
+    if (current != state->written) {
+        state->base = current;  // the game (re)wrote it: that is the retail value
+    }
+    if (!(state->base > 0.0f) || state->base > 4.0f) return;  // not the value we expect
+    int window = dt > 0.0f ? static_cast<int>(1.0f / (30.0f * dt) + 0.5f) : 1;
+    window = window < 1 ? 1 : (window > 8 ? 8 : window);
+    float recent = 0.0f;  // descent over the last (window - 1) frames, including the one just done
+    for (int i = 0; i < window - 1; ++i) {
+        recent += state->drop[(state->head - 1 - i) & 7];
+    }
+    constexpr float kTolerance = 1.2f;
+    float allowed = state->base * kTolerance - recent;
+    if (allowed > state->base) allowed = state->base;
+    const float floor_reach = state->base * 0.05f;
+    if (allowed < floor_reach) allowed = floor_reach;
+    state->written = allowed;
+    *reach = allowed;
+}
+
 // Written by the lift stub (machine code): slot (body >> 4) & 0xFF holds the body pointer.
 uint32_t g_lifted[256] = {};
 
@@ -94,6 +160,10 @@ float __cdecl snap_factor(const void* body, float proxy_y, float start_y) {
         for (auto& e : g_episodes) {
             if (e.body == body) e.applied = 0.0f;  // balanced frame: the next unbalanced run is a new episode
         }
+    }
+    if (g_enabled) {
+        const float b4 = *reinterpret_cast<const float*>(static_cast<const uint8_t*>(body) + 0xB4);
+        ground_reach_step(body, static_cast<float>(fixes_last_dt()), proxy_y, start_y, b4 * result);
     }
     Debug* d = debug_slot(body);
     d->body = body;
