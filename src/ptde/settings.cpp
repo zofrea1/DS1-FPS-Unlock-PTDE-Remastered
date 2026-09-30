@@ -80,6 +80,18 @@ Settings settings_load(const wchar_t* dll_path) {
             s.vblank_patch = parse_bool(val);
         } else if (key == "fullscreenrefreshrate") {
             s.fullscreen_refresh = std::atoi(val.c_str());
+        } else if (key == "fixslide") {
+            s.fix_slide = parse_bool(val);
+        } else if (key == "fixdamping") {
+            s.fix_damping = parse_bool(val);
+        } else if (key == "fixtimers") {
+            s.fix_timers = parse_bool(val);
+        } else if (key == "fixsmoothing") {
+            s.fix_smoothing = parse_bool(val);
+        } else if (key == "watch") {
+            std::strncpy(s.watch, val.c_str(), sizeof(s.watch) - 1);
+        } else if (key == "trace") {
+            s.trace = parse_bool(val);
         } else if (key == "profile") {
             s.profile = parse_bool(val);
         } else if (key == "skippresentrepeat") {

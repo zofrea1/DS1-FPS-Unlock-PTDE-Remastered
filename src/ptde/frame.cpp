@@ -1,8 +1,11 @@
 #include "frame.h"
 
+#include "fixes.h"
 #include "log.h"
 #include "present.h"
 #include "profile.h"
+#include "trace.h"
+#include "watch.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -55,6 +58,7 @@ struct State {
     LONGLONG start = 0;
     LONGLONG report = 0;
     bool driver = false;
+    int rate = 0;
 
     // per-window survey
     int count[kCommands]{};
@@ -191,6 +195,21 @@ void frame_boundary() {
             *g.step = dt;
             g.written = dt;
         }
+        fixes_update(g.driver ? static_cast<double>(g.written) : 1.0 / 30.0);
+    }
+    watch_poll();
+    if (g.cfg.trace) {
+        static const int kRates[4] = {30, 60, 120, 240};
+        static const int kKeys[4] = {VK_F4, VK_F5, VK_F6, VK_F7};
+        for (int i = 0; i < 4; ++i) {
+            if ((GetAsyncKeyState(kKeys[i]) & 0x8000) != 0 && g.rate != kRates[i]) {
+                g.rate = kRates[i];
+                g.period = g.freq.QuadPart / g.rate;
+                LOG_INFO("Trace: frame rate set to %d FPS", g.rate);
+            }
+        }
+        trace_frame(g.last ? ms_between(g.last, t) : 0.0, g.rate);
+        fixes_poll_hotkeys();
     }
     g.last = t;
     survey_report(t);
@@ -289,7 +308,8 @@ bool frame_install(const Settings& settings) {
     QueryPerformanceCounter(&now);
     g.start = now.QuadPart;
     g.report = now.QuadPart;
-    g.period = g.freq.QuadPart / settings.target_fps;
+    g.rate = settings.target_fps;
+    g.period = g.freq.QuadPart / g.rate;
     g.step = reinterpret_cast<float*>(kTimestepVa);
 
     if (settings.driver) {
@@ -314,6 +334,15 @@ bool frame_install(const Settings& settings) {
     LOG_INFO("Frame hook installed at %08X: driver=%s target=%d FPS vblank_patch=%s survey=%ds",
              kDispatchCall, g.driver ? "on" : "off", settings.target_fps, settings.vblank_patch ? "on" : "off",
              settings.survey_seconds);
+    watch_set_spec(settings.watch);
+    if (settings.driver) {
+        FixFlags flags;
+        flags.slide = settings.fix_slide;
+        flags.damping = settings.fix_damping;
+        flags.timers = settings.fix_timers;
+        flags.smoothing = settings.fix_smoothing;
+        fixes_install(flags);
+    }
     present_install(settings);
     if (settings.profile) {
         profile_start();

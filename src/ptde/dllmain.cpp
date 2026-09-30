@@ -4,6 +4,7 @@
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
+#include "trace.h"
 #include "window.h"
 #include "xinput_proxy.h"
 
@@ -36,6 +37,7 @@ DWORD WINAPI worker(void*) {
     LOG_INFO("EXE: %s", exe_narrow);
 
     const Settings settings = settings_load(dll_path);
+    trace_set_dir(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("TargetFPS: %d", settings.target_fps);
 
@@ -61,8 +63,8 @@ DWORD WINAPI worker(void*) {
         LOG_INFO("FPSUnlock is false. The game is unchanged.");
         return 0;
     }
-    if (settings.target_fps < 31 || settings.target_fps > 1000) {
-        LOG_ERROR("TargetFPS must be from 31 to 1000. The game is unchanged.");
+    if (settings.target_fps < 20 || settings.target_fps > 1000) {
+        LOG_ERROR("TargetFPS must be from 20 to 1000. The game is unchanged.");
         return 0;
     }
     if (patches_probe(settings)) {

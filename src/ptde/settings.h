@@ -14,6 +14,16 @@ struct Settings {
     int fullscreen_refresh = -1;
     // Press F10 in a busy scene to sample the render thread for 15 s and log where the time goes.
     bool profile = false;
+    // Frame-rate independence fixes for constants tuned for 30 FPS (see fixes.h).
+    bool fix_slide = true;
+    bool fix_damping = true;
+    bool fix_timers = true;
+    bool fix_smoothing = true;
+    // Diagnostic: F9 records the player's state to a CSV; F4/F5/F6/F7 switch the frame
+    // rate live to 30/60/120/240 FPS.
+    bool trace = false;
+    // Diagnostic: hardware write watchpoints on player fields, e.g. "c:1B8,p:180". F8 arms/reports.
+    char watch[96] = {};
     // Disable the game's catch-up loop that re-presents a frame until the display's
     // vblank counter reaches its 30 FPS schedule.
     bool skip_present_repeat = false;
