@@ -19,6 +19,8 @@
 
 #pragma comment(lib, "winmm.lib")
 
+volatile int g_cmd_totals[6] = {};
+
 namespace {
 
 // Fixed-base 32-bit image (checked at install). All addresses are absolute.
@@ -225,6 +227,7 @@ int __fastcall hook_getcmd(void* self, void* edx) {
     const int cmd = g_orig(self, edx);
     if (cmd >= 0 && cmd < kCommands) {
         ++g.count[cmd];
+        ++g_cmd_totals[cmd];
     }
     if (cmd == 2 || cmd == 5) {
         frame_boundary();

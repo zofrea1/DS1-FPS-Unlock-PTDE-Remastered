@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstring>
 
+extern volatile int g_cmd_totals[6];
+
 namespace {
 
 constexpr uint32_t kWorldChrMan = 0x0137DC70;
@@ -112,7 +114,11 @@ void start_capture() {
     for (int i = 0; i < kChrWords; ++i) std::fprintf(g_file, ",c%03X", i * 4);
     for (int i = 0; i < kMcWords; ++i) std::fprintf(g_file, ",m%03X", i * 4);
     for (int i = 0; i < kPhysWords; ++i) std::fprintf(g_file, ",p%03X", i * 4);
-    std::fprintf(g_file, ",sn_dy,sn_factor,sn_lifted,sn_calls\n");
+    std::fprintf(g_file, ",sn_dy,sn_factor,sn_lifted,sn_calls");
+    for (int i = 0; i < 6; ++i) std::fprintf(g_file, ",cmd%d", i);
+    for (int i = 0; i < 0x20; ++i) std::fprintf(g_file, ",g1_%02X", i * 4);
+    for (int i = 0; i < 0x10; ++i) std::fprintf(g_file, ",g2_%02X", i * 4);
+    std::fprintf(g_file, "\n");
     g_row = 0;
     snapshot("start");
     QueryPerformanceCounter(&g_t0);
@@ -174,6 +180,15 @@ void trace_frame(double dt_ms, int target_fps) {
         unsigned calls = 0;
         snap_debug(phys, &dy, &factor, &lifted, &calls);
         std::fprintf(g_file, ",%.4f,%.4f,%d,%u", dy, factor, lifted, calls);
+    }
+    for (int i = 0; i < 6; ++i) std::fprintf(g_file, ",%d", g_cmd_totals[i]);
+    {
+        // Global clock objects: [0x13784A0] and [0x137CDFC] (the countdown the 1/30 timer touches).
+        static uint32_t g1[0x20], g2[0x10];
+        read_words(read_ptr(reinterpret_cast<const void*>(0x013784A0)), g1, 0x20);
+        read_words(read_ptr(reinterpret_cast<const void*>(0x0137CDFC)), g2, 0x10);
+        for (int i = 0; i < 0x20; ++i) std::fprintf(g_file, ",%x", g1[i]);
+        for (int i = 0; i < 0x10; ++i) std::fprintf(g_file, ",%x", g2[i]);
     }
     std::fprintf(g_file, "\n");
 }
