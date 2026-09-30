@@ -1,6 +1,7 @@
 #include "trace.h"
 
 #include "log.h"
+#include "snap.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -111,7 +112,7 @@ void start_capture() {
     for (int i = 0; i < kChrWords; ++i) std::fprintf(g_file, ",c%03X", i * 4);
     for (int i = 0; i < kMcWords; ++i) std::fprintf(g_file, ",m%03X", i * 4);
     for (int i = 0; i < kPhysWords; ++i) std::fprintf(g_file, ",p%03X", i * 4);
-    std::fprintf(g_file, "\n");
+    std::fprintf(g_file, ",sn_dy,sn_factor,sn_lifted,sn_calls\n");
     g_row = 0;
     snapshot("start");
     QueryPerformanceCounter(&g_t0);
@@ -167,5 +168,12 @@ void trace_frame(double dt_ms, int target_fps) {
     for (int i = 0; i < kChrWords; ++i) std::fprintf(g_file, ",%x", c[i]);
     for (int i = 0; i < kMcWords; ++i) std::fprintf(g_file, ",%x", m[i]);
     for (int i = 0; i < kPhysWords; ++i) std::fprintf(g_file, ",%x", p[i]);
+    {
+        float dy = 0, factor = 0;
+        int lifted = 0;
+        unsigned calls = 0;
+        snap_debug(phys, &dy, &factor, &lifted, &calls);
+        std::fprintf(g_file, ",%.4f,%.4f,%d,%u", dy, factor, lifted, calls);
+    }
     std::fprintf(g_file, "\n");
 }
