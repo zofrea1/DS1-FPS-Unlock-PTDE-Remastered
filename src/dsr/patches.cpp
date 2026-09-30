@@ -1251,7 +1251,11 @@ void scale_follow_camera(void* object, float step) {
     if (!object) {
         return;
     }
-    double n = static_cast<double>(step) * 60.0;
+    // n = how many "frames" of the tuned rate this step covers. Remastered keeps the weights it
+    // inherited from the 30 FPS game, so at its native 60 FPS the pan is twice as fast as the
+    // original; CameraPtdeSpeed evaluates them at 30 frames a second instead.
+    const double tuned_rate = g_camera_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+    double n = static_cast<double>(step) * tuned_rate;
     if (n < 0.02) {
         n = 0.02;
     }
@@ -1274,7 +1278,7 @@ void scale_follow_camera(void* object, float step) {
     }
     if (!cam->logged) {
         cam->logged = true;
-        LOG_INFO("Follow camera %p: blend weights +0x23C=%.4f +0x1BC=%.4f (60 FPS values)", object,
+        LOG_INFO("Follow camera %p: blend weights +0x23C=%.4f +0x1BC=%.4f (retail values)", object,
                  cam->field[0].original, cam->field[1].original);
     }
 }

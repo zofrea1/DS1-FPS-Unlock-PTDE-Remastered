@@ -56,6 +56,9 @@ DWORD WINAPI worker(void*) {
     g_menu_filter.store(settings.menu_input_filter ? 1 : 0, std::memory_order_relaxed);
     LOG_INFO("MenuInputFilter: %s", settings.menu_input_filter ? "true" : "false");
     g_fix_camera.store(settings.fix_camera ? 1 : 0, std::memory_order_relaxed);
+    g_camera_ptde_speed.store(settings.camera_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixCamera: %s, CameraPtdeSpeed: %s", settings.fix_camera ? "true" : "false",
+             settings.camera_ptde_speed ? "true" : "false");
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
     if (!patches_apply()) {

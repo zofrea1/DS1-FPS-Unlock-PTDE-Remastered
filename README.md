@@ -37,6 +37,8 @@ Several movement systems in the retail game are counted once per displayed frame
 
 `FixMoveDt` and `FixStepDown` in the INI switch the last two on and off for comparison.
 
+- **Lock-on camera.** Switching targets, or locking onto an enemy near the edge of the screen, used to snap at a high frame rate because the camera's smoothing is applied once per frame. `FixCamera` (on by default) makes the pan take the same time at any frame rate. The retail game keeps the weights it inherited from the 30 FPS version, so its pan at 60 FPS is twice as fast as the original's; `CameraPtdeSpeed = true` restores the original speed.
+
 **Accuracy.** Physics is very close to the game running at 60 FPS, and more than good enough for casual and serious play. It is not a perfect 1:1 match: retail decides some of these things on a 1/60 s frame grid, so a borderline slope or lip can behave slightly differently at 180 or 240 FPS. Speedrunners and anyone who needs stock-exact precision should not use this.
 
 Weapon durability and hit windows are still worth checking. Menu and HUD animations take the scaled menu step, so they keep the retail pace. Menu navigation and mouse look are scaled back toward the 60 FPS rate (mouse counts are divided by the time they were collected over, so a slow frame does not make the camera jump). Cloth uses the same scale on the separate Havok step. The sprint and movement constants are written a few seconds after startup, once the executable will keep a code edit.

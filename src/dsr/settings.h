@@ -21,6 +21,9 @@ struct Settings {
     // Makes the lock-on camera pan (target switches, locking onto an enemy near the edge of the
     // screen) take the same time at any frame rate. Set false to A/B test.
     bool fix_camera = true;
+    // Pan the lock-on camera at the speed of the original Dark Souls (30 FPS) instead of the
+    // snappier Remastered speed. Needs FixCamera.
+    bool camera_ptde_speed = false;
     // Hardware write-watch on character height (implies trace). Diagnostic only.
     bool watch = false;
 };

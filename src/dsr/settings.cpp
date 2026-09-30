@@ -83,6 +83,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.trace = parse_bool(val);
         } else if (key == "fixstepdown") {
             s.fix_step_down = parse_bool(val);
+        } else if (key == "cameraptdespeed") {
+            s.camera_ptde_speed = parse_bool(val);
         } else if (key == "fixcamera") {
             s.fix_camera = parse_bool(val);
         } else if (key == "watch") {
