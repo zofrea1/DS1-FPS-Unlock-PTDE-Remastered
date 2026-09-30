@@ -1,5 +1,6 @@
 #include "frame.h"
 
+#include "camera.h"
 #include "diag.h"
 #include "fixes.h"
 #include "log.h"
@@ -354,6 +355,9 @@ bool frame_install(const Settings& settings) {
         fixes_install(flags);
         if (settings.fix_ladder) {
             snap_install();
+        }
+        if (settings.fix_camera) {
+            camera_install();
         }
     }
     present_install(settings);

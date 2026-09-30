@@ -1,6 +1,7 @@
 #include "fixes.h"
 
 #include "log.h"
+#include "camera.h"
 #include "snap.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -138,6 +139,13 @@ void fixes_poll_hotkeys() {
         LOG_INFO("Fix group 'ladder/ledge snap' is now %s", snap_enabled() ? "ON" : "OFF");
     }
     snap_key = snap_down;
+    static bool camera_key = false;
+    const bool camera_down = ctrl && (GetAsyncKeyState('7') & 0x8000) != 0;
+    if (camera_down && !camera_key) {
+        camera_set_enabled(!camera_enabled());
+        LOG_INFO("Fix group 'camera' is now %s", camera_enabled() ? "ON" : "OFF");
+    }
+    camera_key = camera_down;
     for (int i = 0; i < 5; ++i) {
         const bool down = ctrl && (GetAsyncKeyState('1' + i) & 0x8000) != 0;
         if (down && !g_keys_down[i]) {

@@ -86,6 +86,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_damping = parse_bool(val);
         } else if (key == "fixtimers") {
             s.fix_timers = parse_bool(val);
+        } else if (key == "fixcamera") {
+            s.fix_camera = parse_bool(val);
         } else if (key == "fixladder") {
             s.fix_ladder = parse_bool(val);
         } else if (key == "fixgraze") {
