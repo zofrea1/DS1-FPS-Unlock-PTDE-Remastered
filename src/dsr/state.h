@@ -10,6 +10,9 @@ inline std::atomic<int> g_is_game{0};
 inline std::atomic<int> g_fix_move_dt{1};
 inline std::atomic<int> g_fix_step_down{1};
 inline std::atomic<int> g_fix_camera{1};
+inline std::atomic<int> g_fix_graze{1};
+inline std::atomic<int> g_fix_damping{1};
+inline std::atomic<int> g_fix_slide{1};
 // 1 = the lock-on camera pans at the original Prepare to Die Edition speed (half the Remastered speed).
 inline std::atomic<int> g_camera_ptde_speed{0};
 // 1 = the game's step is the measured frame time (TargetFPS only caps the frame rate);

@@ -34,7 +34,7 @@ DWORD WINAPI worker(void*) {
 
     const Settings settings = settings_load(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
-    LOG_INFO("TargetFPS: %d", settings.target_fps);
+    LOG_INFO("MaxFPS: %d", settings.target_fps);
     if ((settings.trace || settings.watch) && !trace_start(dll_path)) {
         LOG_ERROR("Trace was requested but the CSV could not be opened");
     }
@@ -46,7 +46,7 @@ DWORD WINAPI worker(void*) {
         return 0;
     }
     if (settings.target_fps < 61 || settings.target_fps > 1000) {
-        LOG_ERROR("TargetFPS must be from 61 to 1000. The game is unchanged.");
+        LOG_ERROR("MaxFPS must be from 61 to 1000. The game is unchanged.");
         return 0;
     }
     g_target_fps.store(static_cast<uint32_t>(settings.target_fps), std::memory_order_relaxed);
@@ -59,6 +59,9 @@ DWORD WINAPI worker(void*) {
     g_camera_ptde_speed.store(settings.camera_ptde_speed ? 1 : 0, std::memory_order_relaxed);
     LOG_INFO("FixCamera: %s, CameraPtdeSpeed: %s", settings.fix_camera ? "true" : "false",
              settings.camera_ptde_speed ? "true" : "false");
+    g_fix_graze.store(settings.fix_graze ? 1 : 0, std::memory_order_relaxed);
+    g_fix_damping.store(settings.fix_damping ? 1 : 0, std::memory_order_relaxed);
+    g_fix_slide.store(settings.fix_slide ? 1 : 0, std::memory_order_relaxed);
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
     if (!patches_apply()) {

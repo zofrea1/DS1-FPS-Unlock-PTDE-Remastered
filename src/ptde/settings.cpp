@@ -72,9 +72,9 @@ Settings settings_load(const wchar_t* dll_path) {
         const std::string val = trim(line.substr(eq + 1));
         if (key == "fpsunlock") {
             s.fps_unlock = parse_bool(val);
-        } else if (key == "targetfps") {
+        } else if (key == "maxfps" || key == "targetfps") {
             s.target_fps = std::atoi(val.c_str());
-        } else if (key == "driver") {
+        } else if (key == "variableframetime" || key == "driver") {
             s.driver = parse_bool(val);
         } else if (key == "vblankpatch") {
             s.vblank_patch = parse_bool(val);

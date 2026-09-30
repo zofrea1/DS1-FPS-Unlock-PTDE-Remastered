@@ -1349,17 +1349,17 @@ void try_delayed_patches() {
     }
     expected = 0;
     if (g_speed_state.compare_exchange_strong(expected, 1)) {
-        const bool ok = patch_speed();
+        const bool ok = !g_fix_graze.load(std::memory_order_relaxed) || patch_speed();
         g_speed_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_decay_state.compare_exchange_strong(expected, 1)) {
-        const bool ok = patch_decay();
+        const bool ok = !g_fix_damping.load(std::memory_order_relaxed) || patch_decay();
         g_decay_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_slide_state.compare_exchange_strong(expected, 1)) {
-        const bool ok = patch_slide();
+        const bool ok = !g_fix_slide.load(std::memory_order_relaxed) || patch_slide();
         g_slide_state.store(ok ? 2 : -1);
     }
     expected = 0;

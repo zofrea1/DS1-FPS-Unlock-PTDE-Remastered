@@ -12,6 +12,10 @@ struct Settings {
     // Writes DSR-FPS-Unlock-trace.csv with per-character update samples. Off by
     // default: the file is large and the hook costs a little per update.
     bool trace = false;
+    // Sprint slowdown near geometry, airborne momentum and slope slide scaled to the frame time.
+    bool fix_graze = true;
+    bool fix_damping = true;
+    bool fix_slide = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;

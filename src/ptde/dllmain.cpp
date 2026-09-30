@@ -31,7 +31,7 @@ DWORD WINAPI worker(void*) {
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"PTDE-FPS-Unlock.log");
     diag_install(dll_path, L"PTDE-FPS-Unlock-crash.dmp");
-    LOG_INFO("DS1 PTDE FPS Unlock (development build)");
+    LOG_INFO("DS1 PTDE FPS Unlock v1.1.0");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
@@ -43,7 +43,7 @@ DWORD WINAPI worker(void*) {
     trace_set_dir(dll_path);
     deep_set_dir(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
-    LOG_INFO("TargetFPS: %d", settings.target_fps);
+    LOG_INFO("MaxFPS: %d", settings.target_fps);
 
     wchar_t game_dir[MAX_PATH];
     lstrcpynW(game_dir, exe_path, MAX_PATH);
@@ -68,7 +68,7 @@ DWORD WINAPI worker(void*) {
         return 0;
     }
     if (settings.target_fps < 20 || settings.target_fps > 1000) {
-        LOG_ERROR("TargetFPS must be from 20 to 1000. The game is unchanged.");
+        LOG_ERROR("MaxFPS must be from 20 to 1000. The game is unchanged.");
         return 0;
     }
     if (patches_probe(settings)) {

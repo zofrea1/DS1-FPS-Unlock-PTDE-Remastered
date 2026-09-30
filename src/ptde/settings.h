@@ -3,7 +3,7 @@
 struct Settings {
     bool fps_unlock = true;
     // Frames per second the game should aim for (a cap). PTDE runs at 30 FPS natively.
-    int target_fps = 240;
+    int target_fps = 120;
     // Overwrite the engine's fixed 1/30 step with the measured frame time.
     bool driver = true;
     // Change the game's swap-interval bookkeeping the way DSfix does (2 -> 5) so the
@@ -37,7 +37,7 @@ struct Settings {
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
     bool borderless = false;
     // Log a per-command summary for this many seconds after start (0 = off).
-    int survey_seconds = 30;
+    int survey_seconds = 0;
 };
 
 // Reads PTDE-FPS-Unlock.ini from the same directory as the DLL.

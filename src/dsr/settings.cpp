@@ -73,7 +73,7 @@ Settings settings_load(const wchar_t* dll_path) {
         const std::string val = trim(line.substr(eq + 1));
         if (key == "fpsunlock") {
             s.fps_unlock = parse_bool(val);
-        } else if (key == "targetfps") {
+        } else if (key == "maxfps" || key == "targetfps") {
             s.target_fps = std::atoi(val.c_str());
         } else if (key == "variableframetime") {
             s.variable_frame_time = parse_bool(val);
@@ -89,6 +89,12 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_camera = parse_bool(val);
         } else if (key == "watch") {
             s.watch = parse_bool(val);
+        } else if (key == "fixgraze") {
+            s.fix_graze = parse_bool(val);
+        } else if (key == "fixdamping") {
+            s.fix_damping = parse_bool(val);
+        } else if (key == "fixslide") {
+            s.fix_slide = parse_bool(val);
         } else if (key == "fixmovedt") {
             s.fix_move_dt = parse_bool(val);
         }
