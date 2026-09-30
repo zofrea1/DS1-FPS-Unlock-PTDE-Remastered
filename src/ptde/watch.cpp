@@ -35,6 +35,8 @@ struct Hit {
 };
 
 Spec g_spec[kSlots];
+volatile uint32_t g_exec_ecx[kSlots] = {};
+volatile uint32_t g_exec_arg0[kSlots] = {};
 int g_nspec = 0;
 void* g_addr[kSlots] = {};
 Hit g_hits[kMaxHits];
@@ -70,7 +72,18 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
     for (int i = 0; i < kSlots; ++i) {
         if (!(dr6 & (1u << i)) || !g_addr[i]) continue;
         const bool exec = g_spec[i].base == 'x';
-        if (exec) ctx->EFlags |= 0x10000;  // resume flag: run the instruction this time
+        if (exec) {
+            ctx->EFlags |= 0x10000;  // resume flag: run the instruction this time
+            // Remember the object the function was entered with: ecx (thiscall) and the first
+            // stack argument. The trace dumps what they point to while the watch is armed.
+            g_exec_ecx[i] = ctx->Ecx;
+            uint32_t arg0 = 0;
+            __try {
+                arg0 = *reinterpret_cast<const uint32_t*>(ctx->Esp + 4);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+            g_exec_arg0[i] = arg0;
+        }
         const uint32_t v = exec ? 0 : *static_cast<volatile uint32_t*>(g_addr[i]);
         float f;
         std::memcpy(&f, &v, 4);
@@ -279,4 +292,12 @@ void watch_poll() {
     }
     g_f8_down = down;
     if (g_armed && GetTickCount64() - g_armed_at > 40000) report();
+}
+
+uint32_t watch_exec_ecx(int slot) {
+    return slot >= 0 && slot < kSlots ? g_exec_ecx[slot] : 0;
+}
+
+uint32_t watch_exec_arg0(int slot) {
+    return slot >= 0 && slot < kSlots ? g_exec_arg0[slot] : 0;
 }

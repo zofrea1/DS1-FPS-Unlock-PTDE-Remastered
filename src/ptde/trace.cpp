@@ -2,6 +2,7 @@
 
 #include "log.h"
 #include "snap.h"
+#include "watch.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -27,6 +28,7 @@ bool g_down = false;
 constexpr int kChrWords = 0x100;   // chr[0 .. 0x400)
 constexpr int kMcWords = 0xC0;     // movement controller [0 .. 0x300)
 constexpr int kPhysWords = 0xC0;
+constexpr int kObjWords = 0x80;    // objects found by the execute watch: [0 .. 0x200)
 constexpr int kCamWords = 0x100;   // each camera object [0 .. 0x400)   // physics [0 .. 0x300)
 
 // Reads `words` dwords from `p`, zero-filled if the memory is not readable.
@@ -123,6 +125,10 @@ void start_capture() {
     for (int k = 0; k < 2; ++k) {
         for (int i = 0; i < kCamWords; ++i) std::fprintf(g_file, ",cam%d_%03X", k, i * 4);
     }
+    for (int k = 0; k < 8; ++k) {
+        std::fprintf(g_file, ",ob%d_ptr", k);
+        for (int i = 0; i < kObjWords; ++i) std::fprintf(g_file, ",ob%d_%03X", k, i * 4);
+    }
     std::fprintf(g_file, "\n");
     g_row = 0;
     snapshot("start");
@@ -206,6 +212,16 @@ void trace_frame(double dt_ms, int target_fps) {
         for (int i = 0; i < 0x10; ++i) std::fprintf(g_file, ",%x", cm[i]);
         for (int k = 0; k < 2; ++k) {
             for (int i = 0; i < kCamWords; ++i) std::fprintf(g_file, ",%x", cam[k][i]);
+        }
+    }
+    {
+        // Objects the execute watch saw entering its functions (ecx, then first stack argument).
+        static uint32_t obj[kObjWords];
+        for (int k = 0; k < 8; ++k) {
+            const uint32_t ptr = (k & 1) ? watch_exec_arg0(k >> 1) : watch_exec_ecx(k >> 1);
+            read_words(reinterpret_cast<const void*>(ptr), obj, kObjWords);
+            std::fprintf(g_file, ",%x", ptr);
+            for (int i = 0; i < kObjWords; ++i) std::fprintf(g_file, ",%x", obj[i]);
         }
     }
     std::fprintf(g_file, "\n");
