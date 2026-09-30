@@ -4,6 +4,7 @@
 #include "log.h"
 #include "present.h"
 #include "profile.h"
+#include "snap.h"
 #include "trace.h"
 #include "watch.h"
 
@@ -341,7 +342,11 @@ bool frame_install(const Settings& settings) {
         flags.damping = settings.fix_damping;
         flags.timers = settings.fix_timers;
         flags.smoothing = settings.fix_smoothing;
+        flags.graze = settings.fix_graze;
         fixes_install(flags);
+        if (settings.fix_ladder) {
+            snap_install();
+        }
     }
     present_install(settings);
     if (settings.profile) {

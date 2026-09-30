@@ -19,6 +19,8 @@ struct Settings {
     bool fix_damping = true;
     bool fix_timers = true;
     bool fix_smoothing = true;
+    bool fix_graze = true;
+    bool fix_ladder = true;
     // Diagnostic: F9 records the player's state to a CSV; F4/F5/F6/F7 switch the frame
     // rate live to 30/60/120/240 FPS.
     bool trace = false;

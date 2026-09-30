@@ -1,6 +1,7 @@
 #include "fixes.h"
 
 #include "log.h"
+#include "snap.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -15,6 +16,9 @@ namespace {
 alignas(8) volatile double g_timer_dt = 1.0 / 30.0;
 alignas(8) volatile double g_smooth = 1.0 / 30.0;
 alignas(8) volatile double g_damp = 0.95;
+alignas(8) volatile double g_rate = 30.0;
+alignas(8) volatile double g_slow = 0.8;
+alignas(8) volatile double g_recover = 1.2;
 alignas(4) volatile float g_gravity = 1.0f;
 alignas(4) volatile float g_friction = 0.65f;
 
@@ -37,10 +41,16 @@ Site g_sites[] = {
     {0x00EC7769, 4, 0x011E7CF0, &g_timer_dt, 2, false},   // addsd  timer + 1/30
     {0x00F9179D, 4, 0x011E7CF0, &g_timer_dt, 2, false},   // movsd  countdown step
     {0x00F0B556, 4, 0x011E7CF0, &g_smooth, 3, false},     // movsd  lerp factor (camera-like smoothing)
+    // Movement controller graze check (fn 0xE3AA..): speed = |position delta| * 30 per frame is
+    // compared with 1; below it the walk-speed multiplier [ctrl+0x170] is multiplied by 0.8 each
+    // frame (floor 0.5), otherwise by 1.2 (cap 1.0). At 240 FPS a normal run fails the test.
+    {0x00E3ABA2, 4, 0x011E7CD8, &g_rate, 4, false},       // mulsd xmm0,[30.0]  -> 1 / dt
+    {0x00E3ABCB, 4, 0x011E7DE8, &g_slow, 4, false},       // mulsd xmm0,[0.8]   -> 0.8 ^ (dt * 30)
+    {0x00E3AC01, 4, 0x011E84F8, &g_recover, 4, false},    // mulsd xmm0,[1.2]   -> 1.2 ^ (dt * 30)
 };
 
-bool g_enabled[4] = {true, true, true, true};
-bool g_keys_down[4] = {};
+bool g_enabled[5] = {true, true, true, true, true};
+bool g_keys_down[5] = {};
 bool g_installed = false;
 
 bool write_operand(Site& s, uint32_t address) {
@@ -78,6 +88,7 @@ bool fixes_install(const FixFlags& flags) {
     g_enabled[1] = flags.damping;
     g_enabled[2] = flags.timers;
     g_enabled[3] = flags.smoothing;
+    g_enabled[4] = flags.graze;
     int ok = 0, bad = 0;
     for (auto& s : g_sites) {
         uint32_t cur = 0;
@@ -90,14 +101,21 @@ bool fixes_install(const FixFlags& flags) {
         }
         ++ok;
     }
-    for (int g = 0; g < 4; ++g) set_group(g, g_enabled[g]);
+    for (int g = 0; g < 5; ++g) set_group(g, g_enabled[g]);
     g_installed = true;
-    LOG_INFO("Per-frame fixes: %d sites verified, %d skipped. slide=%d damping=%d timers=%d smoothing=%d", ok, bad,
-             g_enabled[0], g_enabled[1], g_enabled[2], g_enabled[3]);
+    LOG_INFO("Per-frame fixes: %d sites verified, %d skipped. slide=%d damping=%d timers=%d smoothing=%d graze=%d", ok,
+             bad, g_enabled[0], g_enabled[1], g_enabled[2], g_enabled[3], g_enabled[4]);
     return bad == 0;
 }
 
+double g_last_dt = 1.0 / 30.0;
+
+double fixes_last_dt() {
+    return g_last_dt;
+}
+
 void fixes_update(double dt) {
+    g_last_dt = dt;
     if (!g_installed) return;
     const double s = dt * 30.0;
     g_gravity = static_cast<float>(1.0 * s);
@@ -105,17 +123,27 @@ void fixes_update(double dt) {
     g_damp = std::pow(0.95, s);
     g_timer_dt = dt;
     g_smooth = 1.0 - std::pow(1.0 - 1.0 / 30.0, s);
+    g_rate = 1.0 / dt;
+    g_slow = std::pow(0.8, s);
+    g_recover = std::pow(1.2, s);
 }
 
 void fixes_poll_hotkeys() {
     if (!g_installed) return;
     const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-    for (int i = 0; i < 4; ++i) {
+    static bool snap_key = false;
+    const bool snap_down = ctrl && (GetAsyncKeyState('6') & 0x8000) != 0;
+    if (snap_down && !snap_key) {
+        snap_set_enabled(!snap_enabled());
+        LOG_INFO("Fix group 'ladder/ledge snap' is now %s", snap_enabled() ? "ON" : "OFF");
+    }
+    snap_key = snap_down;
+    for (int i = 0; i < 5; ++i) {
         const bool down = ctrl && (GetAsyncKeyState('1' + i) & 0x8000) != 0;
         if (down && !g_keys_down[i]) {
             g_enabled[i] = !g_enabled[i];
             set_group(i, g_enabled[i]);
-            static const char* const names[4] = {"slide", "damping", "timers", "smoothing"};
+            static const char* const names[5] = {"slide", "damping", "timers", "smoothing", "graze"};
             LOG_INFO("Fix group '%s' is now %s", names[i], g_enabled[i] ? "ON" : "OFF");
         }
         g_keys_down[i] = down;
