@@ -294,15 +294,18 @@ void watch_poll() {
     if (g_armed && GetTickCount64() - g_armed_at > 40000) report();
 }
 
-void watch_arm_address(uint32_t address) {
+void watch_arm_addresses(const uint32_t* addresses, int count) {
     if (g_armed) return;
-    g_nspec = 1;
-    g_spec[0].base = 'a';
-    g_spec[0].offset = address;
+    if (count > kSlots) count = kSlots;
+    g_nspec = count;
     g_nhits = 0;
     for (int i = 0; i < kSlots; ++i) g_addr[i] = nullptr;
-    g_addr[0] = reinterpret_cast<void*>(address);
-    LOG_INFO("Watch: write watchpoint on %08X", address);
+    for (int i = 0; i < count; ++i) {
+        g_spec[i].base = 'a';
+        g_spec[i].offset = addresses[i];
+        g_addr[i] = reinterpret_cast<void*>(addresses[i]);
+        LOG_INFO("Watch: write watchpoint %d on %08X", i, addresses[i]);
+    }
     if (!g_veh) g_veh = AddVectoredExceptionHandler(1, on_exception);
     apply_registers(true);
     g_armed = true;

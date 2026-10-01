@@ -22,6 +22,7 @@ constexpr int kMaxFrames = 3000;
 wchar_t g_dir[MAX_PATH] = {};
 int g_capture = 0;
 size_t armed_at = 0;
+std::vector<uint8_t> g_ramp_hits;
 bool g_down = false;
 bool g_active = false;
 LARGE_INTEGER g_freq{}, g_t0{};
@@ -87,6 +88,7 @@ bool start() {
         o.first = g_columns;
         g_columns += o.words;
     }
+    g_ramp_hits.assign(g_columns, 0);
     QueryPerformanceCounter(&g_t0);
     int counts[3] = {};
     for (const Object& o : g_objects) ++counts[o.kind];
@@ -182,14 +184,22 @@ void gauge_frame(double dt_ms) {
                 float a = 0, b = 0;
                 std::memcpy(&a, &g_data[previous + c], 4);
                 std::memcpy(&b, &g_data[base + c], 4);
-                if (a == a && b == b && std::fabs(b - a) > 0.05f && std::fabs(b) < 2.0f && std::fabs(a) < 2.0f &&
-                    std::fabs(b - a) < 1.0f) {
-                    watch_arm_address(g_objects[oi].address + static_cast<uint32_t>((c - g_objects[oi].first) * 4));
+                if (a == a && b == b && std::fabs(b - a) > 0.02f && std::fabs(b - a) < 0.5f && std::fabs(b) < 2.0f &&
+                    std::fabs(a) < 2.0f && ++g_ramp_hits[c] >= 3) {
+                    // The animation runs on neighbouring gauges at different moments (the bar and its
+                    // trailing ghost), so watch the same field of the next few objects too.
+                    uint32_t addresses[4];
+                    int n = 0;
+                    const uint32_t offset = static_cast<uint32_t>((c - g_objects[oi].first) * 4);
+                    for (size_t j = oi; j < g_objects.size() && n < 4; ++j) {
+                        if (g_objects[j].kind == g_objects[oi].kind) addresses[n++] = g_objects[j].address + offset;
+                    }
+                    watch_arm_addresses(addresses, n);
                     armed_at = g_ms.size();
                     break;
                 }
             }
-        } else if (g_ms.size() == armed_at + 120) {
+        } else if (g_ms.size() == armed_at + 360) {
             watch_report_now();
         }
     }

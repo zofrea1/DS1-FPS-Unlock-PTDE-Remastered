@@ -17,5 +17,5 @@ uint32_t watch_exec_arg0(int slot);
 
 // Arms a hardware write watchpoint on one absolute address (the gauge recorder uses this to find
 // what writes a value it saw change), and reports the writers.
-void watch_arm_address(uint32_t address);
+void watch_arm_addresses(const uint32_t* addresses, int count);
 void watch_report_now();
