@@ -1,10 +1,12 @@
 #include "ui.h"
 
+#include "fixes.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 
@@ -73,6 +75,77 @@ bool install_swirl() {
     DWORD ignored = 0;
     VirtualProtect(site, 5, old, &ignored);
     LOG_INFO("Loading screen swirl follows real time (site %08X)", kSwirlSite);
+    return true;
+}
+
+// ---- HUD gauge follower ------------------------------------------------------------------------
+//
+// fn 0xC88BA0 (called with eax = the gauge element) moves a displayed value ([+0x3C]) toward its
+// target by a fixed amount per call: [+0x4C] when it has to rise, [+0x44] ([+0x48] for the second
+// value) when it has to fall; a gap smaller than the step snaps. The player's health bar and its
+// trailing ghost fill through this, a step of about 0.076 of the bar per frame, so an Estus heal
+// finished in 50 ms at 120 FPS. The three steps are multiplied by frame time * 30 for the duration
+// of each call (and put back afterwards), which is the same animation in real time.
+constexpr uint32_t kGaugeFollow = 0x00C88BA0;
+constexpr size_t kGaugeStolen = 5;  // movss xmm3, [eax+44h]
+void* g_gauge_follow_tramp = nullptr;
+float g_gauge_saved[3] = {};
+
+void __stdcall gauge_scale_enter(uint8_t* gauge) {
+    float s = static_cast<float>(fixes_last_dt() * 30.0);
+    if (s < 0.02f) s = 0.02f;
+    if (s > 4.0f) s = 4.0f;
+    float* steps[3] = {reinterpret_cast<float*>(gauge + 0x44), reinterpret_cast<float*>(gauge + 0x48),
+                       reinterpret_cast<float*>(gauge + 0x4C)};
+    for (int i = 0; i < 3; ++i) {
+        g_gauge_saved[i] = *steps[i];
+        *steps[i] = g_gauge_saved[i] * s;
+    }
+}
+
+void __stdcall gauge_scale_leave(uint8_t* gauge) {
+    *reinterpret_cast<float*>(gauge + 0x44) = g_gauge_saved[0];
+    *reinterpret_cast<float*>(gauge + 0x48) = g_gauge_saved[1];
+    *reinterpret_cast<float*>(gauge + 0x4C) = g_gauge_saved[2];
+}
+
+__declspec(naked) void gauge_follow_hook() {
+    __asm {
+        push eax
+        push eax
+        call gauge_scale_enter
+        mov eax, dword ptr [esp]
+        call dword ptr [g_gauge_follow_tramp]
+        push eax
+        call gauge_scale_leave
+        pop eax
+        ret
+    }
+}
+
+bool install_gauge_follow() {
+    auto* site = reinterpret_cast<uint8_t*>(kGaugeFollow);
+    static const uint8_t kExpect[kGaugeStolen] = {0xF3, 0x0F, 0x10, 0x58, 0x44};
+    if (std::memcmp(site, kExpect, kGaugeStolen) != 0) {
+        LOG_ERROR("Gauge follower at %08X does not match this build. Not patching.", kGaugeFollow);
+        return false;
+    }
+    auto* tramp = static_cast<uint8_t*>(VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!tramp) return false;
+    std::memcpy(tramp, site, kGaugeStolen);
+    tramp[kGaugeStolen] = 0xE9;
+    const int32_t back = static_cast<int32_t>((kGaugeFollow + kGaugeStolen) - reinterpret_cast<uintptr_t>(tramp + kGaugeStolen + 5));
+    std::memcpy(tramp + kGaugeStolen + 1, &back, 4);
+    g_gauge_follow_tramp = tramp;
+    DWORD old = 0;
+    if (!VirtualProtect(site, kGaugeStolen, PAGE_EXECUTE_READWRITE, &old)) return false;
+    site[0] = 0xE9;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&gauge_follow_hook) - (kGaugeFollow + 5));
+    std::memcpy(site + 1, &rel, 4);
+    FlushInstructionCache(GetCurrentProcess(), site, kGaugeStolen);
+    DWORD ignored = 0;
+    VirtualProtect(site, kGaugeStolen, old, &ignored);
+    LOG_INFO("HUD gauge fill follows the frame time (health bar animation, site %08X)", kGaugeFollow);
     return true;
 }
 
@@ -327,6 +400,7 @@ bool ui_install(const Settings& settings) {
     bool ok = true;
     if (settings.fix_ui) {
         ok &= install_swirl();
+        ok &= install_gauge_follow();
     }
     if (settings.bonfire_unstick) {
         HANDLE thread = CreateThread(nullptr, 0, bonfire_thread, nullptr, 0, nullptr);
