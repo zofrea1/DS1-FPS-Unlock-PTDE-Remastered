@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 
 namespace {
 
@@ -148,6 +149,59 @@ bool install_gauge_follow() {
     DWORD ignored = 0;
     VirtualProtect(site, kGaugeStolen, old, &ignored);
     LOG_INFO("HUD gauge fill follows the frame time (health bar animation, site %08X)", kGaugeFollow);
+    return true;
+}
+
+// ---- Sprint stamina tick ------------------------------------------------------------------------
+//
+// The character update (fn 0xE80A00) keeps a timer at [chr+0x168]: while the character spends
+// stamina it adds the frame time, and when the sum reaches the interval (0.1 s, the float at
+// 0x12DF014) it takes one point off the stamina ([chr+0x2E4], through 0xE67960) and then STORES ZERO
+// in the timer (movss [ebx+168h], xmm2 at 0xE80B00, xmm2 being 0). The leftover of the last frame
+// is thrown away, so each tick lasts 0.1 s rounded up to a whole number of frames: at awkward frame
+// rates the drain runs up to a frame per tick slow. That store becomes a call that subtracts the
+// interval from the timer instead, which makes the drain 10 points a second at any frame rate.
+constexpr uint32_t kTickStoreSite = 0x00E80B00;
+constexpr uint32_t kTickInterval = 0x012DF014;
+
+bool install_stamina_tick() {
+    static const uint8_t kExpect[8] = {0xF3, 0x0F, 0x11, 0x93, 0x68, 0x01, 0x00, 0x00};
+    auto* site = reinterpret_cast<uint8_t*>(kTickStoreSite);
+    if (std::memcmp(site, kExpect, sizeof(kExpect)) != 0) {
+        LOG_ERROR("Sprint stamina tick at %08X does not match this build. Not patching.", kTickStoreSite);
+        return false;
+    }
+    const float interval = *reinterpret_cast<const float*>(kTickInterval);
+    if (!(interval >= 0.05f && interval <= 0.5f)) {
+        LOG_ERROR("Sprint stamina tick interval is %.4f, not what was expected. Not patching.", interval);
+        return false;
+    }
+    auto* stub = static_cast<uint8_t*>(VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!stub) return false;
+    size_t n = 0;
+    auto emit = [&](std::initializer_list<uint8_t> bytes) {
+        for (uint8_t b : bytes) stub[n++] = b;
+    };
+    emit({0x9C});                                      // pushfd (the jg after the call needs the flags)
+    emit({0xD9, 0x83, 0x68, 0x01, 0x00, 0x00});        // fld  dword ptr [ebx+168h]
+    emit({0xD8, 0x25});                                // fsub dword ptr [interval]
+    const uint32_t address = kTickInterval;
+    std::memcpy(stub + n, &address, 4);
+    n += 4;
+    emit({0xD9, 0x9B, 0x68, 0x01, 0x00, 0x00});        // fstp dword ptr [ebx+168h]
+    emit({0x9D});                                      // popfd
+    emit({0xC3});                                      // ret
+    DWORD old = 0;
+    if (!VirtualProtect(site, sizeof(kExpect), PAGE_EXECUTE_READWRITE, &old)) return false;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(stub) - (kTickStoreSite + 5));
+    site[0] = 0xE8;
+    std::memcpy(site + 1, &rel, 4);
+    site[5] = site[6] = site[7] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(kExpect));
+    FlushInstructionCache(GetCurrentProcess(), stub, 64);
+    DWORD ignored = 0;
+    VirtualProtect(site, sizeof(kExpect), old, &ignored);
+    LOG_INFO("Sprint stamina drain keeps the leftover of each tick (interval %.3f s)", interval);
     return true;
 }
 
@@ -614,6 +668,9 @@ bool ui_install(const Settings& settings) {
     if (settings.fix_ui) {
         ok &= install_swirl();
         ok &= install_gauge_follow();
+    }
+    if (settings.fix_stamina_tick) {
+        ok &= install_stamina_tick();
     }
     if (settings.bonfire_unstick) {
         HANDLE thread = CreateThread(nullptr, 0, bonfire_thread, nullptr, 0, nullptr);

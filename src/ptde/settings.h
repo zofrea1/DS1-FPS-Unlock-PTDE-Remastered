@@ -24,6 +24,9 @@ struct Settings {
     bool fix_camera = true;
     // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
     bool fix_ui = true;
+    // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each
+    // tick up to a whole frame and dropped the remainder).
+    bool fix_stamina_tick = true;
     // Stand the character up if it stays seated at a bonfire with no menu open (reverse hollowing bug).
     bool bonfire_unstick = true;
     // Diagnostic: log the HUD shortcut (D-pad) actions with timestamps.
