@@ -5,6 +5,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <TlHelp32.h>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -163,6 +165,75 @@ bool plausible_stats(const uint8_t* a) {
            stamina == stamina_max;
 }
 
+// Hardware write watchpoint on the stamina word (once the finder knows which block is real).
+struct WriteHit {
+    uintptr_t rip;
+    uintptr_t ret[3];
+    int value;
+};
+constexpr int kMaxHits = 4096;
+WriteHit g_hits[kMaxHits];
+std::atomic<int> g_hit_count{0};
+volatile LONG g_watch_address_set = 0;
+uintptr_t g_watch_address = 0;
+
+LONG CALLBACK on_stamina_write(EXCEPTION_POINTERS* info) {
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(info->ContextRecord->Dr6 & 1)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    CONTEXT* ctx = info->ContextRecord;
+    const int slot = g_hit_count.fetch_add(1, std::memory_order_relaxed);
+    if (slot < kMaxHits) {
+        WriteHit& h = g_hits[slot];
+        h.rip = static_cast<uintptr_t>(ctx->Rip);
+        const uintptr_t* stack = reinterpret_cast<const uintptr_t*>(ctx->Rsp);
+        for (int i = 0; i < 3; ++i) {
+            h.ret[i] = 0;
+            __try {
+                h.ret[i] = stack[i];
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+        h.value = *reinterpret_cast<const int*>(g_watch_address);
+    }
+    ctx->Dr6 = 0;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void arm_stamina_watch(uintptr_t address) {
+    g_watch_address = address;
+    AddVectoredExceptionHandler(1, on_stamina_write);
+    const DWORD self = GetCurrentThreadId();
+    const DWORD pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 e{};
+    e.dwSize = sizeof(e);
+    int applied = 0;
+    if (Thread32First(snap, &e)) {
+        do {
+            if (e.th32OwnerProcessID != pid) continue;
+            HANDLE th = OpenThread(THREAD_SET_CONTEXT | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, e.th32ThreadID);
+            if (!th) continue;
+            const bool me = e.th32ThreadID == self;
+            if (me || SuspendThread(th) != static_cast<DWORD>(-1)) {
+                CONTEXT ctx{};
+                ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                if (GetThreadContext(th, &ctx)) {
+                    ctx.Dr0 = address;
+                    ctx.Dr7 = 1u | (1u << 16) | (3u << 18);  // write, 4 bytes
+                    ctx.Dr6 = 0;
+                    if (SetThreadContext(th, &ctx)) ++applied;
+                }
+                if (!me) ResumeThread(th);
+            }
+            CloseHandle(th);
+        } while (Thread32Next(snap, &e));
+    }
+    CloseHandle(snap);
+    LOG_INFO("[stamW] write watchpoint on %p set on %d threads", reinterpret_cast<void*>(address), applied);
+}
+
 void scan_region(uintptr_t begin, uintptr_t end, const uint8_t** out, size_t* count, size_t limit) {
     __try {
         for (uintptr_t a = begin; a + 0x40 <= end && *count < limit; a += 4) {
@@ -212,9 +283,47 @@ DWORD WINAPI stamina_thread(void*) {
         const ULONGLONG start = GetTickCount64();
         while (GetTickCount64() - start < 240000) {
             Sleep(1);
+            {
+                static int reported = 0;
+                static ULONGLONG last_report = 0;
+                const ULONGLONG now = GetTickCount64();
+                if (g_watch_address_set && now - last_report > 15000 && g_hit_count.load() > reported) {
+                    last_report = now;
+                    const int total = g_hit_count.load() < kMaxHits ? g_hit_count.load() : kMaxHits;
+                    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+                    struct Key { uintptr_t rip, r0, r1; int count, vmin, vmax; } keys[24] = {};
+                    int nkeys = 0;
+                    for (int h = 0; h < total; ++h) {
+                        int k = 0;
+                        for (; k < nkeys; ++k) {
+                            if (keys[k].rip == g_hits[h].rip && keys[k].r0 == g_hits[h].ret[0]) break;
+                        }
+                        if (k == nkeys) {
+                            if (nkeys == 24) continue;
+                            keys[nkeys++] = {g_hits[h].rip, g_hits[h].ret[0], g_hits[h].ret[1], 0, 1 << 30, -(1 << 30)};
+                        }
+                        ++keys[k].count;
+                        if (g_hits[h].value < keys[k].vmin) keys[k].vmin = g_hits[h].value;
+                        if (g_hits[h].value > keys[k].vmax) keys[k].vmax = g_hits[h].value;
+                    }
+                    reported = g_hit_count.load();
+                    LOG_INFO("[stamW] %d writes so far", total);
+                    for (int k = 0; k < nkeys; ++k) {
+                        LOG_INFO("[stamW]   writer rva %llX  ret rva %llX %llX  x%d  values %d..%d",
+                                 static_cast<unsigned long long>(keys[k].rip - base),
+                                 static_cast<unsigned long long>(keys[k].r0 - base),
+                                 static_cast<unsigned long long>(keys[k].r1 - base), keys[k].count, keys[k].vmin,
+                                 keys[k].vmax);
+                    }
+                }
+            }
             for (size_t i = 0; i < count; ++i) {
                 const int value = read_stamina(found[i]);
                 if (value != last[i]) {
+                    if (!g_watch_address_set && last[i] > 0 && value == last[i] - 1 && last[i] >= 60 && last[i] <= 300 &&
+                        InterlockedExchange(&g_watch_address_set, 1) == 0) {
+                        arm_stamina_watch(reinterpret_cast<uintptr_t>(found[i]) + 0x28);
+                    }
                     last[i] = value;
                     LOG_INFO("[stamD] %zu %p stamina=%d", i, static_cast<const void*>(found[i]), value);
                 }
