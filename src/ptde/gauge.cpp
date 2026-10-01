@@ -14,7 +14,7 @@ namespace {
 
 constexpr uint32_t kVtables[3] = {0x011C090C, 0x011BE714, 0x011BE324};  // PCGauge, SmoothGauge, ObjGauge
 constexpr const char* kNames[3] = {"pc", "smooth", "obj"};
-constexpr uint32_t kWords = 0xC0;  // 0x300 bytes per object
+constexpr uint32_t kWords = 0x180;  // 0x600 bytes per object
 constexpr int kMaxObjects = 48;
 constexpr int kMaxFrames = 3000;
 
@@ -135,7 +135,7 @@ void gauge_set_dir(const wchar_t* dll_path) {
 }
 
 void gauge_frame(double dt_ms) {
-    const bool down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+    const bool down = (GetAsyncKeyState(VK_SCROLL) & 0x8000) != 0;
     if (down && !g_down) {
         if (g_active) {
             g_active = false;

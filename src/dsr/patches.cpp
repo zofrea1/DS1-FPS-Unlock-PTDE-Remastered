@@ -403,6 +403,12 @@ bool patch_havok() {
 
 uint8_t hook_menu(void* menu, int action) {
     const uint8_t active = g_menu(menu, action);
+    if (active && g_input_log.load(std::memory_order_relaxed) != 0 && ((action >= 0x50 && action <= 0x54) || action == 0x70)) {
+        static std::atomic<int> raw_lines{0};
+        if (raw_lines.fetch_add(1) < 6000) {
+            LOG_INFO("[input] raw action=0x%02X menu=%p", action, menu);
+        }
+    }
     if (!active || !menu || action < 0 || action >= kMaxActions ||
         g_scheduler_active.load(std::memory_order_acquire) == 0) {
         return active;
