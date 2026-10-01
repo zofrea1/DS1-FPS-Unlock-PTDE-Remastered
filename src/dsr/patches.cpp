@@ -1598,9 +1598,9 @@ bool patch_trace() {
 }
 
 // Lock-on camera. ChrFollowCam::Update (0x236C60; rcx = camera, xmm1 = step, r8 = character) smooths
-// the camera toward its target with blend weights applied once per frame and tuned for 60 FPS:
-// [camera+0x23C] for the lock-on yaw/pitch state and [camera+0x1BC] for the orientation filter
-// (both 0.1 in the retail constructor). At a higher frame rate the same per-frame weights finish
+// the camera toward its target with blend weights applied once per frame: [camera+0x23C] for the
+// yaw/pitch state (0.3 for the player's camera) and [camera+0x1BC] for the camera distance (0.4); the
+// remaining weights are handled by patch_camera_gains. At a higher frame rate the same per-frame weights finish
 // a pan in a fraction of the time, so switching targets snaps. The weights are replaced before
 // every update by the equivalent for this frame's step: k applied n = step * 60 times is
 // 1 - (1 - k)^n. Two call sites, both retargeted at a stub that does this and forwards.
@@ -1705,7 +1705,18 @@ void scale_follow_camera(void* object, float step) {
     }
 }
 
+// Set up by patch_camera_gains (in its stub page): n for the redirected weights, and the distance weight.
+float* g_cam_gain_n = nullptr;
+float* g_cam_dist_k = nullptr;
+
 void hook_follow(void* camera, float step, void* chr, void* extra) {
+    if (g_cam_gain_n && g_cam_dist_k) {
+        const double rate = g_camera_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+        double n = static_cast<double>(step) * rate;
+        n = n < 0.02 ? 0.02 : (n > 10.0 ? 10.0 : n);
+        *g_cam_gain_n = static_cast<float>(n);
+        *g_cam_dist_k = static_cast<float>(1.0 - std::pow(0.9, n));
+    }
     scale_follow_camera(camera, step);
     g_follow(camera, step, chr, extra);
 }
@@ -1982,6 +1993,184 @@ bool patch_turn() {
     return true;
 }
 
+// Besides the two weights above, ChrFollowCam::Update blends several more values toward a target by
+// a weight once per frame, read from the camera (rsi) at the point of use (the same values as the
+// original game, which ran them at 30 FPS):
+//   [+0x1C0] / [+0x1C4]  look-at point toward its target while locked on (0.4 / 0.3)
+//   [+0x1A4] / [+0x1B0]  the same with no lock-on (0.1 / 0.03; +0x1A4 itself eases toward +0x1A8)
+//   [+0x190]             pivot following the character (0.1; eases toward +0x194)
+//   [+0x1A0]             yaw settling back to the reference yaw (0.3)
+//   [+0x238]             automatic turn toward the walking direction (0.06)
+//   [+0x288]             stick input smoothing
+//   [+0x320]             camera parameter changes: distance, height, look-at offset, FOV (0.05)
+// and the constant 0.1 loaded at 0x236F10 eases the camera distance [+0x184] toward [+0x188].
+// None use the frame time, so a lock-on pan (yaw/pitch weight AND look-at weights) still finished
+// early with only the first two scaled. Each load is redirected through a stub that computes
+// 1 - (1 - w)^n with the x87 unit (no general or vector register other than the destination
+// changes) and then performs the original instruction on that value.
+constexpr uint32_t kCamGainSites[] = {0x2396B7, 0x2396C1, 0x2396D5, 0x2396DF, 0x237708, 0x238A42, 0x238894, 0x238982,
+                                      0x238316, 0x238341, 0x236DF3, 0x236E1C, 0x236E41, 0x236E89, 0x236EEA};
+constexpr uint32_t kCamDistSite = 0x236F10;  // mulss xmm1, dword ptr [rip+disp] (0.1)
+
+// Decodes `F3 [REX] 0F 10|59 modrm(10 reg 110) disp32` (movss/mulss xmmN, [rsi+disp32]).
+bool decode_cam_gain_load(const uint8_t* p, size_t* size, uint8_t* op, int* reg, uint32_t* disp) {
+    size_t i = 0;
+    if (p[i++] != 0xF3) {
+        return false;
+    }
+    int rex_r = 0;
+    if (p[i] == 0x44) {
+        rex_r = 8;
+        ++i;
+    }
+    if (p[i++] != 0x0F) {
+        return false;
+    }
+    *op = p[i++];
+    if (*op != 0x10 && *op != 0x59) {
+        return false;
+    }
+    const uint8_t modrm = p[i++];
+    if ((modrm & 0xC7) != 0x86) {  // mod = 10, rm = 110 (rsi)
+        return false;
+    }
+    *reg = ((modrm >> 3) & 7) + rex_r;
+    std::memcpy(disp, p + i, 4);
+    i += 4;
+    *size = i;
+    return true;
+}
+
+bool patch_camera_gains() {
+    struct Site {
+        uint8_t* at;
+        size_t size;
+        uint8_t op;
+        int reg;
+        uint32_t disp;
+    };
+    Site sites[sizeof(kCamGainSites) / sizeof(kCamGainSites[0])];
+    size_t count = 0;
+    for (uint32_t rva : kCamGainSites) {
+        Site s{};
+        s.at = image_rva(rva);
+        if (!decode_cam_gain_load(s.at, &s.size, &s.op, &s.reg, &s.disp) || s.disp < 0x180 || s.disp > 0x330) {
+            LOG_ERROR("Camera gain load at 0x%08X does not match this build", rva);
+            return false;
+        }
+        sites[count++] = s;
+    }
+    uint8_t* dist = image_rva(kCamDistSite);
+    if (!rip_mulss_is(dist, 0.1f) || dist[3] != 0x0D) {
+        LOG_ERROR("Camera distance smoothing at 0x%08X does not match this build", kCamDistSite);
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(sites[0].at));
+    if (!page) {
+        LOG_ERROR("Could not allocate the camera gain stubs (Win32=%lu)", GetLastError());
+        return false;
+    }
+    auto* n_slot = reinterpret_cast<float*>(page + 0xF00);
+    auto* value_slot = reinterpret_cast<float*>(page + 0xF04);
+    auto* dist_slot = reinterpret_cast<float*>(page + 0xF08);
+    *n_slot = 1.0f;
+    *dist_slot = 0.1f;
+    uint8_t* stubs[sizeof(kCamGainSites) / sizeof(kCamGainSites[0])] = {};
+    uint8_t* p = page;
+    auto emit = [&](std::initializer_list<uint8_t> bytes) {
+        for (uint8_t b : bytes) {
+            *p++ = b;
+        }
+    };
+    auto emit32 = [&](uint32_t v) {
+        std::memcpy(p, &v, 4);
+        p += 4;
+    };
+    auto emit_rel = [&](const void* target) {  // rel32 to `target`, measured from the end of this field
+        emit32(static_cast<uint32_t>(static_cast<const uint8_t*>(target) - (p + 4)));
+    };
+    for (size_t k = 0; k < count; ++k) {
+        const Site& s = sites[k];
+        stubs[k] = p;
+        emit({0x9C});                                        // pushfq
+        emit({0x83, 0xBE});                                  // cmp dword ptr [rsi+disp], 0
+        emit32(s.disp);
+        emit({0x00});
+        emit({0x7E, 0x00});                                  // jle raw (patched below)
+        uint8_t* jle = p - 1;
+        emit({0x81, 0xBE});                                  // cmp dword ptr [rsi+disp], 1.0f
+        emit32(s.disp);
+        emit32(0x3F800000);
+        emit({0x7D, 0x00});                                  // jge raw (patched below)
+        uint8_t* jge = p - 1;
+        emit({0xD9, 0x05});                                  // fld dword ptr [n]
+        emit_rel(n_slot);
+        emit({0xD9, 0xE8});                                  // fld1
+        emit({0xD8, 0xA6});                                  // fsub dword ptr [rsi+disp]   1 - w, n
+        emit32(s.disp);
+        emit({0xD9, 0xF1});                                  // fyl2x                      y = n log2(1 - w)
+        emit({0xD9, 0xC0});                                  // fld st(0)
+        emit({0xD9, 0xFC});                                  // frndint                    i, y
+        emit({0xD9, 0xC9});                                  // fxch st(1)                 y, i
+        emit({0xD8, 0xE1});                                  // fsub st(0), st(1)          f, i
+        emit({0xD9, 0xF0});                                  // f2xm1
+        emit({0xD9, 0xE8});                                  // fld1
+        emit({0xDE, 0xC1});                                  // faddp st(1), st(0)         2^f, i
+        emit({0xD9, 0xFD});                                  // fscale                     2^y, i
+        emit({0xDD, 0xD9});                                  // fstp st(1)                 (1 - w)^n
+        emit({0xD9, 0xE0});                                  // fchs
+        emit({0xD9, 0xE8});                                  // fld1
+        emit({0xDE, 0xC1});                                  // faddp st(1), st(0)         1 - (1 - w)^n
+        emit({0xD9, 0x1D});                                  // fstp dword ptr [value]
+        emit_rel(value_slot);
+        emit({0x9D});                                        // popfq
+        emit({0xF3});                                        // op xmmN, dword ptr [value]
+        if (s.reg >= 8) {
+            emit({0x44});
+        }
+        emit({0x0F, s.op, static_cast<uint8_t>(0x05 | ((s.reg & 7) << 3))});
+        emit_rel(value_slot);
+        emit({0xE9});                                        // jmp back
+        emit_rel(s.at + s.size);
+        uint8_t* raw = p;
+        *jle = static_cast<uint8_t>(raw - (jle + 1));
+        *jge = static_cast<uint8_t>(raw - (jge + 1));
+        emit({0x9D});                                        // raw: popfq, the original instruction, jmp back
+        std::memcpy(p, s.at, s.size);
+        p += s.size;
+        emit({0xE9});
+        emit_rel(s.at + s.size);
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READWRITE, &old)) {
+        LOG_ERROR("Could not make the camera gain stubs executable (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    for (size_t k = 0; k < count; ++k) {
+        const Site& s = sites[k];
+        uint8_t jump[16];
+        std::memset(jump, 0x90, sizeof(jump));
+        jump[0] = 0xE9;
+        const auto rel = static_cast<int32_t>(stubs[k] - (s.at + 5));
+        std::memcpy(jump + 1, &rel, 4);
+        if (!write_code(s.at, jump, s.size)) {
+            LOG_ERROR("Could not patch the camera gain load at %p", s.at);
+            return false;
+        }
+    }
+    g_cam_dist_k = dist_slot;
+    g_cam_gain_n = n_slot;
+    if (!write_disp32(dist + 4, dist + 8, dist_slot)) {
+        LOG_ERROR("Could not retarget the camera distance smoothing");
+        return false;
+    }
+    LOG_INFO("Follow camera: %u more blend weights follow the frame time (look-at, pivot, yaw settle, auto turn, "
+             "stick, parameter changes, distance)",
+             static_cast<unsigned>(count) + 1);
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -2051,7 +2240,7 @@ void try_delayed_patches() {
     }
     expected = 0;
     if (g_camera_state.compare_exchange_strong(expected, 1)) {
-        const bool ok = patch_camera();
+        const bool ok = patch_camera() && (g_fix_camera.load(std::memory_order_relaxed) == 0 || patch_camera_gains());
         g_camera_state.store(ok ? 2 : -1);
     }
     expected = 0;
