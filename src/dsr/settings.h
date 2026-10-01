@@ -15,6 +15,8 @@ struct Settings {
     // Sprint slowdown near geometry, airborne momentum and slope slide scaled to the frame time.
     // HUD gauge fill speed (Estus, stamina and boss bars).
     bool fix_ui = true;
+    // Diagnostic: log the HUD shortcut (D-pad) actions with timestamps.
+    bool input_log = false;
     bool fix_graze = true;
     bool fix_damping = true;
     bool fix_slide = true;

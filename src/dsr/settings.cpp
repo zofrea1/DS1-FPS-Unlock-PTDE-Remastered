@@ -89,6 +89,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_camera = parse_bool(val);
         } else if (key == "watch") {
             s.watch = parse_bool(val);
+        } else if (key == "inputlog") {
+            s.input_log = parse_bool(val);
         } else if (key == "fixui") {
             s.fix_ui = parse_bool(val);
         } else if (key == "fixgraze") {

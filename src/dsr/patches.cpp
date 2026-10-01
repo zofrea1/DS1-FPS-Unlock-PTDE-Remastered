@@ -438,6 +438,9 @@ uint8_t hook_menu(void* menu, int action) {
         consumer->generation = generation;
     }
     spin_unlock(g_consumer_lock);
+    if (g_input_log.load(std::memory_order_relaxed) != 0 && ((action >= 0x50 && action <= 0x54) || action == 0x70)) {
+        LOG_INFO("[input] query action=0x%02X %s", action, suppress ? "suppressed" : "delivered");
+    }
     if (suppress) {
         g_menu_suppressed.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1593,6 +1596,10 @@ void note_presses_impl(void* detector, void* input_state, void* resolved, size_t
             continue;
         }
         const uint64_t now = GetTickCount64();
+        if (g_input_log.load(std::memory_order_relaxed) != 0 && ((action >= 0x50 && action <= 0x54) || action == 0x70)) {
+            LOG_INFO("[input] pulse action=0x%02X source=%s", action,
+                     kind == 0 ? "press" : (kind == 1 ? "press-alt" : (kind == 2 ? "repeat" : "repeat-alt")));
+        }
         const uint64_t batch = static_cast<uint64_t>(g_pulse_batch_ms.load(std::memory_order_relaxed));
         int64_t generation = g_pulse_generation.load(std::memory_order_relaxed);
         if (generation == 0 || now - batch > 40) {

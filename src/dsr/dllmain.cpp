@@ -59,6 +59,7 @@ DWORD WINAPI worker(void*) {
     g_camera_ptde_speed.store(settings.camera_ptde_speed ? 1 : 0, std::memory_order_relaxed);
     LOG_INFO("FixCamera: %s, CameraPtdeSpeed: %s", settings.fix_camera ? "true" : "false",
              settings.camera_ptde_speed ? "true" : "false");
+    g_input_log.store(settings.input_log ? 1 : 0, std::memory_order_relaxed);
     g_fix_ui.store(settings.fix_ui ? 1 : 0, std::memory_order_relaxed);
     g_fix_graze.store(settings.fix_graze ? 1 : 0, std::memory_order_relaxed);
     g_fix_damping.store(settings.fix_damping ? 1 : 0, std::memory_order_relaxed);

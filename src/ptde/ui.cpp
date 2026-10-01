@@ -216,6 +216,28 @@ bool install_input_log() {
     return true;
 }
 
+// ---- Hit point log ----------------------------------------------------------------------------
+//
+// Diagnostic: logs every change of the player's hit points (PlayerGameData at [0x1378700]+8,
+// current at +0xC, maximum at +0x10) so the speed of an Estus heal can be measured.
+constexpr uint32_t kGameDataPtr = 0x01378700;
+
+DWORD WINAPI hp_thread(void*) {
+    int last = -1;
+    while (GetModuleHandleW(nullptr)) {
+        Sleep(1);
+        uint32_t manager = 0, data = 0, hp = 0, max_hp = 0;
+        if (!read_u32(kGameDataPtr, &manager) || manager < 0x10000) continue;
+        if (!read_u32(manager + 8, &data) || data < 0x10000) continue;
+        if (!read_u32(data + 0xC, &hp) || !read_u32(data + 0x10, &max_hp)) continue;
+        if (static_cast<int>(hp) != last) {
+            last = static_cast<int>(hp);
+            LOG_INFO("[hp] hp=%u max=%u", hp, max_hp);
+        }
+    }
+    return 0;
+}
+
 }  // namespace
 
 bool ui_install(const Settings& settings) {
@@ -233,6 +255,10 @@ bool ui_install(const Settings& settings) {
         }
     }
     if (settings.input_log) {
+        HANDLE hp = CreateThread(nullptr, 0, hp_thread, nullptr, 0, nullptr);
+        if (hp) {
+            CloseHandle(hp);
+        }
         ok &= install_input_log();
     }
     return ok;
