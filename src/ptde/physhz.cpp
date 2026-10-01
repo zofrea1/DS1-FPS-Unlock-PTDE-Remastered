@@ -23,6 +23,11 @@ uint32_t g_frame_id = 1;
 uint32_t g_phys_ran = 0;
 uint32_t g_graze_ran = 0;
 uint32_t g_mc = 0, g_phys = 0;  // the player's, refreshed once a frame
+// The animation writes this frame's root-motion displacement to [phys+0x60] (vec4) every frame, and the
+// velocity builder (fn 0xEC0BB0) turns it into a velocity by multiplying with 1/dt. On skipped frames
+// it is added up here and handed to the step frame whole, otherwise only the last frame's motion is
+// used with the accumulated dt and the player moves at Hz/FPS of the normal speed.
+float g_disp_acc[4] = {};
 void* g_phys_tramp = nullptr;
 void* g_graze_tramp = nullptr;
 bool g_installed = false;
@@ -57,6 +62,11 @@ void __stdcall hk_phys(void* controller, float dt) {
     }
     if (!g_fire || g_phys_ran == g_frame_id) return;  // not a step frame: the body stays where it is
     g_phys_ran = g_frame_id;
+    auto* disp = reinterpret_cast<float*>(static_cast<uint8_t*>(controller) + 0x60);
+    for (int i = 0; i < 4; ++i) {
+        disp[i] += g_disp_acc[i];
+        g_disp_acc[i] = 0.0f;
+    }
     fixes_override_dt(g_fire_dt);
     orig(controller, static_cast<float>(g_fire_dt));
     fixes_restore_dt();
@@ -64,7 +74,15 @@ void __stdcall hk_phys(void* controller, float dt) {
 
 extern "C" uint32_t __cdecl physhz_graze_should_run(uint32_t mc) {
     if (g_hz == 0 || mc != g_mc || g_mc == 0) return 1;
-    if (!g_fire || g_graze_ran == g_frame_id) return 0;
+    if (!g_fire) {
+        if (g_graze_ran != g_frame_id && g_phys) {
+            g_graze_ran = g_frame_id;  // once per frame
+            const auto* disp = reinterpret_cast<const float*>(g_phys + 0x60);
+            for (int i = 0; i < 4; ++i) g_disp_acc[i] += disp[i];
+        }
+        return 0;
+    }
+    if (g_graze_ran == g_frame_id) return 0;
     g_graze_ran = g_frame_id;
     return 1;
 }
@@ -166,6 +184,7 @@ void physhz_poll_hotkeys() {
     if (down && !down_was) {
         g_hz = g_hz == 0 ? 30 : (g_hz == 30 ? 60 : 0);
         g_acc = 0.0;
+        for (float& v : g_disp_acc) v = 0.0f;
         LOG_INFO("Fixed-rate physics is now %s", g_hz == 0 ? "OFF (every frame)" : (g_hz == 30 ? "30 Hz" : "60 Hz"));
     }
     down_was = down;
