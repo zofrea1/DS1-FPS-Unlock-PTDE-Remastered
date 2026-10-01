@@ -26,7 +26,6 @@ Everything below is on by default and has an INI switch.
 | Ladders | Sliding down dropped you through the floor | `FixMoveDt`, `FixStepDown` | `FixStepDown` |
 | Ledges and lips | The ground snap-down glued you to a curved lip and dragged you down several times faster | `FixStepDown` | `FixStepDown` |
 | Lock-on camera | Switching targets, or locking onto an enemy near the screen edge, snapped instead of panning | `FixCamera` | `FixCamera` |
-| Fixed-rate player physics | Short steps, ledges, the ground snap and the graze check are decided once per physics step; stepping every frame changed which steps the character could climb. The player's physics run at the native rate (PTDE 30, Remastered 60 steps a second) with the visible movement interpolated | `FixedRatePhysics` (off by default) | `FixedRatePhysics` |
 | Lock-on body turn | The torso, head and hips swung round to face the target several times too fast | `FixLockOnTurn` | `FixLockOnTurn` |
 | Ghost replays | Bloodstain and wandering ghost replays ran several times too fast, and your own replay data was recorded too densely (it played back in slow motion for other players) | `FixGhosts` | `FixGhosts` |
 | Estus / health bar fill | The bar animation advanced a fixed amount per frame and finished in a few frames | `FixUI` | `FixUI` |

@@ -7,7 +7,6 @@
 #include "gauge.h"
 #include "ghost.h"
 #include "log.h"
-#include "physhz.h"
 #include "present.h"
 #include "profile.h"
 #include "snap.h"
@@ -209,7 +208,6 @@ void frame_boundary() {
             g.written = dt;
         }
         const double step = g.driver ? static_cast<double>(g.written) : 1.0 / 30.0;
-        physhz_frame(step);
         fixes_update(step);
         ghost_frame(step);
     }
@@ -226,7 +224,6 @@ void frame_boundary() {
         }
         trace_frame(g.last ? ms_between(g.last, t) : 0.0, g.rate);
         fixes_poll_hotkeys();
-        physhz_poll_hotkeys();
         deep_frame(g.last ? ms_between(g.last, t) : 0.0, g.rate);
         gauge_frame(g.last ? ms_between(g.last, t) : 0.0);
     }
@@ -367,7 +364,6 @@ bool frame_install(const Settings& settings) {
         flags.ui = settings.fix_ui;
         fixes_install(flags);
         ui_install(settings);
-        physhz_install(settings);
         if (settings.fix_step_down) {
             snap_install();
         }
