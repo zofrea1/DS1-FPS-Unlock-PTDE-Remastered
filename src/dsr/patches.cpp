@@ -950,11 +950,14 @@ bool patch_swirl() {
     return true;
 }
 
+// Exactly the retail test and rates at every frame rate: stuck below 1 unit per second, 0.8 per
+// 1/60 s while stuck, 1.2 per 1/60 s while moving. (Earlier builds gave the test 20% of slack and a
+// recovery base of 1.5 at 90 FPS and above; that made a character that had grazed a small step
+// able to climb it after a few seconds of jitter, which retail does not.)
 void write_speed_factors(float dt) {
     const float target = static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
-    const bool high = target >= 90.0f;
-    const float leniency = high ? 1.2f : 1.0f;
-    const float recover_base = high ? 1.5f : 1.2f;
+    const float leniency = 1.0f;
+    const float recover_base = 1.2f;
     if (dt < 1.0f / 480.0f) {
         dt = 1.0f / 480.0f;
     }
