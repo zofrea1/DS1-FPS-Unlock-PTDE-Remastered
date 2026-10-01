@@ -610,7 +610,7 @@ void hook_gauge_follow(void* gauge) {
         const float after0 = *reinterpret_cast<float*>(steps + 0x60);
         const float after1 = *reinterpret_cast<float*>(steps + 0x64);
         if ((std::fabs(after0 - before[0]) > 0.001f || std::fabs(after1 - before[1]) > 0.001f) &&
-            lines.fetch_add(1, std::memory_order_relaxed) < 500) {
+            lines.fetch_add(1, std::memory_order_relaxed) < 6000) {
             LOG_INFO("[gauge] obj=%p value %.4f -> %.4f, second %.4f -> %.4f (target %.4f / %.4f)", gauge, before[0], after0,
                      before[1], after1, *reinterpret_cast<float*>(steps + 0x40), *reinterpret_cast<float*>(steps + 0x44));
         }

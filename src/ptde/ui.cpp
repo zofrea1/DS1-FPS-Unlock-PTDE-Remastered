@@ -297,12 +297,23 @@ constexpr uint32_t kGameDataPtr = 0x01378700;
 
 DWORD WINAPI hp_thread(void*) {
     int last = -1;
+    uint32_t last_other[4] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
     while (GetModuleHandleW(nullptr)) {
         Sleep(1);
         uint32_t manager = 0, data = 0, hp = 0, max_hp = 0;
         if (!read_u32(kGameDataPtr, &manager) || manager < 0x10000) continue;
         if (!read_u32(manager + 8, &data) || data < 0x10000) continue;
         if (!read_u32(data + 0xC, &hp) || !read_u32(data + 0x10, &max_hp)) continue;
+        {
+            // The words next to the hit points: stamina and its maximum are among them.
+            uint32_t other[4] = {};
+            bool ok = true;
+            for (int i = 0; i < 4; ++i) ok = ok && read_u32(data + 0x24 + 4 * i, &other[i]);
+            if (ok && std::memcmp(other, last_other, sizeof(other)) != 0) {
+                std::memcpy(last_other, other, sizeof(other));
+                LOG_INFO("[stam] +24=%u +28=%u +2C=%u +30=%u", other[0], other[1], other[2], other[3]);
+            }
+        }
         if (static_cast<int>(hp) != last) {
             last = static_cast<int>(hp);
             LOG_INFO("[hp] hp=%u max=%u", hp, max_hp);

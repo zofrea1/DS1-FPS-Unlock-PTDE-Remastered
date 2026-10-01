@@ -227,10 +227,20 @@ void arm() {
     const uint8_t* camera0 = static_cast<const uint8_t*>(rd_ptr(cman ? cman + 4 : nullptr));
     const uint8_t* camera1 = static_cast<const uint8_t*>(rd_ptr(cman ? cman + 8 : nullptr));
     LOG_INFO("Watch: camera objects %p %p", camera0, camera1);
+    // "g" = PlayerGameData ([[0x1378700] + 8]): hit points at +0xC, stamina near +0x28.
+    const uint8_t* game_data = nullptr;
+    if (const uint8_t* manager = static_cast<const uint8_t*>(rd_ptr(reinterpret_cast<const void*>(0x01378700)))) {
+        game_data = static_cast<const uint8_t*>(rd_ptr(manager + 8));
+    }
     g_nhits = 0;
     for (int i = 0; i < kSlots; ++i) {
         g_addr[i] = nullptr;
         if (i >= g_nspec) continue;
+        if (g_spec[i].base == 'g') {
+            g_addr[i] = const_cast<uint8_t*>(game_data + g_spec[i].offset);
+            LOG_INFO("Watch: slot %d = g+0x%X at %p", i, g_spec[i].offset, g_addr[i]);
+            continue;
+        }
         const uint8_t* base = g_spec[i].base == 'c'   ? chr
                               : g_spec[i].base == 'm' ? mc
                               : g_spec[i].base == 'y' ? proxy_pos
