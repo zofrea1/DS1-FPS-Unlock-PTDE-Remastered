@@ -554,6 +554,90 @@ constexpr uint32_t kGaugeK = 0x6664D6;
 float* g_gauge_cave = nullptr;
 std::atomic<int> g_gauge_state{0};
 
+// HUD gauge follower (fn 0x6692B0, this in rcx). The element's displayed value moves toward its
+// target by a fixed step per call: [+0x70] when rising, [+0x68] and [+0x6C] when falling (two
+// values); a gap smaller than the step snaps. The player's health bar and its trailing ghost fill
+// through this, so an Estus heal was over in a few frames at a high frame rate. The three steps are
+// multiplied by frame time * 60 for the duration of each call and put back afterwards.
+constexpr uint32_t kGaugeFollowRva = 0x6692B0;
+using GaugeFollowFn = void (*)(void* gauge);
+GaugeFollowFn g_gauge_follow = nullptr;
+std::atomic<int> g_gauge_follow_state{0};
+
+void hook_gauge_follow(void* gauge) {
+    float n = g_frame_dt.load(std::memory_order_relaxed) * 60.0f;
+    if (n < 0.02f) {
+        n = 0.02f;
+    }
+    if (n > 4.0f) {
+        n = 4.0f;
+    }
+    auto* steps = static_cast<uint8_t*>(gauge);
+    float* fall1 = reinterpret_cast<float*>(steps + 0x68);
+    float* fall2 = reinterpret_cast<float*>(steps + 0x6C);
+    float* rise = reinterpret_cast<float*>(steps + 0x70);
+    const float saved1 = *fall1;
+    const float saved2 = *fall2;
+    const float saved3 = *rise;
+    *fall1 = saved1 * n;
+    *fall2 = saved2 * n;
+    *rise = saved3 * n;
+    g_gauge_follow(gauge);
+    *fall1 = saved1;
+    *fall2 = saved2;
+    *rise = saved3;
+}
+
+bool patch_gauge_follow() {
+    static const uint8_t kExpect[9] = {0x48, 0x83, 0xEC, 0x18, 0xF3, 0x0F, 0x10, 0x59, 0x68};
+    uint8_t* site = image_rva(kGaugeFollowRva);
+    if (std::memcmp(site, kExpect, sizeof(kExpect)) != 0) {
+        LOG_ERROR("HUD gauge follower does not match this build");
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the gauge follower stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    // page+0: jmp [rip+0] ; hook      page+16: the stolen bytes, then jmp [rip+0] ; site+9
+    const uint64_t hook = reinterpret_cast<uint64_t>(&hook_gauge_follow);
+    const uint64_t resume = reinterpret_cast<uint64_t>(site + sizeof(kExpect));
+    page[0] = 0xFF;
+    page[1] = 0x25;
+    std::memset(page + 2, 0, 4);
+    std::memcpy(page + 6, &hook, 8);
+    std::memcpy(page + 16, site, sizeof(kExpect));
+    page[16 + 9] = 0xFF;
+    page[16 + 10] = 0x25;
+    std::memset(page + 16 + 11, 0, 4);
+    std::memcpy(page + 16 + 15, &resume, 8);
+    DWORD old = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) {
+        LOG_ERROR("Could not make the gauge follower stub executable (Win32=%lu)", GetLastError());
+        return false;
+    }
+    const intptr_t rel = reinterpret_cast<intptr_t>(page) - reinterpret_cast<intptr_t>(site + 5);
+    if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) {
+        LOG_ERROR("Gauge follower stub is out of range");
+        return false;
+    }
+    if (!VirtualProtect(site, sizeof(kExpect), PAGE_EXECUTE_READWRITE, &old)) {
+        LOG_ERROR("Could not unprotect the gauge follower (Win32=%lu)", GetLastError());
+        return false;
+    }
+    g_gauge_follow = reinterpret_cast<GaugeFollowFn>(page + 16);
+    site[0] = 0xE9;
+    const int32_t value = static_cast<int32_t>(rel);
+    std::memcpy(site + 1, &value, 4);
+    std::memset(site + 5, 0x90, sizeof(kExpect) - 5);
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(kExpect));
+    FlushInstructionCache(GetCurrentProcess(), page, 64);
+    VirtualProtect(site, sizeof(kExpect), old, &old);
+    LOG_INFO("HUD gauge fill follows the frame time (health bar animation)");
+    return true;
+}
+
 bool rip_xmm1_load_is(const uint8_t* insn, uint8_t op, float expected) {
     if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != op || insn[3] != 0x0D) {
         return false;
@@ -1538,6 +1622,11 @@ void try_delayed_patches() {
     if (g_gauge_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_ui.load(std::memory_order_relaxed) == 0 || patch_gauge();
         g_gauge_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_gauge_follow_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_ui.load(std::memory_order_relaxed) == 0 || patch_gauge_follow();
+        g_gauge_follow_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_swirl_state.compare_exchange_strong(expected, 1)) {
