@@ -13,6 +13,8 @@ inline std::atomic<int> g_fix_camera{1};
 inline std::atomic<int> g_fix_graze{1};
 inline std::atomic<int> g_fix_ui{1};
 inline std::atomic<int> g_fix_hold{1};
+// 1 = HUD gauges fill at the original Prepare to Die Edition speed (half the Remastered speed).
+inline std::atomic<int> g_gauge_ptde_speed{0};
 inline std::atomic<int> g_input_log{0};
 inline std::atomic<int> g_fix_damping{1};
 inline std::atomic<int> g_fix_slide{1};

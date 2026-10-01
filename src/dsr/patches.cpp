@@ -565,7 +565,8 @@ GaugeFollowFn g_gauge_follow = nullptr;
 std::atomic<int> g_gauge_follow_state{0};
 
 void hook_gauge_follow(void* gauge) {
-    float n = g_frame_dt.load(std::memory_order_relaxed) * 60.0f;
+    float n = g_frame_dt.load(std::memory_order_relaxed) *
+              (g_gauge_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0f : 60.0f);
     if (n < 0.02f) {
         n = 0.02f;
     }
@@ -579,6 +580,20 @@ void hook_gauge_follow(void* gauge) {
     const float saved1 = *fall1;
     const float saved2 = *fall2;
     const float saved3 = *rise;
+    {
+        // Log the first few distinct sets of step sizes, to compare with the original game's (the
+        // health bar there rises by about 0.076 of the bar per frame).
+        static std::atomic<int> logged{0};
+        static float last[3] = {-1.0f, -1.0f, -1.0f};
+        if (logged.load(std::memory_order_relaxed) < 8 && (saved1 != last[0] || saved2 != last[1] || saved3 != last[2]) &&
+            (saved1 > 0.0f || saved2 > 0.0f || saved3 > 0.0f)) {
+            logged.fetch_add(1, std::memory_order_relaxed);
+            last[0] = saved1;
+            last[1] = saved2;
+            last[2] = saved3;
+            LOG_INFO("Gauge follower steps: fall %.5f / %.5f, rise %.5f (scaled by %.3f)", saved1, saved2, saved3, n);
+        }
+    }
     *fall1 = saved1 * n;
     *fall2 = saved2 * n;
     *rise = saved3 * n;
@@ -652,7 +667,8 @@ void write_gauge_factors(float dt) {
     if (!g_gauge_cave) {
         return;
     }
-    float n = dt * 60.0f;
+    // 60 = Remastered's native frame rate; 30 reproduces the original game's speed (GaugePtdeSpeed).
+    float n = dt * (g_gauge_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0f : 60.0f);
     if (n < 0.02f) {
         n = 0.02f;
     }
