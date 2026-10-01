@@ -166,6 +166,9 @@ bool plausible_stats(const uint8_t* a) {
 }
 
 // Hardware write watchpoint on the stamina word (once the finder knows which block is real).
+// The write watchpoint was only needed to find the stamina tick code (now fixed); it slows the game.
+constexpr bool kArmWriteWatch = false;
+
 struct WriteHit {
     uintptr_t rip;
     uintptr_t ret[3];
@@ -356,7 +359,7 @@ DWORD WINAPI stamina_thread(void*) {
             for (size_t i = 0; i < count; ++i) {
                 const int value = read_stamina(found[i]);
                 if (value != last[i]) {
-                    if (!g_watch_address_set && last[i] > 0 && value == last[i] - 1 && last[i] >= 60 && last[i] <= 300 &&
+                    if (kArmWriteWatch && !g_watch_address_set && last[i] > 0 && value == last[i] - 1 && last[i] >= 60 && last[i] <= 300 &&
                         InterlockedExchange(&g_watch_address_set, 1) == 0) {
                         arm_stamina_watch(0, reinterpret_cast<uintptr_t>(found[i]) + 0x28);
                     }
