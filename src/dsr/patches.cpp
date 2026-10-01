@@ -566,8 +566,7 @@ std::atomic<int> g_gauge_follow_state{0};
 
 void hook_gauge_follow(void* gauge) {
     // The follower's step sizes in Remastered (rise 0.048 / 0.038, from the logged values) are exactly
-    // half of the original game's (0.096 / 0.076), so the designers already adjusted them for 60 FPS:
-    // this scales against 60 whatever GaugePtdeSpeed says.
+    // half of the original game's (0.096 / 0.076), so the designers already adjusted them for 60 FPS.
     float n = g_frame_dt.load(std::memory_order_relaxed) * 60.0f;
     if (n < 0.02f) {
         n = 0.02f;
@@ -685,8 +684,7 @@ void write_gauge_factors(float dt) {
     if (!g_gauge_cave) {
         return;
     }
-    // 60 = Remastered's native frame rate; 30 reproduces the original game's speed (GaugePtdeSpeed).
-    float n = dt * (g_gauge_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0f : 60.0f);
+    float n = dt * 60.0f;
     if (n < 0.02f) {
         n = 0.02f;
     }
