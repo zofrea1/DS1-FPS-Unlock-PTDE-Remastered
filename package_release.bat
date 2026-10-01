@@ -11,4 +11,4 @@ copy /y README.md build\release\remastered >nul
 copy /y README.md build\release\ptde >nul
 copy /y LICENSE build\release\remastered >nul
 copy /y LICENSE build\release\ptde >nul
-powershell -NoProfile -Command "Compress-Archive -Path build\release\remastered\* -DestinationPath build\release\DS1-FPS-Unlock-v1.1.0-REMASTERED-DX11.zip; Compress-Archive -Path build\release\ptde\* -DestinationPath build\release\DS1-FPS-Unlock-v1.1.0-PTDE-DX9.zip"
+powershell -NoProfile -Command "Compress-Archive -Path build\release\remastered\* -DestinationPath build\release\DS1-FPS-Unlock-v1.2.0-REMASTERED-DX11.zip; Compress-Archive -Path build\release\ptde\* -DestinationPath build\release\DS1-FPS-Unlock-v1.2.0-PTDE-DX9.zip"

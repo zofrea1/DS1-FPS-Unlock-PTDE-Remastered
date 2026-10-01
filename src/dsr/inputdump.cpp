@@ -386,6 +386,6 @@ void inputdump_start(const wchar_t* dll_path) {
     HANDLE thread = CreateThread(nullptr, 0, dump_thread, nullptr, 0, nullptr);
     if (thread) {
         CloseHandle(thread);
-        LOG_INFO("Input dump available: F12 starts and stops a recording");
+        LOG_INFO("Input dump available: Scroll Lock starts and stops a recording");
     }
 }

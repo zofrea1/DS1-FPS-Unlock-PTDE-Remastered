@@ -7,7 +7,7 @@ The mods are proxy DLLs. The game's files on disk are never modified, and each m
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
-| Release | `v1.1.0-REMASTERED-DX11` | `v1.1.0-PTDE-DX9` |
+| Release | `v1.2.0-REMASTERED-DX11` | `v1.2.0-PTDE-DX9` |
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
@@ -26,6 +26,11 @@ Everything below is on by default and has an INI switch.
 | Ladders | Sliding down dropped you through the floor | `FixMoveDt`, `FixStepDown` | `FixLadder` |
 | Ledges and lips | The ground snap-down glued you to a curved lip and dragged you down several times faster | `FixStepDown` | `FixLadder` |
 | Lock-on camera | Switching targets, or locking onto an enemy near the screen edge, snapped instead of panning | `FixCamera` | `FixCamera` |
+| Estus / health bar fill | The bar animation advanced a fixed amount per frame and finished in a few frames | `FixUI` | `FixUI` |
+| Sprint stamina drain | Each 0.1 s drain tick was rounded up to a whole frame and the remainder thrown away, so the drain ran slow at frame rates that do not divide 0.1 s evenly (8.7 per second at 61 FPS instead of 10) | `FixStaminaTick` | `FixStaminaTick` |
+| Loading screen | The bonfire swirl on the loading screen turned at the display rate | `FixUI` | `FixUI` |
+| D-pad hold (down: back to the first quick item) | The hold is counted in frames (15), so it fired during an ordinary tap | `FixDpadHold` | n/a (the hold does not exist) |
+| Bonfire softlock | After "Reverse hollowing" the character could stay seated with no menu open | not available | `BonfireUnstick` |
 | Timers | Per-frame fades and countdowns ran too fast | (variable step) | `FixTimers` |
 | Smoothing | A per-frame interpolation factor | (variable step) | `FixSmoothing` |
 | Menus and mouse | Menu animation, menu input repeat and mouse look scaled to the real frame time | yes (`MenuInputFilter`) | n/a |
@@ -66,7 +71,7 @@ Copy the two files from the release for your game next to the game's exe (see th
 - **PTDE cutscenes.** In-engine cutscenes can still look like 30 FPS at a high frame rate (their content is stepped at 30 Hz); the pre-rendered movies are 30 FPS by nature.
 - **Lock-on body turn.** The character's upper body and head turn toward a lock-on target on the animation clock and may not match the retail timing exactly at every frame rate.
 - **First walk-to-run (Remastered).** The retail game has a short hitch on the first walk-to-run after standing still. At a high frame rate it reads as a brief freeze of the character and camera; it is left as it is.
-- **Bonfire softlock.** A few users have reported a softlock while resting at the Firelink bonfire in Remastered. It has not been reproduced. If it happens, try `MenuInputFilter = false` and send the log.
+- **Bonfire softlock (Remastered).** A few users have reported a softlock while resting at the Firelink bonfire in Remastered. PTDE has a watchdog for the same symptom (`BonfireUnstick`); Remastered does not, because its code is protected and the cause is not known. It has not been reproduced. If it happens, try `MenuInputFilter = false` and send the log.
 - **Very high frame rates.** 240 FPS is not sustainable on every PC. Below the cap the game still plays in real time.
 - **Weapon durability and hit windows.** Worth checking if you depend on exact timing.
 
@@ -98,6 +103,10 @@ builds both targets. `build_dsr.bat` and `build_ptde.bat` build one each.
 **PTDE.** The game runs at a fixed 1/30 s step. The mod writes the measured frame time into that step every frame, caps the rate with a precise wait, and stops the render thread waiting two vertical blanks per frame (the change DSfix makes). The same physics constants were found in the PTDE executable by the same method, and are scaled with the frame time.
 
 Both mods check the bytes they patch before writing, so on an unsupported build they refuse rather than corrupt anything.
+
+## Acknowledgements
+
+- `BonfireUnstick` (PTDE): the idea, the memory addresses and the bonfire animation ids come from [FPSFix+](https://github.com/SeanPesce/FPSFix-Plus) by Sean Pesce, itself a remake of NullBy7e's FPSFix, both for this same bug. FPSFix+ is GPL-3.0; the code here is written from scratch and no code was copied.
 
 ## License
 

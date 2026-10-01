@@ -2599,7 +2599,7 @@ bool patches_apply() {
         [] { return g_sim_count.load(std::memory_order_relaxed); },
         [] { return g_frame_dt.load(std::memory_order_relaxed) * 1000.0f; },
         describe_flipper, flipper_tick);
-    LOG_INFO("DS1 Remastered FPS Unlock v1.1.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
+    LOG_INFO("DS1 Remastered FPS Unlock v1.2.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
              g_variable_dt.load() ? "measured frame time" : "fixed 1/TargetFPS");
     return true;
 }
