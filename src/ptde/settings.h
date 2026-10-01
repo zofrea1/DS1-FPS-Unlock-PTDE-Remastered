@@ -27,8 +27,10 @@ struct Settings {
     bool fix_lock_on_turn = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
     bool fix_ghosts = true;
-    // SANDBOX: run the player's movement physics at this many steps a second (0 = every frame, 30, 60).
-    int physics_hz = 0;
+    // Run the player's movement physics at a fixed rate like the original game, interpolating the
+    // visible position (INI FixedRatePhysics; PhysicsHz = 0 turns it off, other values set the rate).
+    bool fixed_rate_physics = true;
+    int physics_hz = 30;
     // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
     bool fix_ui = true;
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each

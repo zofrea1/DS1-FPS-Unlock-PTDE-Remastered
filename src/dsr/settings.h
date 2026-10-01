@@ -41,6 +41,9 @@ struct Settings {
     bool fix_lock_on_turn = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
     bool fix_ghosts = true;
+    // Run the player's movement physics at a fixed 60 steps a second like the game at its native 60 FPS,
+    // with the visible position interpolated. Off by default (Remastered steps them every frame).
+    bool fixed_rate_physics = false;
     // Hardware write-watch on character height (implies trace). Diagnostic only.
     bool watch = false;
 };

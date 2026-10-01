@@ -22,6 +22,8 @@ inline std::atomic<int> g_fix_slide{1};
 inline std::atomic<int> g_camera_ptde_speed{0};
 inline std::atomic<int> g_fix_lock_on_turn{1};
 inline std::atomic<int> g_fix_ghosts{1};
+// 1 = the player's movement physics run at a fixed 60 steps a second, interpolated (FixedRatePhysics).
+inline std::atomic<int> g_fixed_rate{0};
 // 1 = the game's step is the measured frame time (TargetFPS only caps the frame rate);
 // 0 = the game's step is a fixed 1/TargetFPS (the game slows down when the rate is not held).
 inline std::atomic<int> g_variable_dt{1};

@@ -105,6 +105,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_slide = parse_bool(val);
         } else if (key == "fixlockonturn") {
             s.fix_lock_on_turn = parse_bool(val);
+        } else if (key == "fixedratephysics") {
+            s.fixed_rate_physics = parse_bool(val);
         } else if (key == "fixghosts") {
             s.fix_ghosts = parse_bool(val);
         } else if (key == "fixmovedt") {
