@@ -565,8 +565,10 @@ GaugeFollowFn g_gauge_follow = nullptr;
 std::atomic<int> g_gauge_follow_state{0};
 
 void hook_gauge_follow(void* gauge) {
-    float n = g_frame_dt.load(std::memory_order_relaxed) *
-              (g_gauge_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0f : 60.0f);
+    // The follower's step sizes in Remastered (rise 0.048 / 0.038, from the logged values) are exactly
+    // half of the original game's (0.096 / 0.076), so the designers already adjusted them for 60 FPS:
+    // this scales against 60 whatever GaugePtdeSpeed says.
+    float n = g_frame_dt.load(std::memory_order_relaxed) * 60.0f;
     if (n < 0.02f) {
         n = 0.02f;
     }
@@ -597,7 +599,23 @@ void hook_gauge_follow(void* gauge) {
     *fall1 = saved1 * n;
     *fall2 = saved2 * n;
     *rise = saved3 * n;
+    float before[2] = {0.0f, 0.0f};
+    const bool trace = g_input_log.load(std::memory_order_relaxed) != 0;
+    if (trace) {
+        before[0] = *reinterpret_cast<float*>(steps + 0x60);
+        before[1] = *reinterpret_cast<float*>(steps + 0x64);
+    }
     g_gauge_follow(gauge);
+    if (trace) {
+        static std::atomic<int> lines{0};
+        const float after0 = *reinterpret_cast<float*>(steps + 0x60);
+        const float after1 = *reinterpret_cast<float*>(steps + 0x64);
+        if ((std::fabs(after0 - before[0]) > 0.001f || std::fabs(after1 - before[1]) > 0.001f) &&
+            lines.fetch_add(1, std::memory_order_relaxed) < 500) {
+            LOG_INFO("[gauge] obj=%p value %.4f -> %.4f, second %.4f -> %.4f (target %.4f / %.4f)", gauge, before[0], after0,
+                     before[1], after1, *reinterpret_cast<float*>(steps + 0x40), *reinterpret_cast<float*>(steps + 0x44));
+        }
+    }
     *fall1 = saved1;
     *fall2 = saved2;
     *rise = saved3;
