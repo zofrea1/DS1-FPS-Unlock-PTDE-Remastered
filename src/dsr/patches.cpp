@@ -1683,6 +1683,59 @@ void hook_title_menu(void* step, float frame_time, void* context) {
     g_title_menu(step, menu_step_time(frame_time), context);
 }
 
+// The loading screen dialog (FrpgMenuDlgNowLoading, vtable slot 16 = update) is not run by the menu
+// steps hooked above, and it is drawn while the simulation is stopped, so it gets a fixed 1/60 on
+// every frame it is drawn and its swirl ran at the display rate. It is given the real time since
+// its previous update instead.
+constexpr uint32_t kLoadingVtable = 0x13CA258;
+constexpr uint32_t kLoadingFn = 0x6FEC50;
+using DialogUpdateFn = void (*)(void* dialog, float frame_time);
+DialogUpdateFn g_loading = nullptr;
+void** g_loading_slot = nullptr;
+std::atomic<int> g_loading_logged{0};
+
+void hook_loading(void* dialog, float frame_time) {
+    static int64_t freq = 0;
+    static int64_t last = 0;
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    if (freq == 0) {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        freq = f.QuadPart;
+    }
+    float dt = frame_time;
+    if (last != 0) {
+        const double elapsed = static_cast<double>(now.QuadPart - last) / static_cast<double>(freq);
+        if (elapsed > 0.0 && elapsed < 0.25) {
+            dt = static_cast<float>(elapsed);
+        }
+    }
+    last = now.QuadPart;
+    if (g_loading_logged.exchange(1) == 0) {
+        LOG_INFO("Loading screen step: incoming=%.9f corrected=%.9f", frame_time, dt);
+    }
+    g_loading(dialog, dt);
+}
+
+bool install_loading_hook() {
+    g_loading_slot = reinterpret_cast<void**>(image_rva(kLoadingVtable) + 16 * sizeof(void*));
+    if (*g_loading_slot != image_rva(kLoadingFn)) {
+        LOG_ERROR("Loading screen update slot does not match this build");
+        g_loading_slot = nullptr;
+        return false;
+    }
+    g_loading = reinterpret_cast<DialogUpdateFn>(*g_loading_slot);
+    if (!patch_pointer(g_loading_slot, reinterpret_cast<void*>(hook_loading))) {
+        g_loading = nullptr;
+        g_loading_slot = nullptr;
+        LOG_ERROR("Could not hook the loading screen update (Win32=%lu)", GetLastError());
+        return false;
+    }
+    LOG_INFO("Loading screen update follows real time");
+    return true;
+}
+
 void hook_fx(void* manager, float frame_time) {
     // Code patches are applied only from the simulation hook (the thread that runs the patched
     // code), never from here, so no other thread can be executing a site while it is rewritten.
@@ -1914,6 +1967,9 @@ void rollback() {
     if (g_remo_slot && g_remo) {
         patch_pointer(g_remo_slot, reinterpret_cast<void*>(g_remo));
     }
+    if (g_loading_slot && g_loading) {
+        patch_pointer(g_loading_slot, reinterpret_cast<void*>(g_loading));
+    }
     g_scheduler_active.store(0, std::memory_order_release);
 }
 
@@ -2131,6 +2187,9 @@ bool patches_apply() {
     if (!activate_scheduler()) {
         rollback();
         return false;
+    }
+    if (g_fix_ui.load(std::memory_order_relaxed) != 0) {
+        install_loading_hook();
     }
     diag_watchdog_start(
         [] { return g_sim_count.load(std::memory_order_relaxed); },

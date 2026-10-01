@@ -238,6 +238,89 @@ DWORD WINAPI hp_thread(void*) {
     return 0;
 }
 
+// ---- Dialog time step log ---------------------------------------------------------------------
+//
+// Diagnostic: fn 0xC303A0 is the base update every HUD and menu dialog runs once per frame with
+// a time step. Once a second this logs, for the dialogs that ran, how many updates they got and
+// how much time they were given in total: a dialog given the real frame time sums to about 1.0
+// per second at any frame rate.
+constexpr uint32_t kDialogUpdate = 0x00C303A0;
+constexpr size_t kDialogStolen = 5;  // fld dword ptr [esp+4]; push esi
+
+using DialogFn = void(__fastcall*)(void* self, void* edx, float dt);
+DialogFn g_dialog_orig = nullptr;
+
+struct DialogStat {
+    void* self = nullptr;
+    uint32_t calls = 0;
+    double sum = 0.0;
+    float last = 0.0f;
+};
+DialogStat g_dialogs[64];
+LARGE_INTEGER g_dialog_freq{}, g_dialog_mark{};
+
+void __fastcall hk_dialog(void* self, void* edx, float dt) {
+    const size_t start = (reinterpret_cast<uintptr_t>(self) >> 4) & 63;
+    for (size_t i = 0; i < 64; ++i) {
+        DialogStat& d = g_dialogs[(start + i) & 63];
+        if (!d.self) d.self = self;
+        if (d.self == self) {
+            ++d.calls;
+            d.sum += dt;
+            d.last = dt;
+            break;
+        }
+    }
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    if (g_dialog_mark.QuadPart == 0) g_dialog_mark = now;
+    const double wall = static_cast<double>(now.QuadPart - g_dialog_mark.QuadPart) / static_cast<double>(g_dialog_freq.QuadPart);
+    if (wall >= 1.0) {
+        static int lines = 0;
+        if (lines < 400) {
+            for (DialogStat& d : g_dialogs) {
+                if (d.self && d.calls > 3) {
+                    ++lines;
+                    LOG_INFO("[dlgdt] obj=%p calls=%u given=%.3f s over %.3f s wall (last dt %.5f)", d.self, d.calls, d.sum, wall,
+                             d.last);
+                }
+                d = DialogStat{};
+            }
+        } else {
+            for (DialogStat& d : g_dialogs) d = DialogStat{};
+        }
+        g_dialog_mark = now;
+    }
+    g_dialog_orig(self, edx, dt);
+}
+
+bool install_dialog_log() {
+    auto* site = reinterpret_cast<uint8_t*>(kDialogUpdate);
+    static const uint8_t kExpect[kDialogStolen] = {0xD9, 0x44, 0x24, 0x04, 0x56};
+    if (std::memcmp(site, kExpect, kDialogStolen) != 0) {
+        LOG_ERROR("Dialog update at %08X does not match this build. Dialog log off.", kDialogUpdate);
+        return false;
+    }
+    QueryPerformanceFrequency(&g_dialog_freq);
+    auto* tramp = static_cast<uint8_t*>(VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!tramp) return false;
+    std::memcpy(tramp, site, kDialogStolen);
+    tramp[kDialogStolen] = 0xE9;
+    const int32_t back = static_cast<int32_t>((kDialogUpdate + kDialogStolen) - reinterpret_cast<uintptr_t>(tramp + kDialogStolen + 5));
+    std::memcpy(tramp + kDialogStolen + 1, &back, 4);
+    g_dialog_orig = reinterpret_cast<DialogFn>(tramp);
+    DWORD old = 0;
+    if (!VirtualProtect(site, kDialogStolen, PAGE_EXECUTE_READWRITE, &old)) return false;
+    site[0] = 0xE9;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_dialog) - (kDialogUpdate + 5));
+    std::memcpy(site + 1, &rel, 4);
+    FlushInstructionCache(GetCurrentProcess(), site, kDialogStolen);
+    DWORD ignored = 0;
+    VirtualProtect(site, kDialogStolen, old, &ignored);
+    LOG_INFO("Dialog log: [dlgdt] lines once a second");
+    return true;
+}
+
 }  // namespace
 
 bool ui_install(const Settings& settings) {
@@ -260,6 +343,7 @@ bool ui_install(const Settings& settings) {
             CloseHandle(hp);
         }
         ok &= install_input_log();
+        ok &= install_dialog_log();
     }
     return ok;
 }
