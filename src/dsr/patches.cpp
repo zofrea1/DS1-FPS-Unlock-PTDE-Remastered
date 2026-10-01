@@ -670,6 +670,73 @@ bool patch_gauge_follow() {
     return true;
 }
 
+// Diagnostic (InputLog): FrpgMenuDlgObjGauge::update (fn 0x666470, this in rcx) moves a bar's
+// displayed value ([+0x50]) toward its target ([+0x4C]). Logging every change of the pair shows how
+// each bar built on it (stamina among them) moves over time.
+constexpr uint32_t kObjGaugeRva = 0x666470;
+using ObjGaugeFn = void (*)(void* gauge);
+ObjGaugeFn g_objgauge = nullptr;
+std::atomic<int> g_objgauge_state{0};
+
+void hook_objgauge(void* gauge) {
+    auto* bytes = static_cast<uint8_t*>(gauge);
+    const float target_before = *reinterpret_cast<float*>(bytes + 0x4C);
+    const float value_before = *reinterpret_cast<float*>(bytes + 0x50);
+    g_objgauge(gauge);
+    static std::atomic<int> lines{0};
+    const float target = *reinterpret_cast<float*>(bytes + 0x4C);
+    const float value = *reinterpret_cast<float*>(bytes + 0x50);
+    if ((target != target_before || std::fabs(value - value_before) > 0.0005f) &&
+        lines.fetch_add(1, std::memory_order_relaxed) < 12000) {
+        LOG_INFO("[bar] obj=%p target %.2f -> %.2f value %.2f -> %.2f", gauge, target_before, target, value_before, value);
+    }
+}
+
+bool patch_objgauge_log() {
+    static const uint8_t kExpect[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x30};
+    uint8_t* site = image_rva(kObjGaugeRva);
+    if (std::memcmp(site, kExpect, sizeof(kExpect)) != 0) {
+        LOG_ERROR("Bar update does not match this build");
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        return false;
+    }
+    const uint64_t hook = reinterpret_cast<uint64_t>(&hook_objgauge);
+    const uint64_t resume = reinterpret_cast<uint64_t>(site + sizeof(kExpect));
+    page[0] = 0xFF;
+    page[1] = 0x25;
+    std::memset(page + 2, 0, 4);
+    std::memcpy(page + 6, &hook, 8);
+    std::memcpy(page + 16, site, sizeof(kExpect));
+    page[16 + 6] = 0xFF;
+    page[16 + 7] = 0x25;
+    std::memset(page + 16 + 8, 0, 4);
+    std::memcpy(page + 16 + 12, &resume, 8);
+    DWORD old = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) {
+        return false;
+    }
+    const intptr_t rel = reinterpret_cast<intptr_t>(page) - reinterpret_cast<intptr_t>(site + 5);
+    if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) {
+        return false;
+    }
+    if (!VirtualProtect(site, sizeof(kExpect), PAGE_EXECUTE_READWRITE, &old)) {
+        return false;
+    }
+    g_objgauge = reinterpret_cast<ObjGaugeFn>(page + 16);
+    site[0] = 0xE9;
+    const int32_t value = static_cast<int32_t>(rel);
+    std::memcpy(site + 1, &value, 4);
+    site[5] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(kExpect));
+    FlushInstructionCache(GetCurrentProcess(), page, 64);
+    VirtualProtect(site, sizeof(kExpect), old, &old);
+    LOG_INFO("Bar log: [bar] lines for every gauge bar value change");
+    return true;
+}
+
 bool rip_xmm1_load_is(const uint8_t* insn, uint8_t op, float expected) {
     if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != op || insn[3] != 0x0D) {
         return false;
@@ -1659,6 +1726,11 @@ void try_delayed_patches() {
     if (g_gauge_follow_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_ui.load(std::memory_order_relaxed) == 0 || patch_gauge_follow();
         g_gauge_follow_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_objgauge_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_input_log.load(std::memory_order_relaxed) == 0 || patch_objgauge_log();
+        g_objgauge_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_swirl_state.compare_exchange_strong(expected, 1)) {
