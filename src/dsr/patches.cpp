@@ -265,6 +265,7 @@ float* g_havok_cell = nullptr;     // Havok step scale (RW page, read by the rel
 float* g_decay_cave = nullptr;     // airborne momentum damp per frame
 float* g_grav_cave = nullptr;      // slide gravity per frame
 float* g_friction_cave = nullptr;  // slide friction per frame
+int32_t* g_ghost_units = nullptr;  // ghost replay counter units for this frame (see patch_ghosts)
 
 constexpr float kMinStep = 1.0f / 2000.0f;
 constexpr float kMaxStep = 1.0f / 20.0f;
@@ -317,6 +318,9 @@ void apply_frame_step(float dt) {
     }
     if (g_friction_cave) {
         *g_friction_cave = static_cast<float>(std::exp(std::log(0.65) * scale));
+    }
+    if (g_ghost_units) {
+        *g_ghost_units = static_cast<int32_t>(std::lround(scale * 65536.0));
     }
 }
 
@@ -1749,6 +1753,235 @@ bool patch_camera() {
     return true;
 }
 
+// Ghost replays (bloodstains, wandering ghosts) and the recorder that produces them count in frames.
+// Remastered doubled the original game's frame counts for 60 FPS:
+//  * Playback: ReplayManipulator::Update (fn 0x39AA10; rbx = manipulator, xmm6 = dt) steps to the next
+//    recorded sample every 20 frames ([rbx+0x278] counts down, reloaded with 20): one sample per 1/3 s
+//    at 60 FPS, so at 120 FPS ghosts ran twice as fast.
+//  * Recording: the player's PadManipulator update (fn 0x3976E0, no dt) takes a replay sample every
+//    20 frames ([rsi+0x344]) and a network-side sample every 10 frames ([rcx+0x238]). At a high frame
+//    rate the recorded data is too dense, so it plays back slowly for other players.
+// All three counters are rescaled to 1/65536 of a 60 FPS frame: the reloads add 20 (or 10) frames'
+// worth instead of setting it, so no fraction is lost, and each frame subtracts dt * 60 * 65536. At
+// exactly 60 FPS this is the retail behaviour.
+constexpr int32_t kGhostUnit = 65536;
+constexpr uint32_t kGhostPlayDec = 0x39AA6A;     // dec dword ptr [rbx+278h]          (6 bytes)
+constexpr uint32_t kGhostPlayReload = 0x39AA7C;  // mov dword ptr [rbx+278h], 14h     (10 bytes)
+constexpr uint32_t kGhostNetDec = 0x3976FE;      // dec dword ptr [rcx+238h]          (6 bytes)
+constexpr uint32_t kGhostRecDec = 0x397739;      // dec dword ptr [rsi+344h]          (6 bytes)
+constexpr uint32_t kGhostRecReload = 0x3978CE;   // mov dword ptr [rsi+344h], 14h     (10 bytes)
+constexpr uint32_t kGhostNetReload = 0x397AB9;   // mov dword ptr [rsi+238h], 0Ah     (10 bytes)
+std::atomic<int> g_ghost_state{0};
+
+bool write_code(uint8_t* site, const uint8_t* bytes, size_t size) {
+    DWORD old = 0;
+    if (!VirtualProtect(site, size, PAGE_EXECUTE_READWRITE, &old)) {
+        return false;
+    }
+    std::memcpy(site, bytes, size);
+    FlushInstructionCache(GetCurrentProcess(), site, size);
+    DWORD ignored = 0;
+    VirtualProtect(site, size, old, &ignored);
+    return true;
+}
+
+bool write_near_call(uint8_t* site, size_t size, const uint8_t* target) {
+    const intptr_t rel = reinterpret_cast<intptr_t>(target) - reinterpret_cast<intptr_t>(site + 5);
+    if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) {
+        return false;
+    }
+    uint8_t bytes[16];
+    bytes[0] = 0xE8;
+    const auto value = static_cast<int32_t>(rel);
+    std::memcpy(bytes + 1, &value, 4);
+    std::memset(bytes + 5, 0x90, size - 5);
+    return write_code(site, bytes, size);
+}
+
+// `mov dword ptr [reg+disp32], imm32` (C7 /0) becomes `add dword ptr [reg+disp32], imm32` (81 /0).
+bool reload_to_add(uint8_t* site, int32_t frames) {
+    uint8_t bytes[10];
+    std::memcpy(bytes, site, sizeof(bytes));
+    bytes[0] = 0x81;
+    const int32_t value = frames * kGhostUnit;
+    std::memcpy(bytes + 6, &value, 4);
+    return write_code(site, bytes, sizeof(bytes));
+}
+
+bool patch_ghosts() {
+    static const uint8_t kPlayDec[6] = {0xFF, 0x8B, 0x78, 0x02, 0x00, 0x00};
+    static const uint8_t kPlayReload[10] = {0xC7, 0x83, 0x78, 0x02, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00};
+    static const uint8_t kNetDec[6] = {0xFF, 0x89, 0x38, 0x02, 0x00, 0x00};
+    static const uint8_t kRecDec[6] = {0xFF, 0x8E, 0x44, 0x03, 0x00, 0x00};
+    static const uint8_t kRecReload[10] = {0xC7, 0x86, 0x44, 0x03, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00};
+    static const uint8_t kNetReload[10] = {0xC7, 0x86, 0x38, 0x02, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00};
+    struct Check {
+        uint32_t rva;
+        const uint8_t* bytes;
+        size_t size;
+    };
+    const Check checks[] = {{kGhostPlayDec, kPlayDec, sizeof(kPlayDec)},
+                            {kGhostPlayReload, kPlayReload, sizeof(kPlayReload)},
+                            {kGhostNetDec, kNetDec, sizeof(kNetDec)},
+                            {kGhostRecDec, kRecDec, sizeof(kRecDec)},
+                            {kGhostRecReload, kRecReload, sizeof(kRecReload)},
+                            {kGhostNetReload, kNetReload, sizeof(kNetReload)}};
+    for (const Check& c : checks) {
+        if (std::memcmp(image_rva(c.rva), c.bytes, c.size) != 0) {
+            LOG_ERROR("Ghost replay site 0x%08X does not match this build", c.rva);
+            return false;
+        }
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(image_rva(kGhostPlayDec)));
+    if (!page) {
+        LOG_ERROR("Could not allocate the ghost replay stubs (Win32=%lu)", GetLastError());
+        return false;
+    }
+    // Data at the end of the page: units per second (float) and this frame's units (int), the latter
+    // rewritten every frame by apply_frame_step.
+    auto* per_second = reinterpret_cast<float*>(page + 0x800);
+    auto* units = reinterpret_cast<int32_t*>(page + 0x804);
+    *per_second = 60.0f * kGhostUnit;
+    *units = kGhostUnit;
+    uint8_t* p = page;
+    auto emit = [&](std::initializer_list<uint8_t> bytes) {
+        for (uint8_t b : bytes) {
+            *p++ = b;
+        }
+    };
+    auto emit_rel = [&](const void* data) {  // rip-relative disp32 to `data` (the instruction's last field)
+        const auto value = static_cast<int32_t>(static_cast<const uint8_t*>(data) - (p + 4));
+        std::memcpy(p, &value, 4);
+        p += 4;
+    };
+    // Playback: xmm0, eax and the flags are free (overwritten before use by the code that follows).
+    uint8_t* play = p;
+    emit({0xF3, 0x0F, 0x10, 0xC6});              // movss xmm0, xmm6            (dt)
+    emit({0xF3, 0x0F, 0x59, 0x05});              // mulss xmm0, [per_second]
+    emit_rel(per_second);
+    emit({0xF3, 0x0F, 0x2D, 0xC0});              // cvtss2si eax, xmm0
+    emit({0x29, 0x83, 0x78, 0x02, 0x00, 0x00});  // sub [rbx+278h], eax
+    emit({0xC3});                                // ret
+    // Recorder, network counter: rax is reloaded right after.
+    uint8_t* net = p;
+    emit({0x8B, 0x05});                          // mov eax, [units]
+    emit_rel(units);
+    emit({0x29, 0x81, 0x38, 0x02, 0x00, 0x00});  // sub [rcx+238h], eax
+    emit({0xC3});
+    // Recorder, replay counter: rax is not read again before it is reloaded.
+    uint8_t* rec = p;
+    emit({0x8B, 0x05});                          // mov eax, [units]
+    emit_rel(units);
+    emit({0x29, 0x86, 0x44, 0x03, 0x00, 0x00});  // sub [rsi+344h], eax
+    emit({0xC3});
+    DWORD old = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READWRITE, &old)) {
+        LOG_ERROR("Could not make the ghost replay stubs executable (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    g_ghost_units = units;
+    const bool ok = write_near_call(image_rva(kGhostPlayDec), 6, play) && reload_to_add(image_rva(kGhostPlayReload), 20) &&
+                    write_near_call(image_rva(kGhostNetDec), 6, net) && write_near_call(image_rva(kGhostRecDec), 6, rec) &&
+                    reload_to_add(image_rva(kGhostRecReload), 20) && reload_to_add(image_rva(kGhostNetReload), 10);
+    if (!ok) {
+        LOG_ERROR("Could not patch the ghost replay counters");
+        return false;
+    }
+    LOG_INFO("Ghost replays and the replay recorder follow real time (sample every 1/3 s, network sample every 1/6 s)");
+    return true;
+}
+
+// Lock-on body turn. With a target locked, TurnAnim and WalkAnim_Twist turn the Upper_Root,
+// Lower_Root, Spine, Spine1 and Head bones toward it through bone rotation controllers. Each
+// controller's update (fn 0x4425D0; rcx = controller, rdx = out, xmm2 = dt, r9 = pose) moves its
+// current angle [+0x24] toward the target [+0x20] by the blend weight [+0x30] once per frame, with no
+// frame time (0.6 for the roots while turning, 0.2 head, 0.1 spine: the original game's 30 FPS
+// values, kept unchanged, so retail Remastered already turns twice as fast as the original). For the
+// duration of each update the weight is replaced by the one that does the same over this frame's
+// time: 1 - (1 - w) ^ (dt * 60), or dt * 30 with LockOnPtdeSpeed.
+constexpr uint32_t kBoneUpdateRva = 0x4425D0;
+using BoneUpdateFn = void* (*)(void* controller, void* out, float dt, void* pose);
+BoneUpdateFn g_bone_update = nullptr;
+std::atomic<int> g_turn_state{0};
+
+void* hook_bone_update(void* controller, void* out, float dt, void* pose) {
+    auto* gain = reinterpret_cast<float*>(static_cast<uint8_t*>(controller) + 0x30);
+    const float saved = *gain;
+    if (!(saved > 0.0f) || saved >= 1.0f) {
+        return g_bone_update(controller, out, dt, pose);
+    }
+    float step = dt;
+    if (!(step > 0.0f) || step > 0.25f) {
+        step = current_step();
+    }
+    const double rate = g_camera_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+    double n = static_cast<double>(step) * rate;
+    if (n < 0.01) {
+        n = 0.01;
+    }
+    if (n > 8.0) {
+        n = 8.0;
+    }
+    *gain = static_cast<float>(1.0 - std::pow(1.0 - static_cast<double>(saved), n));
+    void* result = g_bone_update(controller, out, dt, pose);
+    *gain = saved;
+    return result;
+}
+
+bool patch_turn() {
+    // mov r11,rsp ; push rbp ; push rbx ; push rsi ; push r14 ; lea rbp,[r11-68h] ; sub rsp,148h
+    static const uint8_t kExpect[19] = {0x4C, 0x8B, 0xDC, 0x55, 0x53, 0x56, 0x41, 0x56, 0x49, 0x8D,
+                                        0x6B, 0x98, 0x48, 0x81, 0xEC, 0x48, 0x01, 0x00, 0x00};
+    uint8_t* site = image_rva(kBoneUpdateRva);
+    if (std::memcmp(site, kExpect, sizeof(kExpect)) != 0) {
+        LOG_ERROR("Bone rotation controller update does not match this build");
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the bone update stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    // page+0: jmp [rip+0] ; hook      page+16: the stolen bytes, then jmp [rip+0] ; site+19
+    const uint64_t hook = reinterpret_cast<uint64_t>(&hook_bone_update);
+    const uint64_t resume = reinterpret_cast<uint64_t>(site + sizeof(kExpect));
+    page[0] = 0xFF;
+    page[1] = 0x25;
+    std::memset(page + 2, 0, 4);
+    std::memcpy(page + 6, &hook, 8);
+    std::memcpy(page + 16, site, sizeof(kExpect));
+    uint8_t* back = page + 16 + sizeof(kExpect);
+    back[0] = 0xFF;
+    back[1] = 0x25;
+    std::memset(back + 2, 0, 4);
+    std::memcpy(back + 6, &resume, 8);
+    DWORD old = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) {
+        LOG_ERROR("Could not make the bone update stub executable (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 64);
+    const intptr_t rel = reinterpret_cast<intptr_t>(page) - reinterpret_cast<intptr_t>(site + 5);
+    if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) {
+        LOG_ERROR("Bone update stub is out of range");
+        return false;
+    }
+    g_bone_update = reinterpret_cast<BoneUpdateFn>(page + 16);
+    uint8_t jump[sizeof(kExpect)];
+    std::memset(jump, 0x90, sizeof(jump));
+    jump[0] = 0xE9;
+    const auto value = static_cast<int32_t>(rel);
+    std::memcpy(jump + 1, &value, 4);
+    if (!write_code(site, jump, sizeof(jump))) {
+        LOG_ERROR("Could not patch the bone rotation controller update");
+        return false;
+    }
+    LOG_INFO("Lock-on body turn (bone rotation blend) follows the frame time (%s speed)",
+             g_camera_ptde_speed.load(std::memory_order_relaxed) != 0 ? "original game" : "Remastered 60 FPS");
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -1820,6 +2053,16 @@ void try_delayed_patches() {
     if (g_camera_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_camera();
         g_camera_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_ghost_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_ghosts.load(std::memory_order_relaxed) == 0 || patch_ghosts();
+        g_ghost_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_turn_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_lock_on_turn.load(std::memory_order_relaxed) == 0 || patch_turn();
+        g_turn_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_trace_state.compare_exchange_strong(expected, 1)) {

@@ -83,7 +83,7 @@ Settings settings_load(const wchar_t* dll_path) {
             s.trace = parse_bool(val);
         } else if (key == "fixstepdown") {
             s.fix_step_down = parse_bool(val);
-        } else if (key == "cameraptdespeed") {
+        } else if (key == "lockonptdespeed" || key == "cameraptdespeed") {
             s.camera_ptde_speed = parse_bool(val);
         } else if (key == "fixcamera") {
             s.fix_camera = parse_bool(val);
@@ -103,6 +103,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_damping = parse_bool(val);
         } else if (key == "fixslide") {
             s.fix_slide = parse_bool(val);
+        } else if (key == "fixlockonturn") {
+            s.fix_lock_on_turn = parse_bool(val);
+        } else if (key == "fixghosts") {
+            s.fix_ghosts = parse_bool(val);
         } else if (key == "fixmovedt") {
             s.fix_move_dt = parse_bool(val);
         }

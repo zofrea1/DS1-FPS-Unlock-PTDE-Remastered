@@ -3,6 +3,7 @@
 #include "log.h"
 #include "camera.h"
 #include "snap.h"
+#include "turn.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -164,7 +165,7 @@ void fixes_poll_hotkeys() {
     const bool snap_down = ctrl && (GetAsyncKeyState('6') & 0x8000) != 0;
     if (snap_down && !snap_key) {
         snap_set_enabled(!snap_enabled());
-        LOG_INFO("Fix group 'ladder/ledge snap' is now %s", snap_enabled() ? "ON" : "OFF");
+        LOG_INFO("Fix group 'step down (ledge/ladder snap)' is now %s", snap_enabled() ? "ON" : "OFF");
     }
     snap_key = snap_down;
     static bool camera_key = false;
@@ -174,6 +175,13 @@ void fixes_poll_hotkeys() {
         LOG_INFO("Fix group 'camera' is now %s", camera_enabled() ? "ON" : "OFF");
     }
     camera_key = camera_down;
+    static bool turn_key = false;
+    const bool turn_down = ctrl && (GetAsyncKeyState('9') & 0x8000) != 0;
+    if (turn_down && !turn_key) {
+        turn_set_enabled(!turn_enabled());
+        LOG_INFO("Fix group 'lock-on turn' is now %s", turn_enabled() ? "ON" : "OFF");
+    }
+    turn_key = turn_down;
     for (int i = 0; i < 5; ++i) {
         const bool down = ctrl && (GetAsyncKeyState('1' + i) & 0x8000) != 0;
         if (down && !g_keys_down[i]) {

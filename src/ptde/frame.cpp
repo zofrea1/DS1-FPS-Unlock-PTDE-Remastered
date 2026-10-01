@@ -5,12 +5,14 @@
 #include "diag.h"
 #include "fixes.h"
 #include "gauge.h"
+#include "ghost.h"
 #include "log.h"
 #include "physhz.h"
 #include "present.h"
 #include "profile.h"
 #include "snap.h"
 #include "trace.h"
+#include "turn.h"
 #include "ui.h"
 #include "watch.h"
 
@@ -206,8 +208,10 @@ void frame_boundary() {
             *g.step = dt;
             g.written = dt;
         }
-        physhz_frame(g.driver ? static_cast<double>(g.written) : 1.0 / 30.0);
-        fixes_update(g.driver ? static_cast<double>(g.written) : 1.0 / 30.0);
+        const double step = g.driver ? static_cast<double>(g.written) : 1.0 / 30.0;
+        physhz_frame(step);
+        fixes_update(step);
+        ghost_frame(step);
     }
     watch_poll();
     if (g.cfg.trace) {
@@ -364,11 +368,17 @@ bool frame_install(const Settings& settings) {
         fixes_install(flags);
         ui_install(settings);
         physhz_install(settings);
-        if (settings.fix_ladder) {
+        if (settings.fix_step_down) {
             snap_install();
         }
         if (settings.fix_camera) {
             camera_install();
+        }
+        if (settings.fix_lock_on_turn) {
+            turn_install();
+        }
+        if (settings.fix_ghosts) {
+            ghost_install();
         }
     }
     present_install(settings);

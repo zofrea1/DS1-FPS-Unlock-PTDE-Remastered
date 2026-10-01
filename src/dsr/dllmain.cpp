@@ -61,8 +61,11 @@ DWORD WINAPI worker(void*) {
     LOG_INFO("MenuInputFilter: %s", settings.menu_input_filter ? "true" : "false");
     g_fix_camera.store(settings.fix_camera ? 1 : 0, std::memory_order_relaxed);
     g_camera_ptde_speed.store(settings.camera_ptde_speed ? 1 : 0, std::memory_order_relaxed);
-    LOG_INFO("FixCamera: %s, CameraPtdeSpeed: %s", settings.fix_camera ? "true" : "false",
-             settings.camera_ptde_speed ? "true" : "false");
+    g_fix_lock_on_turn.store(settings.fix_lock_on_turn ? 1 : 0, std::memory_order_relaxed);
+    g_fix_ghosts.store(settings.fix_ghosts ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixCamera: %s, FixLockOnTurn: %s, LockOnPtdeSpeed: %s, FixGhosts: %s", settings.fix_camera ? "true" : "false",
+             settings.fix_lock_on_turn ? "true" : "false", settings.camera_ptde_speed ? "true" : "false",
+             settings.fix_ghosts ? "true" : "false");
     g_input_log.store(settings.input_log ? 1 : 0, std::memory_order_relaxed);
     g_fix_hold.store(settings.fix_dpad_hold ? 1 : 0, std::memory_order_relaxed);
     g_fix_stamina_tick.store(settings.fix_stamina_tick ? 1 : 0, std::memory_order_relaxed);

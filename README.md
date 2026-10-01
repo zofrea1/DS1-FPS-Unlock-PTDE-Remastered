@@ -23,9 +23,11 @@ Everything below is on by default and has an INI switch.
 | Slope slide | Slide gravity and friction were counted per frame | `FixSlide` | `FixSlide` |
 | Airborne momentum | Jumps and walk-offs lost momentum several times too fast | `FixDamping` | `FixDamping` |
 | Sprint slowdown (graze) | Running was treated as "stuck on a wall" and slowed | `FixGraze` | `FixGraze` |
-| Ladders | Sliding down dropped you through the floor | `FixMoveDt`, `FixStepDown` | `FixLadder` |
-| Ledges and lips | The ground snap-down glued you to a curved lip and dragged you down several times faster | `FixStepDown` | `FixLadder` |
+| Ladders | Sliding down dropped you through the floor | `FixMoveDt`, `FixStepDown` | `FixStepDown` |
+| Ledges and lips | The ground snap-down glued you to a curved lip and dragged you down several times faster | `FixStepDown` | `FixStepDown` |
 | Lock-on camera | Switching targets, or locking onto an enemy near the screen edge, snapped instead of panning | `FixCamera` | `FixCamera` |
+| Lock-on body turn | The torso, head and hips swung round to face the target several times too fast | `FixLockOnTurn` | `FixLockOnTurn` |
+| Ghost replays | Bloodstain and wandering ghost replays ran several times too fast, and your own replay data was recorded too densely (it played back in slow motion for other players) | `FixGhosts` | `FixGhosts` |
 | Estus / health bar fill | The bar animation advanced a fixed amount per frame and finished in a few frames | `FixUI` | `FixUI` |
 | Sprint stamina drain | Each 0.1 s drain tick was rounded up to a whole frame and the remainder thrown away, so the drain ran slow at frame rates that do not divide 0.1 s evenly (8.7 per second at 61 FPS instead of 10) | `FixStaminaTick` | `FixStaminaTick` |
 | Loading screen | The bonfire swirl on the loading screen turned at the display rate | `FixUI` | `FixUI` |
@@ -67,9 +69,8 @@ Copy the two files from the release for your game next to the game's exe (see th
 
 ## Notes and known limits
 
-- **Remastered lock-on camera speed.** Remastered pans the lock-on camera twice as fast as the original. `CameraPtdeSpeed = true` in the Remastered INI pans at the original speed instead.
+- **Remastered lock-on speed.** Remastered pans the lock-on camera and turns the body toward the target twice as fast as the original (it kept the original game's per-frame values at 60 FPS). `LockOnPtdeSpeed = true` in the Remastered INI uses the original speed for both instead (the old name `CameraPtdeSpeed` still works).
 - **PTDE cutscenes.** In-engine cutscenes can still look like 30 FPS at a high frame rate (their content is stepped at 30 Hz); the pre-rendered movies are 30 FPS by nature.
-- **Lock-on body turn.** The character's upper body and head turn toward a lock-on target on the animation clock and may not match the retail timing exactly at every frame rate.
 - **First walk-to-run (Remastered).** The retail game has a short hitch on the first walk-to-run after standing still. At a high frame rate it reads as a brief freeze of the character and camera; it is left as it is.
 - **Bonfire softlock (Remastered).** A few users have reported a softlock while resting at the Firelink bonfire in Remastered. PTDE has a watchdog for the same symptom (`BonfireUnstick`); Remastered does not, because its code is protected and the cause is not known. It has not been reproduced. If it happens, try `MenuInputFilter = false` and send the log.
 - **Very high frame rates.** 240 FPS is not sustainable on every PC. Below the cap the game still plays in real time.

@@ -33,9 +33,14 @@ struct Settings {
     // Makes the lock-on camera pan (target switches, locking onto an enemy near the edge of the
     // screen) take the same time at any frame rate. Set false to A/B test.
     bool fix_camera = true;
-    // Pan the lock-on camera at the speed of the original Dark Souls (30 FPS) instead of the
-    // snappier Remastered speed. Needs FixCamera.
+    // Pan the lock-on camera, and turn the body toward the target, at the speed of the original Dark
+    // Souls (30 FPS) instead of the snappier Remastered speed (INI LockOnPtdeSpeed, old name
+    // CameraPtdeSpeed). Needs FixCamera / FixLockOnTurn.
     bool camera_ptde_speed = false;
+    // Lock-on body turn (torso, head and hips toward the target) follows the frame time.
+    bool fix_lock_on_turn = true;
+    // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
+    bool fix_ghosts = true;
     // Hardware write-watch on character height (implies trace). Diagnostic only.
     bool watch = false;
 };

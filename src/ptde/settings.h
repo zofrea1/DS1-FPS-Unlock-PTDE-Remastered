@@ -20,11 +20,16 @@ struct Settings {
     bool fix_timers = true;
     bool fix_smoothing = true;
     bool fix_graze = true;
-    bool fix_ladder = true;
+    // Ground snap-down reach and the ladder-exit cap (INI FixStepDown; FixLadder is the old name).
+    bool fix_step_down = true;
     bool fix_camera = true;
-    // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
+    // Lock-on body turn: the torso, head and root bones turn toward the target at the original speed.
+    bool fix_lock_on_turn = true;
+    // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
+    bool fix_ghosts = true;
     // SANDBOX: run the player's movement physics at this many steps a second (0 = every frame, 30, 60).
     int physics_hz = 0;
+    // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
     bool fix_ui = true;
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each
     // tick up to a whole frame and dropped the remainder).
