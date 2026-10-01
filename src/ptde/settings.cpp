@@ -90,6 +90,12 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_camera = parse_bool(val);
         } else if (key == "fixladder") {
             s.fix_ladder = parse_bool(val);
+        } else if (key == "fixui") {
+            s.fix_ui = parse_bool(val);
+        } else if (key == "bonfireunstick") {
+            s.bonfire_unstick = parse_bool(val);
+        } else if (key == "inputlog") {
+            s.input_log = parse_bool(val);
         } else if (key == "fixgraze") {
             s.fix_graze = parse_bool(val);
         } else if (key == "fixsmoothing") {

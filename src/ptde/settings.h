@@ -22,6 +22,12 @@ struct Settings {
     bool fix_graze = true;
     bool fix_ladder = true;
     bool fix_camera = true;
+    // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
+    bool fix_ui = true;
+    // Stand the character up if it stays seated at a bonfire with no menu open (reverse hollowing bug).
+    bool bonfire_unstick = true;
+    // Diagnostic: log the HUD shortcut (D-pad) actions with timestamps.
+    bool input_log = false;
     // Diagnostic: F9 records the player's state to a CSV; F4/F5/F6/F7 switch the frame
     // rate live to 30/60/120/240 FPS.
     bool trace = false;

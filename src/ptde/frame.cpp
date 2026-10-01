@@ -9,6 +9,7 @@
 #include "profile.h"
 #include "snap.h"
 #include "trace.h"
+#include "ui.h"
 #include "watch.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -354,7 +355,9 @@ bool frame_install(const Settings& settings) {
         flags.timers = settings.fix_timers;
         flags.smoothing = settings.fix_smoothing;
         flags.graze = settings.fix_graze;
+        flags.ui = settings.fix_ui;
         fixes_install(flags);
+        ui_install(settings);
         if (settings.fix_ladder) {
             snap_install();
         }

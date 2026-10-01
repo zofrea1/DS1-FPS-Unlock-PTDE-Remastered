@@ -20,6 +20,10 @@ alignas(8) volatile double g_damp = 0.95;
 alignas(8) volatile double g_rate = 30.0;
 alignas(8) volatile double g_slow = 0.8;
 alignas(8) volatile double g_recover = 1.2;
+// HUD gauges (HP, stamina, boss and enemy bars): the displayed value chases the real one by
+// half the gap per frame when it is more than 2 away, and by 1.0 per frame when closer.
+alignas(8) volatile double g_gauge_k = 0.5;
+alignas(4) volatile float g_gauge_min = 1.0f;
 alignas(4) volatile float g_gravity = 1.0f;
 alignas(4) volatile float g_friction = 0.65f;
 
@@ -48,9 +52,14 @@ Site g_sites[] = {
     {0x00E3ABA2, 4, 0x011E7CD8, &g_rate, 4, false},       // mulsd xmm0,[30.0]  -> 1 / dt
     {0x00E3ABCB, 4, 0x011E7DE8, &g_slow, 4, false},       // mulsd xmm0,[0.8]   -> 0.8 ^ (dt * 30)
     {0x00E3AC01, 4, 0x011E84F8, &g_recover, 4, false},    // mulsd xmm0,[1.2]   -> 1.2 ^ (dt * 30)
+    // FrpgMenuDlgObjGauge update (fn 0xC89A40): displayed value moves toward the real one by
+    // |gap| * 0.5 per frame while the gap is over 2, else by 1.0 per frame. Drinking an Estus
+    // flask fills the bar through this, four times too fast at 120 FPS.
+    {0x00C89A90, 4, 0x0115F59C, &g_gauge_min, 5, false},  // movss xmm2,[1.0]   -> 1.0 * dt * 30
+    {0x00C89AC3, 4, 0x011E7C60, &g_gauge_k, 5, false},    // mulsd xmm2,[0.5]   -> 1 - 0.5 ^ (dt * 30)
 };
 
-bool g_enabled[5] = {true, true, true, true, true};
+bool g_enabled[6] = {true, true, true, true, true, true};
 bool g_keys_down[5] = {};
 bool g_installed = false;
 
@@ -90,6 +99,7 @@ bool fixes_install(const FixFlags& flags) {
     g_enabled[2] = flags.timers;
     g_enabled[3] = flags.smoothing;
     g_enabled[4] = flags.graze;
+    g_enabled[5] = flags.ui;
     int ok = 0, bad = 0;
     for (auto& s : g_sites) {
         uint32_t cur = 0;
@@ -102,10 +112,10 @@ bool fixes_install(const FixFlags& flags) {
         }
         ++ok;
     }
-    for (int g = 0; g < 5; ++g) set_group(g, g_enabled[g]);
+    for (int g = 0; g < 6; ++g) set_group(g, g_enabled[g]);
     g_installed = true;
-    LOG_INFO("Per-frame fixes: %d sites verified, %d skipped. slide=%d damping=%d timers=%d smoothing=%d graze=%d", ok,
-             bad, g_enabled[0], g_enabled[1], g_enabled[2], g_enabled[3], g_enabled[4]);
+    LOG_INFO("Per-frame fixes: %d sites verified, %d skipped. slide=%d damping=%d timers=%d smoothing=%d graze=%d ui=%d", ok,
+             bad, g_enabled[0], g_enabled[1], g_enabled[2], g_enabled[3], g_enabled[4], g_enabled[5]);
     return bad == 0;
 }
 
@@ -127,6 +137,8 @@ void fixes_update(double dt) {
     g_rate = 1.0 / dt;
     g_slow = std::pow(0.8, s);
     g_recover = std::pow(1.2, s);
+    g_gauge_k = 1.0 - std::pow(0.5, s);
+    g_gauge_min = static_cast<float>(1.0 * s);
 }
 
 void fixes_poll_hotkeys() {
