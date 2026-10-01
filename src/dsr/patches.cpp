@@ -737,6 +737,77 @@ bool patch_objgauge_log() {
     return true;
 }
 
+// Sprint stamina drain. The character update (fn 0x31FCA0) keeps a timer at [chr+0x1F0]: while the
+// character is spending stamina it adds the frame time, and when the sum reaches the interval
+// (0.1 s) it takes one tick off the stamina and then SETS THE TIMER TO ZERO. The leftover of the last
+// frame is thrown away, so the real interval is 0.1 s rounded up to a whole number of frames: 115 ms
+// at 61 FPS (8.7 ticks a second), 108 ms at 120, 104 ms at 240 and exactly 100 ms at 60. The store
+// that zeroes the timer becomes a call that subtracts the interval from the timer instead, which makes
+// the drain 10 ticks a second at any frame rate.
+constexpr uint32_t kTickCompareRva = 0x31FD6B;  // comiss xmm0, [rip + interval]
+constexpr uint32_t kTickResetRva = 0x31FD7F;    // mov [rsi + 0x1F0], r13d
+std::atomic<int> g_stamina_tick_state{0};
+
+bool patch_stamina_tick() {
+    static const uint8_t kReset[7] = {0x44, 0x89, 0xAE, 0xF0, 0x01, 0x00, 0x00};
+    uint8_t* compare = image_rva(kTickCompareRva);
+    uint8_t* site = image_rva(kTickResetRva);
+    if (compare[0] != 0x0F || compare[1] != 0x2F || compare[2] != 0x05 || std::memcmp(site, kReset, sizeof(kReset)) != 0) {
+        LOG_ERROR("Sprint stamina tick does not match this build");
+        return false;
+    }
+    int32_t disp = 0;
+    std::memcpy(&disp, compare + 3, sizeof(disp));
+    const auto* interval = reinterpret_cast<const float*>(compare + 7 + disp);
+    if (!(*interval >= 0.05f && *interval <= 0.5f)) {
+        LOG_ERROR("Sprint stamina tick interval is %.4f, not what was expected", *interval);
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the stamina tick stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    size_t n = 0;
+    auto emit = [&](std::initializer_list<uint8_t> bytes) {
+        for (uint8_t b : bytes) {
+            page[n++] = b;
+        }
+    };
+    emit({0xF3, 0x0F, 0x10, 0x86, 0xF0, 0x01, 0x00, 0x00});  // movss xmm0, [rsi + 1F0h]
+    emit({0x48, 0xB8});                                      // mov rax, &interval
+    const uint64_t address = reinterpret_cast<uint64_t>(interval);
+    std::memcpy(page + n, &address, 8);
+    n += 8;
+    emit({0xF3, 0x0F, 0x5C, 0x00});                          // subss xmm0, [rax]
+    emit({0xF3, 0x0F, 0x11, 0x86, 0xF0, 0x01, 0x00, 0x00});  // movss [rsi + 1F0h], xmm0
+    emit({0xC3});                                            // ret
+    DWORD old = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) {
+        LOG_ERROR("Could not make the stamina tick stub executable (Win32=%lu)", GetLastError());
+        return false;
+    }
+    const intptr_t rel = reinterpret_cast<intptr_t>(page) - reinterpret_cast<intptr_t>(site + 5);
+    if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) {
+        LOG_ERROR("Stamina tick stub is out of range");
+        return false;
+    }
+    if (!VirtualProtect(site, sizeof(kReset), PAGE_EXECUTE_READWRITE, &old)) {
+        LOG_ERROR("Could not unprotect the stamina tick (Win32=%lu)", GetLastError());
+        return false;
+    }
+    site[0] = 0xE8;
+    const int32_t value = static_cast<int32_t>(rel);
+    std::memcpy(site + 1, &value, 4);
+    site[5] = 0x90;
+    site[6] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(kReset));
+    FlushInstructionCache(GetCurrentProcess(), page, 64);
+    VirtualProtect(site, sizeof(kReset), old, &old);
+    LOG_INFO("Sprint stamina drain keeps the leftover of each tick (interval %.3f s)", *interval);
+    return true;
+}
+
 bool rip_xmm1_load_is(const uint8_t* insn, uint8_t op, float expected) {
     if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != op || insn[3] != 0x0D) {
         return false;
@@ -1726,6 +1797,11 @@ void try_delayed_patches() {
     if (g_gauge_follow_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_ui.load(std::memory_order_relaxed) == 0 || patch_gauge_follow();
         g_gauge_follow_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_stamina_tick_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_stamina_tick.load(std::memory_order_relaxed) == 0 || patch_stamina_tick();
+        g_stamina_tick_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_objgauge_state.compare_exchange_strong(expected, 1)) {

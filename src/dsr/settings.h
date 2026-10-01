@@ -15,6 +15,8 @@ struct Settings {
     // Sprint slowdown near geometry, airborne momentum and slope slide scaled to the frame time.
     // HUD gauge fill speed (Estus, stamina and boss bars).
     bool fix_ui = true;
+    // Sprint stamina drain ticks every 0.1 s on average at any frame rate (it rounded up to a whole frame).
+    bool fix_stamina_tick = true;
     // D-pad hold (down: back to the first quick item) needs a quarter second at any frame rate.
     bool fix_dpad_hold = true;
     // Diagnostic: log the HUD shortcut (D-pad) actions with timestamps.
