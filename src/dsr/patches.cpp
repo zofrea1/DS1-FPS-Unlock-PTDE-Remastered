@@ -1541,7 +1541,7 @@ void try_delayed_patches() {
     }
     expected = 0;
     if (g_swirl_state.compare_exchange_strong(expected, 1)) {
-        const bool ok = g_fix_ui.load(std::memory_order_relaxed) == 0 || patch_swirl();
+        const bool ok = true;  // the swirl counters are handled in hook_loading
         g_swirl_state.store(ok ? 2 : -1);
     }
     expected = 0;
@@ -1743,6 +1743,18 @@ void hook_loading(void* dialog, float frame_time) {
     }
     if (g_loading_logged.exchange(1) == 0) {
         LOG_INFO("Loading screen step: incoming=%.9f corrected=%.9f", frame_time, dt);
+    }
+    // The dialog adds one to two counters ([+0x208], [+0x20C], wrapping at 100) every time it is
+    // updated; they turn the bonfire swirl. Set them so that its own increment lands on the value
+    // they should have after the 1/30 s steps that really elapsed. (Done here, through the vtable,
+    // so it works from the very first loading screen, before code patches are allowed.)
+    {
+        auto* counters = reinterpret_cast<int*>(static_cast<uint8_t*>(dialog) + 0x208);
+        const uint32_t steps = swirl_steps();
+        if (counters[0] >= 0 && counters[0] < 100 && counters[1] >= 0 && counters[1] < 100) {
+            counters[0] = static_cast<int>((static_cast<uint32_t>(counters[0]) + steps) % 100) - 1;
+            counters[1] = static_cast<int>((static_cast<uint32_t>(counters[1]) + steps) % 100) - 1;
+        }
     }
     g_loading(dialog, dt);
 }

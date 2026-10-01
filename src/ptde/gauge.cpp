@@ -16,8 +16,7 @@ namespace {
 
 constexpr uint32_t kVtables[3] = {0x011C090C, 0x011BE714, 0x011BE324};  // PCGauge, SmoothGauge, ObjGauge
 constexpr const char* kNames[3] = {"pc", "smooth", "obj"};
-constexpr uint32_t kWords = 0x180;  // 0x600 bytes per object
-constexpr int kMaxObjects = 48;
+constexpr int kMaxObjects = 400;
 constexpr int kMaxFrames = 3000;
 
 wchar_t g_dir[MAX_PATH] = {};
@@ -30,7 +29,10 @@ LARGE_INTEGER g_freq{}, g_t0{};
 struct Object {
     uint32_t address;
     int kind;
+    uint32_t words;   // 0x180 for the player gauge, 0x40 for the others
+    size_t first;     // first column
 };
+size_t g_columns = 0;
 std::vector<Object> g_objects;
 std::vector<uint32_t> g_data;  // frames x (objects * kWords)
 std::vector<double> g_ms, g_dt;
@@ -51,7 +53,7 @@ void scan_region(uint32_t begin, uint32_t end) {
             const uint32_t v = *reinterpret_cast<const uint32_t*>(a);
             for (int k = 0; k < 3; ++k) {
                 if (v == kVtables[k]) {
-                    g_objects.push_back({a, k});
+                    g_objects.push_back({a, k, k == 0 ? 0x180u : 0x40u, 0});
                 }
             }
         }
@@ -80,6 +82,11 @@ bool start() {
         LOG_ERROR("Gauge: no gauge objects found");
         return false;
     }
+    g_columns = 0;
+    for (Object& o : g_objects) {
+        o.first = g_columns;
+        g_columns += o.words;
+    }
     QueryPerformanceCounter(&g_t0);
     int counts[3] = {};
     for (const Object& o : g_objects) ++counts[o.kind];
@@ -90,7 +97,7 @@ bool start() {
 
 void stop() {
     const size_t frames = g_ms.size();
-    const size_t columns = g_objects.size() * kWords;
+    const size_t columns = g_columns;
     if (frames < 2) {
         LOG_ERROR("Gauge: too few frames recorded");
         return;
@@ -114,8 +121,10 @@ void stop() {
     }
     std::fprintf(file, "row,ms,dt_ms");
     for (size_t c : keep) {
-        const Object& o = g_objects[c / kWords];
-        std::fprintf(file, ",%s%zu_%08X+%03X", kNames[o.kind], c / kWords, o.address, static_cast<unsigned>((c % kWords) * 4));
+        size_t oi = 0;
+        while (oi + 1 < g_objects.size() && g_objects[oi + 1].first <= c) ++oi;
+        const Object& o = g_objects[oi];
+        std::fprintf(file, ",%s%zu_%08X+%03X", kNames[o.kind], oi, o.address, static_cast<unsigned>((c - o.first) * 4));
     }
     std::fputc(10, file);
     for (size_t f = 0; f < frames; ++f) {
@@ -156,25 +165,26 @@ void gauge_frame(double dt_ms) {
         stop();
         return;
     }
-    const size_t columns = g_objects.size() * kWords;
+    const size_t columns = g_columns;
     const size_t base = g_data.size();
     g_data.resize(base + columns);
     for (size_t i = 0; i < g_objects.size(); ++i) {
-        read_words(g_objects[i].address, &g_data[base + i * kWords], kWords);
+        read_words(g_objects[i].address, &g_data[base + g_objects[i].first], g_objects[i].words);
     }
     // Once a smooth-gauge value moves by a visible amount, put a write watchpoint on it and report the
     // writers a little later: that is the code that animates the bar.
     if (g_data.size() >= 2 * columns) {
         const size_t previous = base - columns;
         if (armed_at == 0) {
+            size_t oi = 0;
             for (size_t c = 0; c < columns; ++c) {
-                if (g_objects[c / kWords].kind != 1) continue;
+                while (oi + 1 < g_objects.size() && g_objects[oi + 1].first <= c) ++oi;
                 float a = 0, b = 0;
                 std::memcpy(&a, &g_data[previous + c], 4);
                 std::memcpy(&b, &g_data[base + c], 4);
                 if (a == a && b == b && std::fabs(b - a) > 0.05f && std::fabs(b) < 2.0f && std::fabs(a) < 2.0f &&
                     std::fabs(b - a) < 1.0f) {
-                    watch_arm_address(g_objects[c / kWords].address + static_cast<uint32_t>((c % kWords) * 4));
+                    watch_arm_address(g_objects[oi].address + static_cast<uint32_t>((c - g_objects[oi].first) * 4));
                     armed_at = g_ms.size();
                     break;
                 }
