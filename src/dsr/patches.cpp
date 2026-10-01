@@ -535,6 +535,155 @@ bool rip_mulss_is(const uint8_t* insn, float expected) {
     return std::fabs(*constant - expected) < 0.0001f;
 }
 
+// HUD gauges (health, stamina, boss and enemy bars). FrpgMenuDlgObjGauge::update moves the
+// displayed value toward the real one once per frame, by half the gap while the gap is over 2 and
+// by 1.0 otherwise. It has no time step, so at 240 FPS the Estus fill ran four times too fast.
+// The 1.0 (movss xmm1,[rip+d]) and 0.5 (mulss xmm1,[rip+d]) loads are retargeted to a pair of
+// floats rewritten every frame: 1.0 * n and 1 - 0.5^n, with n = frame time * 60.
+constexpr uint32_t kGaugeMin = 0x6664B7;
+constexpr uint32_t kGaugeK = 0x6664D6;
+float* g_gauge_cave = nullptr;
+std::atomic<int> g_gauge_state{0};
+
+bool rip_xmm1_load_is(const uint8_t* insn, uint8_t op, float expected) {
+    if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != op || insn[3] != 0x0D) {
+        return false;
+    }
+    int32_t disp = 0;
+    std::memcpy(&disp, insn + 4, sizeof(disp));
+    const auto* constant = reinterpret_cast<const float*>(insn + 8 + disp);
+    return std::fabs(*constant - expected) < 0.0001f;
+}
+
+void write_gauge_factors(float dt) {
+    if (!g_gauge_cave) {
+        return;
+    }
+    float n = dt * 60.0f;
+    if (n < 0.02f) {
+        n = 0.02f;
+    }
+    if (n > 10.0f) {
+        n = 10.0f;
+    }
+    g_gauge_cave[0] = n;
+    g_gauge_cave[1] = 1.0f - std::pow(0.5f, n);
+}
+
+bool patch_gauge() {
+    auto* min_step = image_rva(kGaugeMin);
+    auto* factor = image_rva(kGaugeK);
+    if (!rip_xmm1_load_is(min_step, 0x10, 1.0f) || !rip_xmm1_load_is(factor, 0x59, 0.5f)) {
+        LOG_ERROR("HUD gauge update does not match this build");
+        return false;
+    }
+    void* page = alloc_near(min_step);
+    if (!page) {
+        LOG_ERROR("Could not allocate the HUD gauge constants (Win32=%lu)", GetLastError());
+        return false;
+    }
+    auto* cave = static_cast<float*>(page);
+    cave[0] = 1.0f;
+    cave[1] = 0.5f;
+    if (!write_disp32(min_step + 4, min_step + 8, cave) || !write_disp32(factor + 4, factor + 8, cave + 1)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("Could not retarget the HUD gauge constants");
+        return false;
+    }
+    g_gauge_cave = cave;
+    LOG_INFO("HUD gauge fill follows the frame time (Estus, stamina and boss bars)");
+    return true;
+}
+
+// Loading screen swirl. FrpgMenuDlgNowLoading::update (0x6FEC50) adds one to two counters
+// ([rdi+0x208], [rdi+0x20C]) every time it is drawn; both wrap at 100 and turn the bonfire swirl,
+// so it spun at the frame rate. The three instructions that do it (18 bytes) become a call to a
+// stub that adds the number of 1/30 s steps that really elapsed instead.
+constexpr uint32_t kSwirlSite = 0x6FED0A;
+
+uint32_t swirl_steps() {
+    static int64_t freq = 0;
+    static int64_t last = 0;
+    static double carry = 0.0;
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    if (freq == 0) {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        freq = f.QuadPart;
+    }
+    if (last == 0) {
+        last = now.QuadPart;
+        return 1;
+    }
+    double elapsed = static_cast<double>(now.QuadPart - last) / static_cast<double>(freq);
+    last = now.QuadPart;
+    if (elapsed > 0.25) {
+        elapsed = 1.0 / 30.0;
+    }
+    carry += elapsed * 30.0;
+    const uint32_t whole = static_cast<uint32_t>(carry);
+    carry -= whole;
+    return whole;
+}
+
+std::atomic<int> g_swirl_state{0};
+
+bool patch_swirl() {
+    static const uint8_t kOriginal[18] = {0xFF, 0x87, 0x08, 0x02, 0x00, 0x00, 0x8B, 0x8F, 0x08,
+                                          0x02, 0x00, 0x00, 0xFF, 0x87, 0x0C, 0x02, 0x00, 0x00};
+    uint8_t* site = image_rva(kSwirlSite);
+    if (std::memcmp(site, kOriginal, sizeof(kOriginal)) != 0) {
+        LOG_ERROR("Loading screen swirl does not match this build");
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the loading swirl stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    size_t n = 0;
+    auto emit = [&](std::initializer_list<uint8_t> bytes) {
+        for (uint8_t b : bytes) {
+            page[n++] = b;
+        }
+    };
+    emit({0x48, 0x83, 0xEC, 0x28});  // sub rsp, 28h
+    emit({0x48, 0xB8});              // mov rax, swirl_steps
+    const uint64_t func = reinterpret_cast<uint64_t>(&swirl_steps);
+    std::memcpy(page + n, &func, 8);
+    n += 8;
+    emit({0xFF, 0xD0});                                  // call rax
+    emit({0x48, 0x83, 0xC4, 0x28});                      // add rsp, 28h
+    emit({0x01, 0x87, 0x08, 0x02, 0x00, 0x00});          // add [rdi+208h], eax
+    emit({0x01, 0x87, 0x0C, 0x02, 0x00, 0x00});          // add [rdi+20Ch], eax
+    emit({0x8B, 0x8F, 0x08, 0x02, 0x00, 0x00});          // mov ecx, [rdi+208h]
+    emit({0xC3});                                        // ret
+    const intptr_t rel = reinterpret_cast<intptr_t>(page) - reinterpret_cast<intptr_t>(site + 5);
+    if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) {
+        LOG_ERROR("Loading swirl stub is out of range");
+        return false;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) {
+        LOG_ERROR("Could not make the loading swirl stub executable (Win32=%lu)", GetLastError());
+        return false;
+    }
+    if (!VirtualProtect(site, sizeof(kOriginal), PAGE_EXECUTE_READWRITE, &old)) {
+        LOG_ERROR("Could not unprotect the loading swirl (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, n);
+    site[0] = 0xE8;
+    const int32_t value = static_cast<int32_t>(rel);
+    std::memcpy(site + 1, &value, 4);
+    std::memset(site + 5, 0x90, sizeof(kOriginal) - 5);
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(kOriginal));
+    VirtualProtect(site, sizeof(kOriginal), old, &old);
+    LOG_INFO("Loading screen swirl follows real time");
+    return true;
+}
+
 void write_speed_factors(float dt) {
     const float target = static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
     const bool high = target >= 90.0f;
@@ -1374,6 +1523,16 @@ void try_delayed_patches() {
         g_move_dt_state.store(ok ? 2 : -1);
     }
     expected = 0;
+    if (g_gauge_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_ui.load(std::memory_order_relaxed) == 0 || patch_gauge();
+        g_gauge_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_swirl_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_ui.load(std::memory_order_relaxed) == 0 || patch_swirl();
+        g_swirl_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
     if (g_camera_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_camera();
         g_camera_state.store(ok ? 2 : -1);
@@ -1474,6 +1633,7 @@ void hook_sim(void* step, float frame_time) {
     // Measure first: the work below (first-time patching, logging) must not count as frame time.
     const float dt = advance_frame_dt();
     apply_frame_step(dt);
+    write_gauge_factors(dt);
     try_delayed_patches();
     update_speed_factors();
     const float corrected = scaled_frame(frame_time);

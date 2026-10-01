@@ -13,6 +13,8 @@ struct Settings {
     // default: the file is large and the hook costs a little per update.
     bool trace = false;
     // Sprint slowdown near geometry, airborne momentum and slope slide scaled to the frame time.
+    // HUD gauge fill speed (Estus, stamina and boss bars).
+    bool fix_ui = true;
     bool fix_graze = true;
     bool fix_damping = true;
     bool fix_slide = true;

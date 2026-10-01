@@ -11,6 +11,7 @@ inline std::atomic<int> g_fix_move_dt{1};
 inline std::atomic<int> g_fix_step_down{1};
 inline std::atomic<int> g_fix_camera{1};
 inline std::atomic<int> g_fix_graze{1};
+inline std::atomic<int> g_fix_ui{1};
 inline std::atomic<int> g_fix_damping{1};
 inline std::atomic<int> g_fix_slide{1};
 // 1 = the lock-on camera pans at the original Prepare to Die Edition speed (half the Remastered speed).
