@@ -25,8 +25,8 @@ Everything below is on by default and has an INI switch.
 | Sprint slowdown (graze) | Running was treated as "stuck on a wall" and slowed | `FixGraze` | `FixGraze` |
 | Ladders | Sliding down dropped you through the floor | `FixMoveDt`, `FixStepDown` | `FixStepDown` |
 | Ledges and lips | The ground snap-down glued you to a curved lip and dragged you down several times faster | `FixStepDown` | `FixStepDown` |
-| Lock-on camera | Switching targets, or locking onto an enemy near the screen edge, snapped instead of panning | `FixCamera` | `FixCamera` |
-| Lock-on body turn | The torso, head and hips swung round to face the target several times too fast | `FixLockOnTurn` | `FixLockOnTurn` |
+| Lock-on camera | Switching targets, locking on, or locking onto an enemy near the screen edge snapped or finished early instead of panning | `FixCamera` | `FixCamera` |
+| Lock-on body turn | The torso, head and hips (and enemies' head and upper body when they track you) swung round several times too fast | `FixLockOnTurn` | `FixLockOnTurn` |
 | Ghost replays | Bloodstain and wandering ghost replays ran several times too fast, and your own replay data was recorded too densely (it played back in slow motion for other players) | `FixGhosts` | `FixGhosts` |
 | Estus / health bar fill | The bar animation advanced a fixed amount per frame and finished in a few frames | `FixUI` | `FixUI` |
 | Sprint stamina drain | Each 0.1 s drain tick was rounded up to a whole frame and the remainder thrown away, so the drain ran slow at frame rates that do not divide 0.1 s evenly (8.7 per second at 61 FPS instead of 10) | `FixStaminaTick` | `FixStaminaTick` |
@@ -39,9 +39,25 @@ Everything below is on by default and has an INI switch.
 | Cloth | Havok step scaled to the real frame time | yes | n/a |
 | Fullscreen refresh rate | The game only offers 59/60 Hz; ask for the display's real rate, or use borderless | n/a | `FullscreenRefreshRate`, `BorderlessFullscreen` |
 
-The original game's 30 FPS physics were tuned for 30 frames per second; both mods are exact at the native rate and very close at every other rate.
+The original game's 30 FPS physics were tuned for 30 frames per second; both mods are exact at the native rate and very close at every other rate. See [Fix details](#fix-details) for what each fix does.
 
 **Accuracy.** This is very close to the game at its native rate, and more than good enough for casual and serious play. It is not a perfect 1:1 match: retail decides some of these things on a fixed frame grid, so a borderline slope or lip can behave slightly differently at 180 or 240 FPS. Speedrunners and anyone who needs stock-exact precision should not use this.
+
+## Fix details
+
+**Lock-on camera (`FixCamera`).** The follow camera smooths several things toward a target by a fixed fraction every frame, tuned for the native frame rate: the yaw and pitch, the point it looks at (0.4 sideways, 0.3 vertically while locked on), the camera distance, the pivot that follows your character, the settling back after you let go of the stick, the automatic turn toward your walking direction, stick smoothing and the blend between camera settings when locking on. Every one of them now takes the same real time at any frame rate. Earlier versions scaled only the first two, so a pan from target to target still finished noticeably early.
+
+**Lock-on body turn (`FixLockOnTurn`).** A small bone controller bends the hips, spine and head toward an angle: your torso and head toward the locked-on target (including while strafing), your upper body when aiming a bow or crossbow, and an enemy's head and upper body while it tracks you. It moved each bone a fixed fraction of the way every frame (0.6 hips, 0.2 head, 0.1 spine), so at 120 FPS the bending happened four times faster than in the game. Weapons ride on the skeleton, so this is not only cosmetic: enemies' upper bodies tracked you more sharply than in the game. The fix restores the native timing. The whole-body turn (turn speed in degrees per second) was already correct and is unchanged.
+
+**Remastered lock-on speed (`LockOnPtdeSpeed`).** Remastered kept the original game's per-frame camera and body-turn values but runs them at 60 FPS, so its lock-on pan and body turn are twice as fast as Prepare to Die Edition. By default the mod keeps Remastered's 60 FPS speed; `LockOnPtdeSpeed = true` uses the original game's speed for both (that includes enemies' head and upper-body tracking). The old name `CameraPtdeSpeed` still works.
+
+**Ghost replays (`FixGhosts`).** Bloodstain replays and wandering ghosts step to the next recorded sample every 10 frames in Prepare to Die Edition and every 20 in Remastered, one sample per third of a second at the native rate. At 120 FPS they played several times too fast. The recorder that captures your own bloodstain and the ghost data sent to other players counts in frames too, so a high frame rate recorded it too densely and other players saw your ghosts in slow motion. Playback and recording now follow real time, matching the native rate exactly.
+
+**Sprint graze (`FixGraze`).** The game slows a character that barely moved last frame (it assumes a wall). The test is per frame, so at a high frame rate ordinary running failed it. The fix applies the game's own test to real speed with no slack, and the slowdown and recovery per second match the native rate exactly. Earlier Remastered builds gave it some slack, which let a character climb a small step after a few seconds of jitter, which the game never allows.
+
+**Ground snap and ladders (`FixStepDown`).** Every physics step the game lifts the character by its step height, moves it, then pulls it back down onto the ground, at most a fixed distance per step. At a high frame rate the same pull is applied many more times per second, which glued the character to curved lips and pulled it through the floor at the bottom of a ladder slide. The pull is now limited to the native rate per second. (Prepare to Die Edition called this `FixLadder`; that name still works.)
+
+**Sprint stamina drain (`FixStaminaTick`).** One point every 0.1 s, but the game rounded each tick up to a whole frame and dropped the remainder. The remainder is kept, so the drain is 10 points a second at any frame rate.
 
 ## Supported versions
 
@@ -70,6 +86,7 @@ Copy the two files from the release for your game next to the game's exe (see th
 ## Notes and known limits
 
 - **Remastered lock-on speed.** Remastered pans the lock-on camera and turns the body toward the target twice as fast as the original (it kept the original game's per-frame values at 60 FPS). `LockOnPtdeSpeed = true` in the Remastered INI uses the original speed for both instead (the old name `CameraPtdeSpeed` still works).
+- **Short steps after riding the edge (PTDE).** Walking along a short step at a sharp angle can leave the character riding its edge. At 30 FPS turning into the step then crosses it; at a high frame rate the character can get stuck against it like a low wall. The game decides step-ups once per physics step, and stepping the physics every frame changes the outcome on this borderline case. Running the player's physics at a fixed 30 steps a second does fix it, but needs interpolation that adds visible delay, so it is not included.
 - **PTDE cutscenes.** In-engine cutscenes can still look like 30 FPS at a high frame rate (their content is stepped at 30 Hz); the pre-rendered movies are 30 FPS by nature.
 - **First walk-to-run (Remastered).** The retail game has a short hitch on the first walk-to-run after standing still. At a high frame rate it reads as a brief freeze of the character and camera; it is left as it is.
 - **Bonfire softlock (Remastered).** A few users have reported a softlock while resting at the Firelink bonfire in Remastered. PTDE has a watchdog for the same symptom (`BonfireUnstick`); Remastered does not, because its code is protected and the cause is not known. It has not been reproduced. If it happens, try `MenuInputFilter = false` and send the log.
