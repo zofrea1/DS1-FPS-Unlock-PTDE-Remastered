@@ -1,10 +1,12 @@
 #include "gauge.h"
 
 #include "log.h"
+#include "watch.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -20,6 +22,7 @@ constexpr int kMaxFrames = 3000;
 
 wchar_t g_dir[MAX_PATH] = {};
 int g_capture = 0;
+size_t armed_at = 0;
 bool g_down = false;
 bool g_active = false;
 LARGE_INTEGER g_freq{}, g_t0{};
@@ -57,6 +60,7 @@ void scan_region(uint32_t begin, uint32_t end) {
 }
 
 bool start() {
+    armed_at = 0;
     g_objects.clear();
     g_data.clear();
     g_ms.clear();
@@ -157,6 +161,27 @@ void gauge_frame(double dt_ms) {
     g_data.resize(base + columns);
     for (size_t i = 0; i < g_objects.size(); ++i) {
         read_words(g_objects[i].address, &g_data[base + i * kWords], kWords);
+    }
+    // Once a smooth-gauge value moves by a visible amount, put a write watchpoint on it and report the
+    // writers a little later: that is the code that animates the bar.
+    if (g_data.size() >= 2 * columns) {
+        const size_t previous = base - columns;
+        if (armed_at == 0) {
+            for (size_t c = 0; c < columns; ++c) {
+                if (g_objects[c / kWords].kind != 1) continue;
+                float a = 0, b = 0;
+                std::memcpy(&a, &g_data[previous + c], 4);
+                std::memcpy(&b, &g_data[base + c], 4);
+                if (a == a && b == b && std::fabs(b - a) > 0.05f && std::fabs(b) < 2.0f && std::fabs(a) < 2.0f &&
+                    std::fabs(b - a) < 1.0f) {
+                    watch_arm_address(g_objects[c / kWords].address + static_cast<uint32_t>((c % kWords) * 4));
+                    armed_at = g_ms.size();
+                    break;
+                }
+            }
+        } else if (g_ms.size() == armed_at + 120) {
+            watch_report_now();
+        }
     }
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);

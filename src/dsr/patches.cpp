@@ -610,6 +610,8 @@ bool patch_gauge() {
 // stub that adds the number of 1/30 s steps that really elapsed instead.
 constexpr uint32_t kSwirlSite = 0x6FED0A;
 
+std::atomic<uint32_t> g_swirl_total{0};
+
 uint32_t swirl_steps() {
     static int64_t freq = 0;
     static int64_t last = 0;
@@ -633,6 +635,7 @@ uint32_t swirl_steps() {
     carry += elapsed * 30.0;
     const uint32_t whole = static_cast<uint32_t>(carry);
     carry -= whole;
+    g_swirl_total.fetch_add(whole, std::memory_order_relaxed);
     return whole;
 }
 
@@ -1637,6 +1640,8 @@ void note_presses(void* detector, void* input_state, void* resolved, size_t stri
     }
 }
 
+void try_install_hold_state();
+
 void hook_sim(void* step, float frame_time) {
     if (g_scheduler_active.load(std::memory_order_acquire) == 0) {
         g_sim(step, frame_time);
@@ -1647,6 +1652,9 @@ void hook_sim(void* step, float frame_time) {
     const float dt = advance_frame_dt();
     apply_frame_step(dt);
     write_gauge_factors(dt);
+    if (g_fix_hold.load(std::memory_order_relaxed) != 0) {
+        try_install_hold_state();
+    }
     try_delayed_patches();
     update_speed_factors();
     const float corrected = scaled_frame(frame_time);
@@ -1712,6 +1720,27 @@ void hook_loading(void* dialog, float frame_time) {
         }
     }
     last = now.QuadPart;
+    if (g_input_log.load(std::memory_order_relaxed) != 0) {
+        static int64_t mark = 0;
+        static uint32_t calls = 0;
+        static double sum = 0.0;
+        static uint32_t swirl_mark = 0;
+        if (mark == 0) {
+            mark = now.QuadPart;
+        }
+        ++calls;
+        sum += frame_time;
+        const double wall = static_cast<double>(now.QuadPart - mark) / static_cast<double>(freq);
+        if (wall >= 1.0) {
+            const uint32_t swirl = g_swirl_total.load(std::memory_order_relaxed);
+            LOG_INFO("[loading] %u updates, incoming dt summed %.3f s over %.3f s wall, swirl steps %u", calls, sum, wall,
+                     swirl - swirl_mark);
+            swirl_mark = swirl;
+            calls = 0;
+            sum = 0.0;
+            mark = now.QuadPart;
+        }
+    }
     if (g_loading_logged.exchange(1) == 0) {
         LOG_INFO("Loading screen step: incoming=%.9f corrected=%.9f", frame_time, dt);
     }
@@ -1734,6 +1763,100 @@ bool install_loading_hook() {
     }
     LOG_INFO("Loading screen update follows real time");
     return true;
+}
+
+// Held-button counters. The HUD shortcut handler asks the input system for the state of the D-pad
+// buttons (index 0xC = down, 0xD = up; slot 6 of the input object's vtable): the answer is the
+// number of frames the button has been held, and 15 triggers the hold action (down: back to the
+// first quick item). Counted in frames, 15 is a quarter of a second at 60 FPS and 62 ms at 240, so
+// the hold fired during an ordinary tap. The answer is limited to the count a 60 FPS game would
+// have reached in the real time the button has been down, and 15 is reported once.
+constexpr uint32_t kInputObjectRva = 0x1CB5420;
+constexpr uint32_t kHoldStateFn = 0xC95E50;
+using HoldStateFn = int (*)(void* self, int index);
+HoldStateFn g_hold_orig = nullptr;
+std::atomic<int> g_hold_state{0};
+int g_hold_attempts = 0;
+
+struct HoldTrack {
+    int64_t start = 0;
+    int last = 0;
+};
+HoldTrack g_hold[2];
+
+int hook_hold_state(void* self, int index) {
+    const int result = g_hold_orig(self, index);
+    if (index != 0xC && index != 0xD) {
+        return result;
+    }
+    static int64_t freq = 0;
+    HoldTrack& t = g_hold[index - 0xC];
+    if (result <= 0) {
+        t.start = 0;
+        t.last = 0;
+        return result;
+    }
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    if (freq == 0) {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        freq = f.QuadPart;
+    }
+    if (t.start == 0 || result == 1) {
+        t.start = now.QuadPart;
+        t.last = 0;
+    }
+    const double held = static_cast<double>(now.QuadPart - t.start) / static_cast<double>(freq);
+    int n = 1 + static_cast<int>(held * 60.0);
+    if (n > result) {
+        n = result;
+    }
+    int answer = n;
+    if (n == t.last) {
+        answer = n | 0x100;  // already reported this count; a threshold test must not see it twice
+    } else {
+        t.last = n;
+    }
+    if (g_input_log.load(std::memory_order_relaxed) != 0 && (answer == 0xF || answer == 1)) {
+        LOG_INFO("[input] hold index=0x%X answer=0x%X (game counted %d, %.3f s held)", index, answer, result, held);
+    }
+    return answer;
+}
+
+void try_install_hold_state() {
+    if (g_hold_state.load(std::memory_order_relaxed) != 0 || ++g_hold_attempts > 3000) {
+        return;
+    }
+    void* object = nullptr;
+    __try {
+        object = *reinterpret_cast<void**>(image_rva(kInputObjectRva));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (!object) {
+        return;
+    }
+    void** slot = nullptr;
+    __try {
+        slot = *reinterpret_cast<void***>(object) + 6;
+        if (*slot != image_rva(kHoldStateFn)) {
+            LOG_ERROR("Input state slot does not match this build");
+            g_hold_state.store(-1);
+            return;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    g_hold_orig = reinterpret_cast<HoldStateFn>(*slot);
+    if (!patch_pointer(slot, reinterpret_cast<void*>(hook_hold_state))) {
+        g_hold_orig = nullptr;
+        LOG_ERROR("Could not hook the held-button counters (Win32=%lu)", GetLastError());
+        g_hold_state.store(-1);
+        return;
+    }
+    g_hold_state.store(1);
+    LOG_INFO("D-pad hold counter follows real time (hold = 15 frames at 60 FPS)");
 }
 
 void hook_fx(void* manager, float frame_time) {

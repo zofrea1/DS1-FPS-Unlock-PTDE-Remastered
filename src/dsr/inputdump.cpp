@@ -117,9 +117,6 @@ DWORD WINAPI dump_thread(void*) {
     LARGE_INTEGER t0{};
     for (;;) {
         Sleep(1);
-        if (!g_state_orig) {
-            hook_state_slot(read_object(base));
-        }
         const bool key = (GetAsyncKeyState(VK_SCROLL) & 0x8000) != 0;
         if (key && !key_was) {
             if (recording) {
