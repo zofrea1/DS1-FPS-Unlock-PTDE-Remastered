@@ -150,12 +150,92 @@ DWORD WINAPI dump_thread(void*) {
     return 0;
 }
 
+// Stamina finder. With the character at full hit points and full stamina, Scroll Lock scans the
+// game's memory for the player's stats block as laid out in Prepare to Die Edition (hit points at
+// +0xC, their maximum at +0x10, stamina at +0x28 and its maximum at +0x2C, all 32-bit integers)
+// and then logs every change of the stamina word, with a millisecond timestamp, for 90 seconds.
+bool plausible_stats(const uint8_t* a) {
+    const int hp = *reinterpret_cast<const int*>(a + 0xC);
+    const int hp_max = *reinterpret_cast<const int*>(a + 0x10);
+    const int stamina = *reinterpret_cast<const int*>(a + 0x28);
+    const int stamina_max = *reinterpret_cast<const int*>(a + 0x2C);
+    return hp >= 100 && hp <= 6000 && hp == hp_max && stamina_max >= 60 && stamina_max <= 300 &&
+           stamina == stamina_max;
+}
+
+void scan_region(uintptr_t begin, uintptr_t end, const uint8_t** out, size_t* count, size_t limit) {
+    __try {
+        for (uintptr_t a = begin; a + 0x40 <= end && *count < limit; a += 4) {
+            if (plausible_stats(reinterpret_cast<const uint8_t*>(a))) {
+                out[(*count)++] = reinterpret_cast<const uint8_t*>(a);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+int read_stamina(const uint8_t* block) {
+    __try {
+        return *reinterpret_cast<const int*>(block + 0x28);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+DWORD WINAPI stamina_thread(void*) {
+    bool key_was = false;
+    for (;;) {
+        Sleep(20);
+        const bool key = (GetAsyncKeyState(VK_SCROLL) & 0x8000) != 0;
+        const bool pressed = key && !key_was;
+        key_was = key;
+        if (!pressed) continue;
+        const uint8_t* found[16];
+        size_t count = 0;
+        MEMORY_BASIC_INFORMATION info{};
+        uintptr_t address = 0x10000;
+        while (address < 0x7FFFFFFE0000ull && count < 16 &&
+               VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info))) {
+            const uintptr_t begin = reinterpret_cast<uintptr_t>(info.BaseAddress);
+            if (info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && (info.Protect & 0xFF) == PAGE_READWRITE &&
+                (info.Protect & PAGE_GUARD) == 0 && info.RegionSize >= 0x100) {
+                scan_region(begin, begin + info.RegionSize, found, &count, 16);
+            }
+            address = begin + info.RegionSize;
+        }
+        LOG_INFO("[stamD] scan found %zu candidate stats blocks", count);
+        for (size_t i = 0; i < count; ++i) {
+            LOG_INFO("[stamD] candidate %p stamina=%d", static_cast<const void*>(found[i]), read_stamina(found[i]));
+        }
+        if (count == 0) continue;
+        int last[16];
+        for (int& l : last) l = -1;
+        const ULONGLONG start = GetTickCount64();
+        while (GetTickCount64() - start < 90000) {
+            Sleep(1);
+            for (size_t i = 0; i < count; ++i) {
+                const int value = read_stamina(found[i]);
+                if (value != last[i]) {
+                    last[i] = value;
+                    LOG_INFO("[stamD] %zu stamina=%d", i, value);
+                }
+            }
+        }
+        LOG_INFO("[stamD] done");
+    }
+    return 0;
+}
+
 }  // namespace
 
 void inputdump_start(const wchar_t* dll_path) {
     wcsncpy_s(g_dir, dll_path, _TRUNCATE);
     wchar_t* slash = wcsrchr(g_dir, L'\\');
     if (slash) slash[1] = 0;
+    if (HANDLE finder = CreateThread(nullptr, 0, stamina_thread, nullptr, 0, nullptr)) {
+        CloseHandle(finder);
+        LOG_INFO("Stamina finder: Scroll Lock at full health and stamina starts it");
+    }
     HANDLE thread = CreateThread(nullptr, 0, dump_thread, nullptr, 0, nullptr);
     if (thread) {
         CloseHandle(thread);
