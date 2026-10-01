@@ -4,6 +4,7 @@
 #include "settings.h"
 #include "state.h"
 #include "trace.h"
+#include "inputdump.h"
 #include "watch.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -37,6 +38,9 @@ DWORD WINAPI worker(void*) {
     LOG_INFO("MaxFPS: %d", settings.target_fps);
     if ((settings.trace || settings.watch) && !trace_start(dll_path)) {
         LOG_ERROR("Trace was requested but the CSV could not be opened");
+    }
+    if (settings.input_log) {
+        inputdump_start(dll_path);
     }
     if (settings.watch && !watch_start(dll_path)) {
         LOG_ERROR("Watch was requested but could not start");

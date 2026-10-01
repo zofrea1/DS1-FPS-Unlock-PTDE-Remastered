@@ -3,6 +3,7 @@
 #include "diag.h"
 #include "dsfix.h"
 #include "frame.h"
+#include "gauge.h"
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
@@ -42,6 +43,7 @@ DWORD WINAPI worker(void*) {
     const Settings settings = settings_load(dll_path);
     trace_set_dir(dll_path);
     deep_set_dir(dll_path);
+    gauge_set_dir(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("MaxFPS: %d", settings.target_fps);
 
