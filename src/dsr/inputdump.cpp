@@ -153,7 +153,7 @@ DWORD WINAPI dump_thread(void*) {
 // Stamina finder. With the character at full hit points and full stamina, Scroll Lock scans the
 // game's memory for the player's stats block as laid out in Prepare to Die Edition (hit points at
 // +0xC, their maximum at +0x10, stamina at +0x28 and its maximum at +0x2C, all 32-bit integers)
-// and then logs every change of the stamina word, with a millisecond timestamp, for 90 seconds.
+// and then logs every change of the stamina word, with a millisecond timestamp, for four minutes.
 bool plausible_stats(const uint8_t* a) {
     const int hp = *reinterpret_cast<const int*>(a + 0xC);
     const int hp_max = *reinterpret_cast<const int*>(a + 0x10);
@@ -190,34 +190,33 @@ DWORD WINAPI stamina_thread(void*) {
         const bool pressed = key && !key_was;
         key_was = key;
         if (!pressed) continue;
-        const uint8_t* found[16];
+        static const uint8_t* found[4000];
         size_t count = 0;
         MEMORY_BASIC_INFORMATION info{};
         uintptr_t address = 0x10000;
-        while (address < 0x7FFFFFFE0000ull && count < 16 &&
+        while (address < 0x7FFFFFFE0000ull && count < 4000 &&
                VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info))) {
             const uintptr_t begin = reinterpret_cast<uintptr_t>(info.BaseAddress);
             if (info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && (info.Protect & 0xFF) == PAGE_READWRITE &&
                 (info.Protect & PAGE_GUARD) == 0 && info.RegionSize >= 0x100) {
-                scan_region(begin, begin + info.RegionSize, found, &count, 16);
+                scan_region(begin, begin + info.RegionSize, found, &count, 4000);
             }
             address = begin + info.RegionSize;
         }
         LOG_INFO("[stamD] scan found %zu candidate stats blocks", count);
-        for (size_t i = 0; i < count; ++i) {
-            LOG_INFO("[stamD] candidate %p stamina=%d", static_cast<const void*>(found[i]), read_stamina(found[i]));
-        }
         if (count == 0) continue;
-        int last[16];
+        // Most candidates are look-alikes that never change; the real stats block is the one whose
+        // stamina word moves while sprinting, so only changes are logged.
+        static int last[4000];
         for (int& l : last) l = -1;
         const ULONGLONG start = GetTickCount64();
-        while (GetTickCount64() - start < 90000) {
+        while (GetTickCount64() - start < 240000) {
             Sleep(1);
             for (size_t i = 0; i < count; ++i) {
                 const int value = read_stamina(found[i]);
                 if (value != last[i]) {
                     last[i] = value;
-                    LOG_INFO("[stamD] %zu stamina=%d", i, value);
+                    LOG_INFO("[stamD] %zu %p stamina=%d", i, static_cast<const void*>(found[i]), value);
                 }
             }
         }
