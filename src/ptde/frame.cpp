@@ -6,6 +6,7 @@
 #include "fixes.h"
 #include "gauge.h"
 #include "log.h"
+#include "physhz.h"
 #include "present.h"
 #include "profile.h"
 #include "snap.h"
@@ -205,6 +206,7 @@ void frame_boundary() {
             *g.step = dt;
             g.written = dt;
         }
+        physhz_frame(g.driver ? static_cast<double>(g.written) : 1.0 / 30.0);
         fixes_update(g.driver ? static_cast<double>(g.written) : 1.0 / 30.0);
     }
     watch_poll();
@@ -220,6 +222,7 @@ void frame_boundary() {
         }
         trace_frame(g.last ? ms_between(g.last, t) : 0.0, g.rate);
         fixes_poll_hotkeys();
+        physhz_poll_hotkeys();
         deep_frame(g.last ? ms_between(g.last, t) : 0.0, g.rate);
         gauge_frame(g.last ? ms_between(g.last, t) : 0.0);
     }
@@ -360,6 +363,7 @@ bool frame_install(const Settings& settings) {
         flags.ui = settings.fix_ui;
         fixes_install(flags);
         ui_install(settings);
+        physhz_install(settings);
         if (settings.fix_ladder) {
             snap_install();
         }

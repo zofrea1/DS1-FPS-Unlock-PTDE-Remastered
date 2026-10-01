@@ -30,5 +30,10 @@ double fixes_last_dt();
 // Called on the render thread at every frame boundary with the frame time in seconds.
 void fixes_update(double dt);
 
+// Recomputes the dt-scaled values from another time step (the fixed-rate physics experiment calls
+// the physics with the time it accumulated), and puts the frame's own values back.
+void fixes_override_dt(double dt);
+void fixes_restore_dt();
+
 // Ctrl+1..5 toggle the groups at run time (diagnostic; INI Trace = true).
 void fixes_poll_hotkeys();

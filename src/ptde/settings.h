@@ -23,6 +23,8 @@ struct Settings {
     bool fix_ladder = true;
     bool fix_camera = true;
     // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
+    // SANDBOX: run the player's movement physics at this many steps a second (0 = every frame, 30, 60).
+    int physics_hz = 0;
     bool fix_ui = true;
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each
     // tick up to a whole frame and dropped the remainder).

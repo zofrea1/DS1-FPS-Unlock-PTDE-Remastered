@@ -125,9 +125,8 @@ double fixes_last_dt() {
     return g_last_dt;
 }
 
-void fixes_update(double dt) {
-    g_last_dt = dt;
-    if (!g_installed) return;
+namespace {
+void apply_dt(double dt) {
     const double s = dt * 30.0;
     g_gravity = static_cast<float>(1.0 * s);
     g_friction = static_cast<float>(std::pow(0.65, s));
@@ -139,6 +138,23 @@ void fixes_update(double dt) {
     g_recover = std::pow(1.2, s);
     g_gauge_k = 1.0 - std::pow(0.5, s);
     g_gauge_min = static_cast<float>(1.0 * s);
+}
+}  // namespace
+
+void fixes_update(double dt) {
+    g_last_dt = dt;
+    if (!g_installed) return;
+    apply_dt(dt);
+}
+
+void fixes_override_dt(double dt) {
+    if (!g_installed) return;
+    apply_dt(dt);
+}
+
+void fixes_restore_dt() {
+    if (!g_installed) return;
+    apply_dt(g_last_dt);
 }
 
 void fixes_poll_hotkeys() {
