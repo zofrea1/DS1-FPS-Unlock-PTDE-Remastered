@@ -6,7 +6,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <TlHelp32.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -405,6 +407,206 @@ bool install_dialog_log() {
     return true;
 }
 
+// ---- Stamina writer probe -----------------------------------------------------------------------
+//
+// Diagnostic (INI InputLog): Scroll Lock puts a hardware write watchpoint on the player's stamina
+// word ([[0x1378700]+8]+0x28). The routine that writes it copies the value from the character's
+// own data, so at every hit the registers are searched for a pointer to memory holding the same
+// number; the (register, offset) that matches at every hit, including hits with different values,
+// is the character's own stamina word, which then gets a second watchpoint. The writers of both are
+// summarised in the log as [stamW] lines, with the return addresses found on the stack.
+struct ProbeHit {
+    uint32_t eip;
+    uint32_t ret[3];
+    uint32_t reg[7];  // eax ebx ecx edx esi edi ebp
+    int value;
+    int slot;
+};
+constexpr int kProbeMaxHits = 8192;
+constexpr int kMatchWords = 512;  // 0x800 bytes behind each register
+ProbeHit g_probe_hits[kProbeMaxHits];
+std::atomic<int> g_probe_count{0};
+uint32_t g_probe_address[2] = {0, 0};
+uint16_t g_probe_match[7][kMatchWords];
+int g_probe_slot0_hits = 0;
+int g_probe_min = 1 << 30, g_probe_max = -(1 << 30);
+uint32_t g_probe_first_regs[7] = {};
+volatile LONG g_probe_second_armed = 0;
+
+LONG CALLBACK on_probe(EXCEPTION_POINTERS* info) {
+    CONTEXT* ctx = info->ContextRecord;
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(ctx->Dr6 & 3)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const int which = (ctx->Dr6 & 1) ? 0 : 1;
+    const int slot = g_probe_count.fetch_add(1, std::memory_order_relaxed);
+    if (slot < kProbeMaxHits) {
+        ProbeHit& h = g_probe_hits[slot];
+        h.eip = ctx->Eip;
+        h.slot = which;
+        h.reg[0] = ctx->Eax;
+        h.reg[1] = ctx->Ebx;
+        h.reg[2] = ctx->Ecx;
+        h.reg[3] = ctx->Edx;
+        h.reg[4] = ctx->Esi;
+        h.reg[5] = ctx->Edi;
+        h.reg[6] = ctx->Ebp;
+        h.value = *reinterpret_cast<const int*>(g_probe_address[which]);
+        const uint32_t* stack = reinterpret_cast<const uint32_t*>(ctx->Esp);
+        int found = 0;
+        for (int i = 0; i < 3; ++i) h.ret[i] = 0;
+        for (int i = 0; i < 48 && found < 3; ++i) {
+            uint32_t v = 0;
+            __try {
+                v = stack[i];
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                break;
+            }
+            if (v > 0x401000 && v < 0x1200000) h.ret[found++] = v;
+        }
+        if (which == 0 && g_probe_slot0_hits < 1500) {
+            if (g_probe_slot0_hits == 0) std::memcpy(g_probe_first_regs, h.reg, sizeof(h.reg));
+            ++g_probe_slot0_hits;
+            if (h.value < g_probe_min) g_probe_min = h.value;
+            if (h.value > g_probe_max) g_probe_max = h.value;
+            for (int r = 0; r < 7; ++r) {
+                const uint32_t p = h.reg[r];
+                if (p < 0x10000 || p > 0x7FFF0000) continue;
+                __try {
+                    const int* words = reinterpret_cast<const int*>(p);
+                    for (int i = 0; i < kMatchWords; ++i) {
+                        if (words[i] == h.value) ++g_probe_match[r][i];
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+        }
+    }
+    ctx->Dr6 = 0;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void probe_arm(int slot, uint32_t address) {
+    g_probe_address[slot] = address;
+    const DWORD self = GetCurrentThreadId();
+    const DWORD pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 e{};
+    e.dwSize = sizeof(e);
+    int applied = 0;
+    if (Thread32First(snap, &e)) {
+        do {
+            if (e.th32OwnerProcessID != pid) continue;
+            HANDLE th = OpenThread(THREAD_SET_CONTEXT | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, e.th32ThreadID);
+            if (!th) continue;
+            const bool me = e.th32ThreadID == self;
+            if (me || SuspendThread(th) != static_cast<DWORD>(-1)) {
+                CONTEXT ctx{};
+                ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                if (GetThreadContext(th, &ctx)) {
+                    if (slot == 0) {
+                        ctx.Dr0 = address;
+                        ctx.Dr7 |= 1u | (1u << 16) | (3u << 18);
+                    } else {
+                        ctx.Dr1 = address;
+                        ctx.Dr7 |= (1u << 2) | (1u << 20) | (3u << 22);
+                    }
+                    ctx.Dr6 = 0;
+                    if (SetThreadContext(th, &ctx)) ++applied;
+                }
+                if (!me) ResumeThread(th);
+            }
+            CloseHandle(th);
+        } while (Thread32Next(snap, &e));
+    }
+    CloseHandle(snap);
+    LOG_INFO("[stamW] write watchpoint %d on %08X set on %d threads", slot, address, applied);
+}
+
+DWORD WINAPI probe_thread(void*) {
+    bool key_was = false;
+    for (;;) {
+        Sleep(20);
+        const bool key = (GetAsyncKeyState(VK_SCROLL) & 0x8000) != 0;
+        const bool pressed = key && !key_was;
+        key_was = key;
+        if (!pressed) continue;
+        uint32_t manager = 0, data = 0;
+        if (!read_u32(kGameDataPtr, &manager) || !read_u32(manager + 8, &data) || data < 0x10000) {
+            LOG_ERROR("[stamW] player data not found");
+            continue;
+        }
+        AddVectoredExceptionHandler(1, on_probe);
+        probe_arm(0, data + 0x28);
+        ULONGLONG last_report = GetTickCount64();
+        int reported = 0;
+        const ULONGLONG start = last_report;
+        while (GetTickCount64() - start < 240000) {
+            Sleep(50);
+            if (!g_probe_second_armed && g_probe_slot0_hits >= 60 && g_probe_max - g_probe_min >= 3) {
+                // Candidates: every (register, word) that held the written value at every single hit.
+                const int needed = g_probe_slot0_hits - 2;
+                int first_reg = -1, first_word = -1, listed = 0;
+                for (int r = 0; r < 7; ++r) {
+                    for (int i = 0; i < kMatchWords; ++i) {
+                        if (g_probe_match[r][i] >= needed) {
+                            const uint32_t address = g_probe_first_regs[r] + 4u * i;
+                            if (address == data + 0x28) continue;
+                            if (listed < 12) {
+                                LOG_INFO("[stamW] candidate: register %d + 0x%X (%08X)", r, 4 * i, address);
+                                ++listed;
+                            }
+                            if (first_reg < 0) {
+                                first_reg = r;
+                                first_word = i;
+                            }
+                        }
+                    }
+                }
+                g_probe_second_armed = 1;
+                if (first_reg >= 0) {
+                    probe_arm(1, g_probe_first_regs[first_reg] + 4u * first_word);
+                } else {
+                    LOG_ERROR("[stamW] no character word matched; only the stats block is watched");
+                }
+            }
+            if (GetTickCount64() - last_report > 15000 && g_probe_count.load() > reported) {
+                last_report = GetTickCount64();
+                reported = g_probe_count.load();
+                const int total = reported < kProbeMaxHits ? reported : kProbeMaxHits;
+                struct Key {
+                    int slot;
+                    uint32_t eip, r0, r1;
+                    int count, vmin, vmax;
+                } keys[32] = {};
+                int nkeys = 0;
+                for (int h = 0; h < total; ++h) {
+                    const ProbeHit& hit = g_probe_hits[h];
+                    int k = 0;
+                    for (; k < nkeys; ++k) {
+                        if (keys[k].slot == hit.slot && keys[k].eip == hit.eip && keys[k].r0 == hit.ret[0]) break;
+                    }
+                    if (k == nkeys) {
+                        if (nkeys == 32) continue;
+                        keys[nkeys++] = {hit.slot, hit.eip, hit.ret[0], hit.ret[1], 0, 1 << 30, -(1 << 30)};
+                    }
+                    ++keys[k].count;
+                    if (hit.value < keys[k].vmin) keys[k].vmin = hit.value;
+                    if (hit.value > keys[k].vmax) keys[k].vmax = hit.value;
+                }
+                LOG_INFO("[stamW] %d writes so far", total);
+                for (int k = 0; k < nkeys; ++k) {
+                    LOG_INFO("[stamW]   slot %d writer %08X  ret %08X %08X  x%d  values %d..%d", keys[k].slot, keys[k].eip,
+                             keys[k].r0, keys[k].r1, keys[k].count, keys[k].vmin, keys[k].vmax);
+                }
+            }
+        }
+        LOG_INFO("[stamW] done");
+    }
+    return 0;
+}
+
 }  // namespace
 
 bool ui_install(const Settings& settings) {
@@ -423,6 +625,10 @@ bool ui_install(const Settings& settings) {
         }
     }
     if (settings.input_log) {
+        if (HANDLE probe = CreateThread(nullptr, 0, probe_thread, nullptr, 0, nullptr)) {
+            CloseHandle(probe);
+            LOG_INFO("Stamina probe: Scroll Lock starts it");
+        }
         HANDLE hp = CreateThread(nullptr, 0, hp_thread, nullptr, 0, nullptr);
         if (hp) {
             CloseHandle(hp);
