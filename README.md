@@ -8,7 +8,7 @@ The mods are proxy DLLs. The game's files on disk are never modified, and each m
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
 | Release | `v1.2.0-REMASTERED-DX11` | `v1.2.0-PTDE-DX9` |
-| Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` |
+| Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` (plus `dxvk_d3d9.dll` for the optional `DXVK`) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
 | Works with DSfix | n/a | yes (set `unlockFPS 0` in `DSfix.ini`) |
@@ -40,6 +40,7 @@ Everything below is on by default and has an INI switch.
 | Menus and mouse | Menu animation, menu input repeat and mouse look scaled to the real frame time | yes (`MenuInputFilter`) | n/a |
 | Cloth | Havok step scaled to the real frame time | yes | n/a |
 | Fullscreen refresh rate | The game only offers 59/60 Hz; ask for the display's real rate, or use borderless | n/a | `FullscreenRefreshRate`, `BorderlessFullscreen` |
+| Direct3D 9 on Vulkan (optional) | The Windows Direct3D 9 driver can give an uneven frame rate; DXVK often holds a steadier, higher one | n/a | `DXVK` (off by default) |
 
 The original game's 30 FPS physics were tuned for 30 frames per second; both mods are exact at the native rate and very close at every other rate. See [Fix details](#fix-details) for what each fix does.
 
@@ -87,6 +88,8 @@ Copy the two files from the release for your game next to the game's exe (see th
 
 **PTDE.** The mod loads as `xinput1_3.dll` so it can sit beside DSfix. In exclusive fullscreen it can ask for your display's highest refresh rate instead of the 60 Hz the game offers (`FullscreenRefreshRate`), and it has an optional borderless mode (`BorderlessFullscreen`; set the game to windowed first).
 
+**PTDE: DXVK (optional).** `DXVK = true` runs the game's Direct3D 9 on Vulkan through [DXVK](https://github.com/doitsujin/dxvk) (version 3.1.1, included as `dxvk_d3d9.dll`; keep it next to `xinput1_3.dll`). On many PCs this gives a steadier and higher frame rate than the Windows Direct3D 9 driver. DSfix keeps working on top of it. It needs a graphics driver with Vulkan 1.3. If DXVK cannot start, the game runs on Direct3D 9 as usual and the log says why. The first time an area loads, DXVK compiles its shaders, which can cause brief hitches; they are cached for later runs. DXVK writes its own log, `DARKSOULS_d3d9.log`, next to the game, and reads an optional `dxvk.conf` from there. If the game folder already has a `d3d9.dll` (DXVK or ReShade installed by hand), that one stays in charge and `DXVK` does nothing. With `DXVK = false` (the default) or `FPSUnlock = false`, DXVK is not loaded at all.
+
 `MaxFPS` defaults to 120 in both and accepts 10 to 1000; a value outside that range is clamped to the nearest end. Pick what your PC can usually hold; dips below it do not slow the game. A low cap works too: both games run in real time at any frame rate down to 10 FPS, so a slower PC can cap at 30 for steady frame pacing. (Frames longer than 1/8 s, below 8 FPS, are each treated as 1/8 s, so a hitch or a loading stall does not become one huge step.)
 
 ## Notes and known limits
@@ -102,7 +105,7 @@ Copy the two files from the release for your game next to the game's exe (see th
 
 ## Logs and bug reports
 
-Each mod writes a log next to its DLL (`DSR-FPS-Unlock.log` or `PTDE-FPS-Unlock.log`) with a heartbeat every 30 seconds. The first lines show the version, the exe check and each patch applied. If the game freezes, the log says when the simulation stopped advancing; a crash writes a `*-crash.dmp` next to the DLL and a `CRASH:` line to the log. Send both with a bug report.
+Each mod writes a log next to its DLL (`DSR-FPS-Unlock.log` or `PTDE-FPS-Unlock.log`) with a heartbeat every 30 seconds. The first lines show the version, the exe check and each patch applied. With `DXVK = true` the PTDE log says whether DXVK started and on which GPU, and DXVK's own `DARKSOULS_d3d9.log` is in the game folder. If the game freezes, the log says when the simulation stopped advancing; a crash writes a `*-crash.dmp` next to the DLL and a `CRASH:` line to the log. Send both with a bug report.
 
 The `[Diagnostics]` INI section has development tools (recordings, watchpoints). Leave them off.
 
@@ -114,7 +117,7 @@ Visual Studio 2022 (MSVC, `/MT`):
 build.bat
 ```
 
-builds both targets. `build_dsr.bat` and `build_ptde.bat` build one each.
+builds both targets. `build_dsr.bat` and `build_ptde.bat` build one each. `build_ptde.bat` also downloads DXVK 3.1.1 from its GitHub release once (`tools\fetch_dxvk.ps1`, SHA-256 checked) and puts its 32-bit `d3d9.dll` in `build\ptde\dxvk_d3d9.dll`.
 
 | Game | Output |
 | --- | --- |
@@ -129,9 +132,13 @@ builds both targets. `build_dsr.bat` and `build_ptde.bat` build one each.
 
 Both mods check the bytes they patch before writing, so on an unsupported build they refuse rather than corrupt anything.
 
+**PTDE with DXVK.** The game and DSfix both bind to the Windows `d3d9.dll` before the mod loads, and DSfix hooks its `Direct3DCreate9`. When the game first calls it, the mod loads `dxvk_d3d9.dll`, has DXVK create its Direct3D 9 object once on a separate thread (DXVK ends the process if it cannot start, so this test runs where a failure only ends that thread), and only then makes the Windows `Direct3DCreate9` jump to DXVK just past its first instruction bytes. Whatever hooks that function, DSfix included, then wraps DXVK's objects instead of the Windows ones.
+
 ## Acknowledgements
 
 - `BonfireUnstick` (PTDE): the idea, the memory addresses and the bonfire animation ids come from [FPSFix+](https://github.com/SeanPesce/FPSFix-Plus) by Sean Pesce, itself a remake of NullBy7e's FPSFix, both for this same bug. FPSFix+ is GPL-3.0; the code here is written from scratch and no code was copied.
+
+- `DXVK` (PTDE): [DXVK](https://github.com/doitsujin/dxvk) by Philip Rebohle and contributors, included unmodified (`x32/d3d9.dll` from the v3.1.1 release, renamed `dxvk_d3d9.dll`) under the zlib/libpng license; see `DXVK-LICENSE.txt` in the PTDE release or [third_party/dxvk/LICENSE](third_party/dxvk/LICENSE).
 
 ## License
 

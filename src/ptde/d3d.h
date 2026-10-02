@@ -12,6 +12,9 @@
 // game asks for a fullscreen device, the refresh rate in the present parameters is
 // replaced with the chosen one (the highest the display offers at that resolution, or
 // the configured rate).
+//
+// With DXVK = true the same wrapper first routes the system Direct3DCreate9 to DXVK
+// (dxvk.h), so the objects above are DXVK's, still wrapped by DSfix if it is there.
 void d3d_install_early(HMODULE self);
 
 // Content-cadence probe: a hash of every vertex shader constant upload since the previous call

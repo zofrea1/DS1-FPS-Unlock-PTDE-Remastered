@@ -58,6 +58,8 @@ struct Settings {
     // Disable the game's catch-up loop that re-presents a frame until the display's
     // vblank counter reaches its 30 FPS schedule.
     bool skip_present_repeat = false;
+    // Run Direct3D 9 on Vulkan through DXVK (dxvk_d3d9.dll beside this DLL). Off by default.
+    bool dxvk = false;
     // Make the game window borderless and cover its monitor. Needs the game set to
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
     bool borderless = false;

@@ -1,5 +1,6 @@
 #include "d3d.h"
 
+#include "dxvk.h"
 #include "log.h"
 #include "settings.h"
 
@@ -186,10 +187,34 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
     return hr;
 }
 
+// DXVK goes in before the game's first call reaches the system Direct3DCreate9, so whatever
+// wraps that function (DSfix) wraps DXVK.
+void route_to_dxvk() {
+    static bool tried = false;
+    if (tried) {
+        return;
+    }
+    tried = true;
+    wchar_t dir[MAX_PATH];
+    GetModuleFileNameW(g_self, dir, MAX_PATH);
+    wchar_t* slash = wcsrchr(dir, L'\\');
+    if (slash) {
+        slash[1] = 0;
+    } else {
+        dir[0] = 0;
+    }
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s%s", dir, kDxvkFileName);
+    dxvk_route(path);
+}
+
 IDirect3D9* WINAPI hook_direct3d_create9(UINT sdk_version) {
-    IDirect3D9* d3d = g_create(sdk_version);
     // The import slot is patched from DllMain, before the INI can be read; with FPSUnlock false
-    // the device is left alone.
+    // Direct3D and the device are left alone.
+    if (settings().fps_unlock && settings().dxvk) {
+        route_to_dxvk();
+    }
+    IDirect3D9* d3d = g_create(sdk_version);
     if (d3d && settings().fps_unlock) {
         void* original = patch_slot(d3d, kCreateDeviceSlot, reinterpret_cast<void*>(&hook_create_device));
         if (original && !g_create_device) {

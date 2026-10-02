@@ -46,6 +46,7 @@ DWORD WINAPI worker(void*) {
     gauge_set_dir(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("MaxFPS: %d", settings.target_fps);
+    LOG_INFO("DXVK: %s", settings.dxvk ? "true" : "false");
 
     wchar_t game_dir[MAX_PATH];
     lstrcpynW(game_dir, exe_path, MAX_PATH);

@@ -136,6 +136,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.profile = parse_bool(val);
         } else if (key == "skippresentrepeat") {
             s.skip_present_repeat = parse_bool(val);
+        } else if (key == "dxvk") {
+            s.dxvk = parse_bool(val);
         } else if (key == "borderlessfullscreen") {
             s.borderless = parse_bool(val);
         } else if (key == "survey") {

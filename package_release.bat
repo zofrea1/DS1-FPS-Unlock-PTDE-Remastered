@@ -7,6 +7,8 @@ copy /y build\dsr\dinput8.dll build\release\remastered >nul
 copy /y DSR-FPS-Unlock.ini build\release\remastered >nul
 copy /y build\ptde\xinput1_3.dll build\release\ptde >nul
 copy /y PTDE-FPS-Unlock.ini build\release\ptde >nul
+copy /y build\ptde\dxvk_d3d9.dll build\release\ptde >nul
+copy /y third_party\dxvk\LICENSE build\release\ptde\DXVK-LICENSE.txt >nul
 copy /y README.md build\release\remastered >nul
 copy /y README.md build\release\ptde >nul
 copy /y LICENSE build\release\remastered >nul
