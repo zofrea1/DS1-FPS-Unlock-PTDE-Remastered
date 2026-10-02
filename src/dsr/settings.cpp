@@ -123,6 +123,12 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_lock_on_turn = parse_bool(val);
         } else if (key == "fixghosts") {
             s.fix_ghosts = parse_bool(val);
+        } else if (key == "fixtimers") {
+            s.fix_timers = parse_bool(val);
+        } else if (key == "fixsmoothing") {
+            s.fix_smoothing = parse_bool(val);
+        } else if (key == "fixvelocity") {
+            s.fix_velocity = parse_bool(val);
         } else if (key == "fixmovedt") {
             s.fix_move_dt = parse_bool(val);
         }

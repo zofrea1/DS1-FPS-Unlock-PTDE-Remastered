@@ -17,6 +17,11 @@ inline std::atomic<int> g_fix_stamina_tick{1};
 inline std::atomic<int> g_input_log{0};
 inline std::atomic<int> g_fix_damping{1};
 inline std::atomic<int> g_fix_slide{1};
+// Per-frame constants of a fixed 60 FPS frame (see patch_frame_constants): timers and fades, the camera
+// pivot ease, and velocities derived from one frame's movement.
+inline std::atomic<int> g_fix_timers{1};
+inline std::atomic<int> g_fix_smoothing{1};
+inline std::atomic<int> g_fix_velocity{1};
 // 1 = the lock-on camera pans, and the body turns toward the target, at the original Prepare to Die
 // Edition speed (half the Remastered speed). INI LockOnPtdeSpeed (CameraPtdeSpeed is the old name).
 inline std::atomic<int> g_camera_ptde_speed{0};

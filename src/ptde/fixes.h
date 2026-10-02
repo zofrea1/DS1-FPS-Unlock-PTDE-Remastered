@@ -11,6 +11,9 @@
 //   smoothing       lerp factor 1/30    -> 1 - (1 - 1/30) ^ (dt * 30)
 //   HUD gauges      |gap| * 0.5 and 1.0 per frame -> 1 - 0.5 ^ (dt * 30) and dt * 30
 //   graze check     |delta| * 30 < 1    -> |delta| / dt < 1; 0.8 / 1.2 per frame -> ^ (dt * 30)
+//   item glow fade  [+0x18] / 60 / frame -> [+0x18] * dt / 2 (timers group)
+//   velocities      delta * 30          -> delta / dt
+//   copied step     the 1/30 step copied into settings -> a fixed 1/30 (always on)
 //
 // At exactly 30 FPS every value equals the game's original constant.
 struct FixFlags {
@@ -20,6 +23,7 @@ struct FixFlags {
     bool smoothing = true;  // per-frame 1/30 interpolation factor
     bool ui = true;         // HUD gauge fill speed (HP, stamina, boss and enemy bars)
     bool graze = true;      // walk-speed multiplier that slows the character when its per-frame movement is small
+    bool velocity = true;   // velocities from one frame's movement times 30 (powered ragdoll, 3D sound)
 };
 
 bool fixes_install(const FixFlags& flags);

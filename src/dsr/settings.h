@@ -47,6 +47,12 @@ struct Settings {
     bool fix_lock_on_turn = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
     bool fix_ghosts = true;
+    // Per-frame 1/60 timers and fades: weapon buff glow, ragdoll blend-in, item glow, a load queue countdown.
+    bool fix_timers = true;
+    // The follow camera's pivot and look-at point ease toward their targets by 1/60 of the gap a frame.
+    bool fix_smoothing = true;
+    // Velocities derived from one frame's movement times 60: the powered ragdoll and 3D sound (Doppler).
+    bool fix_velocity = true;
     // Hardware write-watch on character height (implies trace). Diagnostic only.
     bool watch = false;
 };

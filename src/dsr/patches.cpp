@@ -266,6 +266,25 @@ float* g_decay_cave = nullptr;     // airborne momentum damp per frame
 float* g_grav_cave = nullptr;      // slide gravity per frame
 float* g_friction_cave = nullptr;  // slide friction per frame
 int32_t* g_ghost_units = nullptr;  // ghost replay counter units for this frame (see patch_ghosts)
+float* g_frame_cells = nullptr;    // frame constants page (see patch_frame_constants)
+
+// Layout of the frame constants page. The vector comes first so that it is 16-byte aligned (movaps).
+enum FrameCell : int {
+    kCellInvDtVec = 0,  // 4 x (1 / frame time), for the sound velocity (60 x 4 at 60 FPS)
+    kCellDt = 4,        // frame time (1/60 at 60 FPS)
+    kCellInvDt = 5,     // 1 / frame time (60 at 60 FPS)
+    kCellEase = 6,      // a 1/60 per-frame ease over this frame: 1 - (1 - 1/60) ^ (frame time * 60)
+};
+
+void write_frame_cells(float dt) {
+    const float inv = 1.0f / dt;
+    for (int i = 0; i < 4; ++i) {
+        g_frame_cells[kCellInvDtVec + i] = inv;
+    }
+    g_frame_cells[kCellDt] = dt;
+    g_frame_cells[kCellInvDt] = inv;
+    g_frame_cells[kCellEase] = static_cast<float>(1.0 - std::pow(1.0 - 1.0 / 60.0, static_cast<double>(dt) * 60.0));
+}
 
 constexpr float kMinStep = 1.0f / 2000.0f;
 constexpr float kMaxStep = kMaxFrameStep;
@@ -321,6 +340,9 @@ void apply_frame_step(float dt) {
     }
     if (g_ghost_units) {
         *g_ghost_units = static_cast<int32_t>(std::lround(scale * 65536.0));
+    }
+    if (g_frame_cells) {
+        write_frame_cells(dt);
     }
 }
 
@@ -2171,6 +2193,99 @@ bool patch_camera_gains() {
     return true;
 }
 
+// Constants that stand for one 60 FPS frame, loaded straight from .rdata by code that runs once per
+// frame. Remastered changed them from the original game's 30 FPS values (1/30 -> 1/60, 30 -> 60), which
+// is how they were found, but nothing scales them with the frame time. Each load's rip-relative operand
+// is retargeted at a cell in a page next to the image that apply_frame_step rewrites every frame:
+//   timers (FixTimers)
+//     ChrWepEnchantSlot (vtable slot 4, 0x3C3260): weapon buff glow fades in and out by 1/60 a frame
+//     ragdoll blend-in (0x2B5030): [+0x180] rises by 1/60 a frame to 1.0 (one second at 60 FPS)
+//     load queue (0x59E300): [+0x13C] counts down by 1/60 a frame
+//     ObjShineTreasureSlot (vtable slot 4, 0x31AC30): item glow fades by [+0x28] / 60 a frame
+//   smoothing (FixSmoothing)
+//     ChrFollowCam::Update: the pivot [+0x190] eases toward [+0x194] and [+0x1A4] toward [+0x1A8] by
+//     1/60 of the gap a frame (the original game used 1/30 at 30 FPS)
+//   velocities (FixVelocity)
+//     powered ragdoll (0x2B5FD0): a body is pulled toward its target with velocity (target - pos) * 60
+//     3D sound sources (0x3C6E70, 0x3C7520): velocity = (position - last frame's position) * 60, which
+//     FMOD uses for the Doppler shift
+// At exactly 60 FPS every cell equals the game's own constant.
+struct FrameConstSite {
+    uint32_t rva;
+    uint8_t prefix[4];  // opcode bytes before the disp32
+    uint8_t prefix_len;
+    uint8_t length;     // instruction length (the disp32 is relative to its end)
+    float original;     // the value the game's operand points at
+    int cell;
+    int group;          // 0 timers, 1 smoothing, 2 velocity
+};
+constexpr float k60 = 60.0f;
+constexpr float k1_60 = 1.0f / 60.0f;
+constexpr FrameConstSite kFrameConstSites[] = {
+    {0x3C3337, {0xF3, 0x0F, 0x58, 0x05}, 4, 8, k1_60, kCellDt, 0},     // addss xmm0, [1/60]  enchant fade in
+    {0x3C3357, {0xF3, 0x0F, 0x5C, 0x05}, 4, 8, k1_60, kCellDt, 0},     // subss xmm0, [1/60]  enchant fade out
+    {0x2B515D, {0xF3, 0x0F, 0x58, 0x05}, 4, 8, k1_60, kCellDt, 0},     // addss xmm0, [1/60]  ragdoll blend-in
+    {0x59E64F, {0xF3, 0x0F, 0x5C, 0x0D}, 4, 8, k1_60, kCellDt, 0},     // subss xmm1, [1/60]  load queue countdown
+    {0x31AC81, {0xF3, 0x0F, 0x5E, 0x05}, 4, 8, k60, kCellInvDt, 0},    // divss xmm0, [60]    treasure glow fade in
+    {0x31AE07, {0xF3, 0x0F, 0x5E, 0x05}, 4, 8, k60, kCellInvDt, 0},    // divss xmm0, [60]    treasure glow fade out
+    {0x239641, {0xF3, 0x0F, 0x59, 0x0D}, 4, 8, k1_60, kCellEase, 1},   // mulss xmm1, [1/60]  camera pivot ease
+    {0x239669, {0xF3, 0x0F, 0x59, 0x0D}, 4, 8, k1_60, kCellEase, 1},   // mulss xmm1, [1/60]  camera look-at ease
+    {0x2B60D6, {0xF3, 0x0F, 0x59, 0x05}, 4, 8, k60, kCellInvDt, 2},    // mulss xmm0, [60]    powered ragdoll
+    {0x3C7067, {0x0F, 0x28, 0x05}, 3, 7, k60, kCellInvDtVec, 2},       // movaps xmm0, [60 x4] sound velocity
+    {0x3C76F5, {0x0F, 0x28, 0x05}, 3, 7, k60, kCellInvDtVec, 2},       // movaps xmm0, [60 x4] sound velocity
+};
+std::atomic<int> g_frame_const_state{0};
+
+bool patch_frame_constants() {
+    const bool group_on[3] = {g_fix_timers.load(std::memory_order_relaxed) != 0,
+                              g_fix_smoothing.load(std::memory_order_relaxed) != 0,
+                              g_fix_velocity.load(std::memory_order_relaxed) != 0};
+    if (!group_on[0] && !group_on[1] && !group_on[2]) {
+        LOG_INFO("Frame constants left alone (FixTimers, FixSmoothing and FixVelocity are false)");
+        return true;
+    }
+    // Check every site first, so the build either gets all of a group or none of it.
+    for (const FrameConstSite& s : kFrameConstSites) {
+        const uint8_t* site = image_rva(s.rva);
+        if (std::memcmp(site, s.prefix, s.prefix_len) != 0) {
+            LOG_ERROR("Frame constant load at 0x%08X does not match this build", s.rva);
+            return false;
+        }
+        int32_t disp = 0;
+        std::memcpy(&disp, site + s.prefix_len, sizeof(disp));
+        const auto* value = reinterpret_cast<const float*>(site + s.length + disp);
+        const int lanes = s.cell == kCellInvDtVec ? 4 : 1;
+        for (int i = 0; i < lanes; ++i) {
+            if (std::fabs(value[i] - s.original) > s.original * 1e-5f) {
+                LOG_ERROR("Frame constant at 0x%08X reads %.6f, expected %.6f", s.rva, value[i], s.original);
+                return false;
+            }
+        }
+    }
+    auto* page = static_cast<float*>(alloc_near(image_rva(kFrameConstSites[0].rva)));
+    if (!page) {
+        LOG_ERROR("Could not allocate the frame constants page (Win32=%lu)", GetLastError());
+        return false;
+    }
+    g_frame_cells = page;
+    write_frame_cells(current_step());
+    int done = 0;
+    for (const FrameConstSite& s : kFrameConstSites) {
+        if (!group_on[s.group]) {
+            continue;
+        }
+        uint8_t* site = image_rva(s.rva);
+        if (!write_disp32(site + s.prefix_len, site + s.length, page + s.cell)) {
+            LOG_ERROR("Could not retarget the frame constant at 0x%08X", s.rva);
+            return false;
+        }
+        ++done;
+    }
+    LOG_INFO("Frame constants follow the frame time: %d loads (timers=%d smoothing=%d velocity=%d)", done,
+             group_on[0], group_on[1], group_on[2]);
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -2252,6 +2367,11 @@ void try_delayed_patches() {
     if (g_turn_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_lock_on_turn.load(std::memory_order_relaxed) == 0 || patch_turn();
         g_turn_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_frame_const_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_frame_constants();
+        g_frame_const_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_trace_state.compare_exchange_strong(expected, 1)) {

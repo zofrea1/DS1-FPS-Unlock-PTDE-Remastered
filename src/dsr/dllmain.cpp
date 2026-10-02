@@ -72,6 +72,11 @@ DWORD WINAPI worker(void*) {
     g_fix_slide.store(settings.fix_slide ? 1 : 0, std::memory_order_relaxed);
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
+    g_fix_timers.store(settings.fix_timers ? 1 : 0, std::memory_order_relaxed);
+    g_fix_smoothing.store(settings.fix_smoothing ? 1 : 0, std::memory_order_relaxed);
+    g_fix_velocity.store(settings.fix_velocity ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixTimers: %s, FixSmoothing: %s, FixVelocity: %s", settings.fix_timers ? "true" : "false",
+             settings.fix_smoothing ? "true" : "false", settings.fix_velocity ? "true" : "false");
     if (!patches_apply()) {
         LOG_ERROR("FPS unlock was not installed.");
     }

@@ -34,8 +34,9 @@ Everything below is on by default and has an INI switch.
 | Loading screen | The bonfire swirl on the loading screen turned at the display rate | `FixUI` | `FixUI` |
 | D-pad hold (down: back to the first quick item) | The hold is counted in frames (15), so it fired during an ordinary tap | `FixDpadHold` | n/a (the hold does not exist) |
 | Bonfire softlock | After "Reverse hollowing" the character could stay seated with no menu open | not available | `BonfireUnstick` |
-| Timers | Per-frame fades and countdowns ran too fast | (variable step) | `FixTimers` |
-| Smoothing | A per-frame interpolation factor | (variable step) | `FixSmoothing` |
+| Timers | Per-frame fades and countdowns ran too fast: weapon buff glow, ragdoll blend-in, the glow on dropped items | `FixTimers` | `FixTimers` |
+| Smoothing | The follow camera's pivot and look-at point eased toward their targets by a fixed fraction per frame | `FixSmoothing` | `FixSmoothing` |
+| Velocities | The powered ragdoll's pull and the Doppler pitch of moving sounds were worked out from one frame's movement | `FixVelocity` | `FixVelocity` |
 | Menus and mouse | Menu animation, menu input repeat and mouse look scaled to the real frame time | yes (`MenuInputFilter`) | n/a |
 | Cloth | Havok step scaled to the real frame time | yes | n/a |
 | Fullscreen refresh rate | The game only offers 59/60 Hz; ask for the display's real rate, or use borderless | n/a | `FullscreenRefreshRate`, `BorderlessFullscreen` |

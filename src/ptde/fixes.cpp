@@ -27,13 +27,19 @@ alignas(8) volatile double g_gauge_k = 0.5;
 alignas(4) volatile float g_gauge_min = 1.0f;
 alignas(4) volatile float g_gravity = 1.0f;
 alignas(4) volatile float g_friction = 0.65f;
+// 1 / frame time, for velocities the game derives from one frame's movement (30 at 30 FPS).
+alignas(8) volatile double g_inv_dt = 30.0;
+// The item glow fade divisor: 60 frames at 30 FPS, so 2 / frame time.
+alignas(8) volatile double g_shine_div = 60.0;
+// A fixed 1/30 for code that copies the engine's 1/30 step into a setting instead of stepping with it.
+alignas(4) volatile float g_fixed_step = 1.0f / 30.0f;
 
 struct Site {
     uint32_t va;         // instruction address
     uint32_t operand;    // offset of the abs32 operand inside the instruction
     uint32_t original;   // the address the game's own instruction loads from
     const volatile void* cave;
-    int group;           // 0 slide, 1 damping, 2 timers, 3 smoothing
+    int group;           // 0 slide, 1 damping, 2 timers, 3 smoothing, 4 graze, 5 ui, 6 velocity, 7 fixed step
     bool applied;
 };
 
@@ -58,9 +64,35 @@ Site g_sites[] = {
     // flask fills the bar through this, four times too fast at 120 FPS.
     {0x00C89A90, 4, 0x0115F59C, &g_gauge_min, 5, false},  // movss xmm2,[1.0]   -> 1.0 * dt * 30
     {0x00C89AC3, 4, 0x011E7C60, &g_gauge_k, 5, false},    // mulsd xmm2,[0.5]   -> 1 - 0.5 ^ (dt * 30)
+    // ObjShineTreasureSlot (vtable slot 3, fn 0xE85380): the item glow fades in and out by [+0x18] / 60
+    // per frame (two seconds at 30 FPS) and ignores its time argument.
+    {0x00E853BE, 4, 0x011E7FF8, &g_shine_div, 2, false},  // divsd xmm1,[60.0]  -> 2 / dt
+    {0x00E85525, 4, 0x011E7FF8, &g_shine_div, 2, false},  // divsd xmm1,[60.0]  -> 2 / dt
+    // Velocities from one frame's movement times 30. Remastered changed both factors to 60.
+    //  * 3D sound sources (fn 0xDEB3B0, 0xDF12E0): (position - last frame's position) * 30, the velocity
+    //    FMOD uses for the Doppler shift.
+    //  * Powered ragdoll (fn 0xEC63B0): a body is pulled toward its target with (target - pos) * 30.
+    {0x00DEB9BF, 4, 0x011E7CD8, &g_inv_dt, 6, false},     // movsd xmm0,[30.0]  -> 1 / dt
+    {0x00DF1809, 4, 0x011E7CD8, &g_inv_dt, 6, false},     // movsd xmm0,[30.0]  -> 1 / dt
+    {0x00EC6562, 2, 0x011E7CD8, &g_inv_dt, 6, false},     // fmul [30.0]        -> 1 / dt
+    // The engine's 1/30 step (0x11E7E90) is rewritten with the frame time every frame, so code that
+    // copies it into a setting would store whatever the frame time was at that moment. These keep 1/30:
+    // hkpWorldCinfo's expected minimum step, an ImageFilter setting, and the repeat interval of eight
+    // input actions that PadMan registers again whenever the key configuration changes.
+    {0x0087B526, 2, 0x011E7E90, &g_fixed_step, 7, false},  // fld [1/30]   hkpWorldCinfo
+    {0x00D8621C, 4, 0x011E7E90, &g_fixed_step, 7, false},  // movss [1/30] ImageFilter
+    {0x00F7C78E, 4, 0x011E7E90, &g_fixed_step, 7, false},  // movss [1/30] input repeat interval
+    {0x00F7C7C6, 4, 0x011E7E90, &g_fixed_step, 7, false},
+    {0x00F7C7FE, 4, 0x011E7E90, &g_fixed_step, 7, false},
+    {0x00F7C836, 4, 0x011E7E90, &g_fixed_step, 7, false},
+    {0x00F7C86E, 4, 0x011E7E90, &g_fixed_step, 7, false},
+    {0x00F7C8A6, 4, 0x011E7E90, &g_fixed_step, 7, false},
+    {0x00F7C8DE, 4, 0x011E7E90, &g_fixed_step, 7, false},
+    {0x00F7C916, 4, 0x011E7E90, &g_fixed_step, 7, false},
 };
 
-bool g_enabled[6] = {true, true, true, true, true, true};
+constexpr int kGroups = 8;
+bool g_enabled[kGroups] = {true, true, true, true, true, true, true, true};
 bool g_keys_down[5] = {};
 bool g_installed = false;
 
@@ -101,6 +133,8 @@ bool fixes_install(const FixFlags& flags) {
     g_enabled[3] = flags.smoothing;
     g_enabled[4] = flags.graze;
     g_enabled[5] = flags.ui;
+    g_enabled[6] = flags.velocity;
+    g_enabled[7] = true;  // the copied 1/30 step is always restored while the frame time is written
     int ok = 0, bad = 0;
     for (auto& s : g_sites) {
         uint32_t cur = 0;
@@ -113,10 +147,11 @@ bool fixes_install(const FixFlags& flags) {
         }
         ++ok;
     }
-    for (int g = 0; g < 6; ++g) set_group(g, g_enabled[g]);
+    for (int g = 0; g < kGroups; ++g) set_group(g, g_enabled[g]);
     g_installed = true;
-    LOG_INFO("Per-frame fixes: %d sites verified, %d skipped. slide=%d damping=%d timers=%d smoothing=%d graze=%d ui=%d", ok,
-             bad, g_enabled[0], g_enabled[1], g_enabled[2], g_enabled[3], g_enabled[4], g_enabled[5]);
+    LOG_INFO("Per-frame fixes: %d sites verified, %d skipped. slide=%d damping=%d timers=%d smoothing=%d graze=%d ui=%d "
+             "velocity=%d",
+             ok, bad, g_enabled[0], g_enabled[1], g_enabled[2], g_enabled[3], g_enabled[4], g_enabled[5], g_enabled[6]);
     return bad == 0;
 }
 
@@ -140,6 +175,8 @@ void fixes_update(double dt) {
     g_recover = std::pow(1.2, s);
     g_gauge_k = 1.0 - std::pow(0.5, s);
     g_gauge_min = static_cast<float>(1.0 * s);
+    g_inv_dt = 1.0 / dt;
+    g_shine_div = 2.0 / dt;
 }
 
 void fixes_poll_hotkeys() {

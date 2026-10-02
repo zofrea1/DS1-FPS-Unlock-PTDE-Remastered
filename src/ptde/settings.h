@@ -25,6 +25,8 @@ struct Settings {
     bool fix_damping = true;
     bool fix_timers = true;
     bool fix_smoothing = true;
+    // Velocities the game derives from one frame's movement times 30 (powered ragdoll, 3D sound Doppler).
+    bool fix_velocity = true;
     bool fix_graze = true;
     // Ground snap-down reach and the ladder-exit cap (INI FixStepDown; FixLadder is the old name).
     bool fix_step_down = true;

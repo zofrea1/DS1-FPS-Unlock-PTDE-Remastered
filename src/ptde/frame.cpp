@@ -365,6 +365,7 @@ bool frame_install(const Settings& settings) {
         flags.smoothing = settings.fix_smoothing;
         flags.graze = settings.fix_graze;
         flags.ui = settings.fix_ui;
+        flags.velocity = settings.fix_velocity;
         fixes_install(flags);
         ui_install(settings);
         if (settings.fix_step_down) {
