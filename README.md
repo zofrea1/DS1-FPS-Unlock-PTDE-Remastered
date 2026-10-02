@@ -68,6 +68,8 @@ Only the current Steam builds are supported. Anything else is unsupported and ma
 
 Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is well tested with DSfix.** Other multiplayer (the official servers) has not been tested, so play offline there.
 
+**Online play: no guarantees, use at your own risk.** The mods change the game's code in memory while it runs. Some fixes also change data the game exchanges with other players (for example the ghost replay data), now matching the native frame rate. FromSoftware's anti-cheat could still treat any modification as cheating, and a ban (including a soft ban) is possible. The authors accept no responsibility for bans, lost progress or anything else that results from using these mods; see also the [LICENSE](LICENSE) (provided "as is", without warranty).
+
 ## Recommended display mode
 
 - **Remastered: borderless fullscreen** gives the best compatibility with monitors, frame pacing and VRR.
