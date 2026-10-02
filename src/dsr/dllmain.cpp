@@ -36,6 +36,11 @@ DWORD WINAPI worker(void*) {
     const Settings settings = settings_load(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("MaxFPS: %d", settings.target_fps);
+    // FPSUnlock is the master switch: nothing below, diagnostics included, runs without it.
+    if (!settings.fps_unlock) {
+        LOG_INFO("FPSUnlock is false. The game is unchanged.");
+        return 0;
+    }
     if ((settings.trace || settings.watch) && !trace_start(dll_path)) {
         LOG_ERROR("Trace was requested but the CSV could not be opened");
     }
@@ -44,14 +49,6 @@ DWORD WINAPI worker(void*) {
     }
     if (settings.watch && !watch_start(dll_path)) {
         LOG_ERROR("Watch was requested but could not start");
-    }
-    if (!settings.fps_unlock) {
-        LOG_INFO("FPSUnlock is false. The game is unchanged.");
-        return 0;
-    }
-    if (settings.target_fps < 61 || settings.target_fps > 1000) {
-        LOG_ERROR("MaxFPS must be from 61 to 1000. The game is unchanged.");
-        return 0;
     }
     g_target_fps.store(static_cast<uint32_t>(settings.target_fps), std::memory_order_relaxed);
     g_variable_dt.store(settings.variable_frame_time ? 1 : 0, std::memory_order_relaxed);

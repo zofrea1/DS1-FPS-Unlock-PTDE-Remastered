@@ -80,13 +80,13 @@ Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is wel
 
 ## Install
 
-Copy the two files from the release for your game next to the game's exe (see the table above). To uninstall, delete them. `FPSUnlock = false` leaves the game unchanged.
+Copy the two files from the release for your game next to the game's exe (see the table above). To uninstall, delete them. `FPSUnlock` is the master switch: `false` turns every part of the mod off and leaves the game unchanged.
 
 **Remastered.** The game imports `dinput8.dll`, so that file name has to stay. Another mod that also installs `dinput8.dll` needs a chain loader before the two can load together. In `System -> PC Settings -> Display`, set Frequency to the monitor refresh rate and Vertical sync to off, then restart the game after changing `MaxFPS`.
 
 **PTDE.** The mod loads as `xinput1_3.dll` so it can sit beside DSfix. In exclusive fullscreen it can ask for your display's highest refresh rate instead of the 60 Hz the game offers (`FullscreenRefreshRate`), and it has an optional borderless mode (`BorderlessFullscreen`; set the game to windowed first).
 
-`MaxFPS` defaults to 120 in both. Pick what your PC can usually hold; dips below it do not slow the game.
+`MaxFPS` defaults to 120 in both and accepts 10 to 1000; a value outside that range is clamped to the nearest end. Pick what your PC can usually hold; dips below it do not slow the game. A low cap works too: both games run in real time at any frame rate down to 10 FPS, so a slower PC can cap at 30 for steady frame pacing. (Frames longer than 1/8 s, below 8 FPS, are each treated as 1/8 s, so a hitch or a loading stall does not become one huge step.)
 
 ## Notes and known limits
 
@@ -96,6 +96,7 @@ Copy the two files from the release for your game next to the game's exe (see th
 - **First walk-to-run (Remastered).** The retail game has a short hitch on the first walk-to-run after standing still. At a high frame rate it reads as a brief freeze of the character and camera; it is left as it is.
 - **Bonfire softlock (Remastered).** A few users have reported a softlock while resting at the Firelink bonfire in Remastered. PTDE has a watchdog for the same symptom (`BonfireUnstick`); Remastered does not, because its code is protected and the cause is not known. It has not been reproduced. If it happens, try `MenuInputFilter = false` and send the log.
 - **Very high frame rates.** 240 FPS is not sustainable on every PC. Below the cap the game still plays in real time.
+- **Very low frame rates.** Down to 10 FPS the game keeps real time, but each physics step is long (six times a 60 FPS step at 10 FPS). The game pulls a character down onto the ground by at most a fixed distance per step, so around 10 to 15 FPS a character sprinting down steep stairs or slopes can briefly leave the ground. This is the same rule that makes the original 30 FPS game slightly looser than Remastered's 60.
 - **Weapon durability and hit windows.** Worth checking if you depend on exact timing.
 
 ## Logs and bug reports

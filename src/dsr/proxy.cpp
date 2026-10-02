@@ -132,7 +132,8 @@ double poll_step(int64_t* last, double* held_step) {
     if (*last != 0) {
         const double interval = static_cast<double>(now.QuadPart - *last) / static_cast<double>(freq);
         if (interval >= 0.0015) {  // shorter gaps are repeat polls inside a frame
-            step = interval > 0.1 ? 0.1 : interval;
+            // Capped like the game's own step, so the two cancel at any frame rate the game keeps.
+            step = interval > kMaxFrameStep ? kMaxFrameStep : interval;
             *held_step = step;
             *last = now.QuadPart;
         }

@@ -268,7 +268,7 @@ float* g_friction_cave = nullptr;  // slide friction per frame
 int32_t* g_ghost_units = nullptr;  // ghost replay counter units for this frame (see patch_ghosts)
 
 constexpr float kMinStep = 1.0f / 2000.0f;
-constexpr float kMaxStep = 1.0f / 20.0f;
+constexpr float kMaxStep = kMaxFrameStep;
 
 int64_t g_dt_last_qpc = 0;
 int64_t g_dt_freq = 0;
@@ -575,8 +575,8 @@ void hook_gauge_follow(void* gauge) {
     if (n < 0.02f) {
         n = 0.02f;
     }
-    if (n > 4.0f) {
-        n = 4.0f;
+    if (n > kMaxFrameStep * 60.0f) {
+        n = kMaxFrameStep * 60.0f;
     }
     auto* steps = static_cast<uint8_t*>(gauge);
     float* fall1 = reinterpret_cast<float*>(steps + 0x68);
@@ -965,7 +965,7 @@ void write_speed_factors(float dt) {
     if (dt < 1.0f / 480.0f) {
         dt = 1.0f / 480.0f;
     }
-    if (dt > 0.05f) {
+    if (dt > kMaxStep) {
         dt = 1.0f / target;
     }
     g_speed_cave[0] = (1.0f / dt) * leniency;
@@ -987,7 +987,7 @@ float sample_frame_dt(bool* measured) {
     if (g_speed_last_qpc != 0 && g_speed_qpc_freq != 0) {
         const float sample = static_cast<float>(static_cast<double>(now.QuadPart - g_speed_last_qpc) /
                                                  static_cast<double>(g_speed_qpc_freq));
-        if (sample >= 1.0f / 480.0f && sample <= 0.05f) {
+        if (sample >= 1.0f / 480.0f && sample <= kMaxStep) {
             dt = sample;
             *measured = true;
         }
@@ -2485,10 +2485,13 @@ bool install_loading_hook() {
 // buttons (index 0xC = down, 0xD = up; slot 6 of the input object's vtable): the answer is the
 // number of frames the button has been held, and 15 triggers the hold action (down: back to the
 // first quick item). Counted in frames, 15 is a quarter of a second at 60 FPS and 62 ms at 240, so
-// the hold fired during an ordinary tap. The answer is limited to the count a 60 FPS game would
-// have reached in the real time the button has been down, and 15 is reported once.
+// the hold fired during an ordinary tap (and below 60 FPS it took longer). The answer is the count a
+// 60 FPS game would have reached in the real time the button has been down, and 15 is reported
+// once. Below 60 FPS that count moves by several per frame, so the frame that would pass 15 reports
+// 15 itself.
 constexpr uint32_t kInputObjectRva = 0x1CB5420;
 constexpr uint32_t kHoldStateFn = 0xC95E50;
+constexpr int kHoldFrames = 15;
 using HoldStateFn = int (*)(void* self, int index);
 HoldStateFn g_hold_orig = nullptr;
 std::atomic<int> g_hold_state{0};
@@ -2525,8 +2528,8 @@ int hook_hold_state(void* self, int index) {
     }
     const double held = static_cast<double>(now.QuadPart - t.start) / static_cast<double>(freq);
     int n = 1 + static_cast<int>(held * 60.0);
-    if (n > result) {
-        n = result;
+    if (n > kHoldFrames && t.last < kHoldFrames) {
+        n = kHoldFrames;
     }
     int answer = n;
     if (n == t.last) {

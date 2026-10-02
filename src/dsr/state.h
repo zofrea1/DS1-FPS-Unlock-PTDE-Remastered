@@ -28,6 +28,10 @@ inline std::atomic<int> g_variable_dt{1};
 // The step handed to the game for the frame in flight, in seconds. Written by the simulation
 // hook once per frame; 1/TargetFPS until the first frame and whenever variable_dt is off.
 inline std::atomic<float> g_frame_dt{1.0f / 120.0f};
+// Longest measured frame handed to the game as it is. It leaves headroom over the lowest MaxFPS
+// (10), so the game keeps real time down to 8 FPS; a longer frame (a hitch, loading, alt-tab)
+// becomes one step of this length instead of a jump.
+inline constexpr float kMaxFrameStep = 1.0f / 8.0f;
 // Number of simulation steps seen, for the stall watchdog.
 inline std::atomic<uint64_t> g_sim_count{0};
 // 1 = the menu input de-duplication is installed (MenuInputFilter).

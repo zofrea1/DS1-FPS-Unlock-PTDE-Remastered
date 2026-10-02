@@ -36,6 +36,22 @@ bool parse_bool(const std::string& v) {
     return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
+// MaxFPS: a whole number, clamped to kMinMaxFps..kMaxMaxFps. Anything that is not a number keeps
+// the default.
+int parse_max_fps(const std::string& v, int fallback) {
+    char* end = nullptr;
+    const long n = std::strtol(v.c_str(), &end, 10);
+    if (end == v.c_str()) {
+        LOG_ERROR("Settings::read - MaxFPS \"%s\" is not a number, using %d", v.c_str(), fallback);
+        return fallback;
+    }
+    const long clamped = n < kMinMaxFps ? kMinMaxFps : (n > kMaxMaxFps ? kMaxMaxFps : n);
+    if (clamped != n) {
+        LOG_INFO("Settings::read - MaxFPS %ld is outside %d to %d, using %ld", n, kMinMaxFps, kMaxMaxFps, clamped);
+    }
+    return static_cast<int>(clamped);
+}
+
 }  // namespace
 
 Settings settings_load(const wchar_t* dll_path) {
@@ -74,7 +90,7 @@ Settings settings_load(const wchar_t* dll_path) {
         if (key == "fpsunlock") {
             s.fps_unlock = parse_bool(val);
         } else if (key == "maxfps" || key == "targetfps") {
-            s.target_fps = std::atoi(val.c_str());
+            s.target_fps = parse_max_fps(val, s.target_fps);
         } else if (key == "variableframetime") {
             s.variable_frame_time = parse_bool(val);
         } else if (key == "menuinputfilter") {

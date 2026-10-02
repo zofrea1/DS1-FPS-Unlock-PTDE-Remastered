@@ -65,12 +65,9 @@ DWORD WINAPI worker(void*) {
         LOG_INFO("DSfix not detected");
     }
 
+    // FPSUnlock is the master switch (the refresh-rate override in d3d.cpp checks it too).
     if (!settings.fps_unlock) {
         LOG_INFO("FPSUnlock is false. The game is unchanged.");
-        return 0;
-    }
-    if (settings.target_fps < 20 || settings.target_fps > 1000) {
-        LOG_ERROR("MaxFPS must be from 20 to 1000. The game is unchanged.");
         return 0;
     }
     if (patches_probe(settings)) {

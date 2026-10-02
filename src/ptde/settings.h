@@ -1,8 +1,14 @@
 #pragma once
 
+// MaxFPS range. A value outside it is clamped to the nearest end.
+constexpr int kMinMaxFps = 10;
+constexpr int kMaxMaxFps = 1000;
+
 struct Settings {
+    // Master switch: false leaves the game completely unchanged (every fix and diagnostic off).
     bool fps_unlock = true;
-    // Frames per second the game should aim for (a cap). PTDE runs at 30 FPS natively.
+    // Frames per second the game should aim for (a cap), kMinMaxFps..kMaxMaxFps. PTDE runs at
+    // 30 FPS natively.
     int target_fps = 120;
     // Overwrite the engine's fixed 1/30 step with the measured frame time.
     bool driver = true;

@@ -188,7 +188,9 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
 
 IDirect3D9* WINAPI hook_direct3d_create9(UINT sdk_version) {
     IDirect3D9* d3d = g_create(sdk_version);
-    if (d3d) {
+    // The import slot is patched from DllMain, before the INI can be read; with FPSUnlock false
+    // the device is left alone.
+    if (d3d && settings().fps_unlock) {
         void* original = patch_slot(d3d, kCreateDeviceSlot, reinterpret_cast<void*>(&hook_create_device));
         if (original && !g_create_device) {
             g_create_device = reinterpret_cast<CreateDeviceFn>(original);

@@ -58,7 +58,9 @@ GetCmdFn g_orig = nullptr;
 
 constexpr int kCommands = 6;
 constexpr float kMinStep = 1.0f / 1000.0f;
-constexpr float kMaxStep = 1.0f / 10.0f;
+// Longest measured frame written as it is. It leaves headroom over the lowest MaxFPS (10), so the
+// game keeps real time down to 8 FPS; a longer frame (a hitch, loading) becomes one step of this length.
+constexpr float kMaxStep = 1.0f / 8.0f;
 
 struct State {
     Settings cfg;

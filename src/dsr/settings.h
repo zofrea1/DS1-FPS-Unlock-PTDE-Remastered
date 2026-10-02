@@ -1,7 +1,13 @@
 #pragma once
 
+// MaxFPS range. A value outside it is clamped to the nearest end.
+constexpr int kMinMaxFps = 10;
+constexpr int kMaxMaxFps = 1000;
+
 struct Settings {
+    // Master switch: false leaves the game completely unchanged (every fix and diagnostic off).
     bool fps_unlock = true;
+    // Frame rate cap (INI MaxFPS, old name TargetFPS), kMinMaxFps..kMaxMaxFps.
     int target_fps = 120;
     // Hand the game the measured frame time instead of a fixed 1/TargetFPS. TargetFPS then
     // only caps the frame rate, and the game keeps real-time speed when the rate dips.
