@@ -9,6 +9,7 @@
 #include "log.h"
 #include "present.h"
 #include "profile.h"
+#include "sfx.h"
 #include "snap.h"
 #include "trace.h"
 #include "turn.h"
@@ -375,6 +376,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_ghosts) {
             ghost_install();
+        }
+        if (settings.fix_sfx_spawn_rate) {
+            sfx_install();
         }
     }
     present_install(settings);

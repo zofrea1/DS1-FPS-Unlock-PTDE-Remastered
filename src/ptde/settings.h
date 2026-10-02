@@ -27,6 +27,9 @@ struct Settings {
     bool fix_lock_on_turn = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
     bool fix_ghosts = true;
+    // Effect particle spawn intervals below 1/30 s are raised to 1/30 s as effects load (Remastered's rule),
+    // so emitters spawn as densely as at 30 FPS.
+    bool fix_sfx_spawn_rate = true;
     // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
     bool fix_ui = true;
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each
