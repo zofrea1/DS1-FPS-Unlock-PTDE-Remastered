@@ -7,7 +7,7 @@ The mods are proxy DLLs. The game's files on disk are never modified, and each m
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
-| Release | `v1.2.0-REMASTERED-DX11` | `v1.2.0-PTDE-DX9` |
+| Release | `v1.3.0-REMASTERED-DX11` | `v1.3.0-PTDE-DX9` |
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` (plus `dxvk_d3d9.dll` for the optional `DXVK`) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
@@ -64,6 +64,16 @@ The original game's 30 FPS physics were tuned for 30 frames per second; both mod
 
 **Sprint stamina drain (`FixStaminaTick`).** One point every 0.1 s, but the game rounded each tick up to a whole frame and dropped the remainder. The remainder is kept, so the drain is 10 points a second at any frame rate.
 
+**Timers, camera easing and velocities (`FixTimers`, `FixSmoothing`, `FixVelocity`).** Every place in both executables that loads a frame-like constant (30, 60, 1/30, 1/60) was checked, and the matching code of the two games was compared: FromSoftware changed such a constant from 30 to 60 in Remastered only where it counts per frame, which points out the per-frame ones. These were still tied to one fixed frame:
+
+- `FixTimers`: the weapon buff glow fading in and out, the blend from animation into ragdoll, the glow on dropped items, and (Remastered) a load queue countdown. Each advanced 1/30 s (PTDE) or 1/60 s (Remastered) per frame.
+- `FixSmoothing`: the follow camera's pivot and look-at point move a fixed fraction of the remaining gap each frame. They now cover the same fraction per second at any frame rate.
+- `FixVelocity`: the powered ragdoll (which pulls a body toward a pose) and the speed of moving sounds, which FMOD uses for the Doppler pitch shift, were worked out as one frame's movement times 30 (PTDE) or 60 (Remastered). At 120 FPS the ragdoll pull and the pitch shift were a quarter (PTDE) or half (Remastered) as strong as intended. They now divide by the real frame time.
+
+In PTDE the engine's 1/30 step is rewritten with the frame time every frame, so the few places that copy it once into a setting (the Havok world setup, an image filter, the input repeat intervals registered after a key rebind) now read a fixed 1/30 instead of whatever the frame time was at that moment.
+
+**D-pad hold (`FixDpadHold`, Remastered).** Holding down on the D-pad returns to the first quick item after 15 frames, a quarter of a second at 60 FPS but an eighth at 120, so an ordinary tap could trigger it. The hold is timed in real time: a quarter of a second at any frame rate, including below 60 FPS.
+
 ## Supported versions
 
 Only the current Steam builds are supported. Anything else is unsupported and may refuse to patch (the log says why) or misbehave.
@@ -82,7 +92,7 @@ Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is wel
 
 ## Install
 
-Copy the two files from the release for your game next to the game's exe (see the table above). To uninstall, delete them. `FPSUnlock` is the master switch: `false` turns every part of the mod off and leaves the game unchanged.
+Copy the files from the release for your game next to the game's exe (see the table above; PTDE's `dxvk_d3d9.dll` is only needed for the optional `DXVK`). To uninstall, delete them. `FPSUnlock` is the master switch: `false` turns every part of the mod off and leaves the game unchanged.
 
 **Remastered.** The game imports `dinput8.dll`, so that file name has to stay. Another mod that also installs `dinput8.dll` needs a chain loader before the two can load together. In `System -> PC Settings -> Display`, set Frequency to the monitor refresh rate and Vertical sync to off, then restart the game after changing `MaxFPS`.
 
