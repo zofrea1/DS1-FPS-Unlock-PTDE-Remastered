@@ -8,7 +8,7 @@ The mods are proxy DLLs. The game's files on disk are never modified, and each m
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
 | Release | `v1.4.0-REMASTERED-DX11` | `v1.4.0-PTDE-DX9` |
-| Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` (plus `dxvk_d3d9.dll` for the optional `DXVK`) |
+| Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` (plus `dxvk_d3d9.dll` for the experimental `DXVK`) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
 | Works with DSfix | n/a | yes (set `unlockFPS 0` in `DSfix.ini`) |
@@ -40,8 +40,7 @@ Everything below is on by default and has an INI switch.
 | Menus and mouse | Menu animation, menu input repeat and mouse look scaled to the real frame time | yes (`MenuInputFilter`) | n/a |
 | Cloth | Havok step scaled to the real frame time | yes | n/a |
 | Fullscreen refresh rate | The game only offers 59/60 Hz; ask for the display's real rate, or use borderless | n/a | `FullscreenRefreshRate`, `BorderlessFullscreen` |
-| Direct3D 9 on Vulkan (optional) | The Windows Direct3D 9 driver can give an uneven frame rate; DXVK often holds a steadier, higher one | n/a | `DXVK` (off by default) |
-| Brightness when windowed | The game's brightness is a gamma ramp that Direct3D applies only in exclusive fullscreen; windowed, borderless or with DXVK the picture was darker with crushed blacks | n/a | `WindowedGamma` |
+| Direct3D 9 on Vulkan (experimental) | Runs the game through DXVK instead of the Windows Direct3D 9 driver; may or may not help the frame rate, and can have color issues | n/a | `DXVK` (off by default) |
 
 The original game's 30 FPS physics were tuned for 30 frames per second; both mods are exact at the native rate and very close at every other rate. See [Fix details](#fix-details) for what each fix does.
 
@@ -95,15 +94,13 @@ Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is wel
 
 ## Install
 
-Copy the files from the release for your game next to the game's exe (see the table above; PTDE's `dxvk_d3d9.dll` is only needed for the optional `DXVK`). To uninstall, delete them. `FPSUnlock` is the master switch: `false` turns every part of the mod off and leaves the game unchanged.
+Copy the files from the release for your game next to the game's exe (see the table above; PTDE's `dxvk_d3d9.dll` is only needed for the experimental `DXVK`). To uninstall, delete them. `FPSUnlock` is the master switch: `false` turns every part of the mod off and leaves the game unchanged.
 
 **Remastered.** The game imports `dinput8.dll`, so that file name has to stay. Another mod that also installs `dinput8.dll` needs a chain loader before the two can load together. In `System -> PC Settings -> Display`, set Frequency to the monitor refresh rate and Vertical sync to off, then restart the game after changing `MaxFPS`.
 
 **PTDE.** The mod loads as `xinput1_3.dll` so it can sit beside DSfix. In exclusive fullscreen it can ask for your display's highest refresh rate instead of the 60 Hz the game offers (`FullscreenRefreshRate`), and it has an optional borderless mode (`BorderlessFullscreen`; set the game to windowed first).
 
-**PTDE: DXVK (optional).** `DXVK = true` runs the game's Direct3D 9 on Vulkan through [DXVK](https://github.com/doitsujin/dxvk) (version 3.1.1, included as `dxvk_d3d9.dll`; keep it next to `xinput1_3.dll`). On many PCs this gives a steadier and higher frame rate than the Windows Direct3D 9 driver. DSfix keeps working on top of it. It needs a graphics driver with Vulkan 1.3. If DXVK cannot start, the game runs on Direct3D 9 as usual and the log says why. The first time an area loads, DXVK compiles its shaders, which can cause brief hitches; they are cached for later runs. DXVK writes its own log, `DARKSOULS_d3d9.log`, next to the game, and reads an optional `dxvk.conf` from there. If the game folder already has a `d3d9.dll` (DXVK or ReShade installed by hand), that one stays in charge and `DXVK` does nothing. With `DXVK = false` (the default) or `FPSUnlock = false`, DXVK is not loaded at all. DXVK does not raise the frame rate everywhere: it helps most where the Windows Direct3D 9 driver is the bottleneck, and on a fast GPU with a fast driver the difference can be small.
-
-**PTDE: brightness in windowed mode (`WindowedGamma`).** The game sets its brightness as a Direct3D gamma ramp (a curve the display applies to every color). Direct3D 9 applies a gamma ramp only to an exclusive fullscreen swapchain and ignores it in a window, and DXVK follows the same rule. So in windowed or borderless mode, and with DXVK whenever its swapchain is windowed, the picture lost the game's curve: darker, with crushed blacks and duller colors, and the brightness setting did nothing. With `WindowedGamma = true` (the default) the mod applies the game's ramp itself in those modes: right before each frame is presented, after DSfix's processing, one full-screen pass looks every color up in a 256-entry table made from the ramp, exactly as the display would. Exclusive fullscreen is unchanged (Direct3D or DXVK applies the ramp there). `WindowedGamma = false` leaves the picture as Direct3D presents it.
+**PTDE: DXVK (experimental).** `DXVK = true` runs the game's Direct3D 9 on Vulkan through [DXVK](https://github.com/doitsujin/dxvk) (version 3.1.1, included as `dxvk_d3d9.dll`; keep it next to `xinput1_3.dll`). It is experimental and off by default. It may or may not improve the frame rate on your system: it helps most where the Windows Direct3D 9 driver is the bottleneck, and on a fast GPU with a fast driver the difference can be small. It can also have other issues, such as wrong colors, crushed blacks or an inaccurate gamma curve (seen with DXVK's own `d3d9.dll` installed by hand too, so it is not specific to this mod). DSfix keeps working on top of it. It needs a graphics driver with Vulkan 1.3. If DXVK cannot start, the game runs on Direct3D 9 as usual and the log says why. The first time an area loads, DXVK compiles its shaders, which can cause brief hitches; they are cached for later runs. DXVK writes its own log, `DARKSOULS_d3d9.log`, next to the game, and reads an optional `dxvk.conf` from there. If the game folder already has a `d3d9.dll` (DXVK or ReShade installed by hand), that one stays in charge and `DXVK` does nothing. With `DXVK = false` (the default) or `FPSUnlock = false`, DXVK is not loaded at all.
 
 `MaxFPS` defaults to 120 in both and accepts 10 to 1000; a value outside that range is clamped to the nearest end. Pick what your PC can usually hold; dips below it do not slow the game. A low cap works too: both games run in real time at any frame rate down to 10 FPS, so a slower PC can cap at 30 for steady frame pacing. (In Remastered before 1.4.0 a cap below 60 broke the frame pacer, which then waited longer every frame; it now holds any cap exactly. Remastered also no longer drops a frame when a frame comes in a little late, which made a frame rate held below the cap, or a cap set outside the game, hitch.) (Frames longer than 1/8 s, below 8 FPS, are each treated as 1/8 s, so a hitch or a loading stall does not become one huge step.)
 

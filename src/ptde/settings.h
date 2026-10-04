@@ -60,9 +60,6 @@ struct Settings {
     bool skip_present_repeat = false;
     // Run Direct3D 9 on Vulkan through DXVK (dxvk_d3d9.dll beside this DLL). Off by default.
     bool dxvk = false;
-    // Apply the game's brightness (gamma ramp) to the picture when the game is windowed or borderless,
-    // with or without DXVK; Direct3D applies it only in exclusive fullscreen.
-    bool windowed_gamma = true;
     // Make the game window borderless and cover its monitor. Needs the game set to
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
     bool borderless = false;
