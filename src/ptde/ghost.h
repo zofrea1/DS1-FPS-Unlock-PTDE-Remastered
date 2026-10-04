@@ -13,6 +13,10 @@
 // All three counters are rescaled to 1/65536 of a 30 FPS frame: the reloads add 10 (or 5) frames'
 // worth instead of setting it, so no fraction is lost, and each frame subtracts dt * 30 * 65536.
 // At exactly 30 FPS this is the original behaviour.
+//
+//  * Turning: replays and other players' characters (NetworkManipulator) turn by a stored amount every frame,
+//    a tenth (replays) or a fifth (network samples) of the turn to the next sample, i.e. 10 or 5 frames at
+//    30 FPS. That amount is scaled by dt * 30 so the turn takes the time between samples at any frame rate.
 bool ghost_install();
 
 // Called on the render thread at every frame boundary with the frame time in seconds.

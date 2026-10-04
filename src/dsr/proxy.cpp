@@ -48,6 +48,12 @@ MouseDevice g_devices[kMaxDevices];
 std::atomic<int> g_interface_lock{0};
 std::atomic<int> g_mouse_lock{0};
 std::atomic<int> g_mouse_logged{0};
+// Mouse statistics for the log (once a minute while the mouse moves): polls with movement, how many came less
+// than 4 ms after the previous one (a second poll inside one frame), and the largest scale applied.
+std::atomic<uint64_t> g_mouse_polls{0};
+std::atomic<uint64_t> g_mouse_short_polls{0};
+std::atomic<int64_t> g_mouse_max_scale_x100{0};
+std::atomic<uint64_t> g_mouse_report_ms{0};
 
 // GUID_SysMouse. The keyboard and gamepad are left alone.
 constexpr GUID kSystemMouse = {
@@ -112,6 +118,31 @@ LONG scale_axis(LONG value, double* remainder, double step) {
     return static_cast<LONG>(whole);
 }
 
+void note_mouse_poll(LONG x, LONG y, double step) {
+    if (x == 0 && y == 0) {
+        return;
+    }
+    g_mouse_polls.fetch_add(1, std::memory_order_relaxed);
+    if (step < 0.004) {
+        g_mouse_short_polls.fetch_add(1, std::memory_order_relaxed);
+    }
+    const auto scale = static_cast<int64_t>(100.0 / (60.0 * step));
+    int64_t seen = g_mouse_max_scale_x100.load(std::memory_order_relaxed);
+    while (scale > seen && !g_mouse_max_scale_x100.compare_exchange_weak(seen, scale)) {
+    }
+    const uint64_t now = GetTickCount64();
+    uint64_t last = g_mouse_report_ms.load(std::memory_order_relaxed);
+    if (last == 0) {
+        g_mouse_report_ms.store(now, std::memory_order_relaxed);
+    } else if (now - last >= 60000 && g_mouse_report_ms.compare_exchange_strong(last, now)) {
+        LOG_INFO("Mouse: %llu polls with movement in the last minute, %llu less than 4 ms after the previous poll; "
+                 "largest scale %.2f",
+                 static_cast<unsigned long long>(g_mouse_polls.exchange(0)),
+                 static_cast<unsigned long long>(g_mouse_short_polls.exchange(0)),
+                 static_cast<double>(g_mouse_max_scale_x100.exchange(0)) / 100.0);
+    }
+}
+
 // The interval the counts returned by a poll were collected over. `last` is the previous
 // qualifying poll of the same kind; `held_step` remembers the last sane interval so a burst of
 // polls inside one frame keeps using it.
@@ -172,6 +203,7 @@ HRESULT WINAPI hook_get_device_state(void* device, DWORD size, void* state) {
         g_scheduler_active.load(std::memory_order_acquire) != 0) {
         auto* axes = static_cast<LONG*>(state);
         const double step = poll_step(&mouse->last_state_qpc, &mouse->last_state_step);
+        note_mouse_poll(axes[0], axes[1], step);
         axes[0] = scale_axis(axes[0], &mouse->x_remainder, step);
         axes[1] = scale_axis(axes[1], &mouse->y_remainder, step);
         if (g_mouse_logged.exchange(1) == 0) {
@@ -206,6 +238,9 @@ HRESULT WINAPI hook_get_device_data(void* device, DWORD object_size, void* objec
         const double peek_step = mouse->last_data_step;
         const double step = peek ? (peek_step > 0.0 ? peek_step : static_cast<double>(g_frame_dt.load()))
                                  : poll_step(&mouse->last_data_qpc, &mouse->last_data_step);
+        if (!peek && *count > 0) {
+            note_mouse_poll(1, 0, step);
+        }
         for (DWORD i = 0; i < *count; ++i, object += object_size) {
             const DWORD offset = *reinterpret_cast<DWORD*>(object);
             auto* value = reinterpret_cast<LONG*>(object + sizeof(DWORD));

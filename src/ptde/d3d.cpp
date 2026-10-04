@@ -1,6 +1,7 @@
 #include "d3d.h"
 
 #include "dxvk.h"
+#include "gamma.h"
 #include "log.h"
 #include "settings.h"
 
@@ -147,7 +148,12 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
             d3d->Release();
         }
     }
-    return g_reset(device, pp);
+    gamma_before_reset();
+    const HRESULT hr = g_reset(device, pp);
+    if (SUCCEEDED(hr)) {
+        gamma_after_reset();
+    }
+    return hr;
 }
 
 // Patch one slot of a COM object's vtable, returning the original pointer.
@@ -183,6 +189,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             g_set_vs_const = reinterpret_cast<SetVsConstFn>(vs);
             LOG_INFO("Device SetVertexShaderConstantF hooked (content-cadence probe)");
         }
+        gamma_attach(*out, settings().windowed_gamma);
     }
     return hr;
 }

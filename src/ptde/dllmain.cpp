@@ -32,7 +32,7 @@ DWORD WINAPI worker(void*) {
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"PTDE-FPS-Unlock.log");
     diag_install(dll_path, L"PTDE-FPS-Unlock-crash.dmp");
-    LOG_INFO("DS1 PTDE FPS Unlock v1.3.0");
+    LOG_INFO("DS1 PTDE FPS Unlock v1.4.0");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);

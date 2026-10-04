@@ -59,7 +59,14 @@ void** g_common_menu_slot = nullptr;
 void** g_ingame_menu_slot = nullptr;
 void** g_title_menu_slot = nullptr;
 
-std::atomic<int64_t> g_pacer_anchor{0};
+// The frame loop's own frame measurement returns here (see hook_qpc_pacer).
+constexpr uint32_t kPacerMeasureReturn = 0xCE35C2;
+// Frame pacer clock (see hook_qpc_pacer): our anchor in real counts and the game's anchor it belongs to.
+int64_t g_pacer_anchor = 0;
+int64_t g_pacer_game_anchor = -1;
+int64_t g_qpc_freq = 0;
+std::atomic<uint64_t> g_pacer_on_time{0};
+void* g_qpc_thunk = nullptr;
 std::atomic<int> g_sim_logged{0};
 std::atomic<int> g_fx_logged{0};
 std::atomic<int> g_remo_logged{0};
@@ -177,7 +184,8 @@ bool validate_static_sites() {
     g_qpc_iat = reinterpret_cast<void**>(image_rva(kBuild.qpc_iat));
     if (!*g_qpc_iat || !executable(*g_qpc_iat) ||
         !pacer_call_matches(kBuild.pacer_first_return, g_qpc_iat) ||
-        !pacer_call_matches(kBuild.pacer_loop_return, g_qpc_iat)) {
+        !pacer_call_matches(kBuild.pacer_loop_return, g_qpc_iat) ||
+        !pacer_call_matches(kPacerMeasureReturn, g_qpc_iat)) {
         LOG_ERROR("Frame pacer import does not match this build");
         return false;
     }
@@ -209,36 +217,95 @@ bool validate_static_sites() {
     return true;
 }
 
-// The wait at 0xCE3450 does (qpc - anchor) * [object+0x60] / frequency.
-// The gameplay object is constructed with that field set to 60. Scaling the
-// counter by TargetFPS/60 makes the same compare wake up at TargetFPS.
-BOOL WINAPI hook_qpc(LARGE_INTEGER* counter) {
+// The frame loop (0xCE3550, rdi = frame loop object) paces the game in frames of 1/[object+0x60] s (60):
+// it measures frames = (qpc - [object+0x678]) * [object+0x60] / frequency (QueryPerformanceCounter call that
+// returns to 0xCE35C2), compares them with the next frame number [object+0x690], and when it is early it waits
+// in 0xCE3450 (calls returning to 0xCE3478 and 0xCE34AE) until the frames reach that number. When it is one to
+// three frames late it drops the next frame to catch up (and counts no frame); later than that it starts
+// counting from the present frame.
+//
+// Every one of those three calls gets the same clock, running at TargetFPS/60 of real time from the moment the
+// pacer is first seen (so it continues the real time the game counted until then), and re-anchored if the game
+// re-anchors. The measured frames and the wait then agree at any TargetFPS: the earlier version scaled only the
+// wait, which worked above 60 but below 60 kept handing the loop a frame number ahead of its own clock, each
+// wait twice as long as the last (MaxFPS 30 fell to a fraction of a frame per second). A frame that is only one
+// to three frames late is reported on time: the game takes no frame out of the picture and does not wait, and
+// the measured frame time keeps the game in real time. Dropping frames to catch up is meant for the original
+// fixed step and made a frame rate held below the cap (or capped outside the game) hitch.
+constexpr uint32_t kLoopRate = 0x60;      // uint32: frames per second the loop counts in (60)
+constexpr uint32_t kLoopAnchor = 0x678;   // int64: counter value of frame 0
+constexpr uint32_t kLoopNext = 0x690;     // uint32: next frame number
+constexpr int64_t kCatchUpFrames = 12;    // 3 x the largest frame divisor (4)
+
+BOOL hook_qpc_pacer(LARGE_INTEGER* counter, uint8_t* loop) {
     const BOOL ok = g_qpc(counter);
     if (!ok || !counter || g_scheduler_active.load(std::memory_order_acquire) == 0) {
         return ok;
     }
     const void* caller = _ReturnAddress();
-    if (caller != image_rva(kBuild.pacer_first_return) &&
+    const bool measure = caller == image_rva(kPacerMeasureReturn);
+    if (!measure && caller != image_rva(kBuild.pacer_first_return) &&
         caller != image_rva(kBuild.pacer_loop_return)) {
         return ok;
     }
-
+    int64_t game_anchor = 0;
+    uint32_t rate = 0, next = 0;
+    __try {
+        game_anchor = *reinterpret_cast<const int64_t*>(loop + kLoopAnchor);
+        rate = *reinterpret_cast<const uint32_t*>(loop + kLoopRate);
+        next = *reinterpret_cast<const uint32_t*>(loop + kLoopNext);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return ok;
+    }
     const int64_t real = counter->QuadPart;
-    int64_t anchor = g_pacer_anchor.load(std::memory_order_relaxed);
-    if (anchor == 0) {
-        int64_t expected = 0;
-        if (g_pacer_anchor.compare_exchange_strong(expected, real)) {
-            anchor = real;
-        } else {
-            anchor = g_pacer_anchor.load(std::memory_order_relaxed);
+    if (game_anchor == 0 || rate == 0 || real < game_anchor) {
+        return ok;
+    }
+    if (g_qpc_freq == 0) {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        g_qpc_freq = f.QuadPart;
+    }
+    if (game_anchor != g_pacer_game_anchor) {
+        if (g_pacer_game_anchor != -1) {
+            LOG_INFO("Frame pacer: the game counts frames from a new start; the clock follows");
         }
+        g_pacer_game_anchor = game_anchor;
+        g_pacer_anchor = real;
     }
     const int64_t target = g_target_fps.load(std::memory_order_relaxed);
-    counter->QuadPart = anchor + (real - anchor) * target / 60;
+    int64_t value = g_pacer_anchor + (real - g_pacer_anchor) * target / 60;
+    if (measure && g_qpc_freq > 0) {
+        const int64_t frames = (value - game_anchor) * static_cast<int64_t>(rate) / g_qpc_freq;
+        const int64_t late = frames - static_cast<int64_t>(next);
+        if (late > 0 && late <= kCatchUpFrames) {
+            // On time: exactly frame `next`.
+            value = game_anchor + (static_cast<int64_t>(next) * g_qpc_freq + rate - 1) / rate;
+            g_pacer_on_time.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    counter->QuadPart = value;
     if (g_pacer_logged.exchange(1) == 0) {
         LOG_INFO("Frame pacer active at %u FPS", static_cast<unsigned>(target));
     }
     return ok;
+}
+
+// The import slot points at a thunk that hands the caller's rdi (the frame loop object at the pacer's calls)
+// to the hook in rdx, which QueryPerformanceCounter does not use: mov rdx, rdi ; jmp [rip] ; dq hook.
+void* make_qpc_thunk() {
+    auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    if (!code) {
+        return nullptr;
+    }
+    const uint8_t head[] = {0x48, 0x89, 0xFA, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00};
+    std::memcpy(code, head, sizeof(head));
+    const uint64_t target = reinterpret_cast<uint64_t>(&hook_qpc_pacer);
+    std::memcpy(code + sizeof(head), &target, sizeof(target));
+    DWORD old = 0;
+    VirtualProtect(code, 0x1000, PAGE_EXECUTE_READ, &old);
+    FlushInstructionCache(GetCurrentProcess(), code, 0x1000);
+    return code;
 }
 
 void* alloc_near(uint8_t* site) {
@@ -266,6 +333,7 @@ float* g_decay_cave = nullptr;     // airborne momentum damp per frame
 float* g_grav_cave = nullptr;      // slide gravity per frame
 float* g_friction_cave = nullptr;  // slide friction per frame
 int32_t* g_ghost_units = nullptr;  // ghost replay counter units for this frame (see patch_ghosts)
+float* g_ghost_turn = nullptr;     // 4 x (frame time * 60), the per-frame turn of replays and other players
 float* g_frame_cells = nullptr;    // frame constants page (see patch_frame_constants)
 
 // Layout of the frame constants page. The vector comes first so that it is 16-byte aligned (movaps).
@@ -340,6 +408,11 @@ void apply_frame_step(float dt) {
     }
     if (g_ghost_units) {
         *g_ghost_units = static_cast<int32_t>(std::lround(scale * 65536.0));
+    }
+    if (g_ghost_turn) {
+        for (int i = 0; i < 4; ++i) {
+            g_ghost_turn[i] = static_cast<float>(scale);
+        }
     }
     if (g_frame_cells) {
         write_frame_cells(dt);
@@ -1797,6 +1870,12 @@ bool patch_camera() {
 // All three counters are rescaled to 1/65536 of a 60 FPS frame: the reloads add 20 (or 10) frames'
 // worth instead of setting it, so no fraction is lost, and each frame subtracts dt * 60 * 65536. At
 // exactly 60 FPS this is the retail behaviour.
+//  * Turning: each replay sample stores a twentieth of the turn to the next recorded facing (+0x260, sample
+//    loader 0x39AC60: 1/20 = 20 frames per sample) and each network sample of another player a tenth of
+//    theirs (NetworkManipulator +0x2B0, 1/10 = 10 frames per 1/6 s sample); the manipulator hands that
+//    amount to the character as this frame's turn (+0x20) every frame (0x39AB77, 0x39580B). Above 60 FPS
+//    ghosts and other players turned too far between samples and snapped back. The amount is scaled by
+//    dt * 60 where it is handed over.
 constexpr int32_t kGhostUnit = 65536;
 constexpr uint32_t kGhostPlayDec = 0x39AA6A;     // dec dword ptr [rbx+278h]          (6 bytes)
 constexpr uint32_t kGhostPlayReload = 0x39AA7C;  // mov dword ptr [rbx+278h], 14h     (10 bytes)
@@ -1804,6 +1883,8 @@ constexpr uint32_t kGhostNetDec = 0x3976FE;      // dec dword ptr [rcx+238h]    
 constexpr uint32_t kGhostRecDec = 0x397739;      // dec dword ptr [rsi+344h]          (6 bytes)
 constexpr uint32_t kGhostRecReload = 0x3978CE;   // mov dword ptr [rsi+344h], 14h     (10 bytes)
 constexpr uint32_t kGhostNetReload = 0x397AB9;   // mov dword ptr [rsi+238h], 0Ah     (10 bytes)
+constexpr uint32_t kGhostReplayTurn = 0x39AB77;  // movaps xmm0, [rbx+260h]            (7 bytes)
+constexpr uint32_t kGhostRemoteTurn = 0x39580B;  // movaps xmm0, [rdi+2B0h]            (7 bytes)
 std::atomic<int> g_ghost_state{0};
 
 bool write_code(uint8_t* site, const uint8_t* bytes, size_t size) {
@@ -1848,6 +1929,8 @@ bool patch_ghosts() {
     static const uint8_t kRecDec[6] = {0xFF, 0x8E, 0x44, 0x03, 0x00, 0x00};
     static const uint8_t kRecReload[10] = {0xC7, 0x86, 0x44, 0x03, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00};
     static const uint8_t kNetReload[10] = {0xC7, 0x86, 0x38, 0x02, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00};
+    static const uint8_t kReplayTurn[7] = {0x0F, 0x28, 0x83, 0x60, 0x02, 0x00, 0x00};
+    static const uint8_t kRemoteTurn[7] = {0x0F, 0x28, 0x87, 0xB0, 0x02, 0x00, 0x00};
     struct Check {
         uint32_t rva;
         const uint8_t* bytes;
@@ -1858,7 +1941,9 @@ bool patch_ghosts() {
                             {kGhostNetDec, kNetDec, sizeof(kNetDec)},
                             {kGhostRecDec, kRecDec, sizeof(kRecDec)},
                             {kGhostRecReload, kRecReload, sizeof(kRecReload)},
-                            {kGhostNetReload, kNetReload, sizeof(kNetReload)}};
+                            {kGhostNetReload, kNetReload, sizeof(kNetReload)},
+                            {kGhostReplayTurn, kReplayTurn, sizeof(kReplayTurn)},
+                            {kGhostRemoteTurn, kRemoteTurn, sizeof(kRemoteTurn)}};
     for (const Check& c : checks) {
         if (std::memcmp(image_rva(c.rva), c.bytes, c.size) != 0) {
             LOG_ERROR("Ghost replay site 0x%08X does not match this build", c.rva);
@@ -1874,8 +1959,12 @@ bool patch_ghosts() {
     // rewritten every frame by apply_frame_step.
     auto* per_second = reinterpret_cast<float*>(page + 0x800);
     auto* units = reinterpret_cast<int32_t*>(page + 0x804);
+    auto* turn = reinterpret_cast<float*>(page + 0x810);  // 16-byte aligned for mulps
     *per_second = 60.0f * kGhostUnit;
     *units = kGhostUnit;
+    for (int i = 0; i < 4; ++i) {
+        turn[i] = 1.0f;
+    }
     uint8_t* p = page;
     auto emit = [&](std::initializer_list<uint8_t> bytes) {
         for (uint8_t b : bytes) {
@@ -1907,6 +1996,17 @@ bool patch_ghosts() {
     emit_rel(units);
     emit({0x29, 0x86, 0x44, 0x03, 0x00, 0x00});  // sub [rsi+344h], eax
     emit({0xC3});
+    // Turns: xmm0 = the stored per-frame turn * this frame's 60 FPS frames, then stored by the game.
+    uint8_t* replay_turn = p;
+    emit({0x0F, 0x28, 0x83, 0x60, 0x02, 0x00, 0x00});  // movaps xmm0, [rbx+260h]
+    emit({0x0F, 0x59, 0x05});                          // mulps xmm0, [turn]
+    emit_rel(turn);
+    emit({0xC3});
+    uint8_t* remote_turn = p;
+    emit({0x0F, 0x28, 0x87, 0xB0, 0x02, 0x00, 0x00});  // movaps xmm0, [rdi+2B0h]
+    emit({0x0F, 0x59, 0x05});                          // mulps xmm0, [turn]
+    emit_rel(turn);
+    emit({0xC3});
     DWORD old = 0;
     if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READWRITE, &old)) {
         LOG_ERROR("Could not make the ghost replay stubs executable (Win32=%lu)", GetLastError());
@@ -1914,14 +2014,18 @@ bool patch_ghosts() {
     }
     FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
     g_ghost_units = units;
+    g_ghost_turn = turn;
     const bool ok = write_near_call(image_rva(kGhostPlayDec), 6, play) && reload_to_add(image_rva(kGhostPlayReload), 20) &&
                     write_near_call(image_rva(kGhostNetDec), 6, net) && write_near_call(image_rva(kGhostRecDec), 6, rec) &&
-                    reload_to_add(image_rva(kGhostRecReload), 20) && reload_to_add(image_rva(kGhostNetReload), 10);
+                    reload_to_add(image_rva(kGhostRecReload), 20) && reload_to_add(image_rva(kGhostNetReload), 10) &&
+                    write_near_call(image_rva(kGhostReplayTurn), 7, replay_turn) &&
+                    write_near_call(image_rva(kGhostRemoteTurn), 7, remote_turn);
     if (!ok) {
         LOG_ERROR("Could not patch the ghost replay counters");
         return false;
     }
-    LOG_INFO("Ghost replays and the replay recorder follow real time (sample every 1/3 s, network sample every 1/6 s)");
+    LOG_INFO("Ghost replays and the replay recorder follow real time (sample every 1/3 s, network sample every 1/6 s); "
+             "ghosts and other players turn at the original speed");
     return true;
 }
 
@@ -3132,7 +3236,12 @@ bool patches_apply() {
     }
     Sleep(1500);  // let start-up settle before anything is modified
     g_install_ms = GetTickCount64();
-    if (!patch_pointer(g_qpc_iat, reinterpret_cast<void*>(hook_qpc)) ||
+    g_qpc_thunk = make_qpc_thunk();
+    if (!g_qpc_thunk) {
+        LOG_ERROR("Could not allocate the frame pacer thunk (Win32=%lu)", GetLastError());
+        return false;
+    }
+    if (!patch_pointer(g_qpc_iat, g_qpc_thunk) ||
         !patch_pointer(g_sim_slot, reinterpret_cast<void*>(hook_sim)) ||
         !patch_pointer(g_fx_slot, reinterpret_cast<void*>(hook_fx)) ||
         !patch_pointer(g_press_slot, reinterpret_cast<void*>(hook_press)) ||
@@ -3157,7 +3266,7 @@ bool patches_apply() {
         [] { return g_sim_count.load(std::memory_order_relaxed); },
         [] { return g_frame_dt.load(std::memory_order_relaxed) * 1000.0f; },
         describe_flipper, flipper_tick);
-    LOG_INFO("DS1 Remastered FPS Unlock v1.3.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
+    LOG_INFO("DS1 Remastered FPS Unlock v1.4.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
              g_variable_dt.load() ? "measured frame time" : "fixed 1/TargetFPS");
     return true;
 }
