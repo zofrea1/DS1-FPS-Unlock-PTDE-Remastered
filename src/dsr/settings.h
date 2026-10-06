@@ -30,6 +30,9 @@ struct Settings {
     bool fix_graze = true;
     bool fix_damping = true;
     bool fix_slide = true;
+    // Jump take-off: keeps a running jump at full distance when the take-off loses one frame of root motion
+    // (half-length jumps at 30 FPS). Set false to A/B test.
+    bool fix_jump = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;

@@ -633,8 +633,10 @@ bool write_disp32(uint8_t* disp, uint8_t* next_ip, const void* target) {
     return true;
 }
 
-bool rip_mulss_is(const uint8_t* insn, float expected) {
-    if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != 0x59 || insn[3] != 0x05) {
+// `mulss xmmN, dword ptr [rip + disp32]` whose operand is `expected`; `modrm` picks the register
+// (0x05 = xmm0, 0x0D = xmm1).
+bool rip_mulss_is(const uint8_t* insn, float expected, uint8_t modrm = 0x05) {
+    if (insn[0] != 0xF3 || insn[1] != 0x0F || insn[2] != 0x59 || insn[3] != modrm) {
         return false;
     }
     int32_t disp = 0;
@@ -1319,6 +1321,12 @@ struct CaveEmitter {
 // managed from the snap-apply cave, which runs every frame with real dt: the
 // original ("base") value is remembered per physics object and the scaled or full
 // value is written back for the next frame's ground check.
+//
+// In fn 0x2BC650 the position the body is moved from stays at [rsp+0x30] until the
+// snap is applied: [body+0x10] plus the lift, or [body+0x10] itself when the lift
+// was skipped (0x2BC870, the only call that gets it in between, only reads it). The
+// cave passes its height along so the ladder-exit cap knows exactly whether the lift
+// happened.
 constexpr uint32_t kSnapApplySite = 0x2BC7E9;
 constexpr uint32_t kReachOffset = 0x228;
 
@@ -1362,8 +1370,15 @@ GroundState* ground_slot(const void* phys, ULONGLONG now) {
 // Ladder exit: the same snap is applied unbalanced (lift skipped) at the bottom of
 // a ladder slide, pulling the body down 0.31 per FRAME through the collision
 // floor until it reaches a lower one (2+ units at 240 FPS). Where 0x1F4 is set and
-// the proxy is not ~0.31 above the frame-start height, cap the snap at one retail
-// frame's worth (0.31) per episode, spread over frames by 60*dt.
+// the lift was skipped this frame, cap the snap at one retail frame's worth (0.31)
+// per episode, spread over frames by 60*dt.
+//
+// Whether the lift happened is read from the lifted position itself (see
+// patch_ground_snap), not from the height change over the frame: that change also
+// holds the frame's move, and a ladder slide (5 units/s) moves 0.17 a frame at 30
+// FPS, enough to look like a skipped lift. The snap was then cut on every frame of
+// the slide while the lift still happened, and the character rose instead of
+// sliding down. PTDE records the lift exactly in the same way.
 struct SnapEpisode {
     const void* phys = nullptr;
     float applied = 0.0f;
@@ -1371,7 +1386,15 @@ struct SnapEpisode {
 };
 SnapEpisode g_snap_episodes[8];
 
-float ladder_snap_factor(const void* phys, float dt, float lift_height) {
+// Last snap decision per body, for the trace (see ground_snap_debug).
+struct SnapDebug {
+    const void* phys = nullptr;
+    float factor = 1.0f;
+    int lifted = 0;
+};
+SnapDebug g_snap_debug[64];
+
+float ladder_snap_factor(const void* phys, float dt, bool lifted) {
     const ULONGLONG now = GetTickCount64();
     SnapEpisode* slot = nullptr;
     SnapEpisode* stale = &g_snap_episodes[0];
@@ -1389,7 +1412,7 @@ float ladder_snap_factor(const void* phys, float dt, float lift_height) {
         slot->phys = phys;
         slot->applied = 0.0f;
     }
-    if (lift_height >= 0.15f) {  // the lift happened: balanced frame, new episode next time
+    if (lifted) {  // balanced frame: the next unbalanced run is a new episode
         slot->applied = 0.0f;
         slot->last_ms = now;
         return 1.0f;
@@ -1416,14 +1439,24 @@ float ladder_snap_factor(const void* phys, float dt, float lift_height) {
 }
 
 // Called by the snap-apply cave once per physics update, right before the snap is
-// added to the proxy position. `snap` is the vertical offset about to be applied.
-void ground_snap_step(const void* phys, float dt, float proxy_y, float start_y, float* snap) {
+// added to the proxy position. `snap` is the vertical offset about to be applied;
+// `lifted_y` is the height the body was moved from (the lifted position, or the
+// frame-start position when the lift was skipped).
+void ground_snap_step(const void* phys, float dt, float proxy_y, float start_y, float* snap, float lifted_y) {
     auto* bytes = static_cast<const uint8_t*>(phys);
     const ULONGLONG now = GetTickCount64();
 
+    // An exact copy of the start height when the lift was skipped; 0.31 (or 0.8) above it otherwise.
+    const bool lifted = lifted_y - start_y > 0.01f;
+    float factor = 1.0f;
     if (bytes[0x1F4] != 0) {
-        *snap *= ladder_snap_factor(phys, dt, proxy_y - start_y);
+        factor = ladder_snap_factor(phys, dt, lifted);
+        *snap *= factor;
     }
+    SnapDebug& debug = g_snap_debug[(reinterpret_cast<uintptr_t>(phys) >> 4) & 63];
+    debug.phys = phys;
+    debug.factor = factor;
+    debug.lifted = lifted ? 1 : 0;
 
     GroundState* state = ground_slot(phys, now);
     if (!state) {
@@ -1485,6 +1518,8 @@ bool patch_ground_snap() {
     for (uint8_t b : {0xF3, 0x0F, 0x10, 0x5B, 0x14}) e.b(b);                      // movss xmm3,[rbx+0x14] (frame-start y)
     for (uint8_t b : {0x48, 0x8D, 0x44, 0x24, 0x30}) e.b(b);                      // lea rax,[rsp+0x30]
     for (uint8_t b : {0x48, 0x89, 0x44, 0x24, 0x20}) e.b(b);                      // mov [rsp+0x20],rax    (5th arg: &snap)
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x44, 0x24, 0x74}) e.b(b);                // movss xmm0,[rsp+0x74] (lifted y, was rsp+0x34)
+    for (uint8_t b : {0xF3, 0x0F, 0x11, 0x44, 0x24, 0x28}) e.b(b);                // movss [rsp+0x28],xmm0 (6th arg)
     e.b(0x48); e.b(0xB8);                                                         // mov rax, ground_snap_step
     const size_t fn = e.imm64();
     e.fix64(fn, reinterpret_cast<uint64_t>(&ground_snap_step));
@@ -1526,6 +1561,102 @@ bool patch_ground_snap() {
     DWORD ignored = 0;
     VirtualProtect(site, sizeof(patch), old, &ignored);
     LOG_INFO("Ground snap managed per frame (chained-descent reach scaling, ladder-exit cap)");
+    return true;
+}
+
+// Jump take-off. A running jump does not leave the ground: for its first frames ([body+0x1F2] set) the body
+// follows the jump's root motion, then ([body+0x1F3]) the controller (fn 0x2BBE40) keeps that speed.
+// The held velocity is two slots that swap every frame. 0x2BC290 outputs [body+0xD0]. At 0x2BC329 that slot
+// is replaced with the physics velocity at [[body+0x38]+0x60], which the next frame then outputs. The jump
+// therefore alternates between the last two root-motion velocities of the take-off. Y is the gravity chain
+// (the half-strength fall at every frame rate), so only X and Z are touched.
+// At 30 FPS the take-off is three frames and one of them can carry no root motion. When that frame is one of
+// the last two, the slots alternate between stopped and full speed, the jump covers about half the distance,
+// and the graze check (fn 0x379B10) sees every other frame stopped. At 60 FPS the take-off is six frames and
+// the last two already match.
+// The stopped slot is often the physics velocity, not the output: raising the output alone leaves it in the
+// chain and it comes back next frame. While 0x1F3 is set, both slots get the faster horizontal velocity.
+// The free-mode path also reaches this load (0x6D set and 0x32 clear) with 0x1F3 clear, and that is left alone.
+constexpr uint32_t kJumpHoldSite = 0x2BC290;  // movaps xmm3, [rbx+0D0h] (7 bytes)
+std::atomic<int> g_jump_state{0};
+
+// rbx = body, rsi = step info; `out` gets the controller's output for this frame.
+void jump_hold_velocity(uint8_t* body, const float* /*step*/, float* out) {
+    const auto* prev = reinterpret_cast<const float*>(body + 0xD0);
+    for (int i = 0; i < 4; ++i) {
+        out[i] = prev[i];
+    }
+    if (body[0x1F3] == 0) {
+        return;
+    }
+    auto* world = *reinterpret_cast<uint8_t**>(body + 0x38);
+    if (!world) {
+        return;
+    }
+    // Saved over D0 at 0x2BC329, so this is the other link of the chain.
+    auto* vel = reinterpret_cast<float*>(world + 0x60);
+    const float prev_h = prev[0] * prev[0] + prev[2] * prev[2];
+    const float vel_h = vel[0] * vel[0] + vel[2] * vel[2];
+    if (vel_h > prev_h) {
+        out[0] = vel[0];
+        out[2] = vel[2];
+    } else if (prev_h > vel_h) {
+        vel[0] = prev[0];
+        vel[2] = prev[2];
+    }
+}
+
+bool patch_jump() {
+    auto* site = image_rva(kJumpHoldSite);
+    static constexpr uint8_t kExpected[7] = {0x0F, 0x28, 0x9B, 0xD0, 0x00, 0x00, 0x00};
+    // followed by movaps [rbp-29h], xmm3
+    static constexpr uint8_t kNext[4] = {0x0F, 0x29, 0x5D, 0xD7};
+    if (std::memcmp(site, kExpected, sizeof(kExpected)) != 0 || std::memcmp(site + 7, kNext, sizeof(kNext)) != 0) {
+        LOG_ERROR("Jump hold-velocity load does not match this build");
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the jump stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    // Every general register the stub touches is free here (the code after it reloads them), and xmm3 is
+    // the value the replaced load produces. rsp is 16-aligned at the site, 8 after the call.
+    CaveEmitter e{page};
+    for (uint8_t b : {0x48, 0x83, 0xEC, 0x38}) e.b(b);        // sub rsp, 38h (shadow space + a 16-aligned slot)
+    for (uint8_t b : {0x48, 0x89, 0xD9}) e.b(b);              // mov rcx, rbx  (body)
+    for (uint8_t b : {0x48, 0x89, 0xF2}) e.b(b);              // mov rdx, rsi  (step info)
+    for (uint8_t b : {0x4C, 0x8D, 0x44, 0x24, 0x20}) e.b(b);  // lea r8, [rsp+20h]
+    e.b(0x48); e.b(0xB8);                                     // mov rax, jump_hold_velocity
+    const size_t fn = e.imm64();
+    e.fix64(fn, reinterpret_cast<uint64_t>(&jump_hold_velocity));
+    e.b(0xFF); e.b(0xD0);                                     // call rax
+    for (uint8_t b : {0x0F, 0x28, 0x5C, 0x24, 0x20}) e.b(b);  // movaps xmm3, [rsp+20h]
+    for (uint8_t b : {0x48, 0x83, 0xC4, 0x38}) e.b(b);        // add rsp, 38h
+    e.b(0xC3);                                                // ret
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        LOG_ERROR("Could not protect the jump stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    uint8_t patch[7] = {0xE8, 0, 0, 0, 0, 0x90, 0x90};
+    const intptr_t rel = page - (site + 5);
+    if (rel < INT32_MIN || rel > INT32_MAX) {
+        return false;
+    }
+    const auto rel32 = static_cast<int32_t>(rel);
+    std::memcpy(patch + 1, &rel32, sizeof(rel32));
+    DWORD old = 0;
+    if (!VirtualProtect(site, sizeof(patch), PAGE_EXECUTE_READWRITE, &old)) {
+        LOG_ERROR("Could not unprotect the jump hold-velocity load (Win32=%lu)", GetLastError());
+        return false;
+    }
+    std::memcpy(site, patch, sizeof(patch));
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(patch));
+    DWORD ignored = 0;
+    VirtualProtect(site, sizeof(patch), old, &ignored);
+    LOG_INFO("Jump take-off holds the full take-off speed (both held-velocity slots)");
     return true;
 }
 
@@ -1804,6 +1935,29 @@ void scale_follow_camera(void* object, float step) {
 float* g_cam_gain_n = nullptr;
 float* g_cam_dist_k = nullptr;
 
+// The follow camera's state after its last update, for the trace (see camera_trace).
+CameraTrace g_cam_trace;
+std::atomic<int> g_cam_trace_valid{0};
+
+bool copy_camera_trace(const uint8_t* cam, float step, CameraTrace* out) {
+    __try {
+        out->step = step;
+        out->weight = *reinterpret_cast<const volatile float*>(cam + 0x23C);
+        out->boost = *reinterpret_cast<const volatile float*>(cam + 0x130);
+        out->boost_hold = *reinterpret_cast<const volatile float*>(cam + 0x134);
+        out->yaw = *reinterpret_cast<const volatile float*>(cam + 0x140);
+        out->pitch = *reinterpret_cast<const volatile float*>(cam + 0x144);
+        for (int i = 0; i < 3; ++i) {
+            out->pos[i] = *reinterpret_cast<const volatile float*>(cam + 0x100 + 4 * i);
+            out->target[i] = *reinterpret_cast<const volatile float*>(cam + 0x250 + 4 * i);
+        }
+        out->locked = *reinterpret_cast<const volatile uint8_t*>(cam + 0x260);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void hook_follow(void* camera, float step, void* chr, void* extra) {
     if (g_cam_gain_n && g_cam_dist_k) {
         const double rate = g_camera_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
@@ -1814,6 +1968,11 @@ void hook_follow(void* camera, float step, void* chr, void* extra) {
     }
     scale_follow_camera(camera, step);
     g_follow(camera, step, chr, extra);
+    if (trace_active() && camera) {
+        g_cam_trace.chr = chr;
+        g_cam_trace_valid.store(copy_camera_trace(static_cast<const uint8_t*>(camera), step, &g_cam_trace) ? 1 : 0,
+                                std::memory_order_relaxed);
+    }
 }
 
 bool patch_camera() {
@@ -1876,6 +2035,17 @@ bool patch_camera() {
 //    amount to the character as this frame's turn (+0x20) every frame (0x39AB77, 0x39580B). Above 60 FPS
 //    ghosts and other players turned too far between samples and snapped back. The amount is scaled by
 //    dt * 60 where it is handed over.
+//  * Moving: each replay sample also stores a twentieth of the way to the next recorded point (+0x250). Every
+//    frame the manipulator hands that step to its move function (vtable +0x140 = 0x39AED0), which keeps a
+//    copy at +0x70 and turns it into a stick direction and a walk or run speed (|step| * 60 against
+//    2.5 m/s). The character controller (0x379682, 0x379770) then moves the body straight by +0x70 for
+//    replay and network manipulators: a fixed distance per FRAME. Above 60 FPS a ghost covered the
+//    segment in its first twenty frames, stopped (the manipulator zeroes the step once the point is
+//    reached) and waited for the next sample, so it moved in jerks while its walk or run animation played
+//    smoothly. Where the move function stores the copy, the step is scaled by dt * 60 when it is the stored
+//    step (+0x250); the far-behind catch-up warp (the whole distance in one frame) is left as it is, and
+//    the stick direction and speed still come from the unscaled step. Other players' characters
+//    (NetworkManipulator) already move by velocity * dt.
 constexpr int32_t kGhostUnit = 65536;
 constexpr uint32_t kGhostPlayDec = 0x39AA6A;     // dec dword ptr [rbx+278h]          (6 bytes)
 constexpr uint32_t kGhostPlayReload = 0x39AA7C;  // mov dword ptr [rbx+278h], 14h     (10 bytes)
@@ -1885,6 +2055,7 @@ constexpr uint32_t kGhostRecReload = 0x3978CE;   // mov dword ptr [rsi+344h], 14
 constexpr uint32_t kGhostNetReload = 0x397AB9;   // mov dword ptr [rsi+238h], 0Ah     (10 bytes)
 constexpr uint32_t kGhostReplayTurn = 0x39AB77;  // movaps xmm0, [rbx+260h]            (7 bytes)
 constexpr uint32_t kGhostRemoteTurn = 0x39580B;  // movaps xmm0, [rdi+2B0h]            (7 bytes)
+constexpr uint32_t kGhostReplayMove = 0x39AED0;  // movaps xmm0, [rdx] ; movdqa [rcx+70h], xmm0 (8 bytes)
 std::atomic<int> g_ghost_state{0};
 
 bool write_code(uint8_t* site, const uint8_t* bytes, size_t size) {
@@ -1931,6 +2102,7 @@ bool patch_ghosts() {
     static const uint8_t kNetReload[10] = {0xC7, 0x86, 0x38, 0x02, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00};
     static const uint8_t kReplayTurn[7] = {0x0F, 0x28, 0x83, 0x60, 0x02, 0x00, 0x00};
     static const uint8_t kRemoteTurn[7] = {0x0F, 0x28, 0x87, 0xB0, 0x02, 0x00, 0x00};
+    static const uint8_t kReplayMove[8] = {0x0F, 0x28, 0x02, 0x66, 0x0F, 0x7F, 0x41, 0x70};
     struct Check {
         uint32_t rva;
         const uint8_t* bytes;
@@ -1943,7 +2115,8 @@ bool patch_ghosts() {
                             {kGhostRecReload, kRecReload, sizeof(kRecReload)},
                             {kGhostNetReload, kNetReload, sizeof(kNetReload)},
                             {kGhostReplayTurn, kReplayTurn, sizeof(kReplayTurn)},
-                            {kGhostRemoteTurn, kRemoteTurn, sizeof(kRemoteTurn)}};
+                            {kGhostRemoteTurn, kRemoteTurn, sizeof(kRemoteTurn)},
+                            {kGhostReplayMove, kReplayMove, sizeof(kReplayMove)}};
     for (const Check& c : checks) {
         if (std::memcmp(image_rva(c.rva), c.bytes, c.size) != 0) {
             LOG_ERROR("Ghost replay site 0x%08X does not match this build", c.rva);
@@ -2007,6 +2180,20 @@ bool patch_ghosts() {
     emit({0x0F, 0x59, 0x05});                          // mulps xmm0, [turn]
     emit_rel(turn);
     emit({0xC3});
+    // Replay move (rcx = manipulator, rdx = the vector handed in): the copy at +0x70 is the stored step times
+    // this frame's 60 FPS frames when rdx points at the stored step (+0x250), else the vector unchanged. The
+    // move function reloads xmm0 right after, and the flags are set again before they are tested.
+    uint8_t* replay_move = p;
+    emit({0x0F, 0x28, 0x02});                          // movaps xmm0, [rdx]
+    emit({0x50});                                      // push rax
+    emit({0x48, 0x8D, 0x81, 0x50, 0x02, 0x00, 0x00});  // lea rax, [rcx+250h]
+    emit({0x48, 0x39, 0xC2});                          // cmp rdx, rax
+    emit({0x58});                                      // pop rax
+    emit({0x75, 0x07});                                // jne store
+    emit({0x0F, 0x59, 0x05});                          // mulps xmm0, [turn]   (7 bytes)
+    emit_rel(turn);
+    emit({0x66, 0x0F, 0x7F, 0x41, 0x70});              // store: movdqa [rcx+70h], xmm0
+    emit({0xC3});
     DWORD old = 0;
     if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READWRITE, &old)) {
         LOG_ERROR("Could not make the ghost replay stubs executable (Win32=%lu)", GetLastError());
@@ -2019,13 +2206,99 @@ bool patch_ghosts() {
                     write_near_call(image_rva(kGhostNetDec), 6, net) && write_near_call(image_rva(kGhostRecDec), 6, rec) &&
                     reload_to_add(image_rva(kGhostRecReload), 20) && reload_to_add(image_rva(kGhostNetReload), 10) &&
                     write_near_call(image_rva(kGhostReplayTurn), 7, replay_turn) &&
-                    write_near_call(image_rva(kGhostRemoteTurn), 7, remote_turn);
+                    write_near_call(image_rva(kGhostRemoteTurn), 7, remote_turn) &&
+                    write_near_call(image_rva(kGhostReplayMove), 8, replay_move);
     if (!ok) {
         LOG_ERROR("Could not patch the ghost replay counters");
         return false;
     }
     LOG_INFO("Ghost replays and the replay recorder follow real time (sample every 1/3 s, network sample every 1/6 s); "
-             "ghosts and other players turn at the original speed");
+             "ghosts move evenly between samples; ghosts and other players turn at the original speed");
+    return true;
+}
+
+// Graze probe (Trace only). The sprint graze check (fn 0x379B10, rcx = move control; reached by a tail
+// jump from 0x320870, so the return address on the stack is that function's caller) is entered through a
+// stub that records each call per move control for the trace: caller, thread, the speed it is about to
+// test and the multiplier [mc+0x1B8] it starts from.
+constexpr uint32_t kGrazeEntry = 0x379B10;  // push rbx; sub rsp,20h; mov rax,[rcx+10h]; mov rbx,rcx (13 bytes)
+struct GrazeSlot {
+    std::atomic<const void*> mc{nullptr};
+    GrazeTrace data;
+};
+GrazeSlot g_graze_slots[64];
+
+void graze_probe(const uint8_t* mc, const uint8_t* ret) {
+    GrazeSlot& slot = g_graze_slots[(reinterpret_cast<uintptr_t>(mc) >> 4) & 63];
+    if (slot.mc.load(std::memory_order_relaxed) != mc) {
+        slot.mc.store(mc, std::memory_order_relaxed);
+        slot.data = GrazeTrace();
+    }
+    GrazeTrace& d = slot.data;
+    const unsigned i = d.calls < 2 ? d.calls : 1;
+    ++d.calls;
+    if (d.calls > 2) {
+        return;  // keep the first two
+    }
+    d.caller[i] = static_cast<unsigned>(ret - g_image);
+    d.thread[i] = GetCurrentThreadId();
+    __try {
+        const uint8_t* phys = *reinterpret_cast<uint8_t* const*>(mc + 0x28);
+        const float* cur = reinterpret_cast<const float*>(phys + 0x10);
+        const float* prev = reinterpret_cast<const float*>(phys + 0x20);
+        const float dx = cur[0] - prev[0], dy = cur[1] - prev[1], dz = cur[2] - prev[2];
+        const float dt = g_frame_dt.load(std::memory_order_relaxed);
+        d.speed[i] = std::sqrt(dx * dx + dy * dy + dz * dz) / (dt > 0.0f ? dt : 1.0f);
+        d.mul[i] = *reinterpret_cast<const float*>(mc + 0x1B8);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        d.speed[i] = -2.0f;
+    }
+}
+
+bool patch_graze_probe() {
+    auto* entry = image_rva(kGrazeEntry);
+    static constexpr uint8_t kPrologue[13] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48,
+                                              0x8B, 0x41, 0x10, 0x48, 0x8B, 0xD9};
+    if (std::memcmp(entry, kPrologue, sizeof(kPrologue)) != 0) {
+        LOG_ERROR("Graze check prologue does not match this build");
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(entry));
+    if (!page) {
+        LOG_ERROR("Could not allocate the graze probe stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    CaveEmitter e{page};
+    // rsp is 8 mod 16 here; push rcx + 20h of shadow space keeps the call aligned.
+    for (uint8_t b : {0x51}) e.b(b);                                   // push rcx
+    for (uint8_t b : {0x48, 0x83, 0xEC, 0x20}) e.b(b);                 // sub rsp, 20h
+    for (uint8_t b : {0x48, 0x8B, 0x54, 0x24, 0x28}) e.b(b);           // mov rdx, [rsp+28h] (return address)
+    e.b(0x48); e.b(0xB8);                                              // mov rax, graze_probe
+    const size_t fn = e.imm64();
+    e.fix64(fn, reinterpret_cast<uint64_t>(&graze_probe));
+    e.b(0xFF); e.b(0xD0);                                              // call rax
+    for (uint8_t b : {0x48, 0x83, 0xC4, 0x20}) e.b(b);                 // add rsp, 20h
+    e.b(0x59);                                                         // pop rcx
+    for (uint8_t b : kPrologue) e.b(b);                                // the original prologue
+    e.b(0xE9);                                                         // jmp back
+    const size_t back = e.imm32();
+    e.fix32(back, entry + sizeof(kPrologue));
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        LOG_ERROR("Could not protect the graze probe stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    uint8_t patch[13];
+    std::memset(patch, 0x90, sizeof(patch));
+    patch[0] = 0xE9;
+    const auto rel = static_cast<int32_t>(page - (entry + 5));
+    std::memcpy(patch + 1, &rel, 4);
+    if (!write_code(entry, patch, sizeof(patch))) {
+        LOG_ERROR("Could not patch the graze check entry");
+        return false;
+    }
+    LOG_INFO("Graze probe active (trace columns gz_*)");
     return true;
 }
 
@@ -2134,8 +2407,15 @@ bool patch_turn() {
 // early with only the first two scaled. Each load is redirected through a stub that computes
 // 1 - (1 - w)^n with the x87 unit (no general or vector register other than the destination
 // changes) and then performs the original instruction on that value.
+//   [+0x130]             boost of the look-at weights: the camera position follows its target by
+//                        w + (1 - w) * [+0x130] a frame (0x239931). Turning the camera with the stick or
+//                        mouse sets it to 1; it holds for [+0x1D8] (2 s) and then fades out over [+0x1DC]
+//                        (1 s), in real time, also after locking on. With only w scaled, the boost was
+//                        applied whole every frame, so for those seconds the camera followed several
+//                        times faster than it should above 60 FPS. Scaled the same way, the combined
+//                        weight is exactly 1 - ((1 - w)(1 - [+0x130]))^n.
 constexpr uint32_t kCamGainSites[] = {0x2396B7, 0x2396C1, 0x2396D5, 0x2396DF, 0x237708, 0x238A42, 0x238894, 0x238982,
-                                      0x238316, 0x238341, 0x236DF3, 0x236E1C, 0x236E41, 0x236E89, 0x236EEA};
+                                      0x238316, 0x238341, 0x236DF3, 0x236E1C, 0x236E41, 0x236E89, 0x236EEA, 0x239943};
 constexpr uint32_t kCamDistSite = 0x236F10;  // mulss xmm1, dword ptr [rip+disp] (0.1)
 
 // Decodes `F3 [REX] 0F 10|59 modrm(10 reg 110) disp32` (movss/mulss xmmN, [rsi+disp32]).
@@ -2180,14 +2460,14 @@ bool patch_camera_gains() {
     for (uint32_t rva : kCamGainSites) {
         Site s{};
         s.at = image_rva(rva);
-        if (!decode_cam_gain_load(s.at, &s.size, &s.op, &s.reg, &s.disp) || s.disp < 0x180 || s.disp > 0x330) {
+        if (!decode_cam_gain_load(s.at, &s.size, &s.op, &s.reg, &s.disp) || s.disp < 0x130 || s.disp > 0x330) {
             LOG_ERROR("Camera gain load at 0x%08X does not match this build", rva);
             return false;
         }
         sites[count++] = s;
     }
-    uint8_t* dist = image_rva(kCamDistSite);
-    if (!rip_mulss_is(dist, 0.1f) || dist[3] != 0x0D) {
+    uint8_t* dist = image_rva(kCamDistSite);  // mulss xmm1 (modrm 0x0D)
+    if (!rip_mulss_is(dist, 0.1f, 0x0D)) {
         LOG_ERROR("Camera distance smoothing at 0x%08X does not match this build", kCamDistSite);
         return false;
     }
@@ -2292,7 +2572,7 @@ bool patch_camera_gains() {
         return false;
     }
     LOG_INFO("Follow camera: %u more blend weights follow the frame time (look-at, pivot, yaw settle, auto turn, "
-             "stick, parameter changes, distance)",
+             "stick, parameter changes, distance, look-at boost after turning the camera)",
              static_cast<unsigned>(count) + 1);
     return true;
 }
@@ -2422,6 +2702,11 @@ void try_delayed_patches() {
         g_slide_state.store(ok ? 2 : -1);
     }
     expected = 0;
+    if (g_jump_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = !g_fix_jump.load(std::memory_order_relaxed) || patch_jump();
+        g_jump_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
     if (g_step_down_state.compare_exchange_strong(expected, 1)) {
         const bool ok = !g_fix_step_down.load(std::memory_order_relaxed) ||
                         patch_ground_snap();
@@ -2479,7 +2764,7 @@ void try_delayed_patches() {
     }
     expected = 0;
     if (g_trace_state.compare_exchange_strong(expected, 1)) {
-        const bool ok = !trace_active() || patch_trace();
+        const bool ok = !trace_active() || (patch_trace() && patch_graze_probe());
         g_trace_state.store(ok ? 2 : -1);
     }
 }
@@ -3178,6 +3463,34 @@ bool activate_scheduler() {
 
 }  // namespace
 
+bool ground_snap_debug(const void* phys, float* factor, int* lifted) {
+    const SnapDebug& debug = g_snap_debug[(reinterpret_cast<uintptr_t>(phys) >> 4) & 63];
+    if (debug.phys != phys) {
+        return false;
+    }
+    *factor = debug.factor;
+    *lifted = debug.lifted;
+    return true;
+}
+
+bool graze_trace_take(const void* mc, GrazeTrace* out) {
+    GrazeSlot& slot = g_graze_slots[(reinterpret_cast<uintptr_t>(mc) >> 4) & 63];
+    if (slot.mc.load(std::memory_order_relaxed) != mc) {
+        return false;
+    }
+    *out = slot.data;
+    slot.data = GrazeTrace();
+    return true;
+}
+
+bool camera_trace(CameraTrace* out) {
+    if (g_cam_trace_valid.load(std::memory_order_relaxed) == 0) {
+        return false;
+    }
+    *out = g_cam_trace;
+    return true;
+}
+
 bool patches_apply() {
     g_image = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(g_image);
@@ -3266,7 +3579,7 @@ bool patches_apply() {
         [] { return g_sim_count.load(std::memory_order_relaxed); },
         [] { return g_frame_dt.load(std::memory_order_relaxed) * 1000.0f; },
         describe_flipper, flipper_tick);
-    LOG_INFO("DS1 Remastered FPS Unlock v1.4.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
+    LOG_INFO("DS1 Remastered FPS Unlock v1.5.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
              g_variable_dt.load() ? "measured frame time" : "fixed 1/TargetFPS");
     return true;
 }

@@ -1,6 +1,7 @@
 #include "trace.h"
 
 #include "log.h"
+#include "patches.h"
 #include "watch.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -29,6 +30,7 @@ struct Entry {
     uint32_t anim = 0xFFFFFFFFu;
     uint32_t action = 0xFFFFFFFFu;
     int pending = 0;
+    GrazeTrace graze;  // taken on the phase 0 row, repeated on the phase 1 row
 };
 
 Entry g_cache[kCacheSize];
@@ -68,7 +70,10 @@ const char* kHeader =
     "m150x,m150y,m150z,m160x,m160y,m160z,cmdx,cmdy,cmdz,"
     "p130x,p130y,p130z,p140x,p140y,p140z,p150x,p150y,p150z,"
     "p1ax,p1ay,p1az,p1dx,p1dy,p1dz,pflags,"
-    "c0x,c0y,c0z,p154,e4,e8,f228,f1e4,f1e0,fl\n";
+    "c0x,c0y,c0z,p154,e4,e8,f228,f1e4,f1e0,fl,sn_lifted,sn_factor,"
+    "chr2a5,offt,"
+    "cam_step,cam_w,cam_boost,cam_hold,cam_yaw,cam_pitch,cam_px,cam_py,cam_pz,cam_tx,cam_ty,cam_tz,cam_lock,"
+    "gz_calls,gz_caller1,gz_thread1,gz_speed1,gz_mul1,gz_caller2,gz_thread2,gz_speed2,gz_mul2\n";
 
 }  // namespace
 
@@ -148,7 +153,13 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
     Entry* entry = find_entry(chr);
     const bool moved = pos[0] != entry->pos[0] || pos[1] != entry->pos[1] || pos[2] != entry->pos[2] ||
                        anim != entry->anim || action != entry->action;
-    if (moved) {
+    // The follow camera after its last update (see camera_trace); cam_lock = -1 when there is none. While it
+    // is locked on or its look-at boost is active, the character it follows gets a row every frame even
+    // when standing still, so lock-on target switches are traced.
+    CameraTrace cam;
+    const bool cam_active =
+        camera_trace(&cam) && cam.chr == chr && (cam.locked == 1 || cam.boost > 0.0f || cam.boost_hold > 0.0f);
+    if (moved || cam_active) {
         entry->pending = 1;
     }
     const bool log_row = entry->pending != 0;
@@ -230,6 +241,20 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
     if (*reinterpret_cast<const uint8_t*>(phys + 0x241)) fl |= 128u;
     if (*reinterpret_cast<const uint8_t*>(phys + 0x31)) fl |= 256u;
     if (*reinterpret_cast<const uint8_t*>(phys + 0x30)) fl |= 512u;
+    // The ground snap's decision this frame: lift done, and the ladder-exit cap's factor.
+    float sn_factor = 1.0f;
+    int sn_lifted = -1;
+    ground_snap_debug(phys, &sn_factor, &sn_lifted);
+    // Jump probe: the character's flag byte +0x2A5 (bit 0x20 forces the body's free mode, phys+0x6D) and the
+    // body's time off the ground (+0x1B4, the airborne test's 1 s limit in free mode).
+    const uint8_t chr2a5 = *reinterpret_cast<const uint8_t*>(base + 0x2A5);
+    const float offt = *reinterpret_cast<const float*>(phys + 0x1B4);
+    // The graze check's runs since the previous frame (see graze_trace_take).
+    if (phase == 0) {
+        entry->graze = GrazeTrace();
+        graze_trace_take(mc, &entry->graze);
+    }
+    const GrazeTrace& gz = entry->graze;
 
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
@@ -249,7 +274,10 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
                  "%.5f,%.5f,%.5f,"
                  "%.5f,%.5f,%.5f,"
                  "%.5f,%.5f,%.5f,%u,"
-                 "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%u\n",
+                 "%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%u,%d,%.4f,"
+                 "%u,%.5f,"
+                 "%.6f,%.5f,%.5f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,"
+                 "%u,%X,%u,%.4f,%.4f,%X,%u,%.4f,%.4f\n",
                  g_rows, ms, static_cast<unsigned long long>(site), phase,
                  static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(chr)), dt, anim, action, idx,
                  action_type, action_flags, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(mc)),
@@ -258,7 +286,11 @@ void trace_log(void* chr, float dt, uint64_t site, int phase) {
                  vel[0], vel[1], vel[2], mv[0], mv[1], mv[2], airt, m150[0], m150[1], m150[2], m160[0],
                  m160[1], m160[2], mcmd[0], mcmd[1], mcmd[2], p130[0], p130[1], p130[2], p140[0], p140[1],
                  p140[2], p150[0], p150[1], p150[2], p1a0[0], p1a0[1], p1a0[2], p0d0[0], p0d0[1], p0d0[2],
-                 pflags, snap[0], snap[1], snap[2], p154, e4, e8, f228, f1e4, f1e0, fl);
+                 pflags, snap[0], snap[1], snap[2], p154, e4, e8, f228, f1e4, f1e0, fl, sn_lifted, sn_factor,
+                 static_cast<unsigned>(chr2a5), offt, cam.step, cam.weight, cam.boost, cam.boost_hold, cam.yaw,
+                 cam.pitch, cam.pos[0], cam.pos[1], cam.pos[2], cam.target[0], cam.target[1], cam.target[2],
+                 cam.locked, gz.calls, gz.caller[0], gz.thread[0], gz.speed[0], gz.mul[0], gz.caller[1], gz.thread[1],
+                 gz.speed[1], gz.mul[1]);
     if ((g_rows & 0x3FF) == 0) {
         std::fflush(g_file);
     }

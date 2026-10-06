@@ -114,6 +114,13 @@ void scale_camera(void* object, float dt) {
 // weights) still finished early with only the first two scaled. Each load is redirected through a
 // stub that returns 1 - (1 - w)^n for n = dt * 30, computed with the x87 unit so no registers other
 // than the destination change.
+//   [+0x130]             boost of the look-at weights: the camera position follows its target by
+//                        w + (1 - w) * [+0x130] a frame (0xF0C64C). Turning the camera with the stick or
+//                        mouse sets it to 1; it holds for [+0x1D8] (2 s) and then fades out over [+0x1DC]
+//                        (1 s) in real time, also after locking on. With only w scaled, the boost was
+//                        applied whole every frame, so for those seconds the camera followed several times
+//                        faster than it should above 30 FPS. Scaled the same way, the combined weight is
+//                        exactly 1 - ((1 - w)(1 - [+0x130]))^n.
 float g_gain_n = 1.0f;      // dt * 30 of the update in flight
 float g_fmul_tmp = 0.0f;    // operand for the redirected fmul
 alignas(8) double g_dist_k = 0.1;
@@ -163,7 +170,7 @@ const GainSite kGainSites[] = {
     {0x00F0B5F3, 0x1A4, 0}, {0x00F0B5FD, 0x1C0, 0}, {0x00F0B61A, 0x1B0, 1}, {0x00F0B624, 0x1C4, 1},
     {0x00F04FA5, 0x190, 0}, {0x00F079D3, 0x1A0, -1}, {0x00F075D2, 0x234, 2}, {0x00F076CA, 0x234, 2},
     {0x00F06EEB, 0x288, 2}, {0x00F06F31, 0x288, 2}, {0x00F02814, 0x320, 2}, {0x00F02859, 0x320, 2},
-    {0x00F02892, 0x320, 2}, {0x00F028D1, 0x320, 2}, {0x00F0297B, 0x320, 2},
+    {0x00F02892, 0x320, 2}, {0x00F028D1, 0x320, 2}, {0x00F0297B, 0x320, 2}, {0x00F0C64C, 0x130, 0},
 };
 constexpr uint32_t kDistSite = 0x00F029B4;   // mulsd xmm1, qword ptr [0x11E7CD0]  (0.1)
 constexpr uint32_t kDistConst = 0x011E7CD0;
@@ -256,7 +263,7 @@ bool install_gain_sites() {
     DWORD ignored = 0;
     VirtualProtect(reinterpret_cast<void*>(kDistSite + 4), 4, old, &ignored);
     LOG_INFO("Follow camera: %u more blend weights follow the frame time (look-at, pivot, yaw settle, auto turn, "
-             "stick, parameter changes, distance)",
+             "stick, parameter changes, distance, look-at boost after turning the camera)",
              static_cast<unsigned>(sizeof(kGainSites) / sizeof(kGainSites[0])) + 1);
     return true;
 }

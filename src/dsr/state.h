@@ -17,6 +17,7 @@ inline std::atomic<int> g_fix_stamina_tick{1};
 inline std::atomic<int> g_input_log{0};
 inline std::atomic<int> g_fix_damping{1};
 inline std::atomic<int> g_fix_slide{1};
+inline std::atomic<int> g_fix_jump{1};
 // Per-frame constants of a fixed 60 FPS frame (see patch_frame_constants): timers and fades, the camera
 // pivot ease, and velocities derived from one frame's movement.
 inline std::atomic<int> g_fix_timers{1};

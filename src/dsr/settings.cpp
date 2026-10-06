@@ -119,6 +119,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_damping = parse_bool(val);
         } else if (key == "fixslide") {
             s.fix_slide = parse_bool(val);
+        } else if (key == "fixjump") {
+            s.fix_jump = parse_bool(val);
         } else if (key == "fixlockonturn") {
             s.fix_lock_on_turn = parse_bool(val);
         } else if (key == "fixghosts") {

@@ -25,7 +25,7 @@ DWORD WINAPI worker(void*) {
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"DSR-FPS-Unlock.log");
     diag_install(dll_path, L"DSR-FPS-Unlock-crash.dmp");
-    LOG_INFO("DS1 Remastered FPS Unlock v1.4.0");
+    LOG_INFO("DS1 Remastered FPS Unlock v1.5.0");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
@@ -70,6 +70,7 @@ DWORD WINAPI worker(void*) {
     g_fix_graze.store(settings.fix_graze ? 1 : 0, std::memory_order_relaxed);
     g_fix_damping.store(settings.fix_damping ? 1 : 0, std::memory_order_relaxed);
     g_fix_slide.store(settings.fix_slide ? 1 : 0, std::memory_order_relaxed);
+    g_fix_jump.store(settings.fix_jump ? 1 : 0, std::memory_order_relaxed);
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
     g_fix_timers.store(settings.fix_timers ? 1 : 0, std::memory_order_relaxed);

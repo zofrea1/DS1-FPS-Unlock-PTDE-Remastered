@@ -17,6 +17,9 @@
 //  * Turning: replays and other players' characters (NetworkManipulator) turn by a stored amount every frame,
 //    a tenth (replays) or a fifth (network samples) of the turn to the next sample, i.e. 10 or 5 frames at
 //    30 FPS. That amount is scaled by dt * 30 so the turn takes the time between samples at any frame rate.
+//  * Moving: a replay's body is moved straight by a tenth of the way to the next sample every frame (the copy
+//    the replay's move function keeps at +0x70). That step is scaled by dt * 30 too, so a ghost moves evenly
+//    over the whole 1/3 s instead of covering the distance in its first ten frames and then standing still.
 bool ghost_install();
 
 // Called on the render thread at every frame boundary with the frame time in seconds.

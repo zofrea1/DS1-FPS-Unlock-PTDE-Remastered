@@ -30,9 +30,17 @@ constexpr uint32_t kRemoteTurn = 0x00E203D4;  // movq xmm0,[edi+290h] .. movq [e
 // recorded facing (+0x260; 1/10 = 10 frames per sample at 30 FPS), which is handed to the character as this
 // frame's turn (+0x20) every frame. At a high frame rate a ghost turned several times too far between samples and
 // snapped back; the turn is scaled by the frame time where it is handed over. (The tenth of the way to the next
-// point stored at +0x250 is not a distance per frame: the move, 0xE15EE0, only reads it as a stick direction and
-// a walk or run speed, |step| * 30 against 2.5 m/s, so it stays as it is.)
+// point stored at +0x250 itself stays as it is: the move, 0xE15EE0, reads it as a stick direction and a walk or
+// run speed, |step| * 30 against 2.5 m/s. Only the copy the body is moved by is scaled; see kReplayMove.)
 constexpr uint32_t kReplayTurn = 0x00E16B2A;      // movq xmm0,[esi+260h] .. movq [esi+28h],xmm0  (26 bytes)
+// Replays, moving: the move (0xE15EE0) keeps a copy of the vector it is given at +0x70, and the character
+// controller (0xE36020, 0xE36240, 0xE38720) moves the body straight by that copy every FRAME for replay
+// manipulators; the stick direction and walk/run speed come from the vector itself. At a high frame rate a
+// ghost covered the segment in its first ten frames, stopped (the step is zeroed once the point is reached)
+// and waited for the next sample: it moved in jerks while its walk or run animation played smoothly. The
+// copy is scaled by the frame time when the vector is the stored step (+0x250); the far-behind catch-up
+// warp (the whole distance in one frame) is kept as it is.
+constexpr uint32_t kReplayMove = 0x00E15EEC;      // movq xmm0,[eax] .. movq [ecx+78h],xmm0        (19 bytes)
 
 // Read by the stubs: counter units per second (playback multiplies its own dt by it), and minus
 // this frame's units for the recorder (it adds edi to both of its counters).
@@ -40,6 +48,8 @@ alignas(4) float g_units_per_second = 30.0f * kUnit;
 alignas(4) volatile int32_t g_rec_step = -kUnit;
 // This frame's time in 30 FPS frames (1.0 at 30 FPS) for the remote characters' per-frame turn.
 alignas(4) volatile float g_turn_scale = 1.0f;
+// The same in four lanes for the replay move (mulps needs a 16-byte aligned operand).
+alignas(16) volatile float g_step_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
 bool write_code(uint32_t address, const uint8_t* bytes, size_t size) {
     auto* p = reinterpret_cast<uint8_t*>(address);
@@ -90,6 +100,10 @@ bool ghost_install() {
                                                   0x66, 0x0F, 0xD6, 0x46, 0x20,                     // movq [esi+20h],xmm0
                                                   0xF3, 0x0F, 0x7E, 0x86, 0x68, 0x02, 0x00, 0x00,   // movq xmm0,[esi+268h]
                                                   0x66, 0x0F, 0xD6, 0x46, 0x28};                    // movq [esi+28h],xmm0
+    static const uint8_t kReplayMoveExpect[19] = {0xF3, 0x0F, 0x7E, 0x00,                           // movq xmm0,[eax]
+                                                  0x66, 0x0F, 0xD6, 0x41, 0x70,                     // movq [ecx+70h],xmm0
+                                                  0xF3, 0x0F, 0x7E, 0x40, 0x08,                     // movq xmm0,[eax+8]
+                                                  0x66, 0x0F, 0xD6, 0x41, 0x78};                    // movq [ecx+78h],xmm0
     struct Check {
         uint32_t va;
         const uint8_t* bytes;
@@ -101,14 +115,15 @@ bool ghost_install() {
                             {kRecReload, kRecReloadExpect, sizeof(kRecReloadExpect)},
                             {kNetReload, kNetReloadExpect, sizeof(kNetReloadExpect)},
                             {kRemoteTurn, kRemoteTurnExpect, sizeof(kRemoteTurnExpect)},
-                            {kReplayTurn, kReplayTurnExpect, sizeof(kReplayTurnExpect)}};
+                            {kReplayTurn, kReplayTurnExpect, sizeof(kReplayTurnExpect)},
+                            {kReplayMove, kReplayMoveExpect, sizeof(kReplayMoveExpect)}};
     for (const Check& c : checks) {
         if (std::memcmp(reinterpret_cast<const void*>(c.va), c.bytes, c.size) != 0) {
             LOG_ERROR("Ghost replay site %08X does not match this build. Not patching.", c.va);
             return false;
         }
     }
-    auto* cave = static_cast<uint8_t*>(VirtualAlloc(nullptr, 128, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    auto* cave = static_cast<uint8_t*>(VirtualAlloc(nullptr, 256, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     if (!cave) return false;
     uint8_t* p = cave;
     auto emit = [&](std::initializer_list<uint8_t> bytes) {
@@ -154,20 +169,37 @@ bool ghost_install() {
     emit({0x0F, 0x59, 0xC1});                          // mulps xmm0, xmm1
     emit({0x0F, 0x11, 0x46, 0x20});                    // movups [esi+20h], xmm0
     emit({0xC3});                                      // ret
-    FlushInstructionCache(GetCurrentProcess(), cave, 128);
+    // Replay move (ecx = manipulator, eax = the vector handed in): the copy at +0x70 is the vector times this
+    // frame's 30 FPS frames when eax points at the stored step (+0x250), else the vector unchanged. edx is
+    // overwritten by the move before it is read, xmm0 is reloaded, and the flags are set again before a test.
+    uint8_t* replay_move = p;
+    emit({0x8D, 0x91, 0x50, 0x02, 0x00, 0x00});        // lea edx, [ecx+250h]
+    emit({0x39, 0xD0});                                // cmp eax, edx
+    emit({0xF3, 0x0F, 0x7E, 0x00});                    // movq xmm0, [eax]
+    emit({0x75, 0x07});                                // jne +7
+    emit({0x0F, 0x59, 0x05});                          // mulps xmm0, [g_step_scale]
+    emit32(reinterpret_cast<uint32_t>(&g_step_scale[0]));
+    emit({0x66, 0x0F, 0xD6, 0x41, 0x70});              // movq [ecx+70h], xmm0
+    emit({0xF3, 0x0F, 0x7E, 0x40, 0x08});              // movq xmm0, [eax+8]
+    emit({0x75, 0x07});                                // jne +7   (flags from the cmp)
+    emit({0x0F, 0x59, 0x05});                          // mulps xmm0, [g_step_scale]
+    emit32(reinterpret_cast<uint32_t>(&g_step_scale[0]));
+    emit({0x66, 0x0F, 0xD6, 0x41, 0x78});              // movq [ecx+78h], xmm0
+    emit({0xC3});                                      // ret
+    FlushInstructionCache(GetCurrentProcess(), cave, 256);
 
     // Counters already running hold whole frames; they cross zero on the next frame and every
     // reload after that is in the new units.
     bool ok = write_call(kPlayDec, 6, play) && reload_to_add(kPlayReload, kPlayReloadExpect, 10) &&
               write_call(kRecDec, 9, rec) && reload_to_add(kRecReload, kRecReloadExpect, 10) &&
               reload_to_add(kNetReload, kNetReloadExpect, 5) && write_call(kRemoteTurn, 29, turn) &&
-              write_call(kReplayTurn, 26, replay_turn);
+              write_call(kReplayTurn, 26, replay_turn) && write_call(kReplayMove, 19, replay_move);
     if (!ok) {
         LOG_ERROR("Could not patch the ghost replay counters");
         return false;
     }
     LOG_INFO("Ghost replays and the replay recorder follow real time (sample every 1/3 s, network sample every 1/6 s); "
-             "ghosts and other players' characters turn at the original speed");
+             "ghosts move evenly between samples; ghosts and other players' characters turn at the original speed");
     return true;
 }
 
@@ -175,4 +207,5 @@ void ghost_frame(double dt) {
     const double units = dt * 30.0 * kUnit;
     g_rec_step = -static_cast<int32_t>(std::lround(units));
     g_turn_scale = static_cast<float>(dt * 30.0);
+    for (int i = 0; i < 4; ++i) g_step_scale[i] = static_cast<float>(dt * 30.0);
 }
