@@ -63,6 +63,8 @@ struct Settings {
     // Make the game window borderless and cover its monitor. Needs the game set to
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
     bool borderless = false;
+    // Keep a real XInput gamepad when the game's four Windows 7 device ids do not match.
+    bool fix_controller = true;
     // Log a per-command summary for this many seconds after start (0 = off).
     int survey_seconds = 0;
 };

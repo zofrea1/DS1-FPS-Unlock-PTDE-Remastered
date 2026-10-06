@@ -140,6 +140,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.dxvk = parse_bool(val);
         } else if (key == "borderlessfullscreen") {
             s.borderless = parse_bool(val);
+        } else if (key == "fixcontroller") {
+            s.fix_controller = parse_bool(val);
         } else if (key == "survey") {
             s.survey_seconds = std::atoi(val.c_str());
         }

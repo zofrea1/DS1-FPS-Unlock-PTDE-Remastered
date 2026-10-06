@@ -42,12 +42,15 @@ Everything below is on by default and has an INI switch.
 | Cloth | Havok step scaled to the real frame time | yes | n/a |
 | Fullscreen refresh rate | The game only offers 59/60 Hz; ask for the display's real rate, or use borderless | n/a | `FullscreenRefreshRate`, `BorderlessFullscreen` |
 | Direct3D 9 on Vulkan (experimental) | Runs the game through DXVK instead of the Windows Direct3D 9 driver; may or may not help the frame rate, and can have color issues | n/a | `DXVK` (off by default) |
+| Controller | The game only accepts four old XInput device ids, so a pad is missed or another connected device is used instead | n/a | `FixController` |
 
 The original game's 30 FPS physics were tuned for 30 frames per second; both mods are exact at the native rate and very close at every other rate. See [Fix details](#fix-details) for what each fix does.
 
 **Accuracy.** This is very close to the game at its native rate, and more than good enough for casual and serious play. It is not a perfect 1:1 match: retail decides some of these things on a fixed frame grid, so a borderline slope or lip can behave slightly differently at 180 or 240 FPS. Speedrunners and anyone who needs stock-exact precision should not use this.
 
 ## Fix details
+
+**Controller (`FixController`, Prepare to Die Edition).** The game decides a DirectInput device is an XInput pad only when its id is one of four values from Windows 7, one per player slot. A current pad does not have those ids, so the game reads it through DirectInput, which is unreliable, and whichever device was enumerated first wins. A second controller, a wheel or a virtual pad is enough to make the real one go dead. The mod still honours those four ids when the device behind one is actually connected. Otherwise it binds a gamepad, preferring the one being held, and a slot that drops out for a moment is kept for half a second before another connected gamepad is tried. Wheels, flight sticks and music controllers are not taken. On the Steam Deck the same DLL has to forward XInput to Wine's controller backend (`xinput1_4`); forwarding to `xinput1_3` calls this mod again and the deck's pad never appears. That forward happens whether or not `FixController` is on.
 
 **Lock-on camera (`FixCamera`).** The follow camera smooths several things toward a target by a fixed fraction every frame, tuned for the native frame rate: the yaw and pitch, the point it looks at (0.4 sideways, 0.3 vertically while locked on), the camera distance, the pivot that follows your character, the settling back after you let go of the stick, the automatic turn toward your walking direction, stick smoothing and the blend between camera settings when locking on. Every one of them now takes the same real time at any frame rate. Earlier versions scaled only the first two, so a pan from target to target still finished noticeably early.
 

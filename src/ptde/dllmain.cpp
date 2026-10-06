@@ -1,3 +1,4 @@
+#include "controller.h"
 #include "d3d.h"
 #include "deep.h"
 #include "diag.h"
@@ -31,6 +32,7 @@ DWORD WINAPI worker(void*) {
     wchar_t dll_path[MAX_PATH];
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"PTDE-FPS-Unlock.log");
+    xinput_log_target();
     diag_install(dll_path, L"PTDE-FPS-Unlock-crash.dmp");
     LOG_INFO("DS1 PTDE FPS Unlock v1.5.0");
 
@@ -72,6 +74,9 @@ DWORD WINAPI worker(void*) {
         return 0;
     }
     if (patches_probe(settings)) {
+        if (settings.fix_controller) {
+            controller_install(settings);
+        }
         frame_install(settings);
     }
     if (settings.borderless) {

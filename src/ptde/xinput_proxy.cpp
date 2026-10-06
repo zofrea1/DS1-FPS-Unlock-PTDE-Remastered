@@ -5,6 +5,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+// Defined with the exports below. Named here so the loader check can take its address.
+extern "C" DWORD WINAPI XInputGetState(DWORD index, void* state);
+
 #include <cstdio>
 
 namespace {
@@ -24,6 +27,7 @@ EnableFn pEnable = nullptr;
 GetDSoundFn pGetDSound = nullptr;
 GetBatteryFn pGetBattery = nullptr;
 GetKeystrokeFn pGetKeystroke = nullptr;
+char g_target[MAX_PATH] = {};
 
 INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
 constexpr DWORD kNotConnected = 1167;  // ERROR_DEVICE_NOT_CONNECTED
@@ -33,28 +37,100 @@ T load(HMODULE module, const char* name) {
     return reinterpret_cast<T>(GetProcAddress(module, name));
 }
 
-// Loading the real DLL from inside DllMain would run under the loader lock, so it
-// happens on the first XInput call instead.
-BOOL CALLBACK init_once(PINIT_ONCE, PVOID, PVOID*) {
+HMODULE self_module() {
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&XInputGetState), &module);
+    return module;
+}
+
+void narrow_path(const wchar_t* wide, char* out, int out_len) {
+    if (!wide || !WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, out_len, nullptr, nullptr)) {
+        out[0] = 0;
+    }
+}
+
+// `mod` is usable when it is a different module and its XInputGetState is not our
+// own export. A hit on ourselves would recurse until the stack overflows, which on
+// the Steam Deck is the controller going dead while the keyboard still works.
+bool bind_module(HMODULE mod, const wchar_t* label) {
+    char text[MAX_PATH];
+    narrow_path(label, text, MAX_PATH);
+    if (!mod) {
+        return false;
+    }
+    if (mod == self_module()) {
+        LOG_INFO("xinput proxy: skipped %s (that module is this DLL)", text);
+        return false;
+    }
+    auto get_state = load<GetStateFn>(mod, "XInputGetState");
+    auto set_state = load<SetStateFn>(mod, "XInputSetState");
+    if (!get_state || !set_state || reinterpret_cast<void*>(get_state) == reinterpret_cast<void*>(&XInputGetState)) {
+        LOG_INFO("xinput proxy: skipped %s (no XInputGetState of its own)", text);
+        return false;
+    }
+    pGetState = get_state;
+    pSetState = set_state;
+    pGetCaps = load<GetCapsFn>(mod, "XInputGetCapabilities");
+    pEnable = load<EnableFn>(mod, "XInputEnable");
+    pGetDSound = load<GetDSoundFn>(mod, "XInputGetDSoundAudioDeviceGuids");
+    pGetBattery = load<GetBatteryFn>(mod, "XInputGetBatteryInformation");
+    pGetKeystroke = load<GetKeystrokeFn>(mod, "XInputGetKeystroke");
+
+    wchar_t loaded[MAX_PATH];
+    if (GetModuleFileNameW(mod, loaded, MAX_PATH)) {
+        narrow_path(loaded, text, MAX_PATH);
+    }
+    snprintf(g_target, sizeof(g_target), "%s", text);
+    LOG_INFO("xinput proxy: forwarding to %s", text);
+    return true;
+}
+
+bool try_file(const wchar_t* file) {
+    wchar_t sys[MAX_PATH];
+    if (GetSystemDirectoryW(sys, MAX_PATH)) {
+        wchar_t path[MAX_PATH];
+        _snwprintf_s(path, _TRUNCATE, L"%s\\%s", sys, file);
+        if (bind_module(LoadLibraryW(path), path)) {
+            return true;
+        }
+    }
+    // By name, so Wine's builtin (which is not a file in system32) can still load.
+    // xinput1_3 itself is never tried this way: that name is already this DLL.
+    return bind_module(LoadLibraryW(file), file);
+}
+
+// Last resort for a Windows system xinput1_3 whose full path still resolves to us.
+// A different file name is a different module, so the loader will not hand back this DLL.
+bool try_renamed_system() {
     wchar_t sys[MAX_PATH];
     if (!GetSystemDirectoryW(sys, MAX_PATH)) {
+        return false;
+    }
+    wchar_t src[MAX_PATH];
+    _snwprintf_s(src, _TRUNCATE, L"%s\\xinput1_3.dll", sys);
+    wchar_t dir[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, dir)) {
+        return false;
+    }
+    wchar_t dst[MAX_PATH];
+    _snwprintf_s(dst, _TRUNCATE, L"%sptde-xinput-host.dll", dir);
+    if (!CopyFileW(src, dst, FALSE)) {
+        return false;
+    }
+    return bind_module(LoadLibraryW(dst), dst);
+}
+
+// Loading from inside DllMain would run under the loader lock, so the real library
+// is chosen on the first XInput call. xinput1_4 is preferred: it is the Windows 8+
+// library and Wine's real controller backend, and a native override of xinput1_3
+// does not apply to it. xinput9_1_0 is the Windows 7 library and covers GetState
+// and SetState, which is all the game imports.
+BOOL CALLBACK init_once(PINIT_ONCE, PVOID, PVOID*) {
+    if (try_file(L"xinput1_4.dll") || try_file(L"xinput9_1_0.dll") || try_renamed_system()) {
         return TRUE;
     }
-    wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\xinput1_3.dll", sys);
-    HMODULE real = LoadLibraryW(path);
-    if (!real) {
-        LOG_ERROR("xinput proxy: could not load the system xinput1_3.dll (%lu)", GetLastError());
-        return TRUE;
-    }
-    pGetState = load<GetStateFn>(real, "XInputGetState");
-    pSetState = load<SetStateFn>(real, "XInputSetState");
-    pGetCaps = load<GetCapsFn>(real, "XInputGetCapabilities");
-    pEnable = load<EnableFn>(real, "XInputEnable");
-    pGetDSound = load<GetDSoundFn>(real, "XInputGetDSoundAudioDeviceGuids");
-    pGetBattery = load<GetBatteryFn>(real, "XInputGetBatteryInformation");
-    pGetKeystroke = load<GetKeystrokeFn>(real, "XInputGetKeystroke");
-    LOG_INFO("xinput proxy: forwarding to the system xinput1_3.dll");
+    LOG_ERROR("xinput proxy: no real XInput library could be loaded; controllers will be disconnected");
     return TRUE;
 }
 
@@ -62,13 +138,36 @@ void ensure() {
     InitOnceExecuteOnce(&g_once, init_once, nullptr, nullptr);
 }
 
+const char* target_path() {
+    ensure();
+    return g_target;
+}
+
 }  // namespace
+
+DWORD xinput_get_state(DWORD index, void* state) {
+    ensure();
+    return pGetState ? pGetState(index, state) : kNotConnected;
+}
+
+DWORD xinput_get_caps(DWORD index, void* caps) {
+    ensure();
+    return pGetCaps ? pGetCaps(index, 0, caps) : kNotConnected;
+}
+
+void xinput_log_target() {
+    const char* path = target_path();
+    if (path[0]) {
+        LOG_INFO("xinput proxy: forwarding to %s", path);
+    } else {
+        LOG_ERROR("xinput proxy: no real XInput library could be loaded; controllers will be disconnected");
+    }
+}
 
 extern "C" {
 
 DWORD WINAPI XInputGetState(DWORD index, void* state) {
-    ensure();
-    return pGetState ? pGetState(index, state) : kNotConnected;
+    return xinput_get_state(index, state);
 }
 DWORD WINAPI XInputSetState(DWORD index, void* vibration) {
     ensure();
