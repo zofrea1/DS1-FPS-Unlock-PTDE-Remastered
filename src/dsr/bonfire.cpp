@@ -28,10 +28,12 @@
 //     extra ids have to be clear too. A deeper menu, such as level up, sets +0x50 and the
 //     sit id is absent for that stretch. The watch log lists every nonzero id from 0 to 80
 //     while a sit is recorded.
-//   * The idle sit is not one known field on this exe. While a menu is open, or for a short
-//     while after, the player, the current-animation object DSR-Gadget reads
+//   * The idle sit is not one published field. While a menu is open, or for a short while
+//     after, the player, the current-animation object DSR-Gadget reads
 //     (*( *(player + 0x68) + 0x48 ) + 0x80) and the stay-animation block are scanned for
-//     7701, 7711 and 7721. Any such word is cleared once the menus have been clear for a second.
+//     7701, 7711 and 7721. The pose follows the local player's animation id at +0x16C.
+//     Writing 0 there stands the character up, and the other copies of that id clear on
+//     their own, so only that word is written.
 //
 // PTDE also requires character status 0 (human) or 8 (hollow). That field was not found on
 // this executable, so it is not checked. A wrong pointer is worse than a missed kick, so
@@ -364,20 +366,33 @@ void format_word(bool ok, int value, char* buf, size_t cap) {
     snprintf(buf, cap, "%d", value);
 }
 
+// The pose follows player+0x16C. "player" is the only label that starts with p, and
+// the offset keeps this off the other sit copy at player+0x174.
+bool is_player_16c(const Hit& hit) {
+    return hit.offset == 0x16C && hit.where != nullptr && hit.where[0] == 'p';
+}
+
 void clear_sits(const Sample& sample, int* fixed) {
+    const Hit* chosen = nullptr;
     for (int i = 0; i < sample.hit_count; ++i) {
-        const Hit& hit = sample.hits[i];
-        // The word can change during the one-second wait. Only clear it if it is still a sit.
-        if (!is_sit(read_int(hit.address))) {
-            continue;
+        if (is_player_16c(sample.hits[i])) {
+            chosen = &sample.hits[i];
+            break;
         }
-        if (write_u32(hit.address, 0)) {
-            ++*fixed;
-            LOG_INFO("Bonfire softlock: no menu open for a second while seated; told the character to stand (%d, %s+%x was %d)",
-                     *fixed, hit.where, hit.offset, hit.value);
-        } else {
-            LOG_ERROR("Bonfire softlock: could not write the animation id");
-        }
+    }
+    if (chosen == nullptr) {
+        return;
+    }
+    // The word can change during the one-second wait. Only clear it if it is still a sit.
+    if (!is_sit(read_int(chosen->address))) {
+        return;
+    }
+    if (write_u32(chosen->address, 0)) {
+        ++*fixed;
+        LOG_INFO("Bonfire softlock: no menu open for a second while seated; told the character to stand (%d, %s+%x was %d)",
+                 *fixed, chosen->where, chosen->offset, chosen->value);
+    } else {
+        LOG_ERROR("Bonfire softlock: could not write the animation id");
     }
 }
 

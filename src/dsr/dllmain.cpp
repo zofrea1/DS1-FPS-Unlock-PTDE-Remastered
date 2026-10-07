@@ -26,7 +26,7 @@ DWORD WINAPI worker(void*) {
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"DSR-FPS-Unlock.log");
     diag_install(dll_path, L"DSR-FPS-Unlock-crash.dmp");
-    LOG_INFO("DS1 Remastered FPS Unlock v1.5.0");
+    LOG_INFO("DS1 Remastered FPS Unlock v1.6.0");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
@@ -37,7 +37,7 @@ DWORD WINAPI worker(void*) {
     const Settings settings = settings_load(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("MaxFPS: %d", settings.target_fps);
-    LOG_INFO("BonfireUnstick: %s", settings.bonfire_unstick ? "true" : "false");
+    LOG_INFO("BonfireFix: %s", settings.bonfire_unstick ? "true" : "false");
     // FPSUnlock is the master switch: nothing below, diagnostics included, runs without it.
     if (!settings.fps_unlock) {
         LOG_INFO("FPSUnlock is false. The game is unchanged.");
