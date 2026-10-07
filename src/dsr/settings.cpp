@@ -95,6 +95,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.variable_frame_time = parse_bool(val);
         } else if (key == "menuinputfilter") {
             s.menu_input_filter = parse_bool(val);
+        } else if (key == "bonfireunstick") {
+            s.bonfire_unstick = parse_bool(val);
         } else if (key == "trace") {
             s.trace = parse_bool(val);
         } else if (key == "fixstepdown") {

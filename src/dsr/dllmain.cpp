@@ -1,3 +1,4 @@
+#include "bonfire.h"
 #include "diag.h"
 #include "log.h"
 #include "patches.h"
@@ -36,6 +37,7 @@ DWORD WINAPI worker(void*) {
     const Settings settings = settings_load(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("MaxFPS: %d", settings.target_fps);
+    LOG_INFO("BonfireUnstick: %s", settings.bonfire_unstick ? "true" : "false");
     // FPSUnlock is the master switch: nothing below, diagnostics included, runs without it.
     if (!settings.fps_unlock) {
         LOG_INFO("FPSUnlock is false. The game is unchanged.");
@@ -80,6 +82,8 @@ DWORD WINAPI worker(void*) {
              settings.fix_smoothing ? "true" : "false", settings.fix_velocity ? "true" : "false");
     if (!patches_apply()) {
         LOG_ERROR("FPS unlock was not installed.");
+    } else if (settings.bonfire_unstick) {
+        bonfire_start();
     }
     return 0;
 }

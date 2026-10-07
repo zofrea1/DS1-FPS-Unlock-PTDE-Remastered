@@ -34,7 +34,7 @@ Everything below is on by default and has an INI switch.
 | Sprint stamina drain | Each 0.1 s drain tick was rounded up to a whole frame and the remainder thrown away, so the drain ran slow at frame rates that do not divide 0.1 s evenly (8.7 per second at 61 FPS instead of 10) | `FixStaminaTick` | `FixStaminaTick` |
 | Loading screen | The bonfire swirl on the loading screen turned at the display rate | `FixUI` | `FixUI` |
 | D-pad hold (down: back to the first quick item) | The hold is counted in frames (15), so it fired during an ordinary tap | `FixDpadHold` | n/a (the hold does not exist) |
-| Bonfire softlock | After "Reverse hollowing" the character could stay seated with no menu open | not available | `BonfireUnstick` |
+| Bonfire softlock | After "Reverse hollowing" the character could stay seated with no menu open | `BonfireUnstick` | `BonfireUnstick` |
 | Timers | Per-frame fades and countdowns ran too fast: weapon buff glow, ragdoll blend-in, the glow on dropped items | `FixTimers` | `FixTimers` |
 | Smoothing | The follow camera's pivot and look-at point eased toward their targets by a fixed fraction per frame | `FixSmoothing` | `FixSmoothing` |
 | Velocities | The powered ragdoll's pull and the Doppler pitch of moving sounds were worked out from one frame's movement | `FixVelocity` | `FixVelocity` |
@@ -91,6 +91,8 @@ In PTDE the engine's 1/30 step is rewritten with the frame time every frame, so 
 
 **D-pad hold (`FixDpadHold`, Remastered).** Holding down on the D-pad returns to the first quick item after 15 frames, a quarter of a second at 60 FPS but an eighth at 120, so an ordinary tap could trigger it. The hold is timed in real time: a quarter of a second at any frame rate, including below 60 FPS.
 
+**Bonfire softlock (`BonfireUnstick`).** After "Reverse hollowing" the bonfire menu can disappear while the character stays seated, and nothing responds until the game is quit. If that lasts a second, and no bonfire menu is open, the mod writes the stand-up into the seated animation. It only does this for the three seated animations. Prepare to Die Edition watches the fields published with FPSFix+. Remastered watches the 2022 executable's own menu-open fields and the local player's animation id.
+
 ## Supported versions
 
 Only the current Steam builds are supported. Anything else is unsupported and may refuse to patch (the log says why) or misbehave.
@@ -126,7 +128,7 @@ Copy the files from the release for your game next to the game's exe (see the ta
 - **PTDE cutscenes.** In-engine cutscenes can still look like 30 FPS at a high frame rate (their content is stepped at 30 Hz); the pre-rendered movies are 30 FPS by nature.
 - **Camera speeding up (Remastered, reports with 1.2.0).** Players reported the free camera suddenly speeding up, especially when running at an angle to it. Remastered's camera already swings toward your running direction faster than the original game's (it kept the original per-frame values at 60 FPS), and in 1.2.0 the blend between the camera's follow settings (how tightly the pivot and the look-at point follow your character) still ran once per frame, so at a high frame rate those changes finished two to four times sooner. 1.3.0 fixed that blend (`FixSmoothing`). 1.5.0 also scales the extra follow that lasts for two seconds after you turn the camera with the stick or mouse (`FixCamera`); without it, that part still finished several times too fast above 60 FPS, including just after locking on. If the camera still misbehaves, send the log: it has a mouse line once a minute while the mouse moves. `LockOnPtdeSpeed = true` (on in the 1.5.0 INI) also makes the camera settle at the original game's slower speed.
 - **First walk-to-run (Remastered).** The retail game has a short hitch on the first walk-to-run after standing still. At a high frame rate it reads as a brief freeze of the character and camera; it is left as it is.
-- **Bonfire softlock (Remastered).** A few users have reported a softlock while resting at the Firelink bonfire in Remastered. PTDE has a watchdog for the same symptom (`BonfireUnstick`); Remastered does not, because its code is protected and the cause is not known. It has not been reproduced. If it happens, try `MenuInputFilter = false` and send the log.
+- **Bonfire softlock.** After rest or "Reverse hollowing" the menu can close while the character stays seated and nothing responds. `BonfireUnstick` (on by default in both games) waits one second in that state, then tells the character to stand. The log line is `Bonfire softlock: no menu open for a second while seated`. If the character stays seated and that line never appears, send the log.
 - **Very high frame rates.** 240 FPS is not sustainable on every PC. Below the cap the game still plays in real time.
 - **Very low frame rates.** Down to 10 FPS the game keeps real time, but each physics step is long (six times a 60 FPS step at 10 FPS). The game pulls a character down onto the ground by at most a fixed distance per step, so around 10 to 15 FPS a character sprinting down steep stairs or slopes can briefly leave the ground. This is the same rule that makes the original 30 FPS game slightly looser than Remastered's 60.
 - **Weapon durability and hit windows.** Worth checking if you depend on exact timing.
@@ -164,7 +166,7 @@ Both mods check the bytes they patch before writing, so on an unsupported build 
 
 ## Acknowledgements
 
-- `BonfireUnstick` (PTDE): the idea, the memory addresses and the bonfire animation ids come from [FPSFix+](https://github.com/SeanPesce/FPSFix-Plus) by Sean Pesce, itself a remake of NullBy7e's FPSFix, both for this same bug. FPSFix+ is GPL-3.0; the code here is written from scratch and no code was copied.
+- `BonfireUnstick`: the idea, the Prepare to Die Edition addresses and the three bonfire sit animation ids come from [FPSFix+](https://github.com/SeanPesce/FPSFix-Plus) by Sean Pesce, itself a remake of NullBy7e's FPSFix, both for this same bug. Remastered uses that idea and those animation ids. Its local player, the animation id and the menu-open fields were read from the 2022 Steam executable. The world-character and menu-manager globals are the ones [DSR-Gadget](https://github.com/JKAnderson/DSR-Gadget) finds with its signatures. FPSFix+ and DSR-Gadget are GPL-3.0. The code here is written from scratch and no code was copied.
 
 - `DXVK` (PTDE): [DXVK](https://github.com/doitsujin/dxvk) by Philip Rebohle and contributors, included unmodified (`x32/d3d9.dll` from the v3.1.1 release, renamed `dxvk_d3d9.dll`) under the zlib/libpng license; see `DXVK-LICENSE.txt` in the PTDE release or [third_party/dxvk/LICENSE](third_party/dxvk/LICENSE).
 

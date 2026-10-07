@@ -15,6 +15,8 @@ struct Settings {
     // De-duplicates menu button presses so one press is not seen several times per frame at
     // high frame rates. Turn off if menus ever stop responding.
     bool menu_input_filter = true;
+    // Stand the character up if it stays seated at a bonfire with no menu open (reverse hollowing bug).
+    bool bonfire_unstick = true;
     // Writes DSR-FPS-Unlock-trace.csv with per-character update samples. Off by
     // default: the file is large and the hook costs a little per update.
     bool trace = false;
