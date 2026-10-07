@@ -20,12 +20,14 @@
 // Checked against the 2022 Steam 1.03.1 executable (profile.h):
 //   * World character manager RVA 0x1C77E50. The local player is the ChrIns at
 //     *(*(image + RVA) + 0x68). It is null while a level is loading.
-//   * Menu manager RVA 0x1C88D98. The game's own open-menu mask (RVA 0x71AC10) sets a bit
-//     when one of the dwords below is nonzero, so "no menu" means every one of them is 0.
-//     A played session left only +0x50 nonzero while the bonfire menu was up, then all of
-//     them 0 once it closed. Three offsets match PTDE (0x50 reinforce, 0x60 dialog,
-//     0x78 level-up). PTDE's byte flags at 0x40, 0x4C, 0x80, 0x84 and 0xAC are not fields
-//     of this menu manager.
+//   * Menu manager RVA 0x1C88D98. Open state is a dword array at +0x30, one dword per menu id.
+//     The mask at RVA 0x71AC10 sets a bit when one of the first fourteen offsets below is
+//     nonzero. It also sets a bit when menu id 9 (+0x54) is 1, 2, 3 or 4, and the any-menu
+//     check beside it reads ids 2, 3, 21, 26, 59 and 66 the same way (nonzero means open).
+//     A normal rest leaves the first fourteen at 0 while the rest list is on screen, so those
+//     extra ids have to be clear too. A deeper menu, such as level up, sets +0x50 and the
+//     sit id is absent for that stretch. The watch log lists every nonzero id from 0 to 80
+//     while a sit is recorded.
 //   * The idle sit is not one known field on this exe. While a menu is open, or for a short
 //     while after, the player, the current-animation object DSR-Gadget reads
 //     (*( *(player + 0x68) + 0x48 ) + 0x80) and the stay-animation block are scanned for
@@ -44,10 +46,15 @@ constexpr uint32_t kPlayerOffset = 0x68;
 constexpr uintptr_t kMinPointer = 0x1000000;
 constexpr uintptr_t kMaxPointer = 0x00007FFFFFFFFFFFull;
 
-// Dwords the mask function compares with zero. Order follows that function.
+// Dwords that mean a menu is open when nonzero. The first fourteen are the mask's own
+// compares. The rest are menu ids that same mask, and the any-menu check next to it,
+// read through the id array and that the fourteen do not cover.
 constexpr uint32_t kMenuFlags[] = {
     0x50, 0x5C, 0x60, 0x64, 0x78, 0x8C, 0x94, 0x9C, 0xB0, 0xB4, 0xC0, 0x134, 0x2D8, 0x300,
+    0x38, 0x3C, 0x54, 0x84, 0x98, 0x11C, 0x138,
 };
+// Ids 0..80. The rest list was not among the fourteen, so a sit logs whichever of these is set.
+constexpr int kMenuIdScan = 81;
 
 bool exe_supported() {
     __try {
@@ -171,6 +178,7 @@ struct Sample {
     int stay_lower = -1;
     Hit hits[8] = {};
     int hit_count = 0;
+    uintptr_t menus = 0;
     uint32_t flags[sizeof(kMenuFlags) / sizeof(kMenuFlags[0])] = {};
 };
 
@@ -239,6 +247,7 @@ bool sample_player(uintptr_t image, Sample* out) {
     uintptr_t menus = 0;
     if (follow(image, kMenuManRva, &menus)) {
         out->menu_ok = true;
+        out->menus = menus;
         for (size_t i = 0; i < sizeof(kMenuFlags) / sizeof(kMenuFlags[0]); ++i) {
             uint32_t flag = 0;
             if (read_u32(menus + kMenuFlags[i], &flag)) {
@@ -296,6 +305,33 @@ void format_menus(const Sample& sample, char* buf, size_t cap) {
             break;
         }
         used += static_cast<size_t>(wrote);
+    }
+    if (used == 0) {
+        snprintf(buf, cap, "none");
+    }
+}
+
+// Nonzero menu ids 0..80, at most twelve. "none" or "unread".
+void format_ids(const Sample& sample, char* buf, size_t cap) {
+    if (!sample.menu_ok || sample.menus == 0) {
+        snprintf(buf, cap, "unread");
+        return;
+    }
+    size_t used = 0;
+    buf[0] = 0;
+    int shown = 0;
+    for (int id = 0; id < kMenuIdScan && shown < 12; ++id) {
+        uint32_t value = 0;
+        const uintptr_t address = sample.menus + 0x30u + static_cast<uint32_t>(id) * 4u;
+        if (!read_u32(address, &value) || value == 0) {
+            continue;
+        }
+        const int wrote = snprintf(buf + used, cap - used, used ? ",%d:%x" : "%d:%x", id, value);
+        if (wrote < 0 || static_cast<size_t>(wrote) >= cap - used) {
+            break;
+        }
+        used += static_cast<size_t>(wrote);
+        ++shown;
     }
     if (used == 0) {
         snprintf(buf, cap, "none");
@@ -386,7 +422,8 @@ DWORD WINAPI bonfire_thread(void*) {
         if (interesting && logs < 80 && now - last_log >= 1000) {
             last_log = now;
             ++logs;
-            char menus[160];
+            char menus[192];
+            char ids[160];
             char hits[192];
             char cur[16];
             char stay_upper[16];
@@ -396,8 +433,13 @@ DWORD WINAPI bonfire_thread(void*) {
             format_word(sample.cur_ok, sample.cur, cur, sizeof(cur));
             format_word(sample.stay_ok, sample.stay_upper, stay_upper, sizeof(stay_upper));
             format_word(sample.stay_ok, sample.stay_lower, stay_lower, sizeof(stay_lower));
-            LOG_INFO("Bonfire watch: cur=%s stayU=%s stayL=%s hits=%s menus=%s", cur, stay_upper, stay_lower, hits,
-                     menus);
+            if (sample.hit_count > 0) {
+                format_ids(sample, ids, sizeof(ids));
+            } else {
+                snprintf(ids, sizeof(ids), "-");
+            }
+            LOG_INFO("Bonfire watch: cur=%s stayU=%s stayL=%s hits=%s menus=%s ids=%s", cur, stay_upper, stay_lower,
+                     hits, menus, ids);
         }
 
         if (!sample.hit_count || !menus_clear(sample)) {
