@@ -8,34 +8,32 @@
 
 #include <cstdio>
 
-// Same symptom as Prepare to Die Edition, and the same response: if the character stays in a
-// bonfire sit for a second with no menu open, write 0 over the animation id so it stands.
-// PTDE's watchdog (src/ptde/ui.cpp) is the reference. The 32-bit addresses do not exist here.
+// Same rule as Prepare to Die Edition (src/ptde/ui.cpp): if an idle bonfire sit is still set
+// and no menu has been open for a second, write 0 over that animation id so the character stands.
+// The 32-bit addresses do not exist here. There is no separate check for Reverse Hollowing.
+//
+// The sits were read from this install's own c0000.anibnd (a00.tae), not from a PTDE list.
+// The three idle loops are a00_7701, a00_7711 and a00_7721, each 2.667 seconds, and each has a
+// 5.2 second sit-down (7700, 7710, 7720) and stand (7702, 7712, 7722). 7501 is a different
+// clip, a00_7501, 4.13 seconds. It is not one of those loops, so it is not a reason to stand.
 //
 // Checked against the 2022 Steam 1.03.1 executable (profile.h):
 //   * World character manager RVA 0x1C77E50. The local player is the ChrIns at
-//     *(*(image + RVA) + 0x68). It is null while a level is loading. Other characters are
-//     not this pointer.
-//   * A played softlock left every menu dword at 0 and ChrIns+0xD0 at 0. The current animation
-//     DSR-Gadget reads, *( *(player + 0x68) + 0x48 ) + 0x80, was 7501 (use humanity) and then
-//     empty. The sit itself was not in that word. While a bonfire menu was just open, the player,
-//     that animation object, and the stay-animation block (*( *(player + 0x30) + 0x5D0 ), upper
-//     body at +0x690 and lower body at +0x13B0) are scanned for 7701, 7711, and 7721.
-//   * If the humanity-use word goes empty after the menu closes, it is set to 0 once. That is the
-//     same kick PTDE uses, aimed at the word that actually changed during the softlock.
+//     *(*(image + RVA) + 0x68). It is null while a level is loading.
 //   * Menu manager RVA 0x1C88D98. The game's own open-menu mask (RVA 0x71AC10) sets a bit
 //     when one of the dwords below is nonzero, so "no menu" means every one of them is 0.
-//     Three offsets match PTDE (0x50 reinforce, 0x60 dialog, 0x78 level-up). The others
-//     moved. PTDE's byte flags at 0x40, 0x4C, 0x80, 0x84 and 0xAC are not fields of this
-//     menu manager, and a byte read would miss a dword whose low byte is 0.
-//   * Sit ids 7701, 7711 and 7721 are the ones the PTDE watchdog stands up from (rest writes
-//     7710, and the seated menu pose is 7711). They are not immediates in this executable;
-//     they are the shared bonfire sits, and a test has to confirm them.
+//     A played session left only +0x50 nonzero while the bonfire menu was up, then all of
+//     them 0 once it closed. Three offsets match PTDE (0x50 reinforce, 0x60 dialog,
+//     0x78 level-up). PTDE's byte flags at 0x40, 0x4C, 0x80, 0x84 and 0xAC are not fields
+//     of this menu manager.
+//   * The idle sit is not one known field on this exe. While a menu is open, or for a short
+//     while after, the player, the current-animation object DSR-Gadget reads
+//     (*( *(player + 0x68) + 0x48 ) + 0x80) and the stay-animation block are scanned for
+//     7701, 7711 and 7721. Any such word is cleared once the menus have been clear for a second.
 //
-// PTDE also requires character status 0 (human) or 8 (hollow) at +0xA28 of its status block.
-// That field was not found on this executable, so it is not checked. A wrong pointer is worse
-// than a missed kick, so every read and the write are guarded, and a pointer below 16 MB
-// is treated as not ready.
+// PTDE also requires character status 0 (human) or 8 (hollow). That field was not found on
+// this executable, so it is not checked. A wrong pointer is worse than a missed kick, so
+// every read and the write are guarded, and a pointer below 16 MB is treated as not ready.
 
 namespace {
 
@@ -104,14 +102,6 @@ bool is_sit(int anim) {
     return anim == 7701 || anim == 7711 || anim == 7721;
 }
 
-// 7501 is the humanity-use animation. It played during the softlock and must not be cleared.
-constexpr int kHumanityUse = 7501;
-
-// Empty, idle, or a seated loop. Not the stand-up ids, and not the humanity use.
-bool idle_kick(int anim) {
-    return anim == -1 || anim == 0 || is_sit(anim);
-}
-
 // Bytes of address that are committed and readable, capped at size. Never raises.
 size_t readable_bytes(uintptr_t address, size_t size) {
     if (address < kMinPointer || address > kMaxPointer || size < 4) {
@@ -176,7 +166,6 @@ struct Sample {
     bool menu_ok = false;
     bool cur_ok = false;
     int cur = -1;
-    uintptr_t cur_address = 0;
     bool stay_ok = false;
     int stay_upper = -1;
     int stay_lower = -1;
@@ -220,8 +209,7 @@ void read_current(uintptr_t player, Sample* out) {
         return;
     }
     out->cur_ok = true;
-    out->cur_address = block + 0x80;
-    out->cur = read_int(out->cur_address);
+    out->cur = read_int(block + 0x80);
 }
 
 void read_stay(uintptr_t player, Sample* out) {
@@ -236,8 +224,7 @@ void read_stay(uintptr_t player, Sample* out) {
     scan(out, "stay", stay, 0x1400);
 }
 
-// look scans for a sit id. The current-animation word is read either way.
-bool sample_player(uintptr_t image, bool look, Sample* out) {
+bool sample_player(uintptr_t image, Sample* out) {
     uintptr_t world = 0;
     if (!read_ptr(image + kWorldChrManRva, &world) || world < kMinPointer || world > kMaxPointer) {
         return false;
@@ -258,9 +245,6 @@ bool sample_player(uintptr_t image, bool look, Sample* out) {
                 out->flags[i] = flag;
             }
         }
-    }
-    if (!look) {
-        return true;
     }
 
     scan(out, "player", player, 0x700);
@@ -347,6 +331,10 @@ void format_word(bool ok, int value, char* buf, size_t cap) {
 void clear_sits(const Sample& sample, int* fixed) {
     for (int i = 0; i < sample.hit_count; ++i) {
         const Hit& hit = sample.hits[i];
+        // The word can change during the one-second wait. Only clear it if it is still a sit.
+        if (!is_sit(read_int(hit.address))) {
+            continue;
+        }
         if (write_u32(hit.address, 0)) {
             ++*fixed;
             LOG_INFO("Bonfire softlock: no menu open for a second while seated; told the character to stand (%d, %s+%x was %d)",
@@ -357,40 +345,20 @@ void clear_sits(const Sample& sample, int* fixed) {
     }
 }
 
-// True once this slot should not be tried again. A humanity use still in progress stays armed.
-bool kick_humanity_slot(uintptr_t address, int* fixed) {
-    const int value = read_int(address);
-    if (value == kHumanityUse) {
-        return false;
-    }
-    if (!idle_kick(value)) {
-        return true;
-    }
-    if (write_u32(address, 0)) {
-        ++*fixed;
-        LOG_INFO("Bonfire softlock: humanity use ended while seated; told the character to stand (%d)", *fixed);
-    } else {
-        LOG_ERROR("Bonfire softlock: could not write the animation id");
-    }
-    return true;
-}
-
 DWORD WINAPI bonfire_thread(void*) {
     const uintptr_t image = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     Sleep(2000);
     ULONGLONG since = 0;
     ULONGLONG last_log = 0;
     ULONGLONG menu_seen = 0;
-    uintptr_t humanity_slot = 0;
     int logs = 0;
     int missed_player = 0;
     int fixed = 0;
     while (GetModuleHandleW(nullptr)) {
         Sleep(200);
         const ULONGLONG now = GetTickCount64();
-        const bool recent = menu_seen != 0 && now - menu_seen < 30000;
         Sample sample;
-        const bool got = sample_player(image, recent, &sample);
+        const bool got = sample_player(image, &sample);
         if (!got || !sample.player_ok) {
             since = 0;
             if (missed_player < 8 && now - last_log >= 5000) {
@@ -412,16 +380,9 @@ DWORD WINAPI bonfire_thread(void*) {
         }
         if (any_menu) {
             menu_seen = now;
-            if (!recent) {
-                sample = Sample();
-                sample_player(image, true, &sample);
-            }
-        }
-        if (sample.cur_ok && sample.cur == kHumanityUse && menu_seen != 0 && now - menu_seen < 30000) {
-            humanity_slot = sample.cur_address;
         }
 
-        const bool interesting = any_menu || (menu_seen != 0 && now - menu_seen < 30000);
+        const bool interesting = any_menu || sample.hit_count > 0 || (menu_seen != 0 && now - menu_seen < 30000);
         if (interesting && logs < 80 && now - last_log >= 1000) {
             last_log = now;
             ++logs;
@@ -439,9 +400,7 @@ DWORD WINAPI bonfire_thread(void*) {
                      menus);
         }
 
-        const bool humanity_playing = sample.cur_ok && sample.cur == kHumanityUse;
-        const bool humanity_done = humanity_slot != 0 && !humanity_playing;
-        if ((!sample.hit_count && !humanity_done) || !menus_clear(sample)) {
+        if (!sample.hit_count || !menus_clear(sample)) {
             since = 0;
             continue;
         }
@@ -452,15 +411,7 @@ DWORD WINAPI bonfire_thread(void*) {
         if (now - since < 1000) {
             continue;
         }
-        if (sample.hit_count) {
-            clear_sits(sample, &fixed);
-        }
-        if (humanity_done) {
-            const uintptr_t slot = sample.cur_ok && sample.cur_address ? sample.cur_address : humanity_slot;
-            if (kick_humanity_slot(slot, &fixed)) {
-                humanity_slot = 0;
-            }
-        }
+        clear_sits(sample, &fixed);
         since = 0;
     }
     return 0;
