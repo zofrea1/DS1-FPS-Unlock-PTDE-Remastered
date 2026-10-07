@@ -16,15 +16,13 @@
 //   * World character manager RVA 0x1C77E50. The local player is the ChrIns at
 //     *(*(image + RVA) + 0x68). It is null while a level is loading. Other characters are
 //     not this pointer.
-//   * ChrIns::Update (RVA 0x320AE0) reads a uint32 at ChrIns+0xD0 (the read is at RVA 0x320BC6)
-//     and compares it with 0x150E. The first softlock test never held that word on a sit id
-//     together with every menu dword clear, so the stand-up write never ran. It is still
-//     cleared when it does match.
-//   * DSR-Gadget reads the current animation at *( *(player + 0x68) + 0x48 ) + 0x80, and the
-//     animation object (its speed is at +0xA8) at *( *(player + 0x68) + 0x18 ) + 0x90.
-//     Player+0x68 is the move/map object this executable already uses. The same two steps from
-//     player+0x48 cover the older map offset. A sit id in any of those words is cleared too.
-//     Player+0xFC is cleared when it holds a sit id, because that is PTDE's force-play field.
+//   * A played softlock left every menu dword at 0 and ChrIns+0xD0 at 0. The current animation
+//     DSR-Gadget reads, *( *(player + 0x68) + 0x48 ) + 0x80, was 7501 (use humanity) and then
+//     empty. The sit itself was not in that word. While a bonfire menu was just open, the player,
+//     that animation object, and the stay-animation block (*( *(player + 0x30) + 0x5D0 ), upper
+//     body at +0x690 and lower body at +0x13B0) are scanned for 7701, 7711, and 7721.
+//   * If the humanity-use word goes empty after the menu closes, it is set to 0 once. That is the
+//     same kick PTDE uses, aimed at the word that actually changed during the softlock.
 //   * Menu manager RVA 0x1C88D98. The game's own open-menu mask (RVA 0x71AC10) sets a bit
 //     when one of the dwords below is nonzero, so "no menu" means every one of them is 0.
 //     Three offsets match PTDE (0x50 reinforce, 0x60 dialog, 0x78 level-up). The others
@@ -36,7 +34,7 @@
 //
 // PTDE also requires character status 0 (human) or 8 (hollow) at +0xA28 of its status block.
 // That field was not found on this executable, so it is not checked. A wrong pointer is worse
-// than a missed kick, so every read and the write are guarded, and a pointer below 0x10000
+// than a missed kick, so every read and the write are guarded, and a pointer below 16 MB
 // is treated as not ready.
 
 namespace {
@@ -44,8 +42,9 @@ namespace {
 constexpr uint32_t kWorldChrManRva = 0x1C77E50;
 constexpr uint32_t kMenuManRva = 0x1C88D98;
 constexpr uint32_t kPlayerOffset = 0x68;
-constexpr uint32_t kAnimOffset = 0xD0;
-constexpr uintptr_t kMinPointer = 0x10000;
+// Heap objects in this process sit well above 16 MB. Smaller values are counts and flags.
+constexpr uintptr_t kMinPointer = 0x1000000;
+constexpr uintptr_t kMaxPointer = 0x00007FFFFFFFFFFFull;
 
 // Dwords the mask function compares with zero. Order follows that function.
 constexpr uint32_t kMenuFlags[] = {
@@ -105,49 +104,51 @@ bool is_sit(int anim) {
     return anim == 7701 || anim == 7711 || anim == 7721;
 }
 
-// 7698 light, 7699 kindle, 7700/7710/7720 sit down, 7701/7711/7721 seated, 7702/7712/7722 stand.
-bool is_bonfire_anim(int anim) {
-    return anim >= 7698 && anim <= 7722;
+// 7501 is the humanity-use animation. It played during the softlock and must not be cleared.
+constexpr int kHumanityUse = 7501;
+
+// Empty, idle, or a seated loop. Not the stand-up ids, and not the humanity use.
+bool idle_kick(int anim) {
+    return anim == -1 || anim == 0 || is_sit(anim);
 }
 
-// value -1 and address 0 mean the word could not be read. Plain data so the reads stay out of __try.
-struct Slot {
-    int value = -1;
-    uintptr_t address = 0;
-};
-
-struct Sample {
-    bool player_ok = false;
-    bool menu_ok = false;
-    Slot d0;
-    Slot fc;
-    int c8 = -1;
-    int cc = -1;
-    int d4 = -1;
-    int d8 = -1;
-    // *( *(player+0x68)+0x48 )+0x80, the current animation DSR-Gadget reads.
-    Slot cur;
-    // *( *(player+0x68)+0x18 )+0x90, on the animation object whose speed is at +0xA8.
-    Slot a90;
-    Slot altcur;
-    Slot alta90;
-    int queue[4] = {-1, -1, -1, -1};
-    uint32_t flags[sizeof(kMenuFlags) / sizeof(kMenuFlags[0])] = {};
-};
-
-bool read_slot(uintptr_t address, Slot* out) {
-    uint32_t value = 0;
-    if (!read_u32(address, &value)) {
-        return false;
+// Bytes of address that are committed and readable, capped at size. Never raises.
+size_t readable_bytes(uintptr_t address, size_t size) {
+    if (address < kMinPointer || address > kMaxPointer || size < 4) {
+        return 0;
     }
-    out->value = static_cast<int>(value);
-    out->address = address;
-    return true;
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info))) {
+        return 0;
+    }
+    if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD)) {
+        return 0;
+    }
+    const DWORD protect = info.Protect & 0xFF;
+    const bool readable = protect == PAGE_READONLY || protect == PAGE_READWRITE || protect == PAGE_WRITECOPY ||
+                          protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE ||
+                          protect == PAGE_EXECUTE_WRITECOPY;
+    if (!readable) {
+        return 0;
+    }
+    const uintptr_t region = reinterpret_cast<uintptr_t>(info.BaseAddress);
+    const uintptr_t end = region + info.RegionSize;
+    if (address < region || address >= end) {
+        return 0;
+    }
+    const size_t room = static_cast<size_t>(end - address);
+    return room < size ? room : size;
 }
 
 bool follow(uintptr_t base, uint32_t offset, uintptr_t* out) {
+    if (readable_bytes(base + offset, sizeof(uintptr_t)) < sizeof(uintptr_t)) {
+        return false;
+    }
     uintptr_t next = 0;
-    if (!read_ptr(base + offset, &next) || next < kMinPointer) {
+    if (!read_ptr(base + offset, &next) || next < kMinPointer || next > kMaxPointer) {
+        return false;
+    }
+    if (readable_bytes(next, 0x10) < 0x10) {
         return false;
     }
     *out = next;
@@ -156,59 +157,129 @@ bool follow(uintptr_t base, uint32_t offset, uintptr_t* out) {
 
 int read_int(uintptr_t address) {
     uint32_t value = 0;
-    if (!read_u32(address, &value)) {
+    if (readable_bytes(address, sizeof(value)) < sizeof(value) || !read_u32(address, &value)) {
         return -1;
     }
     return static_cast<int>(value);
 }
 
-bool sample_player(uintptr_t image, Sample* out) {
+// One seated-loop word. where is a literal ("player", "stay").
+struct Hit {
+    const char* where = "";
+    uint32_t offset = 0;
+    int value = 0;
+    uintptr_t address = 0;
+};
+
+struct Sample {
+    bool player_ok = false;
+    bool menu_ok = false;
+    bool cur_ok = false;
+    int cur = -1;
+    uintptr_t cur_address = 0;
+    bool stay_ok = false;
+    int stay_upper = -1;
+    int stay_lower = -1;
+    Hit hits[8] = {};
+    int hit_count = 0;
+    uint32_t flags[sizeof(kMenuFlags) / sizeof(kMenuFlags[0])] = {};
+};
+
+void note_sit(Sample* sample, const char* where, uintptr_t base, uint32_t offset, int value) {
+    if (!is_sit(value) || sample->hit_count >= 8) {
+        return;
+    }
+    const uintptr_t address = base + offset;
+    for (int i = 0; i < sample->hit_count; ++i) {
+        if (sample->hits[i].address == address) {
+            return;
+        }
+    }
+    Hit& hit = sample->hits[sample->hit_count++];
+    hit.where = where;
+    hit.offset = offset;
+    hit.value = value;
+    hit.address = address;
+}
+
+void scan(Sample* sample, const char* where, uintptr_t base, uint32_t size) {
+    const size_t bytes = readable_bytes(base, size);
+    for (uint32_t offset = 0; offset + sizeof(uint32_t) <= bytes; offset += sizeof(uint32_t)) {
+        const int value = read_int(base + offset);
+        note_sit(sample, where, base, offset, value);
+    }
+}
+
+void read_current(uintptr_t player, Sample* out) {
+    uintptr_t map = 0;
+    uintptr_t block = 0;
+    if (!follow(player, 0x68, &map) || !follow(map, 0x48, &block)) {
+        return;
+    }
+    if (readable_bytes(block + 0x80, sizeof(uint32_t)) < sizeof(uint32_t)) {
+        return;
+    }
+    out->cur_ok = true;
+    out->cur_address = block + 0x80;
+    out->cur = read_int(out->cur_address);
+}
+
+void read_stay(uintptr_t player, Sample* out) {
+    uintptr_t body = 0;
+    uintptr_t stay = 0;
+    if (!follow(player, 0x30, &body) || !follow(body, 0x5D0, &stay)) {
+        return;
+    }
+    out->stay_ok = true;
+    out->stay_upper = read_int(stay + 0x690);
+    out->stay_lower = read_int(stay + 0x13B0);
+    scan(out, "stay", stay, 0x1400);
+}
+
+// look scans for a sit id. The current-animation word is read either way.
+bool sample_player(uintptr_t image, bool look, Sample* out) {
     uintptr_t world = 0;
-    if (!read_ptr(image + kWorldChrManRva, &world) || world < kMinPointer) {
+    if (!read_ptr(image + kWorldChrManRva, &world) || world < kMinPointer || world > kMaxPointer) {
         return false;
     }
     uintptr_t player = 0;
-    if (!read_ptr(world + kPlayerOffset, &player) || player < kMinPointer) {
+    if (!follow(world, kPlayerOffset, &player)) {
         return false;
     }
     out->player_ok = true;
-    read_slot(player + kAnimOffset, &out->d0);
-    read_slot(player + 0xFC, &out->fc);
-    out->c8 = read_int(player + 0xC8);
-    out->cc = read_int(player + 0xCC);
-    out->d4 = read_int(player + 0xD4);
-    out->d8 = read_int(player + 0xD8);
+    read_current(player, out);
 
-    uintptr_t map = 0;
-    uintptr_t anim = 0;
-    if (follow(player, 0x68, &map)) {
-        if (follow(map, 0x48, &anim)) {
-            read_slot(anim + 0x80, &out->cur);
-        }
-        if (follow(map, 0x18, &anim)) {
-            read_slot(anim + 0x90, &out->a90);
-            for (int i = 0; i < 4; ++i) {
-                out->queue[i] = read_int(anim + 0xCC + static_cast<uint32_t>(i) * 4);
+    uintptr_t menus = 0;
+    if (follow(image, kMenuManRva, &menus)) {
+        out->menu_ok = true;
+        for (size_t i = 0; i < sizeof(kMenuFlags) / sizeof(kMenuFlags[0]); ++i) {
+            uint32_t flag = 0;
+            if (read_u32(menus + kMenuFlags[i], &flag)) {
+                out->flags[i] = flag;
             }
         }
     }
-    if (follow(player, 0x48, &map)) {
-        if (follow(map, 0x48, &anim)) {
-            read_slot(anim + 0x80, &out->altcur);
-        }
-        if (follow(map, 0x18, &anim)) {
-            read_slot(anim + 0x90, &out->alta90);
-        }
-    }
-
-    uintptr_t menus = 0;
-    if (!read_ptr(image + kMenuManRva, &menus) || menus < kMinPointer) {
+    if (!look) {
         return true;
     }
-    out->menu_ok = true;
-    for (size_t i = 0; i < sizeof(kMenuFlags) / sizeof(kMenuFlags[0]); ++i) {
-        read_u32(menus + kMenuFlags[i], &out->flags[i]);
+
+    scan(out, "player", player, 0x700);
+    uintptr_t map = 0;
+    if (follow(player, 0x68, &map)) {
+        scan(out, "map", map, 0x100);
+        uintptr_t child = 0;
+        if (follow(map, 0x18, &child)) {
+            scan(out, "anim", child, 0x100);
+        }
+        if (follow(map, 0x48, &child)) {
+            scan(out, "cur", child, 0x100);
+        }
     }
+    uintptr_t alt = 0;
+    if (follow(player, 0x48, &alt)) {
+        scan(out, "map48", alt, 0x100);
+    }
+    read_stay(player, out);
     return true;
 }
 
@@ -247,53 +318,61 @@ void format_menus(const Sample& sample, char* buf, size_t cap) {
     }
 }
 
-bool watched_bonfire(const Sample& sample) {
-    const int words[] = {
-        sample.d0.value, sample.fc.value, sample.c8,     sample.cc,     sample.d4,     sample.d8,
-        sample.cur.value, sample.a90.value, sample.altcur.value, sample.alta90.value,
-        sample.queue[0], sample.queue[1], sample.queue[2], sample.queue[3],
-    };
-    for (int word : words) {
-        if (is_bonfire_anim(word)) {
-            return true;
-        }
+void format_hits(const Sample& sample, char* buf, size_t cap) {
+    if (sample.hit_count == 0) {
+        snprintf(buf, cap, "none");
+        return;
     }
-    return false;
+    size_t used = 0;
+    buf[0] = 0;
+    for (int i = 0; i < sample.hit_count; ++i) {
+        const Hit& hit = sample.hits[i];
+        const int wrote = snprintf(buf + used, cap - used, used ? ",%s+%x=%d" : "%s+%x=%d", hit.where, hit.offset,
+                                   hit.value);
+        if (wrote < 0 || static_cast<size_t>(wrote) >= cap - used) {
+            break;
+        }
+        used += static_cast<size_t>(wrote);
+    }
 }
 
-bool seated(const Sample& sample) {
-    return is_sit(sample.d0.value) || is_sit(sample.fc.value) || is_sit(sample.cur.value) ||
-           is_sit(sample.a90.value) || is_sit(sample.altcur.value) || is_sit(sample.alta90.value);
+void format_word(bool ok, int value, char* buf, size_t cap) {
+    if (!ok) {
+        snprintf(buf, cap, "na");
+        return;
+    }
+    snprintf(buf, cap, "%d", value);
 }
 
-// Clear each distinct word that is actually holding a sit. Neighbors are logged only.
-void stand_up(const Sample& sample, int* fixed) {
-    const Slot* slots[] = {&sample.d0, &sample.fc, &sample.cur, &sample.a90, &sample.altcur, &sample.alta90};
-    uintptr_t seen[6] = {};
-    int count = 0;
-    for (const Slot* slot : slots) {
-        if (!is_sit(slot->value) || slot->address == 0) {
-            continue;
-        }
-        bool already = false;
-        for (int i = 0; i < count; ++i) {
-            if (seen[i] == slot->address) {
-                already = true;
-                break;
-            }
-        }
-        if (already) {
-            continue;
-        }
-        seen[count++] = slot->address;
-        if (write_u32(slot->address, 0)) {
+void clear_sits(const Sample& sample, int* fixed) {
+    for (int i = 0; i < sample.hit_count; ++i) {
+        const Hit& hit = sample.hits[i];
+        if (write_u32(hit.address, 0)) {
             ++*fixed;
-            LOG_INFO("Bonfire softlock: no menu open for a second while seated; told the character to stand (%d, id %d)",
-                     *fixed, slot->value);
+            LOG_INFO("Bonfire softlock: no menu open for a second while seated; told the character to stand (%d, %s+%x was %d)",
+                     *fixed, hit.where, hit.offset, hit.value);
         } else {
             LOG_ERROR("Bonfire softlock: could not write the animation id");
         }
     }
+}
+
+// True once this slot should not be tried again. A humanity use still in progress stays armed.
+bool kick_humanity_slot(uintptr_t address, int* fixed) {
+    const int value = read_int(address);
+    if (value == kHumanityUse) {
+        return false;
+    }
+    if (!idle_kick(value)) {
+        return true;
+    }
+    if (write_u32(address, 0)) {
+        ++*fixed;
+        LOG_INFO("Bonfire softlock: humanity use ended while seated; told the character to stand (%d)", *fixed);
+    } else {
+        LOG_ERROR("Bonfire softlock: could not write the animation id");
+    }
+    return true;
 }
 
 DWORD WINAPI bonfire_thread(void*) {
@@ -302,14 +381,16 @@ DWORD WINAPI bonfire_thread(void*) {
     ULONGLONG since = 0;
     ULONGLONG last_log = 0;
     ULONGLONG menu_seen = 0;
+    uintptr_t humanity_slot = 0;
     int logs = 0;
     int missed_player = 0;
     int fixed = 0;
     while (GetModuleHandleW(nullptr)) {
         Sleep(200);
-        Sample sample;
-        const bool got = sample_player(image, &sample);
         const ULONGLONG now = GetTickCount64();
+        const bool recent = menu_seen != 0 && now - menu_seen < 30000;
+        Sample sample;
+        const bool got = sample_player(image, recent, &sample);
         if (!got || !sample.player_ok) {
             since = 0;
             if (missed_player < 8 && now - last_log >= 5000) {
@@ -331,23 +412,36 @@ DWORD WINAPI bonfire_thread(void*) {
         }
         if (any_menu) {
             menu_seen = now;
+            if (!recent) {
+                sample = Sample();
+                sample_player(image, true, &sample);
+            }
         }
-        // A rest at a bonfire, or the few seconds after its menu closes. Combat does not log.
-        const bool interesting = watched_bonfire(sample) || any_menu || (menu_seen != 0 && now - menu_seen < 20000);
-        if (interesting && logs < 100 && now - last_log >= 1000) {
+        if (sample.cur_ok && sample.cur == kHumanityUse && menu_seen != 0 && now - menu_seen < 30000) {
+            humanity_slot = sample.cur_address;
+        }
+
+        const bool interesting = any_menu || (menu_seen != 0 && now - menu_seen < 30000);
+        if (interesting && logs < 80 && now - last_log >= 1000) {
             last_log = now;
             ++logs;
             char menus[160];
+            char hits[192];
+            char cur[16];
+            char stay_upper[16];
+            char stay_lower[16];
             format_menus(sample, menus, sizeof(menus));
-            LOG_INFO(
-                "Bonfire watch: d0=%d fc=%d c8=%d cc=%d d4=%d d8=%d cur=%d a90=%d altcur=%d alta90=%d "
-                "q=%d,%d,%d,%d menus=%s",
-                sample.d0.value, sample.fc.value, sample.c8, sample.cc, sample.d4, sample.d8, sample.cur.value,
-                sample.a90.value, sample.altcur.value, sample.alta90.value, sample.queue[0], sample.queue[1],
-                sample.queue[2], sample.queue[3], menus);
+            format_hits(sample, hits, sizeof(hits));
+            format_word(sample.cur_ok, sample.cur, cur, sizeof(cur));
+            format_word(sample.stay_ok, sample.stay_upper, stay_upper, sizeof(stay_upper));
+            format_word(sample.stay_ok, sample.stay_lower, stay_lower, sizeof(stay_lower));
+            LOG_INFO("Bonfire watch: cur=%s stayU=%s stayL=%s hits=%s menus=%s", cur, stay_upper, stay_lower, hits,
+                     menus);
         }
 
-        if (!seated(sample) || !menus_clear(sample)) {
+        const bool humanity_playing = sample.cur_ok && sample.cur == kHumanityUse;
+        const bool humanity_done = humanity_slot != 0 && !humanity_playing;
+        if ((!sample.hit_count && !humanity_done) || !menus_clear(sample)) {
             since = 0;
             continue;
         }
@@ -358,7 +452,15 @@ DWORD WINAPI bonfire_thread(void*) {
         if (now - since < 1000) {
             continue;
         }
-        stand_up(sample, &fixed);
+        if (sample.hit_count) {
+            clear_sits(sample, &fixed);
+        }
+        if (humanity_done) {
+            const uintptr_t slot = sample.cur_ok && sample.cur_address ? sample.cur_address : humanity_slot;
+            if (kick_humanity_slot(slot, &fixed)) {
+                humanity_slot = 0;
+            }
+        }
         since = 0;
     }
     return 0;
