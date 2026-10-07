@@ -43,12 +43,15 @@ Everything below is on by default and has an INI switch.
 | Fullscreen refresh rate | The game only offers 59/60 Hz; ask for the display's real rate, or use borderless | n/a | `FullscreenRefreshRate`, `BorderlessFullscreen` |
 | Direct3D 9 on Vulkan (experimental) | Runs the game through DXVK instead of the Windows Direct3D 9 driver; may or may not help the frame rate, and can have color issues | n/a | `DXVK` (off by default) |
 | Controller | The game only accepts four old XInput device ids, so a pad is missed or another connected device is used instead | n/a | `FixController` |
+| 16:10 and other taller screens | The picture stays 16:9, so the extra height is black bars. The in-game list often has no 1280x800 | n/a | `FixAspect` |
 
 The original game's 30 FPS physics were tuned for 30 frames per second; both mods are exact at the native rate and very close at every other rate. See [Fix details](#fix-details) for what each fix does.
 
 **Accuracy.** This is very close to the game at its native rate, and more than good enough for casual and serious play. It is not a perfect 1:1 match: retail decides some of these things on a fixed frame grid, so a borderline slope or lip can behave slightly differently at 180 or 240 FPS. Speedrunners and anyone who needs stock-exact precision should not use this.
 
 ## Fix details
+
+**Taller screens (`FixAspect`, Prepare to Die Edition).** The projection is locked to 16:9, so on a 16:10 display (the Steam Deck's 1280x800, or 1920x1200) the extra height is black bars and the picture is not stretched. The in-game list often stops at 1280x720, which is why DSfix's borderless mode cannot be pointed at 1280x800 from the menu. When the display is taller than 16:9 and the game asked for a 16:9 mode, the swap chain is sized to the display and the vertical field of view is opened so the horizontal view stays the same. A 16:9 display is left alone. Leave DSfix `presentWidth` and `presentHeight` at 0. On a Steam Deck whose game resolution is set to 1280x720, the mod asks for 1280x800; if that picture looks squashed, set the game resolution in Steam to 1280x800.
 
 **Controller (`FixController`, Prepare to Die Edition).** The game decides a DirectInput device is an XInput pad only when its id is one of four values from Windows 7, one per player slot. A current pad does not have those ids, so the game reads it through DirectInput, which is unreliable, and whichever device was enumerated first wins. A second controller, a wheel or a virtual pad is enough to make the real one go dead. The mod still honours those four ids when the device behind one is actually connected. Otherwise it binds a gamepad, preferring the one being held, and a slot that drops out for a moment is kept for half a second before another connected gamepad is tried. Wheels, flight sticks and music controllers are not taken. On the Steam Deck the same DLL has to forward XInput to Wine's controller backend (`xinput1_4`); forwarding to `xinput1_3` calls this mod again and the deck's pad never appears. That forward happens whether or not `FixController` is on.
 

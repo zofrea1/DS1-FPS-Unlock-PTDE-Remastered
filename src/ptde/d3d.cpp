@@ -1,5 +1,6 @@
 #include "d3d.h"
 
+#include "aspect.h"
 #include "dxvk.h"
 #include "log.h"
 #include "settings.h"
@@ -34,12 +35,18 @@ constexpr int kSetVsConstSlot = 94;    // IDirect3DDevice9::SetVertexShaderConst
 
 using SetVsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
 SetVsConstFn g_set_vs_const = nullptr;
+bool g_probe = false;
 unsigned long long g_frame_hash = 1469598103934665603ull;
 unsigned long long g_small_hash = 1469598103934665603ull;  // uploads of up to 8 registers (camera, world matrices)
 unsigned long long g_big_hash = 1469598103934665603ull;    // larger uploads (skinning palettes)
 
 HRESULT WINAPI hook_set_vs_const(IDirect3DDevice9* device, UINT start, const float* data, UINT count) {
-    if (data && count >= 3 && count < 512) {
+    float corrected[24 * 4];
+    const float* use = data;
+    if (data && aspect_correct_constants(data, count, corrected)) {
+        use = corrected;
+    }
+    if (g_probe && data && count >= 3 && count < 512) {
         const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
         unsigned long long h = g_frame_hash ^ start;
         h *= 1099511628211ull;
@@ -55,7 +62,7 @@ HRESULT WINAPI hook_set_vs_const(IDirect3DDevice9* device, UINT start, const flo
         }
         part = p;
     }
-    return g_set_vs_const(device, start, data, count);
+    return g_set_vs_const(device, start, use, count);
 }
 
 const Settings& settings() {
@@ -140,14 +147,22 @@ void adjust_present_parameters(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMET
 }
 
 HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
-    if (pp && !pp->Windowed) {
-        IDirect3D9* d3d = nullptr;
-        if (SUCCEEDED(device->GetDirect3D(&d3d)) && d3d) {
-            adjust_present_parameters(d3d, D3DADAPTER_DEFAULT, pp, "Reset");
-            d3d->Release();
+    IDirect3D9* d3d = nullptr;
+    if (pp && SUCCEEDED(device->GetDirect3D(&d3d)) && d3d) {
+        aspect_set_enabled(settings().fps_unlock && settings().fix_aspect);
+        if (aspect_is_enabled()) {
+            aspect_adjust_present(d3d, D3DADAPTER_DEFAULT, pp, "Reset");
         }
+        if (!pp->Windowed) {
+            adjust_present_parameters(d3d, D3DADAPTER_DEFAULT, pp, "Reset");
+        }
+        d3d->Release();
     }
-    return g_reset(device, pp);
+    const HRESULT hr = g_reset(device, pp);
+    if (SUCCEEDED(hr) && aspect_is_active()) {
+        aspect_hook_device(device);
+    }
+    return hr;
 }
 
 // Patch one slot of a COM object's vtable, returning the original pointer.
@@ -169,6 +184,10 @@ void* patch_slot(void* object, int slot, void* replacement) {
 
 HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type, HWND window, DWORD flags,
                                   D3DPRESENT_PARAMETERS* pp, IDirect3DDevice9** out) {
+    aspect_set_enabled(settings().fps_unlock && settings().fix_aspect);
+    if (aspect_is_enabled()) {
+        aspect_adjust_present(d3d, adapter, pp, "CreateDevice");
+    }
     adjust_present_parameters(d3d, adapter, pp, "CreateDevice");
     const HRESULT hr = g_create_device(d3d, adapter, type, window, flags, pp, out);
     if (SUCCEEDED(hr) && out && *out) {
@@ -177,11 +196,17 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             g_reset = reinterpret_cast<ResetFn>(original);
             LOG_INFO("Device Reset hooked");
         }
-        void* vs = settings().content_probe ? patch_slot(*out, kSetVsConstSlot, reinterpret_cast<void*>(&hook_set_vs_const))
-                                            : nullptr;
+        // Aspect rewrites the projection on the way through this hook. The content probe only hashes.
+        g_probe = settings().content_probe;
+        void* vs = (g_probe || aspect_is_active())
+                       ? patch_slot(*out, kSetVsConstSlot, reinterpret_cast<void*>(&hook_set_vs_const))
+                       : nullptr;
         if (vs && !g_set_vs_const) {
             g_set_vs_const = reinterpret_cast<SetVsConstFn>(vs);
-            LOG_INFO("Device SetVertexShaderConstantF hooked (content-cadence probe)");
+            LOG_INFO("Device SetVertexShaderConstantF hooked%s", g_probe ? " (content-cadence probe)" : "");
+        }
+        if (aspect_is_active()) {
+            aspect_hook_device(*out);
         }
     }
     return hr;

@@ -142,6 +142,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.borderless = parse_bool(val);
         } else if (key == "fixcontroller") {
             s.fix_controller = parse_bool(val);
+        } else if (key == "fixaspect") {
+            s.fix_aspect = parse_bool(val);
         } else if (key == "survey") {
             s.survey_seconds = std::atoi(val.c_str());
         }

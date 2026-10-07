@@ -65,6 +65,10 @@ struct Settings {
     bool borderless = false;
     // Keep a real XInput gamepad when the game's four Windows 7 device ids do not match.
     bool fix_controller = true;
+    // Fill a display taller than 16:9 (16:10, the Steam Deck's 1280x800). The horizontal
+    // view stays the same and the extra height shows more of the world. A 16:9 display
+    // is left alone. Missing key keeps this on.
+    bool fix_aspect = true;
     // Log a per-command summary for this many seconds after start (0 = off).
     int survey_seconds = 0;
 };
