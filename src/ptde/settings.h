@@ -27,6 +27,9 @@ struct Settings {
     bool fix_smoothing = true;
     // Velocities the game derives from one frame's movement times 30 (powered ragdoll, 3D sound Doppler).
     bool fix_velocity = true;
+    // Script garbage collection at least every 15 (AI) / 30 frames, as at 30 FPS (see script.h). Without it the
+    // script heap can fill at a high frame rate in a crowded area and the game closes itself.
+    bool fix_script_memory = true;
     bool fix_graze = true;
     // Ground snap-down reach and the ladder-exit cap (INI FixStepDown; FixLadder is the old name).
     bool fix_step_down = true;

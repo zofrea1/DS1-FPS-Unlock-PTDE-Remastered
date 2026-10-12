@@ -104,6 +104,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_timers = parse_bool(val);
         } else if (key == "fixvelocity") {
             s.fix_velocity = parse_bool(val);
+        } else if (key == "fixscriptmemory") {
+            s.fix_script_memory = parse_bool(val);
         } else if (key == "fixcamera") {
             s.fix_camera = parse_bool(val);
         } else if (key == "fixstepdown" || key == "fixladder") {

@@ -133,6 +133,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_smoothing = parse_bool(val);
         } else if (key == "fixvelocity") {
             s.fix_velocity = parse_bool(val);
+        } else if (key == "fixscriptmemory") {
+            s.fix_script_memory = parse_bool(val);
         } else if (key == "fixmovedt") {
             s.fix_move_dt = parse_bool(val);
         }

@@ -9,6 +9,7 @@
 #include "log.h"
 #include "present.h"
 #include "profile.h"
+#include "script.h"
 #include "sfx.h"
 #include "snap.h"
 #include "trace.h"
@@ -213,6 +214,7 @@ void frame_boundary() {
         const double step = g.driver ? static_cast<double>(g.written) : 1.0 / 30.0;
         fixes_update(step);
         ghost_frame(step);
+        script_sample();
     }
     watch_poll();
     if (g.cfg.trace) {
@@ -355,7 +357,7 @@ bool frame_install(const Settings& settings) {
              kDispatchCall, g.driver ? "on" : "off", settings.target_fps, settings.vblank_patch ? "on" : "off",
              settings.survey_seconds);
     diag_watchdog_start([] { return static_cast<uint64_t>(g_cmd_totals[2]); },
-                        [] { return static_cast<float>(g.last_dt_ms); });
+                        [] { return static_cast<float>(g.last_dt_ms); }, script_describe);
     watch_set_spec(settings.watch);
     if (settings.driver) {
         FixFlags flags;
@@ -384,6 +386,7 @@ bool frame_install(const Settings& settings) {
             sfx_install();
         }
     }
+    script_install(settings.driver && settings.fix_script_memory);
     present_install(settings);
     if (settings.profile) {
         profile_start();

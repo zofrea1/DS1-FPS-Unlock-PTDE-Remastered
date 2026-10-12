@@ -2670,6 +2670,261 @@ bool patch_frame_constants() {
     return true;
 }
 
+// Script garbage collection (FixScriptMemory). The enemy AI (AiLuaMan) and a second script state run
+// on Lua 5.0 with the collector's own trigger switched off: FromSoft's luaC_checkGC needs a non-zero
+// GCthreshold, lua_open leaves it at 0 and a collection never raises it. The game instead collects
+// each state in full on a countdown driven by the simulation step:
+//   fn 0x5AD550 (AiLuaMan): [+0x10] -= step; at 0 it is reset to 0.5 s and the AI state is collected
+//   fn 0x4AEF30 (the other state): [+0x80] -= step; at 0 it is reset to 1 s and that state is collected
+// Retail always stepped 1/60, so that was every 30 and 60 frames, and the scripts make their garbage
+// every frame (the AI runs from the character update). At 360 FPS a 0.5 s countdown let six times as
+// much garbage pile up between collections. In a crowded area the AI's script heap filled, an
+// allocation in lua_newuserdata failed, and the memory error, which nothing catches, made the game
+// call exit(1). The v1.6.0 crash reports show that exit as a pure virtual call in a worker thread:
+// the exit had already destroyed the static heaps that thread was still using.
+// Each countdown now takes at least 1/60 a frame: a collection at least every 30 / 60 frames as in
+// retail, and still every 0.5 / 1 s of real time below 60 FPS.
+struct ScriptGcSite {
+    uint32_t rva;            // movss xmm2, [rcx + timer] ; xorps xmm0, xmm0 ; subss xmm2, xmm1
+    uint8_t code[15];
+    uint8_t length;          // bytes replaced (the three instructions)
+    uint8_t load_length;     // the movss
+    const char* what;
+};
+constexpr ScriptGcSite kScriptGcSites[] = {
+    {0x5AD550, {0xF3, 0x0F, 0x10, 0x51, 0x10, 0x0F, 0x57, 0xC0, 0xF3, 0x0F, 0x5C, 0xD1}, 12, 5, "AI scripts, 0.5 s"},
+    {0x4AEF34, {0xF3, 0x0F, 0x10, 0x91, 0x80, 0x00, 0x00, 0x00, 0x0F, 0x57, 0xC0, 0xF3, 0x0F, 0x5C, 0xD1}, 15, 8,
+     "other scripts, 1 s"},
+};
+std::atomic<int> g_script_gc_state{0};
+
+bool patch_script_gc() {
+    for (const ScriptGcSite& s : kScriptGcSites) {
+        if (std::memcmp(image_rva(s.rva), s.code, s.length) != 0) {
+            LOG_ERROR("Script collection countdown at 0x%08X does not match this build", s.rva);
+            return false;
+        }
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(image_rva(kScriptGcSites[0].rva)));
+    if (!page) {
+        LOG_ERROR("Could not allocate the script collection stubs (Win32=%lu)", GetLastError());
+        return false;
+    }
+    auto* min_step = reinterpret_cast<float*>(page + 0x800);
+    *min_step = 1.0f / 60.0f;
+    uint8_t* stubs[2] = {};
+    size_t offset = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        const ScriptGcSite& s = kScriptGcSites[i];
+        uint8_t* site = image_rva(s.rva);
+        CaveEmitter e{page + offset};
+        e.put(site, s.load_length);                    // movss xmm2, [rcx + timer]
+        for (uint8_t b : {0xF3, 0x0F, 0x10, 0x05}) e.b(b);  // movss xmm0, [rip + min_step]
+        const size_t step = e.imm32();
+        e.fix32(step, min_step);
+        for (uint8_t b : {0xF3, 0x0F, 0x5F, 0xC1}) e.b(b);  // maxss xmm0, xmm1
+        for (uint8_t b : {0xF3, 0x0F, 0x5C, 0xD0}) e.b(b);  // subss xmm2, xmm0
+        for (uint8_t b : {0x0F, 0x57, 0xC0}) e.b(b);        // xorps xmm0, xmm0
+        e.b(0xE9);                                          // jmp back (comiss xmm0, xmm2)
+        const size_t back = e.imm32();
+        e.fix32(back, site + s.length);
+        stubs[i] = page + offset;
+        offset += (e.len + 15) & ~size_t{15};
+    }
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        LOG_ERROR("Could not protect the script collection stubs (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    for (size_t i = 0; i < 2; ++i) {
+        const ScriptGcSite& s = kScriptGcSites[i];
+        uint8_t* site = image_rva(s.rva);
+        uint8_t patch[15];
+        std::memset(patch, 0x90, sizeof(patch));
+        patch[0] = 0xE9;
+        const auto rel = static_cast<int32_t>(stubs[i] - (site + 5));
+        std::memcpy(patch + 1, &rel, 4);
+        if (!write_code(site, patch, s.length)) {
+            LOG_ERROR("Could not patch the script collection countdown at 0x%08X", s.rva);
+            return false;
+        }
+    }
+    LOG_INFO("Script garbage collection runs at least every 30 / 60 frames, as at 60 FPS (%s; %s)",
+             kScriptGcSites[0].what, kScriptGcSites[1].what);
+    return true;
+}
+
+// Script memory for the heartbeat line: the bytes each Lua state has allocated (global_State nblocks),
+// lowest and highest seen since the last heartbeat. The low is close to the live data after a
+// collection, the high to what piles up before one. Sampled once per simulation step.
+//   AiLuaMan = [[0x1C82508] + 0x17E8], the other state's manager = [[0x1C7B1B0] + 8];
+//   DLLua = [manager + 8], lua_State = [DLLua + 0x30], global_State = [L + 0x20], nblocks = [G + 0x3C].
+constexpr uint32_t kAiLuaManGlobal = 0x1C82508;
+constexpr uint32_t kOtherLuaGlobal = 0x1C7B1B0;
+struct ScriptMemory {
+    std::atomic<uint32_t> low{UINT32_MAX};
+    std::atomic<uint32_t> high{0};
+};
+ScriptMemory g_ai_script_memory;
+ScriptMemory g_other_script_memory;
+
+uint8_t* script_state(uint32_t global_rva, size_t manager_offset) {
+    __try {
+        const uint8_t* root = *reinterpret_cast<uint8_t* const*>(image_rva(global_rva));
+        if (!root) {
+            return nullptr;
+        }
+        const uint8_t* manager = *reinterpret_cast<uint8_t* const*>(root + manager_offset);
+        if (!manager) {
+            return nullptr;
+        }
+        const uint8_t* lua = *reinterpret_cast<uint8_t* const*>(manager + 8);
+        return lua ? *reinterpret_cast<uint8_t* const*>(lua + 0x30) : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+bool script_bytes(const uint8_t* state, uint32_t* bytes) {
+    if (!state) {
+        return false;
+    }
+    __try {
+        const uint8_t* global = *reinterpret_cast<uint8_t* const*>(state + 0x20);
+        if (!global) {
+            return false;
+        }
+        *bytes = *reinterpret_cast<const uint32_t*>(global + 0x3C);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void sample_script(ScriptMemory& m, uint32_t global_rva, size_t manager_offset) {
+    uint32_t bytes = 0;
+    if (!script_bytes(script_state(global_rva, manager_offset), &bytes)) {
+        return;
+    }
+    if (bytes < m.low.load(std::memory_order_relaxed)) {
+        m.low.store(bytes, std::memory_order_relaxed);
+    }
+    if (bytes > m.high.load(std::memory_order_relaxed)) {
+        m.high.store(bytes, std::memory_order_relaxed);
+    }
+}
+
+void sample_script_memory() {
+    sample_script(g_ai_script_memory, kAiLuaManGlobal, 0x17E8);
+    sample_script(g_other_script_memory, kOtherLuaGlobal, 8);
+}
+
+// "AI 3.10-4.20" (MB, low-high since the last call), or "-" when nothing was sampled.
+void take_script_memory(ScriptMemory& m, char* out, size_t size) {
+    const uint32_t low = m.low.exchange(UINT32_MAX, std::memory_order_relaxed);
+    const uint32_t high = m.high.exchange(0, std::memory_order_relaxed);
+    if (low == UINT32_MAX) {
+        std::snprintf(out, size, "-");
+        return;
+    }
+    std::snprintf(out, size, "%.2f-%.2f", low / 1048576.0, high / 1048576.0);
+}
+
+// Diagnostic: a script error that nothing catches. Lua 5.0's luaD_throw (fn 0xDD28B0) calls the panic
+// function and then exit(1) when the state has no error handler ([L + 0x90] = 0), and the game closes
+// with no message of its own (see patch_script_gc). The 7 bytes at the start of that path
+// (mov rax, [rcx + 20h] ; call [rax + 40h]) go to a stub that logs the error first and then runs them.
+constexpr uint32_t kLuaPanicPath = 0xDD28DC;
+std::atomic<int> g_script_panic_state{0};
+
+void log_script_panic(uint8_t* state, int code) {
+    static const char* const kCodes[] = {"no error", "runtime error", "file error", "syntax error", "out of memory",
+                                         "error in the error handler"};
+    const char* kind = code >= 0 && code <= 5 ? kCodes[code] : "unknown error";
+    const char* which = state == script_state(kAiLuaManGlobal, 0x17E8)
+                            ? "the AI scripts"
+                            : (state == script_state(kOtherLuaGlobal, 8) ? "the other script state" : "a script state");
+    uint32_t bytes = 0;
+    const bool have_bytes = script_bytes(state, &bytes);
+    char message[160] = {};
+    if (code == 1) {
+        // A runtime error leaves its message on top of the stack: TObject {int tt; Value} at L->top - 16,
+        // a string (tt 4) is a TString with the length at +0x10 and the characters at +0x18.
+        __try {
+            const uint8_t* top = *reinterpret_cast<uint8_t* const*>(state + 0x10);
+            if (*reinterpret_cast<const int*>(top - 0x10) == 4) {
+                const uint8_t* text = *reinterpret_cast<uint8_t* const*>(top - 0x08);
+                const size_t length = *reinterpret_cast<const size_t*>(text + 0x10);
+                const size_t n = length < sizeof(message) - 1 ? length : sizeof(message) - 1;
+                std::memcpy(message, text + 0x18, n);
+                for (size_t i = 0; i < n; ++i) {
+                    if (message[i] < 0x20) {
+                        message[i] = ' ';
+                    }
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            message[0] = 0;
+        }
+    }
+    char in_use[48] = "unknown";
+    if (have_bytes) {
+        std::snprintf(in_use, sizeof(in_use), "%.2f MB", bytes / 1048576.0);
+    }
+    LOG_ERROR("SCRIPT: %s hit an error that nothing catches (%s, Lua error %d); the game closes itself now "
+              "(script memory in use: %s)%s%s",
+              which, kind, code, in_use, message[0] ? ": " : "", message);
+}
+
+bool patch_script_panic_log() {
+    static constexpr uint8_t kPanic[7] = {0x48, 0x8B, 0x41, 0x20, 0xFF, 0x50, 0x40};
+    uint8_t* site = image_rva(kLuaPanicPath);
+    if (std::memcmp(site, kPanic, sizeof(kPanic)) != 0) {
+        LOG_ERROR("Script error path at 0x%08X does not match this build", kLuaPanicPath);
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the script error stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    CaveEmitter e{page};
+    // rsp is 0 mod 16 here (luaD_throw's own frame); two pushes and 20h of shadow space keep it so.
+    // rcx = L and edx = the error code are the logger's arguments and are needed again afterwards.
+    e.b(0x51);                                          // push rcx
+    e.b(0x52);                                          // push rdx
+    for (uint8_t b : {0x48, 0x83, 0xEC, 0x20}) e.b(b);  // sub rsp, 20h
+    e.b(0x48); e.b(0xB8);                               // mov rax, log_script_panic
+    const size_t fn = e.imm64();
+    e.fix64(fn, reinterpret_cast<uint64_t>(&log_script_panic));
+    e.b(0xFF); e.b(0xD0);                               // call rax
+    for (uint8_t b : {0x48, 0x83, 0xC4, 0x20}) e.b(b);  // add rsp, 20h
+    e.b(0x5A);                                          // pop rdx
+    e.b(0x59);                                          // pop rcx
+    for (uint8_t b : kPanic) e.b(b);                    // the original instructions (G(L)->panic(L))
+    e.b(0xE9);                                          // jmp back (exit(1))
+    const size_t back = e.imm32();
+    e.fix32(back, site + sizeof(kPanic));
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        LOG_ERROR("Could not protect the script error stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    uint8_t patch[sizeof(kPanic)];
+    std::memset(patch, 0x90, sizeof(patch));
+    patch[0] = 0xE9;
+    const auto rel = static_cast<int32_t>(page - (site + 5));
+    std::memcpy(patch + 1, &rel, 4);
+    if (!write_code(site, patch, sizeof(patch))) {
+        LOG_ERROR("Could not patch the script error path");
+        return false;
+    }
+    LOG_INFO("Script errors that close the game are logged (SCRIPT: lines)");
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -2761,6 +3016,16 @@ void try_delayed_patches() {
     if (g_frame_const_state.compare_exchange_strong(expected, 1)) {
         const bool ok = patch_frame_constants();
         g_frame_const_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_script_gc_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_script_memory.load(std::memory_order_relaxed) == 0 || patch_script_gc();
+        g_script_gc_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_script_panic_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_script_panic_log();
+        g_script_panic_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_trace_state.compare_exchange_strong(expected, 1)) {
@@ -2875,6 +3140,7 @@ void hook_sim(void* step, float frame_time) {
         LOG_INFO("Simulation step: incoming=%.9f corrected=%.9f target=%u variable=%d", frame_time, corrected,
                  g_target_fps.load(), g_variable_dt.load());
     }
+    sample_script_memory();
     g_sim(step, corrected);
 }
 
@@ -3388,6 +3654,16 @@ void describe_flipper(char* out, unsigned size) {
                   mode, static_cast<unsigned long long>(g_menu_suppressed.load(std::memory_order_relaxed)));
 }
 
+void describe_heartbeat(char* out, unsigned size) {
+    char flipper[192];
+    describe_flipper(flipper, sizeof(flipper));
+    char ai[48];
+    char other[48];
+    take_script_memory(g_ai_script_memory, ai, sizeof(ai));
+    take_script_memory(g_other_script_memory, other, sizeof(other));
+    std::snprintf(out, size, "%s, script memory MB (low-high) AI %s, other %s", flipper, ai, other);
+}
+
 bool activate_scheduler() {
     const uintptr_t vtable60 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper60_vtable));
     const uintptr_t vtable140 = reinterpret_cast<uintptr_t>(image_rva(kBuild.flipper140_vtable));
@@ -3578,8 +3854,8 @@ bool patches_apply() {
     diag_watchdog_start(
         [] { return g_sim_count.load(std::memory_order_relaxed); },
         [] { return g_frame_dt.load(std::memory_order_relaxed) * 1000.0f; },
-        describe_flipper, flipper_tick);
-    LOG_INFO("DS1 Remastered FPS Unlock v1.6.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
+        describe_heartbeat, flipper_tick);
+    LOG_INFO("DS1 Remastered FPS Unlock v1.7.0 active. Frame cap %u FPS, %s step.", g_target_fps.load(),
              g_variable_dt.load() ? "measured frame time" : "fixed 1/TargetFPS");
     return true;
 }

@@ -140,7 +140,7 @@ DWORD WINAPI watchdog(void*) {
         if (since_heartbeat >= 30) {
             const uint64_t steps = now - heartbeat_base;
             if (steps > 0 || !stalled) {
-                char extra[160] = {};
+                char extra[320] = {};
                 if (g_extra) {
                     g_extra(extra, sizeof(extra));
                 }

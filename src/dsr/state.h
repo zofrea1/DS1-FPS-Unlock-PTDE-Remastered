@@ -23,6 +23,8 @@ inline std::atomic<int> g_fix_jump{1};
 inline std::atomic<int> g_fix_timers{1};
 inline std::atomic<int> g_fix_smoothing{1};
 inline std::atomic<int> g_fix_velocity{1};
+// Script garbage collection at least every 30 / 60 frames (see patch_script_gc). INI FixScriptMemory.
+inline std::atomic<int> g_fix_script_memory{1};
 // 1 = the lock-on camera pans, and the body turns toward the target, at the original Prepare to Die
 // Edition speed (half the Remastered speed). INI LockOnPtdeSpeed (CameraPtdeSpeed is the old name).
 inline std::atomic<int> g_camera_ptde_speed{0};

@@ -59,6 +59,9 @@ struct Settings {
     bool fix_smoothing = true;
     // Velocities derived from one frame's movement times 60: the powered ragdoll and 3D sound (Doppler).
     bool fix_velocity = true;
+    // Script garbage collection at least every 30 (AI) / 60 frames, as at 60 FPS. Without it the AI
+    // script heap can fill at a high frame rate in a crowded area and the game closes itself.
+    bool fix_script_memory = true;
     // Hardware write-watch on character height (implies trace). Diagnostic only.
     bool watch = false;
 };

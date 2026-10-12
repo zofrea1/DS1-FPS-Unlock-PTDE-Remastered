@@ -26,7 +26,7 @@ DWORD WINAPI worker(void*) {
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"DSR-FPS-Unlock.log");
     diag_install(dll_path, L"DSR-FPS-Unlock-crash.dmp");
-    LOG_INFO("DS1 Remastered FPS Unlock v1.6.0");
+    LOG_INFO("DS1 Remastered FPS Unlock v1.7.0");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
@@ -78,8 +78,10 @@ DWORD WINAPI worker(void*) {
     g_fix_timers.store(settings.fix_timers ? 1 : 0, std::memory_order_relaxed);
     g_fix_smoothing.store(settings.fix_smoothing ? 1 : 0, std::memory_order_relaxed);
     g_fix_velocity.store(settings.fix_velocity ? 1 : 0, std::memory_order_relaxed);
-    LOG_INFO("FixTimers: %s, FixSmoothing: %s, FixVelocity: %s", settings.fix_timers ? "true" : "false",
-             settings.fix_smoothing ? "true" : "false", settings.fix_velocity ? "true" : "false");
+    g_fix_script_memory.store(settings.fix_script_memory ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixTimers: %s, FixSmoothing: %s, FixVelocity: %s, FixScriptMemory: %s", settings.fix_timers ? "true" : "false",
+             settings.fix_smoothing ? "true" : "false", settings.fix_velocity ? "true" : "false",
+             settings.fix_script_memory ? "true" : "false");
     if (!patches_apply()) {
         LOG_ERROR("FPS unlock was not installed.");
     } else if (settings.bonfire_unstick) {
