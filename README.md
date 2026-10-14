@@ -6,10 +6,12 @@ High-FPS unlock with gameplay physics fixes for **Dark Souls: Remastered** and *
 
 The mods are proxy DLLs. The game's files on disk are never modified, and each mod has an INI with a switch for every fix so you can compare against the retail behaviour.
 
+Looking for co-op in Prepare to Die Edition? [Prepare to Co-op Edition](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE) plays the whole game with up to three friends and includes this mod.
+
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
-| Release | `v1.6.0-REMASTERED-DX11` | `v1.6.0-PTDE-DX9` |
+| Release | `v1.7.0-REMASTERED-DX11` | `v1.7.0-PTDE-DX9` |
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` (plus `dxvk_d3d9.dll` for the experimental `DXVK`) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
@@ -114,7 +116,7 @@ Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is wel
 
 **Online play: no guarantees, use at your own risk.** The mods change the game's code in memory while it runs. Some fixes also change data the game exchanges with other players (for example the ghost replay data), now matching the native frame rate. FromSoftware's anti-cheat could still treat any modification as cheating, and a ban (including a soft ban) is possible. The authors accept no responsibility for bans, lost progress or anything else that results from using these mods; see also the [LICENSE](LICENSE) (provided "as is", without warranty).
 
-**Prepare to Co-op Edition.** Prepare to Co-op Edition, a co-op mod for Prepare to Die Edition by the same author, is a separate mod with its own page and repository. It is built on this mod and includes it: its `xinput1_3.dll` is this mod plus the co-op, and its `PTDE-FPS-Unlock.ini` has this mod's settings as well as its own. If you have Prepare to Co-op, you have the FPS Unlock; do not install both.
+**Prepare to Co-op Edition.** Prepare to Co-op Edition, a co-op mod for Prepare to Die Edition by the same author, is a separate mod with [its own repository](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE). It is built on this mod and includes it: its `xinput1_3.dll` is this mod plus the co-op, and its `PTDE-FPS-Unlock.ini` has this mod's settings as well as its own. If you have Prepare to Co-op, you have the FPS Unlock; do not install both.
 
 ## Recommended display mode
 
@@ -166,7 +168,7 @@ builds both targets. `build_dsr.bat` and `build_ptde.bat` build one each. `build
 | Dark Souls Remastered (64-bit) | `build\dsr\dinput8.dll` |
 | Dark Souls: Prepare to Die Edition (32-bit) | `build\ptde\xinput1_3.dll` |
 
-The PTDE sources are listed in `src\ptde\sources.txt`. Another mod can be built into the same `xinput1_3.dll` on top of this one: it compiles that list with its own sources and its own `ptde_extension()` (see `src\ptde\extension.h`) instead of `extension_none.cpp`, and keeps its settings in `PTDE-FPS-Unlock.ini` (`settings_read_keys`). Prepare to Co-op Edition is built that way.
+The PTDE sources are listed in `src\ptde\sources.txt`. Another mod can be built into the same `xinput1_3.dll` on top of this one: it compiles that list with its own sources and its own `ptde_extension()` (see `src\ptde\extension.h`) instead of `extension_none.cpp`, and keeps its settings in `PTDE-FPS-Unlock.ini` (`settings_read_keys`). [Prepare to Co-op Edition](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE) is built that way.
 
 ## How it works
 
