@@ -13,12 +13,15 @@
 
 namespace {
 
-// The Steam build stores these in the exe (image base 0x400000, not relocated).
-// Every camera copies them by value: +0x50 is the vertical field of view in radians,
-// +0x54 is the aspect. 43 degrees and 16/9. Writing them here is Vert+: the horizontal
-// view stays the same, and a shorter aspect (a taller screen) gets a wider vertical view.
-constexpr unsigned kAspectRva = 0xDE8484;  // 1.777...
-constexpr unsigned kFovYRva = 0xDE4134;    // 0.75049 rad, about 43 degrees
+// Every perspective the game draws with is built by one function, 0x453720 (image base 0x400000, not
+// relocated): vertical field of view in xmm0, then aspect, near and far on the stack, the matrix to eax
+// (Camera::GetProjection 0x467970 passes camera +0x50, +0x54, +0x58, +0x5C). The screen cameras ask for 16:9.
+// On a taller display those get the display's aspect and a vertical view opened so the horizontal one stays
+// (Vert+), so the world, effects (their shaders take the combined view-projection) and the game's own screen
+// positions (lock-on, health bars) all agree. The cameras' constants (43 degrees 0x11E8134, 16/9 0x11E8484)
+// are not the place: the player camera eases +0x50 toward its camera parameter every frame (0xF02720).
+constexpr uint32_t kPerspective = 0x00453720;
+constexpr uint8_t kPerspectivePrologue[9] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x70};
 constexpr float kVanillaAspect = 16.f / 9.f;
 constexpr float kVanillaFovY = 0.75049156f;
 constexpr float kPi = 3.14159265f;
@@ -116,67 +119,92 @@ float vert_plus_fovy(float aspect) {
     return 2.f * std::atan(t);
 }
 
-bool write_float(void* slot, float value) {
+bool g_proj_hooked = false;
+void* g_persp_orig = nullptr;
+
+void __cdecl adjust_perspective(float* fov, float* aspect) {
+    if (!g_active || !near_f(*aspect, kVanillaAspect, 0.01f)) {
+        return;  // shadow and light cameras use other aspects
+    }
+    const float f = *fov;
+    if (!(f > 0.05f && f < 3.0f)) {
+        return;
+    }
+    *fov = 2.f * std::atan(std::tan(f * 0.5f) * kVanillaAspect / g_aspect);
+    *aspect = g_aspect;
+}
+
+// The game's caller keeps nothing in the xmm registers across this call (0x453720 clobbers xmm0-7 itself), but
+// they are kept anyway; only the field of view in xmm0 and the aspect on the stack change.
+__declspec(naked) void hk_perspective() {
+    __asm {
+        pushfd
+        pushad
+        sub esp, 0x80
+        movdqu [esp], xmm0
+        movdqu [esp + 0x10], xmm1
+        movdqu [esp + 0x20], xmm2
+        movdqu [esp + 0x30], xmm3
+        movdqu [esp + 0x40], xmm4
+        movdqu [esp + 0x50], xmm5
+        movdqu [esp + 0x60], xmm6
+        movdqu [esp + 0x70], xmm7
+        lea eax, [esp + 0xA8]  // the aspect: past the saved xmm (0x80), pushad, pushfd and our return address
+        push eax
+        lea eax, [esp + 4]     // the saved xmm0: the vertical field of view
+        push eax
+        call adjust_perspective
+        add esp, 8
+        movdqu xmm0, [esp]
+        movdqu xmm1, [esp + 0x10]
+        movdqu xmm2, [esp + 0x20]
+        movdqu xmm3, [esp + 0x30]
+        movdqu xmm4, [esp + 0x40]
+        movdqu xmm5, [esp + 0x50]
+        movdqu xmm6, [esp + 0x60]
+        movdqu xmm7, [esp + 0x70]
+        add esp, 0x80
+        popad
+        popfd
+        jmp dword ptr [g_persp_orig]
+    }
+}
+
+// Once, on the game's thread inside CreateDevice/Reset, before anything is drawn with the new size.
+void install_projection_hook() {
+    static bool tried = false;
+    if (tried) {
+        return;
+    }
+    tried = true;
+    auto* site = reinterpret_cast<uint8_t*>(kPerspective);
+    if (std::memcmp(site, kPerspectivePrologue, sizeof(kPerspectivePrologue)) != 0) {
+        LOG_INFO("Aspect: the projection code does not match this build; correcting the draw instead");
+        return;
+    }
+    constexpr size_t kStolen = sizeof(kPerspectivePrologue);
+    auto* tramp = static_cast<uint8_t*>(VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!tramp) {
+        return;
+    }
+    std::memcpy(tramp, site, kStolen);  // push ebp; mov ebp,esp; and esp,-16; sub esp,70h: no relative operands
+    tramp[kStolen] = 0xE9;
+    const int32_t back = static_cast<int32_t>((kPerspective + kStolen) - reinterpret_cast<uintptr_t>(tramp + kStolen + 5));
+    std::memcpy(tramp + kStolen + 1, &back, 4);
+    FlushInstructionCache(GetCurrentProcess(), tramp, 32);
+    g_persp_orig = tramp;
     DWORD old = 0;
-    if (!VirtualProtect(slot, sizeof(float), PAGE_READWRITE, &old)) {
-        return false;
+    if (!VirtualProtect(site, kStolen, PAGE_EXECUTE_READWRITE, &old)) {
+        return;
     }
-    *static_cast<float*>(slot) = value;
+    site[0] = 0xE9;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&hk_perspective) - (kPerspective + 5));
+    std::memcpy(site + 1, &rel, 4);
+    std::memset(site + 5, 0x90, kStolen - 5);
+    FlushInstructionCache(GetCurrentProcess(), site, kStolen);
     DWORD ignored = 0;
-    VirtualProtect(slot, sizeof(float), old, &ignored);
-    return true;
-}
-
-void restore_camera_constants() {
-    auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    if (!base) {
-        return;
-    }
-    float* aspect_slot = reinterpret_cast<float*>(base + kAspectRva);
-    float* fov_slot = reinterpret_cast<float*>(base + kFovYRva);
-    const float cur_a = *aspect_slot;
-    const float cur_f = *fov_slot;
-    if (near_f(cur_a, kVanillaAspect, 0.002f) && near_f(cur_f, kVanillaFovY, 0.002f)) {
-        return;
-    }
-    // Only undo a value this mod wrote. A different number is left for whoever set it.
-    if (cur_a < 1.2f || cur_a > kWiderThan || cur_f < 0.4f || cur_f > 1.4f) {
-        return;
-    }
-    if (!write_float(aspect_slot, kVanillaAspect) || !write_float(fov_slot, kVanillaFovY)) {
-        return;
-    }
-    LOG_INFO("Aspect: restored the 16:9 camera (%.1f deg)", kVanillaFovY * (180.f / kPi));
-}
-
-void write_camera_constants(float aspect) {
-    auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    if (!base) {
-        return;
-    }
-    float* aspect_slot = reinterpret_cast<float*>(base + kAspectRva);
-    float* fov_slot = reinterpret_cast<float*>(base + kFovYRva);
-    const float cur_a = *aspect_slot;
-    const float cur_f = *fov_slot;
-    if (cur_a < 0.5f || cur_a > 4.f || cur_f < 0.2f || cur_f > 2.f) {
-        static bool logged = false;
-        if (!logged) {
-            logged = true;
-            LOG_INFO("Aspect: camera constants look unexpected (%.4f, %.4f); leaving them, correcting the draw instead",
-                     cur_a, cur_f);
-        }
-        return;
-    }
-    const float fov = vert_plus_fovy(aspect);
-    if (near_f(cur_a, aspect, 0.002f) && near_f(cur_f, fov, 0.002f)) {
-        return;
-    }
-    if (!write_float(aspect_slot, aspect) || !write_float(fov_slot, fov)) {
-        LOG_INFO("Aspect: could not write the camera constants");
-        return;
-    }
-    LOG_INFO("Aspect: horizontal view unchanged, vertical FOV %.1f -> %.1f deg (aspect %.4f -> %.4f)",
-             kVanillaFovY * (180.f / kPi), fov * (180.f / kPi), cur_a, aspect);
+    VirtualProtect(site, kStolen, old, &ignored);
+    g_proj_hooked = true;
 }
 
 void cover_window(HWND window) {
@@ -384,7 +412,7 @@ HRESULT WINAPI hook_stretch(IDirect3DDevice9* device, IDirect3DSurface9* src, co
 
 // Same 16:9 perspective test as the shader-constant path. Fixed-function draws use this.
 bool correct_matrix(float* m) {
-    if (!g_active || m[0] < 0.05f || m[5] < 0.05f) {
+    if (!g_active || g_proj_hooked || m[0] < 0.05f || m[5] < 0.05f) {
         return false;
     }
     auto zero = [](float v) { return v < 0.02f && v > -0.02f; };
@@ -458,7 +486,7 @@ constexpr int kSetScissorSlot = 75;
 constexpr int kPresentSlot = 17;
 
 bool correct_upload(const float* data, UINT count, float* out) {
-    if (!g_active || !data || !out || count < 4 || count > 24) {
+    if (!g_active || g_proj_hooked || !data || !out || count < 4 || count > 24) {
         return false;
     }
     std::memcpy(out, data, count * 4 * sizeof(float));
@@ -496,7 +524,6 @@ void aspect_adjust_present(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS*
         if (!g_enabled) {
             g_active = false;
             g_cover = false;
-            restore_camera_constants();
         }
         return;
     }
@@ -535,14 +562,13 @@ void aspect_adjust_present(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS*
         }
         g_active = false;
         g_cover = false;
-        restore_camera_constants();
         return;
     }
 
     g_active = true;
     g_aspect = aspect;
     g_window = pp->hDeviceWindow;
-    write_camera_constants(aspect);
+    install_projection_hook();
 
     static UINT log_w = 0;
     static UINT log_h = 0;
@@ -551,6 +577,10 @@ void aspect_adjust_present(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS*
     if (log_w != target_w || log_h != target_h || log_rw != pp->BackBufferWidth || log_rh != pp->BackBufferHeight) {
         LOG_INFO("Aspect: %s game asked for %ux%u; presenting %ux%u (%.3f)", where, pp->BackBufferWidth,
                  pp->BackBufferHeight, target_w, target_h, aspect);
+        if (g_proj_hooked) {
+            LOG_INFO("Aspect: screen cameras use aspect %.3f; horizontal view unchanged, vertical view %.1f -> %.1f deg "
+                     "(at the default 43 deg)", aspect, kVanillaFovY * (180.f / kPi), vert_plus_fovy(aspect) * (180.f / kPi));
+        }
         log_w = target_w;
         log_h = target_h;
         log_rw = pp->BackBufferWidth;

@@ -63,11 +63,87 @@ void describe_exception(const EXCEPTION_POINTERS* info, char* out, size_t size) 
     }
 }
 
+bool in_this_module(const void* address) {
+    HMODULE module = nullptr, self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&in_this_module), &self);
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCWSTR>(address), &module) &&
+           module && module == self;
+}
+
+// The return address of the faulting function's frame. Our guarded reads keep an EBP frame (they use __try), so
+// this names the code that passed the bad address rather than the read helper. 0 where it cannot be told.
+uintptr_t caller_of(const CONTEXT* ctx) {
+#if defined(_M_IX86)
+    const NT_TIB* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+    const uintptr_t ebp = ctx->Ebp;
+    const uintptr_t low = reinterpret_cast<uintptr_t>(tib->StackLimit);
+    const uintptr_t high = reinterpret_cast<uintptr_t>(tib->StackBase);
+    if (ebp < low || ebp + 8 > high || (ebp & 3) != 0) return 0;
+    return reinterpret_cast<const uintptr_t*>(ebp)[1];
+#else
+    (void)ctx;
+    return 0;
+#endif
+}
+
+// Faults inside this DLL are counted per place (fault address and caller): each new place is logged, and again
+// at 10, 100, 1000 and 10000. The game's own faults keep the old limit of 25 lines.
+struct FaultSite {
+    uintptr_t ip = 0, caller = 0;
+    long count = 0;
+};
+constexpr int kMaxSites = 128;
+FaultSite g_sites[kMaxSites];
+std::atomic<int> g_site_count{0};
+std::atomic<int> g_site_lock{0};
+std::atomic<bool> g_sites_full{false};
+
 LONG CALLBACK vectored_handler(EXCEPTION_POINTERS* info) {
     if (!info || !info->ExceptionRecord || !fatal_class(info->ExceptionRecord->ExceptionCode)) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     // The watchpoint tooling raises single-step traps on purpose; those are not in this class.
+    const void* ip = info->ExceptionRecord->ExceptionAddress;
+    if (in_this_module(ip) && info->ContextRecord) {
+        const uintptr_t caller = caller_of(info->ContextRecord);
+        long count = 0;
+        bool known = false;
+        while (g_site_lock.exchange(1) != 0) {
+        }
+        const int n = g_site_count.load();
+        for (int i = 0; i < n; ++i) {
+            if (g_sites[i].ip == reinterpret_cast<uintptr_t>(ip) && g_sites[i].caller == caller) {
+                count = ++g_sites[i].count;
+                known = true;
+                break;
+            }
+        }
+        bool full_now = false;
+        if (!known && n < kMaxSites) {
+            g_sites[n] = FaultSite{reinterpret_cast<uintptr_t>(ip), caller, 1};
+            g_site_count.store(n + 1);
+            count = 1;
+        } else if (!known) {
+            full_now = !g_sites_full.exchange(true);
+        }
+        g_site_lock.store(0);
+        if (full_now) {
+            // this one is still logged; later new places are not
+            LOG_INFO("First-chance faults: %d places in this DLL are counted; new places from here on are not logged",
+                     kMaxSites);
+            count = 1;
+        }
+        if (count == 1 || count == 10 || count == 100 || count == 1000 || count == 10000) {
+            char text[512], from[128] = "unknown";
+            describe_exception(info, text, sizeof(text));
+            if (caller) describe_address(reinterpret_cast<const void*>(caller), from, sizeof(from));
+            LOG_INFO("First-chance %s, called from %s (%ld time(s) here; the game may handle this itself)", text,
+                     from, count);
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     if (g_logged.fetch_add(1) >= 25) {
         return EXCEPTION_CONTINUE_SEARCH;
     }

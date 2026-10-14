@@ -3,8 +3,10 @@
 #include "deep.h"
 #include "diag.h"
 #include "dsfix.h"
+#include "extension.h"
 #include "frame.h"
 #include "gauge.h"
+#include "intro.h"
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
@@ -34,7 +36,9 @@ DWORD WINAPI worker(void*) {
     log_init(dll_path, L"PTDE-FPS-Unlock.log");
     xinput_log_target();
     diag_install(dll_path, L"PTDE-FPS-Unlock-crash.dmp");
-    LOG_INFO("DS1 PTDE FPS Unlock v1.7.0");
+    LOG_INFO("DS1 PTDE FPS Unlock v%s", ptde_fps_unlock_version());
+    const PtdeExtension* ext = ptde_extension();
+    if (ext) LOG_INFO("Built together with %s", ext->name);
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
@@ -51,6 +55,10 @@ DWORD WINAPI worker(void*) {
     LOG_INFO("DXVK: %s", settings.dxvk ? "true" : "false");
     LOG_INFO("FixAspect: %s", settings.fix_aspect ? "true" : "false");
 
+    // A mod built into this DLL (see extension.h) and the start-up logos do not depend on the FPS unlock.
+    if (ext && ext->start) ext->start(g_self);
+    intro_install(settings.skip_intro);
+
     wchar_t game_dir[MAX_PATH];
     lstrcpynW(game_dir, exe_path, MAX_PATH);
     wchar_t* slash = wcsrchr(game_dir, L'\\');
@@ -61,6 +69,9 @@ DWORD WINAPI worker(void*) {
     if (dsfix.present) {
         LOG_INFO("DSfix detected (DSfix.ini %s). unlockFPS=%d FPSlimit=%d", dsfix.ini_found ? "found" : "not found",
                  dsfix.unlock_fps ? 1 : 0, dsfix.fps_limit);
+        if (dsfix.skip_intro && settings.skip_intro) {
+            LOG_INFO("DSfix's skipIntro is on too: it only acts while the logos show, and with SkipIntro they never do");
+        }
         if (dsfix.unlock_fps && settings.fps_unlock) {
             LOG_ERROR("DSfix has its own FPS unlock enabled. Set unlockFPS 0 in DSfix.ini while this mod drives "
                       "the frame rate, otherwise the two fight over the same timestep.");
@@ -92,6 +103,8 @@ DWORD WINAPI worker(void*) {
 
 }  // namespace
 
+const char* ptde_fps_unlock_version() { return "1.7.0"; }
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = instance;
@@ -103,6 +116,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         }
         // Before the game calls Direct3DCreate9: wraps it to override the fullscreen refresh rate.
         d3d_install_early(instance);
+        if (const PtdeExtension* ext = ptde_extension()) {
+            if (ext->attach) ext->attach(instance);
+        }
         HANDLE thread = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
         if (thread) {
             CloseHandle(thread);

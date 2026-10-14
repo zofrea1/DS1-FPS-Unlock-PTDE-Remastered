@@ -2,6 +2,7 @@
 
 #include "aspect.h"
 #include "dxvk.h"
+#include "extension.h"
 #include "log.h"
 #include "settings.h"
 
@@ -188,9 +189,13 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
     if (aspect_is_enabled()) {
         aspect_adjust_present(d3d, adapter, pp, "CreateDevice");
     }
-    adjust_present_parameters(d3d, adapter, pp, "CreateDevice");
+    if (settings().fps_unlock) adjust_present_parameters(d3d, adapter, pp, "CreateDevice");
     const HRESULT hr = g_create_device(d3d, adapter, type, window, flags, pp, out);
     if (SUCCEEDED(hr) && out && *out) {
+        const PtdeExtension* ext = ptde_extension();
+        if (ext && ext->device_created) ext->device_created(*out);
+    }
+    if (SUCCEEDED(hr) && out && *out && settings().fps_unlock) {
         void* original = patch_slot(*out, kResetSlot, reinterpret_cast<void*>(&hook_reset));
         if (original && !g_reset) {
             g_reset = reinterpret_cast<ResetFn>(original);
@@ -240,7 +245,8 @@ IDirect3D9* WINAPI hook_direct3d_create9(UINT sdk_version) {
         route_to_dxvk();
     }
     IDirect3D9* d3d = g_create(sdk_version);
-    if (d3d && settings().fps_unlock) {
+    const PtdeExtension* ext = ptde_extension();
+    if (d3d && (settings().fps_unlock || (ext && ext->wants_device && ext->wants_device()))) {
         void* original = patch_slot(d3d, kCreateDeviceSlot, reinterpret_cast<void*>(&hook_create_device));
         if (original && !g_create_device) {
             g_create_device = reinterpret_cast<CreateDeviceFn>(original);

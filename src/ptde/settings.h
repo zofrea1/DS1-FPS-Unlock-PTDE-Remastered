@@ -1,5 +1,8 @@
 #pragma once
 
+#include <functional>
+#include <string>
+
 // MaxFPS range. A value outside it is clamped to the nearest end.
 constexpr int kMinMaxFps = 10;
 constexpr int kMaxMaxFps = 1000;
@@ -72,9 +75,20 @@ struct Settings {
     // view stays the same and the extra height shows more of the world. A 16:9 display
     // is left alone. Missing key keeps this on.
     bool fix_aspect = true;
+    // Skip the autosave notice and the Bandai Namco, FromSoftware and Havok logos at start-up (see intro.h).
+    // Independent of FPSUnlock.
+    bool skip_intro = false;
     // Log a per-command summary for this many seconds after start (0 = off).
     int survey_seconds = 0;
 };
 
 // Reads PTDE-FPS-Unlock.ini from the same directory as the DLL.
 Settings settings_load(const wchar_t* dll_path);
+
+// Every key of PTDE-FPS-Unlock.ini in file order (key in lower case, value trimmed, # comments cut; section
+// headers carry no meaning). A mod built into this DLL keeps its own keys in the same file (see extension.h).
+// false when the file cannot be read.
+bool settings_read_keys(const wchar_t* dll_path,
+                        const std::function<void(const std::string& key, const std::string& value)>& fn);
+// true for 1, true, yes or on (any case).
+bool settings_parse_bool(const std::string& value);

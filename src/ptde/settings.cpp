@@ -52,27 +52,27 @@ int parse_max_fps(const std::string& v, int fallback) {
     return static_cast<int>(clamped);
 }
 
-}  // namespace
-
-Settings settings_load(const wchar_t* dll_path) {
-    Settings s;
+void ini_path(const wchar_t* dll_path, wchar_t* full, size_t size) {
     wchar_t path[MAX_PATH];
     lstrcpynW(path, dll_path, MAX_PATH);
     wchar_t* slash = wcsrchr(path, L'\\');
     if (slash) {
         slash[1] = 0;
     }
+    _snwprintf_s(full, size, _TRUNCATE, L"%sPTDE-FPS-Unlock.ini", path);
+}
+
+}  // namespace
+
+bool settings_parse_bool(const std::string& value) { return parse_bool(value); }
+
+bool settings_read_keys(const wchar_t* dll_path,
+                        const std::function<void(const std::string& key, const std::string& value)>& fn) {
     wchar_t full[MAX_PATH];
-    _snwprintf_s(full, _TRUNCATE, L"%sPTDE-FPS-Unlock.ini", path);
-
-    char narrow[MAX_PATH];
-    WideCharToMultiByte(CP_UTF8, 0, full, -1, narrow, MAX_PATH, nullptr, nullptr);
-    LOG_INFO("Settings::read - reading INI from %s", narrow);
-
+    ini_path(dll_path, full, MAX_PATH);
     std::ifstream in(full);
     if (!in) {
-        LOG_ERROR("Settings::read - INI read failed, using defaults");
-        return s;
+        return false;
     }
     std::string line;
     while (std::getline(in, line)) {
@@ -84,8 +84,20 @@ Settings settings_load(const wchar_t* dll_path) {
         if (eq == std::string::npos) {
             continue;
         }
-        const std::string key = lower(trim(line.substr(0, eq)));
-        const std::string val = trim(line.substr(eq + 1));
+        fn(lower(trim(line.substr(0, eq))), trim(line.substr(eq + 1)));
+    }
+    return true;
+}
+
+Settings settings_load(const wchar_t* dll_path) {
+    Settings s;
+    wchar_t full[MAX_PATH];
+    ini_path(dll_path, full, MAX_PATH);
+    char narrow[MAX_PATH];
+    WideCharToMultiByte(CP_UTF8, 0, full, -1, narrow, MAX_PATH, nullptr, nullptr);
+    LOG_INFO("Settings::read - reading INI from %s", narrow);
+
+    const bool read = settings_read_keys(dll_path, [&s](const std::string& key, const std::string& val) {
         if (key == "fpsunlock") {
             s.fps_unlock = parse_bool(val);
         } else if (key == "maxfps" || key == "targetfps") {
@@ -146,9 +158,12 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_controller = parse_bool(val);
         } else if (key == "fixaspect") {
             s.fix_aspect = parse_bool(val);
+        } else if (key == "skipintro") {
+            s.skip_intro = parse_bool(val);
         } else if (key == "survey") {
             s.survey_seconds = std::atoi(val.c_str());
         }
-    }
+    });
+    if (!read) LOG_ERROR("Settings::read - INI read failed, using defaults");
     return s;
 }

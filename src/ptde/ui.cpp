@@ -216,7 +216,20 @@ constexpr uint32_t kPlayerStatusPtr = 0x0137E204;  // pointer; +0xA28 is the cha
 constexpr uint32_t kAnimPtr = 0x012E29E8;       // pointer -> pointer -> +0xFC is the animation id
 constexpr uint32_t kMenuFlags[] = {0x40, 0x4C, 0x78, 0x84, 0x80, 0x50, 0xAC, 0x60};
 
+// The chain is read every 200 ms and holds stale values while characters are rebuilt (joining another world,
+// a map load). A read through such a value is caught, but it is still a first-chance access violation, and the
+// crash log keeps only the first 25 of those: these filled it within seconds of joining. Committed, readable
+// memory only.
+bool readable(uint32_t address, size_t size) {
+    MEMORY_BASIC_INFORMATION info{};
+    if (address < 0x10000 || !VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info))) return false;
+    if (info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return false;
+    const uintptr_t end = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
+    return address + size <= end;
+}
+
 bool read_u32(uint32_t address, uint32_t* out) {
+    if (!readable(address, 4)) return false;
     __try {
         *out = *reinterpret_cast<const uint32_t*>(address);
         return true;
@@ -226,6 +239,7 @@ bool read_u32(uint32_t address, uint32_t* out) {
 }
 
 bool read_u8(uint32_t address, uint8_t* out) {
+    if (!readable(address, 1)) return false;
     __try {
         *out = *reinterpret_cast<const uint8_t*>(address);
         return true;

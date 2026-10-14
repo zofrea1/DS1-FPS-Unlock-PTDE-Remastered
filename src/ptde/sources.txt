@@ -1,0 +1,31 @@
+# The PTDE mod's sources (xinput1_3.dll), relative to the repository root. build_ptde.bat compiles these plus
+# src\ptde\extension_none.cpp; a build that bundles another mod (see src\ptde\extension.h) compiles these plus
+# its own sources, so new files only need adding here.
+src\ptde\dllmain.cpp
+src\ptde\xinput_proxy.cpp
+src\ptde\controller.cpp
+src\common\log.cpp
+src\common\diag.cpp
+src\ptde\settings.cpp
+src\ptde\dsfix.cpp
+src\ptde\patches.cpp
+src\ptde\frame.cpp
+src\ptde\window.cpp
+src\ptde\present.cpp
+src\ptde\d3d.cpp
+src\ptde\aspect.cpp
+src\ptde\profile.cpp
+src\ptde\trace.cpp
+src\ptde\watch.cpp
+src\ptde\fixes.cpp
+src\ptde\snap.cpp
+src\ptde\camera.cpp
+src\ptde\deep.cpp
+src\ptde\ui.cpp
+src\ptde\gauge.cpp
+src\ptde\turn.cpp
+src\ptde\ghost.cpp
+src\ptde\sfx.cpp
+src\ptde\script.cpp
+src\ptde\dxvk.cpp
+src\ptde\intro.cpp

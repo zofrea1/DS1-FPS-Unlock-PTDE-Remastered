@@ -57,6 +57,8 @@ DsfixInfo dsfix_probe(const wchar_t* game_dir) {
                 info.fps_limit = std::atoi(value.c_str());
             } else if (key == "borderlessFullscreen") {
                 info.borderless = std::atoi(value.c_str()) != 0;
+            } else if (key == "skipIntro") {
+                info.skip_intro = std::atoi(value.c_str()) != 0;
             }
         }
     }

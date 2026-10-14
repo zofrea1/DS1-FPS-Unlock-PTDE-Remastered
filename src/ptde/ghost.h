@@ -20,6 +20,8 @@
 //  * Moving: a replay's body is moved straight by a tenth of the way to the next sample every frame (the copy
 //    the replay's move function keeps at +0x70). That step is scaled by dt * 30 too, so a ghost moves evenly
 //    over the whole 1/3 s instead of covering the distance in its first ten frames and then standing still.
+//  * Gait: another player's character walks, runs or sprints by its step toward the last received position
+//    times 30 (m/s at 30 FPS). The factor is 1 / dt instead, so a running player is not shown walking.
 bool ghost_install();
 
 // Called on the render thread at every frame boundary with the frame time in seconds.
