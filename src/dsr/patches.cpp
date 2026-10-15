@@ -655,19 +655,35 @@ constexpr uint32_t kGaugeK = 0x6664D6;
 float* g_gauge_cave = nullptr;
 std::atomic<int> g_gauge_state{0};
 
-// HUD gauge follower (fn 0x6692B0, this in rcx). The element's displayed value moves toward its
-// target by a fixed step per call: [+0x70] when rising, [+0x68] and [+0x6C] when falling (two
-// values); a gap smaller than the step snaps. The player's health bar and its trailing ghost fill
-// through this, so an Estus heal was over in a few frames at a high frame rate. The three steps are
+// HUD gauge follower (fn 0x6692B0, this in rcx, FrpgMenuDlgObjSmoothGauge). The element's displayed
+// value ([+0x60], a fraction of the bar) moves toward its target ([+0x40]) by a fixed step per call:
+// [+0x70] when rising, [+0x68] when falling ([+0x6C] for the second value, [+0x64] toward [+0x44]);
+// a gap smaller than the step snaps. The player's health bar and its trailing ghost fill through
+// this, so an Estus heal was over in a few frames at a high frame rate. The three steps are
 // multiplied by frame time * 60 for the duration of each call and put back afterwards.
+//
+// The step is also the game's threshold: a change no bigger than one step is shown at once, and a
+// bigger one marks the gauge as moving ([+0x74]), holds the trailing value for the gauge's delay
+// ([+0x80], counted in real time by its update, 0x668EB0) and only then lets it fall ([+0x75]).
+// That is the yellow part of the stamina bar after a roll or an attack (fall step 0.012, delay
+// 1.5 s). A sprint takes one point every 0.1 s, less than 0.012 of a bar of 84 points or more, so
+// it never left one. A scaled step made the threshold smaller too: at a high frame rate each sprint
+// point started the hold, and the yellow part grew for 1.5 s, was wiped away and came back. So a
+// step is scaled only when the gauge is already moving and the gap is bigger than the step: the
+// threshold stays the original one and only the movement follows the frame time.
 constexpr uint32_t kGaugeFollowRva = 0x6692B0;
 using GaugeFollowFn = void (*)(void* gauge);
 GaugeFollowFn g_gauge_follow = nullptr;
 std::atomic<int> g_gauge_follow_state{0};
 
+float gauge_step(float step, float gap, bool moving, float n) {
+    return moving && gap > step ? step * n : step;
+}
+
 void hook_gauge_follow(void* gauge) {
-    // The follower's step sizes in Remastered (rise 0.048 / 0.038, from the logged values) are exactly
-    // half of the original game's (0.096 / 0.076), so the designers already adjusted them for 60 FPS.
+    // The follower's step sizes in Remastered (rise 0.048 / 0.038, from the logged values) are the
+    // original game's (its HUD sets the same 0.048 and 0.038), so at 60 FPS the bars move twice as
+    // fast as in Prepare to Die Edition. The mod keeps Remastered's speed (n = 1 at 60 FPS).
     float n = g_frame_dt.load(std::memory_order_relaxed) * 60.0f;
     if (n < 0.02f) {
         n = 0.02f;
@@ -696,9 +712,12 @@ void hook_gauge_follow(void* gauge) {
             LOG_INFO("Gauge follower steps: fall %.5f / %.5f, rise %.5f (scaled by %.3f)", saved1, saved2, saved3, n);
         }
     }
-    *fall1 = saved1 * n;
-    *fall2 = saved2 * n;
-    *rise = saved3 * n;
+    const auto value = [steps](int off) { return *reinterpret_cast<const float*>(steps + off); };
+    const bool moving = steps[0x75] != 0;
+    const float gap = std::fabs(value(0x60) - value(0x40));
+    *fall1 = gauge_step(saved1, gap, moving, n);
+    *fall2 = gauge_step(saved2, std::fabs(value(0x64) - value(0x44)), moving, n);
+    *rise = gauge_step(saved3, gap, moving, n);
     float before[2] = {0.0f, 0.0f};
     const bool trace = g_input_log.load(std::memory_order_relaxed) != 0;
     if (trace) {
