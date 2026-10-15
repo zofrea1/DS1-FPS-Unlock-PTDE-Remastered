@@ -103,7 +103,7 @@ DWORD WINAPI worker(void*) {
 
 }  // namespace
 
-const char* ptde_fps_unlock_version() { return "1.7.0"; }
+const char* ptde_fps_unlock_version() { return "1.8.0"; }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {

@@ -26,7 +26,7 @@ DWORD WINAPI worker(void*) {
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"DSR-FPS-Unlock.log");
     diag_install(dll_path, L"DSR-FPS-Unlock-crash.dmp");
-    LOG_INFO("DS1 Remastered FPS Unlock v1.7.0");
+    LOG_INFO("DS1 Remastered FPS Unlock v1.8.0");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set VERSION=1.7.0
+set VERSION=1.8.0
 if exist build\release rmdir /s /q build\release
 mkdir build\release\remastered build\release\ptde
 copy /y build\dsr\dinput8.dll build\release\remastered >nul

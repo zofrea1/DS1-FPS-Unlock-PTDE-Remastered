@@ -6,3 +6,5 @@ build/
 *.lib
 *.log
 *.user
+# Nexus Mods page texts, kept locally
+nexus/
