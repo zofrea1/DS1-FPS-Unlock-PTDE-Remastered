@@ -391,6 +391,22 @@ float advance_frame_dt() {
     return dt;
 }
 
+// Airborne momentum damp over a frame of dt (see patch_decay): Remastered's 0.975 per 1/60 s, or the
+// original game's 0.95 per 1/30 s with AirDampingPtde.
+float air_damp_factor(double dt) {
+    if (g_air_damping_ptde.load(std::memory_order_relaxed) != 0) {
+        return static_cast<float>(std::exp(std::log(0.95) * dt * 30.0));
+    }
+    return static_cast<float>(std::exp(std::log(0.975) * dt * 60.0));
+}
+
+// Slide friction over a frame of dt (see patch_slide): 0.65 per 1/60 s as Remastered applies it, or per
+// 1/30 s as the original game did with SlideFrictionPtde.
+float slide_friction_factor(double dt) {
+    const double rate = g_slide_ptde.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+    return static_cast<float>(std::exp(std::log(0.65) * dt * rate));
+}
+
 // Pushes the frame time into every cave the game reads.
 void apply_frame_step(float dt) {
     const double scale = static_cast<double>(dt) * 60.0;
@@ -398,13 +414,13 @@ void apply_frame_step(float dt) {
         *g_havok_cell = static_cast<float>(scale);
     }
     if (g_decay_cave) {
-        *g_decay_cave = static_cast<float>(std::exp(std::log(0.975) * scale));
+        *g_decay_cave = air_damp_factor(dt);
     }
     if (g_grav_cave) {
         *g_grav_cave = static_cast<float>(0.5 * scale);
     }
     if (g_friction_cave) {
-        *g_friction_cave = static_cast<float>(std::exp(std::log(0.65) * scale));
+        *g_friction_cave = slide_friction_factor(dt);
     }
     if (g_ghost_units) {
         *g_ghost_units = static_cast<int32_t>(std::lround(scale * 65536.0));
@@ -1074,10 +1090,14 @@ bool patch_swirl() {
 // 1/60 s while stuck, 1.2 per 1/60 s while moving. (Earlier builds gave the test 20% of slack and a
 // recovery base of 1.5 at 90 FPS and above; that made a character that had grazed a small step
 // able to climb it after a few seconds of jitter, which retail does not.)
+// Remastered kept the original game's 0.8 and 1.2 per frame, so it slows down and recovers twice as fast
+// as the original; GrazePtde applies them per 1/30 s as the original did. The test itself is the same in
+// both games.
 void write_speed_factors(float dt) {
     const float target = static_cast<float>(g_target_fps.load(std::memory_order_relaxed));
     const float leniency = 1.0f;
     const float recover_base = 1.2f;
+    const float rate = g_graze_ptde.load(std::memory_order_relaxed) != 0 ? 30.0f : 60.0f;
     if (dt < 1.0f / 480.0f) {
         dt = 1.0f / 480.0f;
     }
@@ -1085,8 +1105,8 @@ void write_speed_factors(float dt) {
         dt = 1.0f / target;
     }
     g_speed_cave[0] = (1.0f / dt) * leniency;
-    g_speed_cave[1] = std::exp(std::log(0.8f) * dt * 60.0f);
-    g_speed_cave[2] = std::exp(std::log(recover_base) * dt * 60.0f);
+    g_speed_cave[1] = std::exp(std::log(0.8f) * dt * rate);
+    g_speed_cave[2] = std::exp(std::log(recover_base) * dt * rate);
 }
 
 float sample_frame_dt(bool* measured) {
@@ -1148,7 +1168,8 @@ bool patch_speed() {
         LOG_ERROR("Could not retarget the sprint graze multiplies");
         return false;
     }
-    LOG_INFO("Sprint graze check retargeted (vanilla multiplier 60, decay 0.8, recover 1.2)");
+    LOG_INFO("Sprint graze check retargeted (vanilla multiplier 60, decay 0.8, recover 1.2, per 1/%d s)",
+             g_graze_ptde.load(std::memory_order_relaxed) != 0 ? 30 : 60);
     return true;
 }
 
@@ -1161,6 +1182,9 @@ bool patch_speed() {
 // 0.975 ^ (60 / TargetFPS): exactly 0.975 at 60 FPS, and the factor raised
 // to TargetFPS equals 0.975 raised to 60 per second, so the wall-time decay
 // matches retail at any target.
+// The original game damps by 0.95 per 1/30 s (its own constant, 0x11E8388) where
+// Remastered's character constructor puts 0.975 in [body+0xf0]: about 2% less decay
+// over a second. AirDampingPtde uses the original's value (see air_damp_factor).
 constexpr uint32_t kDecaySite = 0x2BC24B;
 
 std::atomic<int> g_decay_state{0};
@@ -1182,7 +1206,7 @@ bool patch_decay() {
         return false;
     }
     auto* factor = static_cast<float*>(page);
-    *factor = static_cast<float>(std::exp(std::log(0.975) * 60.0 * static_cast<double>(current_step())));
+    *factor = air_damp_factor(current_step());
 
     // Same length both ways: [rbx + disp32] becomes [rip + disp32] by
     // changing only the ModRM byte (mod=00, reg=xmm3, rm=101), then the
@@ -1205,7 +1229,9 @@ bool patch_decay() {
         return false;
     }
     g_decay_cave = factor;
-    LOG_INFO("Velocity damp retargeted (per-frame factor %.6f instead of 0.975, follows the frame time)", *factor);
+    LOG_INFO("Velocity damp retargeted (per-frame factor %.6f instead of 0.975, follows the frame time, %s)", *factor,
+             g_air_damping_ptde.load(std::memory_order_relaxed) != 0 ? "original game's 0.95 per 1/30 s"
+                                                                     : "Remastered's 0.975 per 1/60 s");
     return true;
 }
 
@@ -1221,8 +1247,14 @@ bool patch_decay() {
 // them), and leftover slide speed dies several times faster once airborne.
 // Point both loads at cave floats holding the same amounts per 1/60 s:
 // 0.5 * 60/TargetFPS and 0.65 ^ (60/TargetFPS).
+// The original game adds 1.0 per 1/30 s (the same gravity per second) but also
+// multiplies by 0.65 per 1/30 s, so Remastered stops leftover slide speed twice as
+// fast. It also zeroes the slide speed below 0.07 u/s (squared 0.005, loaded at
+// 0x2BC0CA) where the original zeroes it below 0.1 (squared 0.01). SlideFrictionPtde
+// uses the original's friction rate and stop speed.
 constexpr uint32_t kSlideGravSite = 0x2BBF5F;
 constexpr uint32_t kSlideFrictionSite = 0x2BC094;
+constexpr uint32_t kSlideStopSite = 0x2BC0CA;  // movss xmm0, [rip+disp] (0.005), compared with the squared speed
 
 std::atomic<int> g_slide_state{0};
 
@@ -1261,7 +1293,7 @@ bool retarget_movss_const(uint32_t rva, float expected, float replacement, const
 bool patch_slide() {
     const double scale = 60.0 * static_cast<double>(current_step());
     const float grav = static_cast<float>(0.5 * scale);
-    const float friction = static_cast<float>(std::exp(std::log(0.65) * scale));
+    const float friction = slide_friction_factor(current_step());
     float* grav_cave = nullptr;
     float* friction_cave = nullptr;
     if (!retarget_movss_const(kSlideGravSite, 0.5f, grav, "slide gravity", &grav_cave) ||
@@ -1270,8 +1302,16 @@ bool patch_slide() {
     }
     g_grav_cave = grav_cave;
     g_friction_cave = friction_cave;
-    LOG_INFO("Ground slide retargeted (gravity %.5f per frame instead of 0.5, friction %.5f instead of 0.65)", grav,
-             friction);
+    const bool ptde = g_slide_ptde.load(std::memory_order_relaxed) != 0;
+    LOG_INFO("Ground slide retargeted (gravity %.5f per frame instead of 0.5, friction %.5f instead of 0.65, %s)", grav,
+             friction, ptde ? "original game's friction rate" : "Remastered's friction rate");
+    if (ptde) {
+        if (retarget_movss_const(kSlideStopSite, 0.005f, 0.01f, "slide stop speed", nullptr)) {
+            LOG_INFO("Slide stop speed is the original game's 0.1 u/s");
+        } else {
+            LOG_ERROR("Slide stop speed stays at Remastered's 0.07 u/s");
+        }
+    }
     return true;
 }
 
@@ -1341,6 +1381,16 @@ struct CaveEmitter {
 // original ("base") value is remembered per physics object and the scaled or full
 // value is written back for the next frame's ground check.
 //
+// The original game has the same 0.4 per frame at 30 FPS, so it lets go of a surface
+// that drops away faster than 0.4 per 1/30 s (12 u/s) where Remastered holds on up to
+// 24 u/s. StepDownPtde uses the original's window (frames per 1/30 s).
+//
+// Step height: Remastered's character constructor (0x2276FBD, an immediate) puts 0.31
+// in [phys+0xE4]; the original game's puts 0.30 in its twin. With StepHeightPtde the
+// cave replaces a 0.31 it finds with 0.30, after the frame's lift and snap, so every
+// later frame lifts and snaps by 0.30. Writing the field leaves the constructor's code
+// untouched.
+//
 // In fn 0x2BC650 the position the body is moved from stays at [rsp+0x30] until the
 // snap is applied: [body+0x10] plus the lift, or [body+0x10] itself when the lift
 // was skipped (0x2BC870, the only call that gets it in between, only reads it). The
@@ -1348,8 +1398,21 @@ struct CaveEmitter {
 // happened.
 constexpr uint32_t kSnapApplySite = 0x2BC7E9;
 constexpr uint32_t kReachOffset = 0x228;
+constexpr uint32_t kStepHeightOffset = 0xE4;
+constexpr float kStepHeight = 0.31f;      // Remastered
+constexpr float kStepHeightPtde = 0.30f;  // the original game
 
 std::atomic<int> g_step_down_state{0};
+
+// The step height bodies get from the constructor with the current settings.
+float default_step_height() {
+    return g_step_height_ptde.load(std::memory_order_relaxed) != 0 ? kStepHeightPtde : kStepHeight;
+}
+
+// Frames of the retail step-down rule: per 1/60 s frame (Remastered) or per 1/30 s frame (StepDownPtde).
+float step_down_rate() {
+    return g_step_down_ptde.load(std::memory_order_relaxed) != 0 ? 30.0f : 60.0f;
+}
 
 struct GroundState {
     std::atomic<const void*> phys{nullptr};
@@ -1389,8 +1452,9 @@ GroundState* ground_slot(const void* phys, ULONGLONG now) {
 // Ladder exit: the same snap is applied unbalanced (lift skipped) at the bottom of
 // a ladder slide, pulling the body down 0.31 per FRAME through the collision
 // floor until it reaches a lower one (2+ units at 240 FPS). Where 0x1F4 is set and
-// the lift was skipped this frame, cap the snap at one retail frame's worth (0.31)
-// per episode, spread over frames by 60*dt.
+// the lift was skipped this frame, cap the snap at one retail frame's worth (the
+// step height) per episode, spread over frames by 60*dt (30*dt with StepDownPtde,
+// one original 1/30 s frame).
 //
 // Whether the lift happened is read from the lifted position itself (see
 // patch_ground_snap), not from the height change over the frame: that change also
@@ -1440,20 +1504,20 @@ float ladder_snap_factor(const void* phys, float dt, bool lifted) {
         slot->applied = 0.0f;
     }
     slot->last_ms = now;
-    constexpr float kStep = 0.31f;
-    constexpr float kCap = 0.31f;
-    float factor = dt * 60.0f;
+    const float step = default_step_height();
+    const float cap = step;
+    float factor = dt * step_down_rate();
     if (factor > 1.0f) {
         factor = 1.0f;
     }
-    const float remaining = kCap - slot->applied;
+    const float remaining = cap - slot->applied;
     if (remaining <= 0.0f) {
         return 0.0f;
     }
-    if (kStep * factor > remaining) {
-        factor = remaining / kStep;
+    if (step * factor > remaining) {
+        factor = remaining / step;
     }
-    slot->applied += kStep * factor;
+    slot->applied += step * factor;
     return factor;
 }
 
@@ -1464,6 +1528,18 @@ float ladder_snap_factor(const void* phys, float dt, bool lifted) {
 void ground_snap_step(const void* phys, float dt, float proxy_y, float start_y, float* snap, float lifted_y) {
     auto* bytes = static_cast<const uint8_t*>(phys);
     const ULONGLONG now = GetTickCount64();
+
+    // StepHeightPtde: this frame was lifted and is snapped with the height it started with; the next one
+    // uses the original game's. Only the constructor's own value is replaced.
+    if (g_step_height_ptde.load(std::memory_order_relaxed) != 0) {
+        auto* height = reinterpret_cast<float*>(const_cast<uint8_t*>(bytes) + kStepHeightOffset);
+        if (*height == kStepHeight) {
+            *height = kStepHeightPtde;
+        }
+    }
+    if (g_fix_step_down.load(std::memory_order_relaxed) == 0) {
+        return;  // the cave is installed for the step height only
+    }
 
     // An exact copy of the start height when the lift was skipped; 0.31 (or 0.8) above it otherwise.
     const bool lifted = lifted_y - start_y > 0.01f;
@@ -1493,8 +1569,9 @@ void ground_snap_step(const void* phys, float dt, float proxy_y, float start_y, 
     if (current != state->written) {
         state->base = current;  // the game (re)wrote it: that is the retail value
     }
-    // Frames per retail 1/60 s frame at this frame time (1 at <= 60 FPS).
-    int window = dt > 0.0f ? static_cast<int>(1.0f / (60.0f * dt) + 0.5f) : 1;
+    // Frames per retail frame at this frame time: per 1/60 s (1 at <= 60 FPS), or per 1/30 s with
+    // StepDownPtde (1 at <= 30 FPS).
+    int window = dt > 0.0f ? static_cast<int>(1.0f / (step_down_rate() * dt) + 0.5f) : 1;
     window = window < 1 ? 1 : (window > 8 ? 8 : window);
     float recent = 0.0f;  // descent over the last (window - 1) frames, incl. the one just done
     for (int i = 0; i < window - 1; ++i) {
@@ -1579,7 +1656,13 @@ bool patch_ground_snap() {
     FlushInstructionCache(GetCurrentProcess(), site, sizeof(patch));
     DWORD ignored = 0;
     VirtualProtect(site, sizeof(patch), old, &ignored);
-    LOG_INFO("Ground snap managed per frame (chained-descent reach scaling, ladder-exit cap)");
+    if (g_fix_step_down.load(std::memory_order_relaxed) != 0) {
+        LOG_INFO("Ground snap managed per frame (chained-descent reach scaling, ladder-exit cap, per 1/%d s)",
+                 static_cast<int>(step_down_rate()));
+    }
+    if (g_step_height_ptde.load(std::memory_order_relaxed) != 0) {
+        LOG_INFO("Step height %.2f (the original game's) instead of %.2f", kStepHeightPtde, kStepHeight);
+    }
     return true;
 }
 
@@ -2982,7 +3065,8 @@ void try_delayed_patches() {
     }
     expected = 0;
     if (g_step_down_state.compare_exchange_strong(expected, 1)) {
-        const bool ok = !g_fix_step_down.load(std::memory_order_relaxed) ||
+        const bool ok = (!g_fix_step_down.load(std::memory_order_relaxed) &&
+                         !g_step_height_ptde.load(std::memory_order_relaxed)) ||
                         patch_ground_snap();
         g_step_down_state.store(ok ? 2 : -1);
     }

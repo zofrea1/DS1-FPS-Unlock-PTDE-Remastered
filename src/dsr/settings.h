@@ -49,6 +49,21 @@ struct Settings {
     // Souls (30 FPS) instead of the snappier Remastered speed (INI LockOnPtdeSpeed, old name
     // CameraPtdeSpeed). Needs FixCamera / FixLockOnTurn.
     bool camera_ptde_speed = false;
+    // Movement values of the original Dark Souls where Remastered differs. Remastered kept several per-frame
+    // values of the 30 FPS game but applies them 60 times a second, and changed two.
+    //   slide_ptde (SlideFrictionPtde): slide momentum off a steep slope fades at 0.65 per 1/30 s and stops
+    //     below 0.1 m/s (Remastered 0.65 per 1/60 s, 0.07 m/s). Needs FixSlide.
+    //   graze_ptde (GrazePtde): the graze slow-down and recovery run at 0.8 / 1.2 per 1/30 s. Needs FixGraze.
+    //   step_down_ptde (StepDownPtde): the ground snap may pull the body down 0.4 per 1/30 s, and the ladder
+    //     exit's one-frame snap is spread over 1/30 s. Needs FixStepDown.
+    //   step_height_ptde (StepHeightPtde): step-up height 0.30 instead of 0.31.
+    //   air_damping_ptde (AirDampingPtde): airborne momentum fades at 0.95 per 1/30 s (Remastered 0.975 per
+    //     1/60 s). Needs FixDamping.
+    bool slide_ptde = true;
+    bool graze_ptde = true;
+    bool step_down_ptde = true;
+    bool step_height_ptde = true;
+    bool air_damping_ptde = true;
     // Lock-on body turn (torso, head and hips toward the target) follows the frame time.
     bool fix_lock_on_turn = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.

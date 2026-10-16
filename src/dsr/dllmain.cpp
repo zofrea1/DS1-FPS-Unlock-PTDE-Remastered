@@ -75,6 +75,15 @@ DWORD WINAPI worker(void*) {
     g_fix_jump.store(settings.fix_jump ? 1 : 0, std::memory_order_relaxed);
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
+    g_slide_ptde.store(settings.slide_ptde ? 1 : 0, std::memory_order_relaxed);
+    g_graze_ptde.store(settings.graze_ptde ? 1 : 0, std::memory_order_relaxed);
+    g_step_down_ptde.store(settings.step_down_ptde ? 1 : 0, std::memory_order_relaxed);
+    g_step_height_ptde.store(settings.step_height_ptde ? 1 : 0, std::memory_order_relaxed);
+    g_air_damping_ptde.store(settings.air_damping_ptde ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("SlideFrictionPtde: %s, GrazePtde: %s, StepDownPtde: %s, StepHeightPtde: %s, AirDampingPtde: %s",
+             settings.slide_ptde ? "true" : "false", settings.graze_ptde ? "true" : "false",
+             settings.step_down_ptde ? "true" : "false", settings.step_height_ptde ? "true" : "false",
+             settings.air_damping_ptde ? "true" : "false");
     g_fix_timers.store(settings.fix_timers ? 1 : 0, std::memory_order_relaxed);
     g_fix_smoothing.store(settings.fix_smoothing ? 1 : 0, std::memory_order_relaxed);
     g_fix_velocity.store(settings.fix_velocity ? 1 : 0, std::memory_order_relaxed);

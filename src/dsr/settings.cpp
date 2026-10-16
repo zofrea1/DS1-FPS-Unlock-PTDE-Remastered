@@ -103,6 +103,16 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_step_down = parse_bool(val);
         } else if (key == "lockonptdespeed" || key == "cameraptdespeed") {
             s.camera_ptde_speed = parse_bool(val);
+        } else if (key == "slidefrictionptde") {
+            s.slide_ptde = parse_bool(val);
+        } else if (key == "grazeptde") {
+            s.graze_ptde = parse_bool(val);
+        } else if (key == "stepdownptde") {
+            s.step_down_ptde = parse_bool(val);
+        } else if (key == "stepheightptde") {
+            s.step_height_ptde = parse_bool(val);
+        } else if (key == "airdampingptde") {
+            s.air_damping_ptde = parse_bool(val);
         } else if (key == "fixcamera") {
             s.fix_camera = parse_bool(val);
         } else if (key == "watch") {
