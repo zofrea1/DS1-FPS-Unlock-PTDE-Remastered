@@ -27,7 +27,7 @@ inline std::atomic<int> g_fix_velocity{1};
 inline std::atomic<int> g_fix_script_memory{1};
 // 1 = the lock-on camera pans, and the body turns toward the target, at the original Prepare to Die
 // Edition speed (half the Remastered speed). INI LockOnPtdeSpeed (CameraPtdeSpeed is the old name).
-inline std::atomic<int> g_camera_ptde_speed{0};
+inline std::atomic<int> g_camera_ptde_speed{1};
 // 1 = movement uses the original game's value where Remastered differs (INI SlideFrictionPtde, GrazePtde,
 // StepDownPtde, StepHeightPtde, AirDampingPtde; see Settings).
 inline std::atomic<int> g_slide_ptde{1};

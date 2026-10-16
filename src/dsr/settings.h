@@ -47,8 +47,9 @@ struct Settings {
     bool fix_camera = true;
     // Pan the lock-on camera, and turn the body toward the target, at the speed of the original Dark
     // Souls (30 FPS) instead of the snappier Remastered speed (INI LockOnPtdeSpeed, old name
-    // CameraPtdeSpeed). Needs FixCamera / FixLockOnTurn.
-    bool camera_ptde_speed = false;
+    // CameraPtdeSpeed). Needs FixCamera / FixLockOnTurn. On when the key is missing (since 1.8.0, like the
+    // movement switches below; before, a missing key kept Remastered's speed).
+    bool camera_ptde_speed = true;
     // Movement values of the original Dark Souls where Remastered differs. Remastered kept several per-frame
     // values of the 30 FPS game but applies them 60 times a second, and changed two.
     //   slide_ptde (SlideFrictionPtde): slide momentum off a steep slope fades at 0.65 per 1/30 s and stops
