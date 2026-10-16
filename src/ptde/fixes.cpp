@@ -2,6 +2,7 @@
 
 #include "log.h"
 #include "camera.h"
+#include "footik.h"
 #include "snap.h"
 #include "turn.h"
 
@@ -203,6 +204,13 @@ void fixes_poll_hotkeys() {
         LOG_INFO("Fix group 'lock-on turn' is now %s", turn_enabled() ? "ON" : "OFF");
     }
     turn_key = turn_down;
+    static bool foot_key = false;
+    const bool foot_down = ctrl && (GetAsyncKeyState('0') & 0x8000) != 0;
+    if (foot_down && !foot_key) {
+        footik_set_enabled(!footik_enabled());
+        LOG_INFO("Fix group 'foot IK' is now %s", footik_enabled() ? "ON" : "OFF");
+    }
+    foot_key = foot_down;
     for (int i = 0; i < 5; ++i) {
         const bool down = ctrl && (GetAsyncKeyState('1' + i) & 0x8000) != 0;
         if (down && !g_keys_down[i]) {

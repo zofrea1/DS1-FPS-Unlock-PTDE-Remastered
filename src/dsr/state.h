@@ -38,6 +38,9 @@ inline std::atomic<int> g_step_down_ptde{1};
 inline std::atomic<int> g_step_height_ptde{1};
 inline std::atomic<int> g_air_damping_ptde{1};
 inline std::atomic<int> g_fix_lock_on_turn{1};
+// Foot IK follows the frame time (INI FixFootIk), at the original game's speed with FootIkPtdeSpeed.
+inline std::atomic<int> g_fix_foot_ik{1};
+inline std::atomic<int> g_foot_ik_ptde_speed{1};
 inline std::atomic<int> g_fix_ghosts{1};
 // 1 = the game's step is the measured frame time (TargetFPS only caps the frame rate);
 // 0 = the game's step is a fixed 1/TargetFPS (the game slows down when the rate is not held).

@@ -124,6 +124,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_step_down = parse_bool(val);
         } else if (key == "fixlockonturn") {
             s.fix_lock_on_turn = parse_bool(val);
+        } else if (key == "fixfootik") {
+            s.fix_foot_ik = parse_bool(val);
         } else if (key == "fixghosts") {
             s.fix_ghosts = parse_bool(val);
         } else if (key == "fixsfxspawnrate") {

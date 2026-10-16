@@ -4,6 +4,7 @@
 #include "deep.h"
 #include "diag.h"
 #include "fixes.h"
+#include "footik.h"
 #include "gauge.h"
 #include "ghost.h"
 #include "log.h"
@@ -213,6 +214,7 @@ void frame_boundary() {
         }
         const double step = g.driver ? static_cast<double>(g.written) : 1.0 / 30.0;
         fixes_update(step);
+        footik_update(step);
         ghost_frame(step);
         script_sample();
     }
@@ -378,6 +380,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_lock_on_turn) {
             turn_install();
+        }
+        if (settings.fix_foot_ik) {
+            footik_install();
         }
         if (settings.fix_ghosts) {
             ghost_install();

@@ -71,6 +71,11 @@ struct Settings {
     bool air_damping_ptde = true;
     // Lock-on body turn (torso, head and hips toward the target) follows the frame time.
     bool fix_lock_on_turn = true;
+    // Foot IK (feet on stairs and slopes, the pelvis lowered to reach them) follows the frame time (INI FixFootIk).
+    bool fix_foot_ik = true;
+    // Foot IK at the original game's speed: Remastered kept its per-frame pelvis and on/off gains, so at 60 FPS
+    // the pelvis followed the feet twice as fast (INI FootIkPtdeSpeed). Needs FixFootIk.
+    bool foot_ik_ptde_speed = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
     bool fix_ghosts = true;
     // Per-frame 1/60 timers and fades: weapon buff glow, ragdoll blend-in, item glow, a load queue countdown.

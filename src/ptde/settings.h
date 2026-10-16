@@ -39,6 +39,8 @@ struct Settings {
     bool fix_camera = true;
     // Lock-on body turn: the torso, head and root bones turn toward the target at the original speed.
     bool fix_lock_on_turn = true;
+    // Foot IK (feet on stairs and slopes, the pelvis lowered to reach them) at the original speed (see footik.h).
+    bool fix_foot_ik = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
     bool fix_ghosts = true;
     // Effect particle spawn intervals below 1/30 s are raised to 1/30 s as effects load (Remastered's rule),

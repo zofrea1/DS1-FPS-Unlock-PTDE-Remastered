@@ -62,6 +62,10 @@ DWORD WINAPI worker(void*) {
     g_camera_ptde_speed.store(settings.camera_ptde_speed ? 1 : 0, std::memory_order_relaxed);
     g_fix_lock_on_turn.store(settings.fix_lock_on_turn ? 1 : 0, std::memory_order_relaxed);
     g_fix_ghosts.store(settings.fix_ghosts ? 1 : 0, std::memory_order_relaxed);
+    g_fix_foot_ik.store(settings.fix_foot_ik ? 1 : 0, std::memory_order_relaxed);
+    g_foot_ik_ptde_speed.store(settings.foot_ik_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixFootIk: %s, FootIkPtdeSpeed: %s", settings.fix_foot_ik ? "true" : "false",
+             settings.foot_ik_ptde_speed ? "true" : "false");
     LOG_INFO("FixCamera: %s, FixLockOnTurn: %s, LockOnPtdeSpeed: %s, FixGhosts: %s", settings.fix_camera ? "true" : "false",
              settings.fix_lock_on_turn ? "true" : "false", settings.camera_ptde_speed ? "true" : "false",
              settings.fix_ghosts ? "true" : "false");

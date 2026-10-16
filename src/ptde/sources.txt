@@ -24,6 +24,7 @@ src\ptde\deep.cpp
 src\ptde\ui.cpp
 src\ptde\gauge.cpp
 src\ptde\turn.cpp
+src\ptde\footik.cpp
 src\ptde\ghost.cpp
 src\ptde\sfx.cpp
 src\ptde\script.cpp

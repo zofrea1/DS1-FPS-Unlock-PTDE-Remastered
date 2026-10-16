@@ -335,6 +335,15 @@ float* g_friction_cave = nullptr;  // slide friction per frame
 int32_t* g_ghost_units = nullptr;  // ghost replay counter units for this frame (see patch_ghosts)
 float* g_ghost_turn = nullptr;     // 4 x (frame time * 60), the per-frame turn of replays and other players
 float* g_frame_cells = nullptr;    // frame constants page (see patch_frame_constants)
+float* g_foot_cells = nullptr;     // foot IK per-frame values (see patch_foot_ik and FootCell)
+
+// Layout of the foot IK cells, read by the patched code.
+enum FootCell : int {
+    kFootPelvisGain = 0,  // the pelvis's 0.2 a frame over this frame's time
+    kFootDecayN = 1,      // exponent for the pelvis decay [chr+0x364] (frames of the tuned rate in this step)
+    kFootOnOff = 2,       // the solver's on/off gain 0.2 over this frame's time
+    kFootRotation = 3,    // the solver's foot rotation gain 0.2 (Havok 2015) over this frame's time
+};
 
 // Layout of the frame constants page. The vector comes first so that it is 16-byte aligned (movaps).
 enum FrameCell : int {
@@ -407,6 +416,21 @@ float slide_friction_factor(double dt) {
     return static_cast<float>(std::exp(std::log(0.65) * dt * rate));
 }
 
+// Foot IK: Remastered applies the original game's per-frame pelvis and on/off gains 60 times a second;
+// FootIkPtdeSpeed applies them per 1/30 s as the original game did. The foot rotation smoothing is Havok
+// 2015's own (the original game's Havok has none) and stays at Remastered's rate.
+void write_foot_cells(float dt) {
+    const double rate = g_foot_ik_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+    const auto clamp_n = [](double n) { return n < 0.01 ? 0.01 : (n > 10.0 ? 10.0 : n); };
+    const double n = clamp_n(static_cast<double>(dt) * rate);
+    const double n_rotation = clamp_n(static_cast<double>(dt) * 60.0);
+    const float gain = static_cast<float>(1.0 - std::pow(0.8, n));
+    g_foot_cells[kFootPelvisGain] = gain;
+    g_foot_cells[kFootDecayN] = static_cast<float>(n);
+    g_foot_cells[kFootOnOff] = gain;
+    g_foot_cells[kFootRotation] = static_cast<float>(1.0 - std::pow(0.8, n_rotation));
+}
+
 // Pushes the frame time into every cave the game reads.
 void apply_frame_step(float dt) {
     const double scale = static_cast<double>(dt) * 60.0;
@@ -432,6 +456,9 @@ void apply_frame_step(float dt) {
     }
     if (g_frame_cells) {
         write_frame_cells(dt);
+    }
+    if (g_foot_cells) {
+        write_foot_cells(dt);
     }
 }
 
@@ -3050,6 +3077,139 @@ bool patch_script_panic_log() {
     return true;
 }
 
+// Foot IK (stairs and slopes). Each leg's feet are placed by Havok's hkaFootPlacementIkSolver: the leg update
+// (0x2A0400) copies the solver input from the leg object (+0xE0, made by 0x8311A0) and calls doFootPlacement
+// (0x831280) at 0x2A0659 with the input in rdx. The character's pelvis is then lowered so both feet reach
+// (0x382500). Several steps are fixed fractions per frame, the original game's values:
+//  * the pelvis offset [chr+0x330] moves toward the legs' vertical error by 0.2 of it a frame (0x382742,
+//    mulss from a rip constant), clamped to +-0.5;
+//  * with no foot on the ground it decays by [chr+0x364] a frame (0.6 from the constructor, 0x382716);
+//  * the solver blends its weight toward on or off by the input's onOffGain [+0x70] (0.2) a call, and turns
+//    the foot toward the ground's slope by [+0x88] (0.2, new in Havok 2015) times that weight.
+// At a high frame rate the pelvis followed every step of a staircase several times as fast, and the body
+// bobbed with each step. The 0.2 gains become 1 - 0.8 ^ n and the decay 0.6 ^ n, n = frame time * 60 (or
+// * 30 with FootIkPtdeSpeed). The solver's other gains are 1.0 (applied in full), so they need nothing.
+constexpr uint32_t kFootSolveCall = 0x2A0659;   // call 0x831280 (rcx solver, rdx input, r8 output, r9 pose)
+constexpr uint32_t kFootSolve = 0x831280;
+constexpr uint32_t kPelvisDecaySite = 0x382716; // movss xmm0, dword ptr [rbx+0x364]
+constexpr uint32_t kPelvisGainSite = 0x382742;  // mulss xmm0, dword ptr [rip+disp] (0.2)
+constexpr uint32_t kHavokGain02 = 0x3E4CCCCD;   // 0.2f
+
+std::atomic<int> g_foot_state{0};
+
+bool patch_foot_ik() {
+    auto* call = image_rva(kFootSolveCall);
+    auto* decay = image_rva(kPelvisDecaySite);
+    auto* gain = image_rva(kPelvisGainSite);
+    int32_t call_rel = 0;
+    std::memcpy(&call_rel, call + 1, 4);
+    static constexpr uint8_t kDecayExpect[8] = {0xF3, 0x0F, 0x10, 0x83, 0x64, 0x03, 0x00, 0x00};
+    if (call[0] != 0xE8 || call + 5 + call_rel != image_rva(kFootSolve) ||
+        std::memcmp(decay, kDecayExpect, sizeof(kDecayExpect)) != 0 || !rip_mulss_is(gain, 0.2f, 0x05)) {
+        LOG_ERROR("Foot IK sites do not match this build");
+        return false;
+    }
+    auto* cells = static_cast<float*>(alloc_near(gain));
+    auto* page = static_cast<uint8_t*>(alloc_near(gain));
+    if (!cells || !page) {
+        LOG_ERROR("Could not allocate the foot IK pages (Win32=%lu)", GetLastError());
+        return false;
+    }
+    g_foot_cells = cells;
+    write_foot_cells(current_step());
+
+    CaveEmitter e{page};
+    // Pelvis decay: xmm0 = [rbx+0x364] ^ n for 0 < value < 1 (x87, so no other register changes).
+    uint8_t* decay_stub = page;
+    for (uint8_t b : {0xF3, 0x0F, 0x10, 0x83, 0x64, 0x03, 0x00, 0x00}) e.b(b);  // movss xmm0,[rbx+0x364]
+    e.b(0x9C);                                                                  // pushfq
+    for (uint8_t b : {0x83, 0xBB, 0x64, 0x03, 0x00, 0x00, 0x00}) e.b(b);        // cmp dword [rbx+0x364],0
+    e.b(0x7E);                                                                  // jle done
+    const size_t jle_at = e.len;
+    e.b(0);
+    for (uint8_t b : {0x81, 0xBB, 0x64, 0x03, 0x00, 0x00}) e.b(b);              // cmp dword [rbx+0x364],1.0f
+    e.d(0x3F800000);
+    e.b(0x7D);                                                                  // jge done
+    const size_t jge_at = e.len;
+    e.b(0);
+    for (uint8_t b : {0x48, 0x83, 0xEC, 0x08}) e.b(b);                          // sub rsp,8
+    e.b(0xD9);                                                                  // fld dword [rip+n]
+    e.b(0x05);
+    e.fix32(e.imm32(), &cells[kFootDecayN]);
+    for (uint8_t b : {0xD9, 0x83, 0x64, 0x03, 0x00, 0x00}) e.b(b);              // fld dword [rbx+0x364]
+    for (uint8_t b : {0xD9, 0xF1,                                               // fyl2x       y = n*log2(v)
+                      0xD9, 0xC0,                                               // fld st(0)
+                      0xD9, 0xFC,                                               // frndint     i, y
+                      0xDC, 0xE9,                                               // fsub st(1),st   i, f
+                      0xD9, 0xC9,                                               // fxch st(1)  f, i
+                      0xD9, 0xF0,                                               // f2xm1
+                      0xD9, 0xE8,                                               // fld1
+                      0xDE, 0xC1,                                               // faddp st(1),st  2^f, i
+                      0xD9, 0xFD,                                               // fscale      2^y, i
+                      0xDD, 0xD9,                                               // fstp st(1)  v^n
+                      0xD9, 0x1C, 0x24,                                         // fstp dword [rsp]
+                      0xF3, 0x0F, 0x10, 0x04, 0x24,                             // movss xmm0,[rsp]
+                      0x48, 0x83, 0xC4, 0x08})                                  // add rsp,8
+        e.b(b);
+    const size_t done = e.len;
+    e.buf[jle_at] = static_cast<uint8_t>(done - (jle_at + 1));
+    e.buf[jge_at] = static_cast<uint8_t>(done - (jge_at + 1));
+    e.b(0x9D);                                                                  // popfq
+    e.b(0xE9);                                                                  // jmp back
+    e.fix32(e.imm32(), decay + 8);
+
+    // Solver call: the input is a local copy made for this call, so its default 0.2 gains are replaced
+    // in place and nothing has to be put back. rax is free at a call.
+    uint8_t* solve_stub = page + e.len;
+    for (uint8_t b : {0x81, 0x7A, 0x70}) e.b(b);                                // cmp dword [rdx+0x70],0.2f
+    e.d(kHavokGain02);
+    e.b(0x75);                                                                  // jne +9
+    e.b(0x09);
+    e.b(0x8B);                                                                  // mov eax,[rip+on/off]
+    e.b(0x05);
+    e.fix32(e.imm32(), &cells[kFootOnOff]);
+    for (uint8_t b : {0x89, 0x42, 0x70}) e.b(b);                                // mov [rdx+0x70],eax
+    for (uint8_t b : {0x81, 0xBA, 0x88, 0x00, 0x00, 0x00}) e.b(b);              // cmp dword [rdx+0x88],0.2f
+    e.d(kHavokGain02);
+    e.b(0x75);                                                                  // jne +12
+    e.b(0x0C);
+    e.b(0x8B);                                                                  // mov eax,[rip+rotation]
+    e.b(0x05);
+    e.fix32(e.imm32(), &cells[kFootRotation]);
+    for (uint8_t b : {0x89, 0x82, 0x88, 0x00, 0x00, 0x00}) e.b(b);              // mov [rdx+0x88],eax
+    for (uint8_t b : {0xFF, 0x25, 0x00, 0x00, 0x00, 0x00}) e.b(b);              // jmp [rip+0]
+    e.q(reinterpret_cast<uint64_t>(image_rva(kFootSolve)));
+
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        LOG_ERROR("Could not make the foot IK stubs executable (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+
+    const intptr_t decay_rel = decay_stub - (decay + 5);
+    const intptr_t solve_rel = solve_stub - (call + 5);
+    if (decay_rel < INT32_MIN || decay_rel > INT32_MAX || solve_rel < INT32_MIN || solve_rel > INT32_MAX) {
+        LOG_ERROR("Foot IK stubs are out of range");
+        return false;
+    }
+    uint8_t decay_jump[8] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+    const auto decay_rel32 = static_cast<int32_t>(decay_rel);
+    std::memcpy(decay_jump + 1, &decay_rel32, 4);
+    uint8_t call_patch[5] = {0xE8, 0, 0, 0, 0};
+    const auto solve_rel32 = static_cast<int32_t>(solve_rel);
+    std::memcpy(call_patch + 1, &solve_rel32, 4);
+    if (!write_disp32(gain + 4, gain + 8, &cells[kFootPelvisGain]) || !write_code(decay, decay_jump, 8) ||
+        !write_code(call, call_patch, 5)) {
+        LOG_ERROR("Could not patch the foot IK");
+        return false;
+    }
+    LOG_INFO("Foot IK follows the frame time (pelvis 0.2 / 0.6 and solver on/off 0.2 per 1/%d s, foot rotation "
+             "0.2 per 1/60 s)",
+             g_foot_ik_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30 : 60);
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -3085,6 +3245,11 @@ void try_delayed_patches() {
     if (g_jump_state.compare_exchange_strong(expected, 1)) {
         const bool ok = !g_fix_jump.load(std::memory_order_relaxed) || patch_jump();
         g_jump_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_foot_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_foot_ik.load(std::memory_order_relaxed) == 0 || patch_foot_ik();
+        g_foot_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_step_down_state.compare_exchange_strong(expected, 1)) {
