@@ -57,11 +57,17 @@ volatile long g_enabled = 1;
 // clamped to 6 u/s horizontally and the slide speed braked, so a steered slide crawled down the slope.
 constexpr uint32_t kReachOffset = 0x208;
 
+// Recent frames kept per body: one 1/30 s frame is 34 frames at 1000 FPS, and the history leaves room
+// for frames shorter than the MaxFPS one. Up to 1.8.0 it held 8 frames, so above about 255 FPS the
+// window covered less than 1/30 s and the snap could pull the body down faster than the retail rate.
+constexpr unsigned kDropFrames = 64;
+
 struct GroundState {
     const void* body = nullptr;
     float base = 0.0f;
     float written = -1.0f;
-    float drop[8] = {};
+    float drop[kDropFrames] = {};     // the snap's pull per recent frame (>= 0), newest at (head - 1)
+    float drop_dt[kDropFrames] = {};  // that frame's time
     unsigned head = 0;
     ULONGLONG last_ms = 0;
 };
@@ -91,7 +97,8 @@ void ground_reach_step(const void* body, float dt, float snap, float lift) {
     if (!state) return;
     const float pull = -snap - lift;  // how far below the moved (unlifted) position the snap puts the body
     state->last_ms = now;
-    state->drop[state->head & 7] = pull > 0.0f ? pull : 0.0f;
+    state->drop[state->head % kDropFrames] = pull > 0.0f ? pull : 0.0f;
+    state->drop_dt[state->head % kDropFrames] = dt;
     state->head++;
 
     auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(static_cast<const uint8_t*>(body)) + kReachOffset);
@@ -100,11 +107,19 @@ void ground_reach_step(const void* body, float dt, float snap, float lift) {
         state->base = current;  // the game (re)wrote it: that is the retail value
     }
     if (!(state->base > 0.0f) || state->base > 4.0f) return;  // not the value we expect
-    int window = dt > 0.0f ? static_cast<int>(1.0f / (30.0f * dt) + 0.5f) : 1;
-    window = window < 1 ? 1 : (window > 8 ? 8 : window);
-    float recent = 0.0f;  // pull over the last (window - 1) frames, including the one just done
-    for (int i = 0; i < window - 1; ++i) {
-        recent += state->drop[(state->head - 1 - i) & 7];
+    // The retail 1/30 s frame ends with the next frame, taken to be as long as this one. The frames already
+    // done that fit in the rest of it, to the nearest frame, count: at a steady rate that is frames per 1/30 s
+    // - 1 (none at 30 FPS or below), and a run of shorter or longer frames counts by their real time.
+    float recent = 0.0f;  // pull over those frames, including the one just done
+    if (dt > 0.0f) {
+        const float span = 1.0f / 30.0f - 0.5f * dt;
+        float covered = 0.0f;
+        for (unsigned i = 0; i < kDropFrames; ++i) {
+            const unsigned at = (state->head - 1 - i) % kDropFrames;
+            covered += state->drop_dt[at];
+            if (covered > span) break;
+            recent += state->drop[at];
+        }
     }
     constexpr float kTolerance = 1.2f;
     float allowed = state->base * kTolerance - recent;

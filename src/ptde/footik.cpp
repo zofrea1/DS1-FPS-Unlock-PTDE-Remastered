@@ -59,6 +59,14 @@ __declspec(naked) void pow_thunk() {
     }
 }
 
+// The pelvis gain and the solver's on/off gain for n = frame time * 30, or the game's 0.2 while the fix is off.
+void write_gains(double n) {
+    const double gain = g_enabled ? 1.0 - std::pow(0.8, n) : 0.2;
+    g_pelvis_gain = gain;
+    const float bits_source = static_cast<float>(gain);
+    std::memcpy(&g_onoff_bits, &bits_source, 4);
+}
+
 bool write_bytes(uint32_t va, const void* bytes, size_t size) {
     DWORD old = 0;
     if (!VirtualProtect(reinterpret_cast<void*>(va), size, PAGE_EXECUTE_READWRITE, &old)) return false;
@@ -147,14 +155,13 @@ void footik_update(double dt) {
     if (!(n > 0.01)) n = 0.01;
     if (n > 8.0) n = 8.0;
     g_n = static_cast<float>(n);
-    const double gain = g_enabled ? 1.0 - std::pow(0.8, n) : 0.2;
-    g_pelvis_gain = gain;
-    const float bits_source = static_cast<float>(gain);
-    std::memcpy(&g_onoff_bits, &bits_source, 4);
+    write_gains(n);
 }
 
+// The decay thunk reads g_enabled as it runs, so the gains change with it, not at the next frame's update.
 void footik_set_enabled(bool on) {
     g_enabled = on ? 1 : 0;
+    write_gains(g_n);
 }
 
 bool footik_enabled() {

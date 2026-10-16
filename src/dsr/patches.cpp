@@ -706,21 +706,23 @@ std::atomic<int> g_gauge_state{0};
 // multiplied by frame time * 60 for the duration of each call and put back afterwards.
 //
 // The step is also the game's threshold: a change no bigger than one step is shown at once, and a
-// bigger one marks the gauge as moving ([+0x74]), holds the trailing value for the gauge's delay
-// ([+0x80], counted in real time by its update, 0x668EB0) and only then lets it fall ([+0x75]).
-// That is the yellow part of the stamina bar after a roll or an attack (fall step 0.012, delay
-// 1.5 s). A sprint takes one point every 0.1 s, less than 0.012 of a bar of 84 points or more, so
-// it never left one. A scaled step made the threshold smaller too: at a high frame rate each sprint
-// point started the hold, and the yellow part grew for 1.5 s, was wiped away and came back. So a
-// step is scaled only when the gauge is already moving and the gap is bigger than the step: the
-// threshold stays the original one and only the movement follows the frame time.
+// bigger one marks the gauge as moving ([+0x74]), holds the displayed value for the gauge's delay
+// ([+0x80], counted in real time by its update, 0x668EB0) and only then lets it go ([+0x75]): the
+// follower moves a value, up or down, only while [+0x75] is set (0x66936F, 0x66934B). Before that
+// the step is only the threshold. The held value is the yellow part of the stamina bar after a roll
+// or an attack (fall step 0.012, delay 1.5 s); a health bar waits for its own delay before an
+// Estus fill rises. A sprint takes one point every 0.1 s, less than 0.012 of a bar of 84 points or
+// more, so it never left a yellow part. A scaled step made the threshold smaller too: at a high
+// frame rate each sprint point started the hold, and the yellow part grew for 1.5 s, was wiped away
+// and came back. So a step is scaled only when the gauge may move ([+0x75]) and the gap is bigger
+// than the step: the threshold stays the original one and only the movement follows the frame time.
 constexpr uint32_t kGaugeFollowRva = 0x6692B0;
 using GaugeFollowFn = void (*)(void* gauge);
 GaugeFollowFn g_gauge_follow = nullptr;
 std::atomic<int> g_gauge_follow_state{0};
 
-float gauge_step(float step, float gap, bool moving, float n) {
-    return moving && gap > step ? step * n : step;
+float gauge_step(float step, float gap, bool go, float n) {
+    return go && gap > step ? step * n : step;
 }
 
 // Frames per second the HUD bars' per-frame steps are meant for: Remastered applies the original game's
@@ -764,11 +766,11 @@ void hook_gauge_follow(void* gauge) {
         }
     }
     const auto value = [steps](int off) { return *reinterpret_cast<const float*>(steps + off); };
-    const bool moving = steps[0x75] != 0;
+    const bool go = steps[0x75] != 0;  // the follower may move the values
     const float gap = std::fabs(value(0x60) - value(0x40));
-    *fall1 = gauge_step(saved1, gap, moving, n);
-    *fall2 = gauge_step(saved2, std::fabs(value(0x64) - value(0x44)), moving, n);
-    *rise = gauge_step(saved3, gap, moving, n);
+    *fall1 = gauge_step(saved1, gap, go, n);
+    *fall2 = gauge_step(saved2, std::fabs(value(0x64) - value(0x44)), go, n);
+    *rise = gauge_step(saved3, gap, go, n);
     float before[2] = {0.0f, 0.0f};
     const bool trace = g_input_log.load(std::memory_order_relaxed) != 0;
     if (trace) {
@@ -1222,8 +1224,10 @@ bool patch_speed() {
 // to TargetFPS equals 0.975 raised to 60 per second, so the wall-time decay
 // matches retail at any target.
 // The original game damps by 0.95 per 1/30 s (its own constant, 0x11E8388) where
-// Remastered's character constructor puts 0.975 in [body+0xf0]: about 2% less decay
-// over a second. AirDampingPtde uses the original's value (see air_damp_factor).
+// Remastered's character constructor puts 0.975 in [body+0xf0]. After a second the
+// original keeps 0.95^30 = 0.215 of the speed and Remastered 0.975^60 = 0.219, so the
+// original's momentum fades about 2% faster. AirDampingPtde uses the original's value
+// (see air_damp_factor).
 constexpr uint32_t kDecaySite = 0x2BC24B;
 
 std::atomic<int> g_decay_state{0};
@@ -1463,11 +1467,18 @@ float step_down_rate() {
     return g_step_down_ptde.load(std::memory_order_relaxed) != 0 ? 30.0f : 60.0f;
 }
 
+// Recent frames kept per body: one retail frame is 34 frames at 1000 FPS with StepDownPtde, and the
+// history leaves room for frames shorter than the MaxFPS one. Up to 1.8.0 it held 8 frames, so above
+// about 255 FPS with StepDownPtde (510 without) the window covered less than a retail frame and the
+// snap could pull the body down faster than the retail rate.
+constexpr unsigned kDropFrames = 64;
+
 struct GroundState {
     std::atomic<const void*> phys{nullptr};
     float base = 0.0f;
     float written = -1.0f;
-    float drop[8] = {};  // net descent per recent frame (>= 0), newest at (head - 1)
+    float drop[kDropFrames] = {};     // the snap's pull per recent frame (>= 0), newest at (head - 1)
+    float drop_dt[kDropFrames] = {};  // that frame's time
     unsigned head = 0;
     ULONGLONG last_ms = 0;
 };
@@ -1489,6 +1500,7 @@ GroundState* ground_slot(const void* phys, ULONGLONG now) {
                 s.base = 0.0f;
                 s.written = -1.0f;
                 std::memset(s.drop, 0, sizeof(s.drop));
+                std::memset(s.drop_dt, 0, sizeof(s.drop_dt));
                 s.head = 0;
                 s.last_ms = now;
                 return &s;
@@ -1611,7 +1623,8 @@ void ground_snap_step(const void* phys, float dt, float /*proxy_y*/, float start
     const float lift = lifted ? lifted_y - start_y : 0.0f;
     const float pull = -*snap - lift;
     state->last_ms = now;
-    state->drop[state->head & 7] = pull > 0.0f ? pull : 0.0f;
+    state->drop[state->head % kDropFrames] = pull > 0.0f ? pull : 0.0f;
+    state->drop_dt[state->head % kDropFrames] = dt;
     state->head++;
 
     auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(bytes) + kReachOffset);
@@ -1619,13 +1632,22 @@ void ground_snap_step(const void* phys, float dt, float /*proxy_y*/, float start
     if (current != state->written) {
         state->base = current;  // the game (re)wrote it: that is the retail value
     }
-    // Frames per retail frame at this frame time: per 1/60 s (1 at <= 60 FPS), or per 1/30 s with
-    // StepDownPtde (1 at <= 30 FPS).
-    int window = dt > 0.0f ? static_cast<int>(1.0f / (step_down_rate() * dt) + 0.5f) : 1;
-    window = window < 1 ? 1 : (window > 8 ? 8 : window);
-    float recent = 0.0f;  // pull over the last (window - 1) frames, incl. the one just done
-    for (int i = 0; i < window - 1; ++i) {
-        recent += state->drop[(state->head - 1 - i) & 7];
+    // The retail frame (1/60 s, or 1/30 s with StepDownPtde) ends with the next frame, taken to be as
+    // long as this one. The frames already done that fit in the rest of it, to the nearest frame, count:
+    // at a steady rate that is frames per retail frame - 1 (none at 60 FPS or below, or 30 with
+    // StepDownPtde), and a run of shorter or longer frames counts by their real time.
+    float recent = 0.0f;  // pull over those frames, incl. the one just done
+    if (dt > 0.0f) {
+        const float span = 1.0f / step_down_rate() - 0.5f * dt;
+        float covered = 0.0f;
+        for (unsigned i = 0; i < kDropFrames; ++i) {
+            const unsigned at = (state->head - 1 - i) % kDropFrames;
+            covered += state->drop_dt[at];
+            if (covered > span) {
+                break;
+            }
+            recent += state->drop[at];
+        }
     }
     constexpr float kTolerance = 1.2f;
     float allowed = state->base * kTolerance - recent;

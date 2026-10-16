@@ -34,5 +34,5 @@ double fixes_last_dt();
 // Called on the render thread at every frame boundary with the frame time in seconds.
 void fixes_update(double dt);
 
-// Ctrl+1..7 and Ctrl+9 toggle the groups at run time (diagnostic; INI Trace = true).
+// Ctrl+1..7, Ctrl+9 and Ctrl+0 (foot IK) toggle the groups at run time (diagnostic; INI Trace = true).
 void fixes_poll_hotkeys();

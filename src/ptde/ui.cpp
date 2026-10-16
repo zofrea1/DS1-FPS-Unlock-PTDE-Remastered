@@ -93,21 +93,23 @@ bool install_swirl() {
 // back afterwards), which is the same animation in real time.
 //
 // The step is also the game's threshold: a change no bigger than one step is shown at once, and a
-// bigger one marks the gauge as moving ([+0x50]), holds the trailing value for the gauge's delay
-// ([+0x5C], counted in real time by its update, 0xC88FD0) and only then lets it fall ([+0x51]).
-// That is the yellow part of the stamina bar after a roll or an attack (fall step 0.012, delay
-// 1.5 s). A sprint takes one point every 0.1 s, less than 0.012 of a bar of 84 points or more, so
-// it never left one. A scaled step made the threshold smaller too: at a high frame rate each sprint
-// point started the hold, and the yellow part grew for 1.5 s, was wiped away and came back. So a
-// step is scaled only when the gauge is already moving and the gap is bigger than the step: the
-// threshold stays the native one and only the movement follows the frame time.
+// bigger one marks the gauge as moving ([+0x50]), holds the displayed value for the gauge's delay
+// ([+0x5C], counted in real time by its update, 0xC88FD0) and only then lets it go ([+0x51]): the
+// follower moves a value, up or down, only while [+0x51] is set (0xC88CCA, 0xC88C7F). Before that
+// the step is only the threshold. The held value is the yellow part of the stamina bar after a roll
+// or an attack (fall step 0.012, delay 1.5 s); a health bar waits for its own delay before an
+// Estus fill rises. A sprint takes one point every 0.1 s, less than 0.012 of a bar of 84 points or
+// more, so it never left a yellow part. A scaled step made the threshold smaller too: at a high
+// frame rate each sprint point started the hold, and the yellow part grew for 1.5 s, was wiped away
+// and came back. So a step is scaled only when the gauge may move ([+0x51]) and the gap is bigger
+// than the step: the threshold stays the native one and only the movement follows the frame time.
 constexpr uint32_t kGaugeFollow = 0x00C88BA0;
 constexpr size_t kGaugeStolen = 5;  // movss xmm3, [eax+44h]
 void* g_gauge_follow_tramp = nullptr;
 float g_gauge_saved[3] = {};
 
-float gauge_step(float step, float gap, bool moving, float s) {
-    return moving && gap > step ? step * s : step;
+float gauge_step(float step, float gap, bool go, float s) {
+    return go && gap > step ? step * s : step;
 }
 
 void __stdcall gauge_scale_enter(uint8_t* gauge) {
@@ -118,12 +120,12 @@ void __stdcall gauge_scale_enter(uint8_t* gauge) {
                        reinterpret_cast<float*>(gauge + 0x4C)};
     for (int i = 0; i < 3; ++i) g_gauge_saved[i] = *steps[i];
     const auto value = [gauge](int off) { return *reinterpret_cast<const float*>(gauge + off); };
-    const bool moving = gauge[0x51] != 0;
+    const bool go = gauge[0x51] != 0;  // the follower may move the values
     const float gap = std::fabs(value(0x3C) - value(0x20));
     const float gap_second = std::fabs(value(0x40) - value(0x24));
-    *steps[0] = gauge_step(g_gauge_saved[0], gap, moving, s);
-    *steps[1] = gauge_step(g_gauge_saved[1], gap_second, moving, s);
-    *steps[2] = gauge_step(g_gauge_saved[2], gap, moving, s);
+    *steps[0] = gauge_step(g_gauge_saved[0], gap, go, s);
+    *steps[1] = gauge_step(g_gauge_saved[1], gap_second, go, s);
+    *steps[2] = gauge_step(g_gauge_saved[2], gap, go, s);
 }
 
 void __stdcall gauge_scale_leave(uint8_t* gauge) {
