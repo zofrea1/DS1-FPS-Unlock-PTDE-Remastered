@@ -696,16 +696,24 @@ float gauge_step(float step, float gap, bool moving, float n) {
     return moving && gap > step ? step * n : step;
 }
 
+// Frames per second the HUD bars' per-frame steps are meant for: Remastered applies the original game's
+// steps 60 times a second, the original game 30 times (HudPtdeSpeed).
+float hud_rate() {
+    return g_hud_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0f : 60.0f;
+}
+
 void hook_gauge_follow(void* gauge) {
     // The follower's step sizes in Remastered (rise 0.048 / 0.038, from the logged values) are the
     // original game's (its HUD sets the same 0.048 and 0.038), so at 60 FPS the bars move twice as
-    // fast as in Prepare to Die Edition. The mod keeps Remastered's speed (n = 1 at 60 FPS).
-    float n = g_frame_dt.load(std::memory_order_relaxed) * 60.0f;
+    // fast as in Prepare to Die Edition. n = frame time * 60 keeps Remastered's speed; HudPtdeSpeed
+    // uses frame time * 30, the original game's.
+    const float rate = hud_rate();
+    float n = g_frame_dt.load(std::memory_order_relaxed) * rate;
     if (n < 0.02f) {
         n = 0.02f;
     }
-    if (n > kMaxFrameStep * 60.0f) {
-        n = kMaxFrameStep * 60.0f;
+    if (n > kMaxFrameStep * rate) {
+        n = kMaxFrameStep * rate;
     }
     auto* steps = static_cast<uint8_t*>(gauge);
     float* fall1 = reinterpret_cast<float*>(steps + 0x68);
@@ -802,7 +810,8 @@ bool patch_gauge_follow() {
     FlushInstructionCache(GetCurrentProcess(), site, sizeof(kExpect));
     FlushInstructionCache(GetCurrentProcess(), page, 64);
     VirtualProtect(site, sizeof(kExpect), old, &old);
-    LOG_INFO("HUD gauge fill follows the frame time (health bar animation)");
+    LOG_INFO("HUD gauge fill follows the frame time (health bar animation, %s speed)",
+             g_hud_ptde_speed.load(std::memory_order_relaxed) != 0 ? "original game" : "Remastered");
     return true;
 }
 
@@ -958,7 +967,9 @@ void write_gauge_factors(float dt) {
     if (!g_gauge_cave) {
         return;
     }
-    float n = dt * 60.0f;
+    // The 0.5 and 1.0 per frame are the original game's too (0xC89AC3 / 0xC89A90 there), so this bar also
+    // moves at Remastered's doubled speed unless HudPtdeSpeed applies them per 1/30 s.
+    float n = dt * hud_rate();
     if (n < 0.02f) {
         n = 0.02f;
     }
@@ -990,7 +1001,8 @@ bool patch_gauge() {
         return false;
     }
     g_gauge_cave = cave;
-    LOG_INFO("HUD gauge fill follows the frame time (Estus, stamina and boss bars)");
+    LOG_INFO("HUD gauge fill follows the frame time (Estus, stamina and boss bars, %s speed)",
+             g_hud_ptde_speed.load(std::memory_order_relaxed) != 0 ? "original game" : "Remastered");
     return true;
 }
 
@@ -1367,12 +1379,22 @@ struct CaveEmitter {
 //
 // Scaling the field by 60/TargetFPS fixed the boost but broke role one: steps
 // were no longer caught in a frame and the player fell for a few frames. Retail's
-// actual rule is "the body may drop at most 0.4 over one 1/60 s frame". Emulate
-// exactly that: keep a short history of each frame's net descent and give the next
-// frame a reach of (0.4 * tolerance - descent over the last k-1 frames), capped at
-// the retail 0.4, where k = frames per 1/60 s (4 at 240 FPS, 1 at 60/61). A fresh
-// step-down has no recent descent, so it gets the full retail reach; a lip that has
-// already used up its budget over the last 1/60 s is released, at retail's rate.
+// actual rule is "the snap may pull the body down at most 0.4 over one 1/60 s
+// frame". Emulate exactly that: keep a short history of each frame's pull and give
+// the next frame a reach of (0.4 * tolerance - pull over the last k-1 frames),
+// capped at the retail 0.4, where k = frames per 1/60 s (4 at 240 FPS, 1 at 60/61).
+// A fresh step-down has no recent pull, so it gets the full retail reach; a lip
+// that has already used up its budget over the last 1/60 s is released, at
+// retail's rate.
+//
+// The pull is the part of the snap below the body's moved position: the snap minus
+// the lift (the lift only puts back what was added before the move). The body's own
+// movement down a slope is not a pull. Up to 1.7.0 the whole descent of the frame
+// was counted, so on a slide, which carries the body down the slope with its own
+// speed, the slide used up the reach. The reach fell to its floor, the small gap a
+// sideways or downhill step opens on the slope was then out of reach, and the
+// character was let go: airborne, its speed clamped to 6 u/s horizontally and the
+// slide speed braked (no slide sound either), so a steered slide crawled down.
 // The sliding window is slightly stricter than retail's frame-grid-aligned one, so
 // a small tolerance keeps borderline slopes attached the way they are at 61 FPS.
 //
@@ -1525,7 +1547,7 @@ float ladder_snap_factor(const void* phys, float dt, bool lifted) {
 // added to the proxy position. `snap` is the vertical offset about to be applied;
 // `lifted_y` is the height the body was moved from (the lifted position, or the
 // frame-start position when the lift was skipped).
-void ground_snap_step(const void* phys, float dt, float proxy_y, float start_y, float* snap, float lifted_y) {
+void ground_snap_step(const void* phys, float dt, float /*proxy_y*/, float start_y, float* snap, float lifted_y) {
     auto* bytes = static_cast<const uint8_t*>(phys);
     const ULONGLONG now = GetTickCount64();
 
@@ -1557,11 +1579,12 @@ void ground_snap_step(const void* phys, float dt, float proxy_y, float start_y, 
     if (!state) {
         return;
     }
-    // Net height change this frame: proxy after the move, plus the snap, versus
-    // where the body started the frame. (The lift is already inside proxy_y.)
-    const float net = proxy_y + *snap - start_y;
+    // Pull this frame: how far below the moved, unlifted position the snap puts the body.
+    // The lift is exact (lifted_y is the position the body was moved from).
+    const float lift = lifted ? lifted_y - start_y : 0.0f;
+    const float pull = -*snap - lift;
     state->last_ms = now;
-    state->drop[state->head & 7] = net < 0.0f ? -net : 0.0f;
+    state->drop[state->head & 7] = pull > 0.0f ? pull : 0.0f;
     state->head++;
 
     auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(bytes) + kReachOffset);
@@ -1573,7 +1596,7 @@ void ground_snap_step(const void* phys, float dt, float proxy_y, float start_y, 
     // StepDownPtde (1 at <= 30 FPS).
     int window = dt > 0.0f ? static_cast<int>(1.0f / (step_down_rate() * dt) + 0.5f) : 1;
     window = window < 1 ? 1 : (window > 8 ? 8 : window);
-    float recent = 0.0f;  // descent over the last (window - 1) frames, incl. the one just done
+    float recent = 0.0f;  // pull over the last (window - 1) frames, incl. the one just done
     for (int i = 0; i < window - 1; ++i) {
         recent += state->drop[(state->head - 1 - i) & 7];
     }

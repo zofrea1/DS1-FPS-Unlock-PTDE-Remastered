@@ -69,6 +69,8 @@ DWORD WINAPI worker(void*) {
     g_fix_hold.store(settings.fix_dpad_hold ? 1 : 0, std::memory_order_relaxed);
     g_fix_stamina_tick.store(settings.fix_stamina_tick ? 1 : 0, std::memory_order_relaxed);
     g_fix_ui.store(settings.fix_ui ? 1 : 0, std::memory_order_relaxed);
+    g_hud_ptde_speed.store(settings.hud_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixUI: %s, HudPtdeSpeed: %s", settings.fix_ui ? "true" : "false", settings.hud_ptde_speed ? "true" : "false");
     g_fix_graze.store(settings.fix_graze ? 1 : 0, std::memory_order_relaxed);
     g_fix_damping.store(settings.fix_damping ? 1 : 0, std::memory_order_relaxed);
     g_fix_slide.store(settings.fix_slide ? 1 : 0, std::memory_order_relaxed);

@@ -123,6 +123,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_dpad_hold = parse_bool(val);
         } else if (key == "fixstaminatick") {
             s.fix_stamina_tick = parse_bool(val);
+        } else if (key == "hudptdespeed") {
+            s.hud_ptde_speed = parse_bool(val);
         } else if (key == "fixui") {
             s.fix_ui = parse_bool(val);
         } else if (key == "fixgraze") {

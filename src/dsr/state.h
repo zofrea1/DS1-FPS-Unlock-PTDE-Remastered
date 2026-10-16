@@ -12,6 +12,8 @@ inline std::atomic<int> g_fix_step_down{1};
 inline std::atomic<int> g_fix_camera{1};
 inline std::atomic<int> g_fix_graze{1};
 inline std::atomic<int> g_fix_ui{1};
+// 1 = the HUD bars move at the original game's speed (half Remastered's). INI HudPtdeSpeed, needs FixUI.
+inline std::atomic<int> g_hud_ptde_speed{1};
 inline std::atomic<int> g_fix_hold{1};
 inline std::atomic<int> g_fix_stamina_tick{1};
 inline std::atomic<int> g_input_log{0};

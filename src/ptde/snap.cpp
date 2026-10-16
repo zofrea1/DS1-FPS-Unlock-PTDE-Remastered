@@ -45,8 +45,16 @@ volatile long g_enabled = 1;
 // also a rate limit: a surface that drops away faster than 0.4 per 1/30 s lets the body leave
 // it. At 120 FPS the surface drops 1/4 as much per frame, so the body stays glued to a sloped
 // lip and rides it down at up to 0.4 per frame (a boost of over a metre in three frames). The
-// retail rule is "at most 0.4 over one 1/30 s frame", so each frame the reach is set to
-// 0.4 * tolerance minus the descent over the last (frames per 1/30 s - 1) frames, capped at 0.4.
+// retail rule is "the snap pulls at most 0.4 over one 1/30 s frame", so each frame the reach is set
+// to 0.4 * tolerance minus the pull over the last (frames per 1/30 s - 1) frames, capped at 0.4.
+//
+// The pull is the part of the snap below the body's moved position: the snap minus the lift (the lift
+// only puts back what was added before the move). The body's own movement down a slope is not a pull:
+// the reach limits only how far the ground may fall away under a frame's move. Up to 1.7.0 the whole
+// descent of the frame was counted, so on a slide, which carries the body down the slope with its own
+// speed, the slide used up the reach. The reach fell to its floor, the small gap a sideways or downhill
+// step opens on the slope was then out of reach, and the character was let go: airborne, its speed
+// clamped to 6 u/s horizontally and the slide speed braked, so a steered slide crawled down the slope.
 constexpr uint32_t kReachOffset = 0x208;
 
 struct GroundState {
@@ -75,13 +83,15 @@ GroundState* ground_slot(const void* body, ULONGLONG now) {
     return nullptr;
 }
 
-void ground_reach_step(const void* body, float dt, float proxy_y, float start_y, float snap) {
+// `snap` is the vertical offset applied to the moved proxy, `lift` how far the proxy was raised before the
+// move (0 when the lift was skipped).
+void ground_reach_step(const void* body, float dt, float snap, float lift) {
     const ULONGLONG now = GetTickCount64();
     GroundState* state = ground_slot(body, now);
     if (!state) return;
-    const float net = proxy_y + snap - start_y;  // the lift is already inside proxy_y
+    const float pull = -snap - lift;  // how far below the moved (unlifted) position the snap puts the body
     state->last_ms = now;
-    state->drop[state->head & 7] = net < 0.0f ? -net : 0.0f;
+    state->drop[state->head & 7] = pull > 0.0f ? pull : 0.0f;
     state->head++;
 
     auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(static_cast<const uint8_t*>(body)) + kReachOffset);
@@ -92,7 +102,7 @@ void ground_reach_step(const void* body, float dt, float proxy_y, float start_y,
     if (!(state->base > 0.0f) || state->base > 4.0f) return;  // not the value we expect
     int window = dt > 0.0f ? static_cast<int>(1.0f / (30.0f * dt) + 0.5f) : 1;
     window = window < 1 ? 1 : (window > 8 ? 8 : window);
-    float recent = 0.0f;  // descent over the last (window - 1) frames, including the one just done
+    float recent = 0.0f;  // pull over the last (window - 1) frames, including the one just done
     for (int i = 0; i < window - 1; ++i) {
         recent += state->drop[(state->head - 1 - i) & 7];
     }
@@ -105,8 +115,24 @@ void ground_reach_step(const void* body, float dt, float proxy_y, float start_y,
     *reach = allowed;
 }
 
-// Written by the lift stub (machine code): slot (body >> 4) & 0xFF holds the body pointer.
+// With the fix switched off (Ctrl+6) the reach goes back to the game's value, so the comparison is with
+// the game's own snap and not with whatever reach the fix last wrote.
+void ground_reach_restore(const void* body) {
+    const size_t start = ((reinterpret_cast<uintptr_t>(body) >> 4) * 2654435761u) & (kGroundSlots - 1);
+    for (size_t n = 0; n < 32; ++n) {
+        GroundState& s = g_ground[(start + n) & (kGroundSlots - 1)];
+        if (s.body != body) continue;
+        auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(static_cast<const uint8_t*>(body)) + kReachOffset);
+        if (s.written >= 0.0f && *reach == s.written) *reach = s.base;
+        s.written = -1.0f;
+        return;
+    }
+}
+
+// Written by the lift stub (machine code): slot (body >> 4) & 0xFF holds the body pointer, and the
+// height the body was lifted to.
 uint32_t g_lifted[256] = {};
+uint32_t g_lifted_y[256] = {};
 
 struct Debug {
     const void* body = nullptr;
@@ -124,6 +150,8 @@ Debug* debug_slot(const void* body) {
 float __cdecl snap_factor(const void* body, float proxy_y, float start_y) {
     const uint32_t key = (reinterpret_cast<uint32_t>(body) >> 4) & 0xFF;
     const bool lifted = g_lifted[key] == reinterpret_cast<uint32_t>(body);
+    float lifted_y = start_y;
+    if (lifted) std::memcpy(&lifted_y, &g_lifted_y[key], sizeof(lifted_y));
     g_lifted[key] = 0;
     float result = 1.0f;
     if (g_enabled && !lifted) {
@@ -163,7 +191,10 @@ float __cdecl snap_factor(const void* body, float proxy_y, float start_y) {
     }
     if (g_enabled) {
         const float b4 = *reinterpret_cast<const float*>(static_cast<const uint8_t*>(body) + 0xB4);
-        ground_reach_step(body, static_cast<float>(fixes_last_dt()), proxy_y, start_y, b4 * result);
+        const float lift = lifted && lifted_y > start_y ? lifted_y - start_y : 0.0f;
+        ground_reach_step(body, static_cast<float>(fixes_last_dt()), b4 * result, lift);
+    } else {
+        ground_reach_restore(body);
     }
     Debug* d = debug_slot(body);
     d->body = body;
@@ -204,14 +235,21 @@ bool snap_install() {
         p += 4;
     };
 
-    // Lift stub: note the body, then continue into setPosition.
+    // Lift stub: note the body and the height it is lifted to, then continue into setPosition (thiscall,
+    // one argument: the lifted position).
     uint8_t* lift_stub = p;
     emit({0x50});                                      // push eax
+    emit({0x52});                                      // push edx
     emit({0x89, 0xD8});                                // mov eax,ebx
     emit({0xC1, 0xE8, 0x04});                          // shr eax,4
     emit({0x25, 0xFF, 0x00, 0x00, 0x00});              // and eax,0xFF
     emit({0x89, 0x1C, 0x85});                          // mov [g_lifted + eax*4], ebx
     emit32(reinterpret_cast<uint32_t>(g_lifted));
+    emit({0x8B, 0x54, 0x24, 0x0C});                    // mov edx,[esp+0xC]   (the argument: edx, eax, return address)
+    emit({0x8B, 0x52, 0x04});                          // mov edx,[edx+4]     (lifted y)
+    emit({0x89, 0x14, 0x85});                          // mov [g_lifted_y + eax*4], edx
+    emit32(reinterpret_cast<uint32_t>(g_lifted_y));
+    emit({0x5A});                                      // pop edx
     emit({0x58});                                      // pop eax
     emit({0xE9});                                      // jmp setPosition
     emit32(kSetPosition - (reinterpret_cast<uint32_t>(p) + 4));
