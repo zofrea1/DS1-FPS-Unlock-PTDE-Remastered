@@ -70,7 +70,6 @@ bool patches_probe(const Settings& settings) {
     }
     LOG_INFO("Code references to the timestep constant: %d (expected %d)", refs, kTimestepRefs);
 
-    LOG_INFO("Target %d FPS requested (FPSUnlock=%s). Phase 1 build: observing only, the game is unchanged.",
-             settings.target_fps, settings.fps_unlock ? "true" : "false");
+    LOG_INFO("Target %d FPS requested (FPSUnlock=%s)", settings.target_fps, settings.fps_unlock ? "true" : "false");
     return true;
 }
