@@ -11,7 +11,7 @@ Looking for co-op in Prepare to Die Edition? [Prepare to Co-op Edition](https://
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
-| Release | `v1.7.0-REMASTERED-DX11` | `v1.7.0-PTDE-DX9` |
+| Release | `v1.8.0-REMASTERED-DX11` | `v1.8.0-PTDE-DX9` |
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` (plus `dxvk_d3d9.dll` for the experimental `DXVK`) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |

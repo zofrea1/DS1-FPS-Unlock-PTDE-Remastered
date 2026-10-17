@@ -753,7 +753,7 @@ void hook_gauge_follow(void* gauge) {
     const float saved3 = *rise;
     {
         // Log the first few distinct sets of step sizes, to compare with the original game's (the
-        // health bar there rises by about 0.076 of the bar per frame).
+        // health bar there rises by 0.048 of the bar per frame, as in Remastered).
         static std::atomic<int> logged{0};
         static float last[3] = {-1.0f, -1.0f, -1.0f};
         if (logged.load(std::memory_order_relaxed) < 8 && (saved1 != last[0] || saved2 != last[1] || saved3 != last[2]) &&
@@ -1468,7 +1468,7 @@ float step_down_rate() {
 }
 
 // Recent frames kept per body: one retail frame is 34 frames at 1000 FPS with StepDownPtde, and the
-// history leaves room for frames shorter than the MaxFPS one. Up to 1.8.0 it held 8 frames, so above
+// history leaves room for frames shorter than the MaxFPS one. Up to 1.7.0 it held 8 frames, so above
 // about 255 FPS with StepDownPtde (510 without) the window covered less than a retail frame and the
 // snap could pull the body down faster than the retail rate.
 constexpr unsigned kDropFrames = 64;

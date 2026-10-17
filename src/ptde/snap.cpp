@@ -58,7 +58,7 @@ volatile long g_enabled = 1;
 constexpr uint32_t kReachOffset = 0x208;
 
 // Recent frames kept per body: one 1/30 s frame is 34 frames at 1000 FPS, and the history leaves room
-// for frames shorter than the MaxFPS one. Up to 1.8.0 it held 8 frames, so above about 255 FPS the
+// for frames shorter than the MaxFPS one. Up to 1.7.0 it held 8 frames, so above about 255 FPS the
 // window covered less than 1/30 s and the snap could pull the body down faster than the retail rate.
 constexpr unsigned kDropFrames = 64;
 
