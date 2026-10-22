@@ -52,6 +52,7 @@ DWORD WINAPI worker(void*) {
     gauge_set_dir(dll_path);
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("MaxFPS: %d", settings.target_fps);
+    LOG_INFO("FPSLimitPoint: %s", settings.fps_limit_early ? "early" : "present");
     LOG_INFO("DXVK: %s", settings.dxvk ? "true" : "false");
     LOG_INFO("FixAspect: %s", settings.fix_aspect ? "true" : "false");
 

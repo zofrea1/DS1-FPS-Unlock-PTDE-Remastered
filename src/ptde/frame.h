@@ -4,7 +4,8 @@
 
 // Hooks the draw thread's command fetch, the one place that runs once per rendered
 // frame, and drives frame timing from it:
-//  * limits the frame rate to TargetFPS with a precise wait;
+//  * limits the frame rate to MaxFPS with a precise wait, either before input is read
+//    or just before Present (FPSLimitPoint);
 //  * writes the measured frame time into the engine's fixed 1/30 step constant, so
 //    game speed stays correct at any frame rate (and when the frame rate drops);
 //  * optionally stops the render thread from waiting two vertical blanks per frame.

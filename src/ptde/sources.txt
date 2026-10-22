@@ -10,6 +10,7 @@ src\ptde\settings.cpp
 src\ptde\dsfix.cpp
 src\ptde\patches.cpp
 src\ptde\frame.cpp
+src\ptde\limiter.cpp
 src\ptde\window.cpp
 src\ptde\present.cpp
 src\ptde\d3d.cpp

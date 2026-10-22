@@ -7,6 +7,7 @@
 #include "footik.h"
 #include "gauge.h"
 #include "ghost.h"
+#include "limiter.h"
 #include "log.h"
 #include "present.h"
 #include "profile.h"
@@ -44,6 +45,11 @@ constexpr uint32_t kImageSize = 0x011C2000;
 constexpr uint32_t kDispatchCall = 0x00BAC4ED;
 constexpr uint32_t kGetCmdFn = 0x00578190;
 
+// WinMain's frame loop calls this once per frame, and the call is the whole body of the loop.
+// The function reads the pad, keyboard and mouse before it steps the world.
+constexpr uint32_t kGameFrameCall = 0x01025AA7;
+constexpr uint32_t kGameFrameFn = 0x00F91770;
+
 // The engine's 1/30 second step, one pooled float in .rdata loaded directly by 37
 // pieces of code.
 constexpr uint32_t kTimestepVa = 0x011E7E90;
@@ -56,6 +62,8 @@ constexpr uint32_t kVblankImmVa = 0x00FFB68E;
 
 using GetCmdFn = int(__fastcall*)(void* self, void* edx);
 GetCmdFn g_orig = nullptr;
+using GameFrameFn = char (*)();
+GameFrameFn g_game_frame = nullptr;
 
 
 constexpr int kCommands = 6;
@@ -98,24 +106,6 @@ struct State {
 
 double ms_between(LONGLONG a, LONGLONG b) {
     return 1000.0 * static_cast<double>(b - a) / static_cast<double>(g.freq.QuadPart);
-}
-
-// Wait until `deadline`: sleep while it is far away, spin for the last stretch.
-void wait_until(LONGLONG deadline) {
-    for (;;) {
-        LARGE_INTEGER now{};
-        QueryPerformanceCounter(&now);
-        const LONGLONG remaining = deadline - now.QuadPart;
-        if (remaining <= 0) {
-            return;
-        }
-        const double remaining_ms = 1000.0 * static_cast<double>(remaining) / static_cast<double>(g.freq.QuadPart);
-        if (remaining_ms > 2.5) {
-            Sleep(1);
-        } else {
-            YieldProcessor();
-        }
-    }
 }
 
 // CPU use of the render thread over the last survey window: close to 100% means the
@@ -187,17 +177,10 @@ void survey_report(LONGLONG now) {
 void frame_boundary() {
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
-    LONGLONG t = now.QuadPart;
-    if (g.driver && g.last != 0 && g.period > 0) {
-        const LONGLONG deadline = g.last + g.period;
-        if (t < deadline) {
-            const LONGLONG before = t;
-            wait_until(deadline);
-            QueryPerformanceCounter(&now);
-            t = now.QuadPart;
-            g.wait_sum += ms_between(before, t);
-        }
-    }
+    const LONGLONG t = now.QuadPart;
+    // The cap waits on the game thread or just before Present, not here. That wait still falls inside the
+    // gap since the previous boundary, so the step below is the capped frame time.
+    g.wait_sum += limiter_take_wait_ms();
     if (g.last != 0) {
         const double dt_ms = ms_between(g.last, t);
         g.last_dt_ms = dt_ms;
@@ -226,6 +209,9 @@ void frame_boundary() {
             if ((GetAsyncKeyState(kKeys[i]) & 0x8000) != 0 && g.rate != kRates[i]) {
                 g.rate = kRates[i];
                 g.period = g.freq.QuadPart / g.rate;
+                if (g.driver) {
+                    limiter_start(g.rate);
+                }
                 LOG_INFO("Trace: frame rate set to %d FPS", g.rate);
             }
         }
@@ -265,6 +251,39 @@ int __fastcall hook_getcmd(void* self, void* edx) {
         if (span > g.span_max) g.span_max = span;
     }
     return cmd;
+}
+
+bool make_writable(void* address, size_t size);
+
+char hook_game_frame() {
+    limiter_wait_early();
+    return g_game_frame();
+}
+
+// The cap's early point. Refuses an unexpected build instead of jumping into the wrong function.
+bool install_game_frame_hook() {
+    auto* site = reinterpret_cast<uint8_t*>(kGameFrameCall);
+    if (site[0] != 0xE8) {
+        LOG_ERROR("Game-frame call opcode is %02X, expected E8. The early cap is off.", site[0]);
+        return false;
+    }
+    int32_t rel = 0;
+    std::memcpy(&rel, site + 1, sizeof(rel));
+    const uint32_t target = kGameFrameCall + 5 + static_cast<uint32_t>(rel);
+    if (target != kGameFrameFn) {
+        LOG_ERROR("Game-frame call goes to %08X, expected %08X. The early cap is off.", target, kGameFrameFn);
+        return false;
+    }
+    g_game_frame = reinterpret_cast<GameFrameFn>(target);
+    const int32_t new_rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&hook_game_frame) - (kGameFrameCall + 5));
+    if (!make_writable(site + 1, 4)) {
+        LOG_ERROR("Could not unprotect the game-frame call (Win32=%lu). The early cap is off.", GetLastError());
+        return false;
+    }
+    std::memcpy(site + 1, &new_rel, sizeof(new_rel));
+    FlushInstructionCache(GetCurrentProcess(), site, 5);
+    LOG_INFO("FPS cap waits at %08X, before input is read", kGameFrameCall);
+    return true;
 }
 
 bool make_writable(void* address, size_t size) {
@@ -345,6 +364,13 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.vblank_patch) {
             apply_vblank_patch();
+        }
+        if (g.driver) {
+            limiter_set_early(settings.fps_limit_early);
+            limiter_start(settings.target_fps);
+            if (settings.fps_limit_early) {
+                install_game_frame_hook();
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 #include "present.h"
 
 #include "d3d.h"
+#include "limiter.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -144,6 +145,7 @@ LONGLONG stamp() {
 
 #define HOOK_P3(NAME, SITE)                                                             \
     int __fastcall NAME(void* c, void* e, int a, int b, int d) {                        \
+        limiter_wait_present();                                                         \
         const LONGLONG t0 = stamp();                                                    \
         const int r = reinterpret_cast<P3Fn>(g_orig[SITE])(c, e, a, b, d);              \
         note(SITE, t0);                                                                 \
@@ -228,6 +230,9 @@ bool present_install(const Settings& settings) {
         }
     }
 
+    // present waits on the two sites that show a new picture. The catch-up repeat would count the cap again.
+    // Survey mode hooks every site; its gameplay and loading hooks take the same wait.
+    const bool cap_at_present = limiter_is_on() && !settings.fps_limit_early;
     if (settings.survey_seconds > 0) {
         int hooked = 0;
         hooked += patch_call_site(kP3Early, reinterpret_cast<void*>(&hook_p3_early)) ? 1 : 0;
@@ -236,6 +241,13 @@ bool present_install(const Settings& settings) {
         hooked += patch_call_site(kP0Repeat, reinterpret_cast<void*>(&hook_p0_repeat)) ? 1 : 0;
         hooked += patch_call_site(kP2, reinterpret_cast<void*>(&hook_p2)) ? 1 : 0;
         LOG_INFO("Present instrumentation installed on %d of %d call sites", hooked, static_cast<int>(kSites));
+    } else if (cap_at_present) {
+        const bool loading = patch_call_site(kP3Early, reinterpret_cast<void*>(&hook_p3_early));
+        const bool gameplay = patch_call_site(kP3Frame, reinterpret_cast<void*>(&hook_p3_frame));
+        if (loading && gameplay) {
+            LOG_INFO("FPS cap waits before Present (gameplay %08X, loading %08X)", kSiteInfo[kP3Frame].call,
+                     kSiteInfo[kP3Early].call);
+        }
     }
     return true;
 }

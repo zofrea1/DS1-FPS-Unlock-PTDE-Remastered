@@ -102,6 +102,16 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fps_unlock = parse_bool(val);
         } else if (key == "maxfps" || key == "targetfps") {
             s.target_fps = parse_max_fps(val, s.target_fps);
+        } else if (key == "fpslimitpoint") {
+            const std::string point = lower(val);
+            if (point == "present") {
+                s.fps_limit_early = false;
+            } else if (point == "early") {
+                s.fps_limit_early = true;
+            } else {
+                LOG_INFO("FPSLimitPoint \"%s\" is not early or present; using early", val.c_str());
+                s.fps_limit_early = true;
+            }
         } else if (key == "variableframetime" || key == "driver") {
             s.driver = parse_bool(val);
         } else if (key == "vblankpatch") {

@@ -13,6 +13,8 @@ struct Settings {
     // Frames per second the game should aim for (a cap), kMinMaxFps..kMaxMaxFps. PTDE runs at
     // 30 FPS natively.
     int target_fps = 120;
+    // true: wait at the start of the frame, before input is read. false: wait just before Present.
+    bool fps_limit_early = true;
     // Overwrite the engine's fixed 1/30 step with the measured frame time.
     bool driver = true;
     // Change the game's swap-interval bookkeeping the way DSfix does (2 -> 5) so the
