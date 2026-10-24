@@ -51,7 +51,7 @@ Everything below is on by default and has an INI switch.
 | Direct3D 9 on Vulkan (experimental) | Runs the game through DXVK instead of the Windows Direct3D 9 driver; may or may not help the frame rate, and can have color issues | n/a | `DXVK` (off by default) |
 | Controller | The game only accepts four old XInput device ids, so a pad is missed or another connected device is used instead | n/a | `FixController` |
 | 16:10 and other taller screens | The picture stays 16:9, so the extra height is black bars. The in-game list often has no 1280x800 | n/a | `FixAspect` |
-| Start-up notice and logos | The autosave notice (10 seconds or a button) and the Bandai Namco, FromSoftware and Havok logos play at every start. DSfix's `skipIntro` does not work with every setup and leaves the notice | n/a | `SkipIntro` (off by default) |
+| Start-up notice and logos | The autosave notice (10 seconds or a button) and the Bandai Namco, FromSoftware and Havok logos play at every start. DSfix's `skipIntro` does not work with every setup and leaves the notice | n/a | `SkipIntro` |
 
 The original game's 30 FPS physics were tuned for 30 frames per second; both mods are exact at the native rate and very close at every other rate. See [Fix details](#fix-details) for what each fix does.
 

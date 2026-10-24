@@ -81,7 +81,7 @@ struct Settings {
     bool fix_aspect = true;
     // Skip the autosave notice and the Bandai Namco, FromSoftware and Havok logos at start-up (see intro.h).
     // Independent of FPSUnlock.
-    bool skip_intro = false;
+    bool skip_intro = true;
     // Log a per-command summary for this many seconds after start (0 = off).
     int survey_seconds = 0;
 };
