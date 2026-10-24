@@ -151,8 +151,9 @@ LONGLONG stamp() {
         note(SITE, t0);                                                                 \
         return r;                                                                       \
     }
-#define HOOK_P0(NAME, SITE)                                                             \
+#define HOOK_P0(NAME, SITE, WAIT)                                                       \
     int __fastcall NAME(void* c, void* e) {                                             \
+        if (WAIT) limiter_wait_present();                                               \
         const LONGLONG t0 = stamp();                                                    \
         const int r = reinterpret_cast<P0Fn>(g_orig[SITE])(c, e);                       \
         note(SITE, t0);                                                                 \
@@ -161,10 +162,11 @@ LONGLONG stamp() {
 
 HOOK_P3(hook_p3_early, kP3Early)
 HOOK_P3(hook_p3_frame, kP3Frame)
-HOOK_P0(hook_p0_direct, kP0Direct)
-HOOK_P0(hook_p0_repeat, kP0Repeat)
+HOOK_P0(hook_p0_direct, kP0Direct, true)
+HOOK_P0(hook_p0_repeat, kP0Repeat, false)  // the catch-up loop shows the same picture again: never waits
 
 int __fastcall hook_p2(void* c, void* e, int a, int b) {
+    limiter_wait_present();
     const LONGLONG t0 = stamp();
     const int r = reinterpret_cast<P2Fn>(g_orig[kP2])(c, e, a, b);
     note(kP2, t0);
@@ -230,23 +232,37 @@ bool present_install(const Settings& settings) {
         }
     }
 
-    // present waits on the two sites that show a new picture. The catch-up repeat would count the cap again.
-    // Survey mode hooks every site; its gameplay and loading hooks take the same wait.
-    const bool cap_at_present = limiter_is_on() && !settings.fps_limit_early;
+    // present waits at the four sites that show a new picture (gameplay, loading and the two others), once per
+    // frame: at its first Present. The catch-up repeat shows the same picture again and never waits. Survey mode
+    // hooks every site; the same hooks wait.
+    const bool cap_at_present = limiter_is_on() && limiter_point() == kLimitPresent;
+    int waiting = 0;  // of the four sites that can wait
     if (settings.survey_seconds > 0) {
-        int hooked = 0;
-        hooked += patch_call_site(kP3Early, reinterpret_cast<void*>(&hook_p3_early)) ? 1 : 0;
-        hooked += patch_call_site(kP3Frame, reinterpret_cast<void*>(&hook_p3_frame)) ? 1 : 0;
-        hooked += patch_call_site(kP0Direct, reinterpret_cast<void*>(&hook_p0_direct)) ? 1 : 0;
-        hooked += patch_call_site(kP0Repeat, reinterpret_cast<void*>(&hook_p0_repeat)) ? 1 : 0;
-        hooked += patch_call_site(kP2, reinterpret_cast<void*>(&hook_p2)) ? 1 : 0;
-        LOG_INFO("Present instrumentation installed on %d of %d call sites", hooked, static_cast<int>(kSites));
+        const bool repeat = patch_call_site(kP0Repeat, reinterpret_cast<void*>(&hook_p0_repeat));
+        waiting += patch_call_site(kP3Early, reinterpret_cast<void*>(&hook_p3_early)) ? 1 : 0;
+        waiting += patch_call_site(kP3Frame, reinterpret_cast<void*>(&hook_p3_frame)) ? 1 : 0;
+        waiting += patch_call_site(kP0Direct, reinterpret_cast<void*>(&hook_p0_direct)) ? 1 : 0;
+        waiting += patch_call_site(kP2, reinterpret_cast<void*>(&hook_p2)) ? 1 : 0;
+        LOG_INFO("Present instrumentation installed on %d of %d call sites", waiting + (repeat ? 1 : 0),
+                 static_cast<int>(kSites));
     } else if (cap_at_present) {
-        const bool loading = patch_call_site(kP3Early, reinterpret_cast<void*>(&hook_p3_early));
-        const bool gameplay = patch_call_site(kP3Frame, reinterpret_cast<void*>(&hook_p3_frame));
-        if (loading && gameplay) {
-            LOG_INFO("FPS cap waits before Present (gameplay %08X, loading %08X)", kSiteInfo[kP3Frame].call,
-                     kSiteInfo[kP3Early].call);
+        waiting += patch_call_site(kP3Early, reinterpret_cast<void*>(&hook_p3_early)) ? 1 : 0;
+        waiting += patch_call_site(kP3Frame, reinterpret_cast<void*>(&hook_p3_frame)) ? 1 : 0;
+        waiting += patch_call_site(kP0Direct, reinterpret_cast<void*>(&hook_p0_direct)) ? 1 : 0;
+        waiting += patch_call_site(kP2, reinterpret_cast<void*>(&hook_p2)) ? 1 : 0;
+    }
+    if (cap_at_present) {
+        if (waiting == 4) {
+            LOG_INFO("FPS cap waits before Present, at the first new picture of each frame (gameplay %08X, loading "
+                     "%08X, %08X, %08X)",
+                     kSiteInfo[kP3Frame].call, kSiteInfo[kP3Early].call, kSiteInfo[kP0Direct].call,
+                     kSiteInfo[kP2].call);
+        } else {
+            // A frame shown through a site that is not hooked would go uncapped: 1.8.0's point covers them all.
+            limiter_set_point(kLimitBoundary);
+            LOG_ERROR("FPS cap: %d of 4 Present sites hooked; it waits when the render thread takes a frame instead "
+                      "(as in 1.8.0)",
+                      waiting);
         }
     }
     return true;

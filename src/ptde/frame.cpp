@@ -175,11 +175,12 @@ void survey_report(LONGLONG now) {
 
 // Runs on the draw thread at every frame boundary.
 void frame_boundary() {
+    // The cap waits on the game thread or just before Present (here only when neither could be hooked). Its wait
+    // falls inside the gap since the previous boundary, so the step below is the capped frame time.
+    limiter_frame_boundary();
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     const LONGLONG t = now.QuadPart;
-    // The cap waits on the game thread or just before Present, not here. That wait still falls inside the
-    // gap since the previous boundary, so the step below is the capped frame time.
     g.wait_sum += limiter_take_wait_ms();
     if (g.last != 0) {
         const double dt_ms = ms_between(g.last, t);
@@ -210,7 +211,7 @@ void frame_boundary() {
                 g.rate = kRates[i];
                 g.period = g.freq.QuadPart / g.rate;
                 if (g.driver) {
-                    limiter_start(g.rate);
+                    limiter_set_fps(g.rate);  // taken up by the waiting thread at its next wait
                 }
                 LOG_INFO("Trace: frame rate set to %d FPS", g.rate);
             }
@@ -264,20 +265,22 @@ char hook_game_frame() {
 bool install_game_frame_hook() {
     auto* site = reinterpret_cast<uint8_t*>(kGameFrameCall);
     if (site[0] != 0xE8) {
-        LOG_ERROR("Game-frame call opcode is %02X, expected E8. The early cap is off.", site[0]);
+        LOG_ERROR("Game-frame call opcode is %02X, expected E8. The early point is not available.", site[0]);
         return false;
     }
     int32_t rel = 0;
     std::memcpy(&rel, site + 1, sizeof(rel));
     const uint32_t target = kGameFrameCall + 5 + static_cast<uint32_t>(rel);
     if (target != kGameFrameFn) {
-        LOG_ERROR("Game-frame call goes to %08X, expected %08X. The early cap is off.", target, kGameFrameFn);
+        LOG_ERROR("Game-frame call goes to %08X, expected %08X. The early point is not available.", target,
+                  kGameFrameFn);
         return false;
     }
     g_game_frame = reinterpret_cast<GameFrameFn>(target);
     const int32_t new_rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&hook_game_frame) - (kGameFrameCall + 5));
     if (!make_writable(site + 1, 4)) {
-        LOG_ERROR("Could not unprotect the game-frame call (Win32=%lu). The early cap is off.", GetLastError());
+        LOG_ERROR("Could not unprotect the game-frame call (Win32=%lu). The early point is not available.",
+                  GetLastError());
         return false;
     }
     std::memcpy(site + 1, &new_rel, sizeof(new_rel));
@@ -366,11 +369,14 @@ bool frame_install(const Settings& settings) {
             apply_vblank_patch();
         }
         if (g.driver) {
-            limiter_set_early(settings.fps_limit_early);
             limiter_start(settings.target_fps);
-            if (settings.fps_limit_early) {
-                install_game_frame_hook();
+            LimitPoint point = settings.fps_limit_early ? kLimitEarly : kLimitPresent;
+            if (point == kLimitEarly && !install_game_frame_hook()) {
+                // Never no cap: 1.8.0's point needs only the frame hook below.
+                point = kLimitBoundary;
+                LOG_ERROR("FPS cap waits when the render thread takes a frame instead (as in 1.8.0)");
             }
+            limiter_set_point(point);  // present_install() falls back the same way when it cannot hook Present
         }
     }
 

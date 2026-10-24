@@ -11,9 +11,13 @@
 
 namespace {
 
-// 0 while the limiter is off. The schedule is origin + index * frequency / fps, so the cap does not drift.
+// The schedule is origin + index * frequency / fps, so the cap does not drift. g_fps, the schedule and the timer
+// belong to the thread that waits (0 while the limiter is off); another thread only posts a new rate in g_requested,
+// which the waiting thread takes up at its next wait. g_freq is set once, before any hook can wait.
 int g_fps = 0;
-bool g_early = true;
+volatile LONG g_requested = 0;
+volatile LONG g_point = kLimitEarly;
+bool g_armed = true;  // render thread: set at each frame boundary, so the frame's first Present waits once
 LONGLONG g_freq = 0;
 LONGLONG g_origin = 0;
 LONGLONG g_index = 0;
@@ -77,6 +81,14 @@ void sleep_until(LONGLONG target) {
 }
 
 void wait_for_slot() {
+    const int requested = static_cast<int>(g_requested);
+    if (requested != g_fps) {
+        g_fps = requested;
+        g_index = 0;  // a fresh schedule from this frame
+        if (g_fps > 0) {
+            LOG_INFO("FPS cap: now %d (%.3f ms)", g_fps, 1000.0 / static_cast<double>(g_fps));
+        }
+    }
     if (g_fps <= 0 || g_freq <= 0) {
         return;
     }
@@ -108,18 +120,7 @@ void wait_for_slot() {
 }  // namespace
 
 void limiter_start(int fps) {
-    if (g_timer) {
-        CancelWaitableTimer(g_timer);
-        CloseHandle(g_timer);
-        g_timer = nullptr;
-    }
-    g_timer_ready = false;
-    g_fps = 0;
-    g_freq = 0;
-    g_origin = 0;
-    g_index = 0;
-    g_wait_ticks = 0;
-    if (fps <= 0) {
+    if (fps <= 0 || g_freq > 0) {
         return;
     }
     LARGE_INTEGER freq{};
@@ -129,28 +130,45 @@ void limiter_start(int fps) {
     }
     g_freq = freq.QuadPart;
     g_fps = fps;
-    LOG_INFO("FPS cap: %d (%.3f ms), %s", g_fps, 1000.0 / static_cast<double>(g_fps),
-             g_early ? "before input is read" : "before Present");
+    g_requested = fps;
+    LOG_INFO("FPS cap: %d (%.3f ms)", g_fps, 1000.0 / static_cast<double>(g_fps));
 }
 
-void limiter_set_early(bool early) {
-    g_early = early;
+void limiter_set_fps(int fps) {
+    InterlockedExchange(&g_requested, fps > 0 ? fps : 0);
+}
+
+void limiter_set_point(LimitPoint point) {
+    InterlockedExchange(&g_point, point);
+}
+
+LimitPoint limiter_point() {
+    return static_cast<LimitPoint>(g_point);
 }
 
 bool limiter_is_on() {
-    return g_fps > 0;
+    return g_freq > 0 && g_requested > 0;
 }
 
 void limiter_wait_early() {
-    if (g_early) {
+    if (g_point == kLimitEarly) {
         wait_for_slot();
     }
 }
 
 void limiter_wait_present() {
-    if (!g_early) {
+    // Every Present that shows a new picture comes here; only the frame's first one waits.
+    if (g_point == kLimitPresent && g_armed) {
+        g_armed = false;
         wait_for_slot();
     }
+}
+
+void limiter_frame_boundary() {
+    if (g_point == kLimitBoundary) {
+        wait_for_slot();
+    }
+    g_armed = true;
 }
 
 double limiter_take_wait_ms() {
