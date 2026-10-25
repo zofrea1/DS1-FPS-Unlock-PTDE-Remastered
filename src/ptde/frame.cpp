@@ -1,6 +1,7 @@
 #include "frame.h"
 
 #include "camera.h"
+#include "cutscenecam.h"
 #include "deep.h"
 #include "diag.h"
 #include "fixes.h"
@@ -13,7 +14,10 @@
 #include "profile.h"
 #include "script.h"
 #include "sfx.h"
+#include "slidecontact.h"
+#include "slidesteer.h"
 #include "snap.h"
+#include "soulcounter.h"
 #include "trace.h"
 #include "turn.h"
 #include "ui.h"
@@ -199,6 +203,7 @@ void frame_boundary() {
         const double step = g.driver ? static_cast<double>(g.written) : 1.0 / 30.0;
         fixes_update(step);
         footik_update(step);
+        slidesteer_update(step);
         ghost_frame(step);
         script_sample();
     }
@@ -421,6 +426,18 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_sfx_spawn_rate) {
             sfx_install();
+        }
+        if (settings.fix_slide_contact) {
+            slidecontact_install();
+        }
+        if (settings.fix_slide_steer) {
+            slidesteer_install();
+        }
+        if (settings.fix_cutscene_camera) {
+            cutscenecam_install();
+        }
+        if (settings.fix_soul_counter) {
+            soulcounter_install();
         }
     }
     script_install(settings.driver && settings.fix_script_memory);

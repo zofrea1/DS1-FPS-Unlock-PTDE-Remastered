@@ -53,6 +53,14 @@ struct Settings {
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each
     // tick up to a whole frame and dropped the remainder).
     bool fix_stamina_tick = true;
+    // Steep slides: keep the script's contact bit for 1/30 s after the last real contact (see slidecontact.h).
+    bool fix_slide_contact = true;
+    // Slide steering: scale Havok's root-motion threshold for a one-frame-old turn layer (see slidesteer.h).
+    bool fix_slide_steer = true;
+    // In-engine cutscene cameras blend between their 30 FPS keys (see cutscenecam.h).
+    bool fix_cutscene_camera = true;
+    // HUD soul counter steps with the frame time, at most four of the game's steps per update (see soulcounter.h).
+    bool fix_soul_counter = true;
     // Stand the character up if it stays seated at a bonfire with no menu open (reverse hollowing bug).
     bool bonfire_unstick = true;
     // Diagnostic: log the HUD shortcut (D-pad) actions with timestamps.
