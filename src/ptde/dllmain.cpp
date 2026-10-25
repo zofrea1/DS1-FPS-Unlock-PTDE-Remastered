@@ -83,7 +83,8 @@ DWORD WINAPI worker(void*) {
 
     // FPSUnlock is the master switch (the refresh-rate override in d3d.cpp checks it too).
     if (!settings.fps_unlock) {
-        LOG_INFO("FPSUnlock is false. The game is unchanged.");
+        LOG_INFO("FPSUnlock is false. The game is unchanged%s.",
+                 settings.skip_intro ? ", except the start-up notice and logos (SkipIntro)" : "");
         return 0;
     }
     if (patches_probe(settings)) {

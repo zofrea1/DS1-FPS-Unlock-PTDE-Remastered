@@ -8,7 +8,7 @@ constexpr int kMinMaxFps = 10;
 constexpr int kMaxMaxFps = 1000;
 
 struct Settings {
-    // Master switch: false leaves the game completely unchanged (every fix and diagnostic off).
+    // Master switch: false leaves the game unchanged (every fix and diagnostic off), except skip_intro.
     bool fps_unlock = true;
     // Frames per second the game should aim for (a cap), kMinMaxFps..kMaxMaxFps. PTDE runs at
     // 30 FPS natively.

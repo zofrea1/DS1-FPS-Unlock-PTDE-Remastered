@@ -11,7 +11,7 @@ Looking for co-op in Prepare to Die Edition? [Prepare to Co-op Edition](https://
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
-| Release | `v1.8.0-REMASTERED-DX11` | `v1.8.0-PTDE-DX9` |
+| Release | `v1.9.0-REMASTERED-DX11` | `v1.9.0-PTDE-DX9` |
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` (plus `dxvk_d3d9.dll` for the experimental `DXVK`) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
@@ -145,7 +145,7 @@ Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is wel
 
 ## Install
 
-Copy the files from the release for your game next to the game's exe (see the table above; PTDE's `dxvk_d3d9.dll` is only needed for the experimental `DXVK`). To uninstall, delete them. `FPSUnlock` is the master switch: `false` turns every part of the mod off and leaves the game unchanged.
+Copy the files from the release for your game next to the game's exe (see the table above; PTDE's `dxvk_d3d9.dll` is only needed for the experimental `DXVK`). To uninstall, delete them. `FPSUnlock` is the master switch: `false` turns every part of the mod off and leaves the game unchanged, except PTDE's `SkipIntro`, which has its own switch.
 
 **Remastered.** The game imports `dinput8.dll`, so that file name has to stay. Another mod that also installs `dinput8.dll` needs a chain loader before the two can load together. In `System -> PC Settings -> Display`, set Frequency to the monitor refresh rate and Vertical sync to off, then restart the game after changing `MaxFPS`.
 
