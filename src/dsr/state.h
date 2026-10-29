@@ -25,6 +25,9 @@ inline std::atomic<int> g_fix_jump{1};
 inline std::atomic<int> g_fix_slide_contact{1};
 inline std::atomic<int> g_fix_slide_steer{1};
 inline std::atomic<int> g_fix_soul_counter{1};
+// 1 = FixSlideContact / FixSlideSteer keep the original game's 30 FPS feel at any frame rate (INI
+// SlidePtdeSpeed); 0 = Remastered's own 60 FPS feel.
+inline std::atomic<int> g_slide_ptde_speed{1};
 // Per-frame constants of a fixed 60 FPS frame (see patch_frame_constants): timers and fades, the camera
 // pivot ease, and velocities derived from one frame's movement.
 inline std::atomic<int> g_fix_timers{1};

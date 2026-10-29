@@ -125,6 +125,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_slide_contact = parse_bool(val);
         } else if (key == "fixslidesteer") {
             s.fix_slide_steer = parse_bool(val);
+        } else if (key == "slideptdespeed") {
+            s.slide_ptde_speed = parse_bool(val);
         } else if (key == "fixsoulcounter") {
             s.fix_soul_counter = parse_bool(val);
         } else if (key == "fixstaminatick") {

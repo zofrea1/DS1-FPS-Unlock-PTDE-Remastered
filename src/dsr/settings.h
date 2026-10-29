@@ -48,6 +48,10 @@ struct Settings {
     bool fix_slide_steer = true;
     // The HUD soul counter steps with the frame time (at the original game's speed with HudPtdeSpeed).
     bool fix_soul_counter = true;
+    // FixSlideContact and FixSlideSteer reproduce the original game's 30 FPS slide at any frame rate (INI
+    // SlidePtdeSpeed); false reproduces Remastered's own 60 FPS slide. Remastered kept the original game's
+    // animation blend times, so a restarted slide turn carries a quarter of the weight at 60 FPS.
+    bool slide_ptde_speed = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;

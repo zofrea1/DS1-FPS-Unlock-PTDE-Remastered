@@ -3422,20 +3422,31 @@ bool patch_soul_counter() {
     return true;
 }
 
+// Frame rate the slide fixes are meant for: Remastered's own 60 FPS, or the original game's 30 (SlidePtdeSpeed).
+// Both games run the same slide code, so the fixes only differ in how long one native frame is.
+double slide_rate() {
+    return g_slide_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+}
+
 // Slide contact. The script input block (rebuilt each frame by fn 0x38A3E0) holds in the low bits of its byte
-// [+0x3C4] what the physics reported for the character: bit 0 is "feet on the ground / slide" (bit 19 of the
-// state word [+0xC]). On a steep slide that bit can miss for a single short frame at a high frame rate, and
-// the slide animation cancels. The bit is kept for 1/30 s after the last real contact. At 30 FPS and below
-// the next frame is already that long, so it drops as in the game; so does a gap over 0.25 s (a load).
+// [+0x3C4] what the game reported for the character: bit 0 is "feet on the ground / slide" (bit 19 of the
+// state word [+0xC]); bit 3 is the previous frame's bit 0 (Remastered only). The byte goes to the character's
+// behaviour graph as a variable each frame. On a steep slide bit 0 can miss for a single short frame at a high
+// frame rate, and the slide animation cancels. The game itself is only ever as strict as one native frame, so
+// the bit is kept until it has been missing for that long: 1/60 s (1/30 s with SlidePtdeSpeed). Frames of
+// the native length or longer see no hold at all, so the game at its own rate (or below) is untouched. The
+// hold is a little under a native frame (kContactMargin) so that frame-time jitter near the native rate cannot
+// turn it on and off. A gap over 0.25 s (a load) drops it.
 constexpr uint32_t kSlideContactRva = 0x38A47C;  // mov [rcx+3C4h], r8b
 constexpr int kContactSlots = 64;
-constexpr double kContactHold = 1.0 / 30.0;
 constexpr double kContactGapReset = 0.25;
+constexpr double kContactMargin = 0.95;
 std::atomic<int> g_slide_contact_state{0};
 
 struct ContactSlot {
     const void* block = nullptr;
-    double since = 1.0;  // seconds since the last real contact; kContactHold or more means no hold
+    double since = 1.0;  // seconds since the last real contact; the hold length or more means no hold
+    unsigned held = 0;   // frames the bit has been held in the current miss
     double seen = 0.0;
     uint32_t stamp = 0;
 };
@@ -3459,7 +3470,8 @@ ContactSlot* contact_slot_for(const void* block, bool* fresh) {
     }
     ContactSlot* s = empty != nullptr ? empty : oldest;
     s->block = block;
-    s->since = kContactHold;
+    s->since = 1.0;
+    s->held = 0;
     s->seen = 0.0;
     *fresh = true;
     return s;
@@ -3469,6 +3481,7 @@ ContactSlot* contact_slot_for(const void* block, bool* fresh) {
 uint8_t slide_contact_byte(const void* block, uint32_t bits) {
     const uint8_t value = static_cast<uint8_t>(bits);
     const bool contact = (value & 1) != 0;
+    const double hold = kContactMargin / slide_rate();
     bool fresh = false;
     ContactSlot* s = contact_slot_for(block, &fresh);
     const double now = qpc_seconds();
@@ -3478,22 +3491,33 @@ uint8_t slide_contact_byte(const void* block, uint32_t bits) {
 
     double step = static_cast<double>(g_frame_dt.load(std::memory_order_relaxed));
     if (!(step > 0.0 && step <= kContactGapReset)) {
-        step = kContactHold;
+        step = hold;
     }
-    // A load, or a step that is already one native frame, drops the bit as the game does at 30 FPS.
-    if (fresh || gap > kContactGapReset || !(step * 30.0 < 1.0)) {
-        s->since = contact ? 0.0 : kContactHold;
+    // A load, or a step that is already a native frame, drops the bit as the game does.
+    if (fresh || gap > kContactGapReset || step >= hold) {
+        s->since = contact ? 0.0 : hold;
+        s->held = 0;
         return value;
     }
     if (contact) {
+        if (s->held != 0 && g_input_log.load(std::memory_order_relaxed) != 0) {
+            static std::atomic<int> lines{0};
+            if (lines.fetch_add(1, std::memory_order_relaxed) < 400) {
+                LOG_INFO("[slide] contact came back after %u held frame(s), step %.2f ms, hold %.2f ms", s->held,
+                         step * 1000.0, hold * 1000.0);
+            }
+        }
         s->since = 0.0;
+        s->held = 0;
         return value;
     }
-    if (s->since + step < kContactHold) {
+    if (s->since + step < hold) {
         s->since += step;
+        ++s->held;
         return static_cast<uint8_t>(value | 1u);
     }
-    s->since = kContactHold;
+    s->since = hold;
+    s->held = 0;
     return value;
 }
 
@@ -3528,7 +3552,8 @@ bool patch_slide_contact() {
     if (!finish_cave(site, sizeof(kStoreExpect), page, "slide contact")) {
         return false;
     }
-    LOG_INFO("Slide contact holds for 1/30 s after the last real contact (site 0x%08X)", kSlideContactRva);
+    LOG_INFO("Slide contact holds a miss shorter than 1/%d s (site 0x%08X, %s feel)", static_cast<int>(slide_rate()),
+             kSlideContactRva, g_slide_ptde_speed.load(std::memory_order_relaxed) != 0 ? "original game" : "Remastered");
     return true;
 }
 
@@ -3536,9 +3561,20 @@ bool patch_slide_contact() {
 // layers' weights; when the total is under the skeleton's threshold ([skeleton+0x38], 0.1, set by the
 // constructor at 0x8439B4) the root motion is divided by the threshold instead of the total, so it is scaled
 // down. A slide's turn restarts its animation every frame, so the only live layer is one frame old, and
-// after a short frame its weight is far under 0.1: the legs play the turn and the body barely moves. While
-// the query runs, the threshold is multiplied by (frame time * 30) squared, capped at 1 (the same factor as
-// Prepare to Die Edition). The stored threshold and the pose blending that uses it are unchanged.
+// after a short frame its weight is far under 0.1: the legs play the turn and the body barely moves.
+// The weight of a layer that has played for t seconds is a smoothstep, 3x^2 - 2x^3 with x = t / blend time
+// (ease-in curve 0, 0, 1, 1 from the control's constructor, 0x84BF29 here and 0x7C2CD0 in the original game),
+// so for the small x of a frame it is proportional to the frame time squared. The root motion kept per
+// frame is weight / threshold, and the animation moves by the frame time, so a slide's turn covers
+// (frame time)^3 / threshold per frame and (frame time)^2 / threshold per second: it dies away as the frame
+// rate rises. While the query runs the threshold is multiplied by (frame time * rate)^2, rate being 60 (30
+// with SlidePtdeSpeed), which keeps the turn as long as it is at that rate whatever the frame rate. Remastered
+// kept the original game's blend times and runs at twice the rate, so at 60 FPS its slide turn has a quarter of
+// the original game's weight: with SlidePtdeSpeed the threshold is a quarter at 60 FPS, without it the
+// game is left as it is there. Below the rate the factor grows (the game at 30 FPS keeps four times the
+// weight of 60 FPS, so a slide would turn four times as far per second), but the weight stops growing as
+// the square once a frame is a large part of the blend time, so the factor stops at 4. The stored threshold and
+// the pose blending that uses it are unchanged.
 constexpr uint32_t kSteerLoadRva = 0x843E49;  // movss xmm6, dword ptr [r14+38h]
 constexpr uint32_t kSteerCtorRva = 0x8439B4;  // mov dword ptr [rcx+38h], 0.1f
 std::atomic<int> g_slide_steer_state{0};
@@ -3574,7 +3610,8 @@ bool patch_slide_steer() {
         return false;
     }
     g_steer_cell = reinterpret_cast<std::atomic<float>*>(cell);
-    LOG_INFO("Slide steering threshold follows the frame time (site 0x%08X)", kSteerLoadRva);
+    LOG_INFO("Slide steering threshold follows the frame time (site 0x%08X, %s feel)", kSteerLoadRva,
+             g_slide_ptde_speed.load(std::memory_order_relaxed) != 0 ? "original game" : "Remastered");
     return true;
 }
 
@@ -3583,12 +3620,15 @@ void write_slide_steer(float dt) {
     if (!g_steer_cell) {
         return;
     }
-    float n = dt * 30.0f;
+    float n = dt * static_cast<float>(slide_rate());
     if (!(n > 0.0f)) {
         n = 1.0f;
     }
-    if (n > 1.0f) {
-        n = 1.0f;
+    if (n > 2.0f) {
+        n = 2.0f;
+    }
+    if (n < 0.03f) {
+        n = 0.03f;
     }
     g_steer_cell->store(n * n, std::memory_order_relaxed);
 }
