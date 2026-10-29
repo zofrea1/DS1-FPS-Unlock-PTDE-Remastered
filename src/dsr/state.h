@@ -20,8 +20,9 @@ inline std::atomic<int> g_input_log{0};
 inline std::atomic<int> g_fix_damping{1};
 inline std::atomic<int> g_fix_slide{1};
 inline std::atomic<int> g_fix_jump{1};
-// Steep slides keep their contact bit for 1/30 s, a slide's turn keeps its root motion, and the soul
-// counter follows the frame time (INI FixSlideContact, FixSlideSteer, FixSoulCounter).
+// Steep slides keep their contact bit through a miss shorter than 0.95 of a native frame (0.95 / 30 s with
+// SlidePtdeSpeed, 0.95 / 60 s without), a slide's turn keeps its root motion, and the soul counter follows the
+// frame time (INI FixSlideContact, FixSlideSteer, FixSoulCounter).
 inline std::atomic<int> g_fix_slide_contact{1};
 inline std::atomic<int> g_fix_slide_steer{1};
 inline std::atomic<int> g_fix_soul_counter{1};

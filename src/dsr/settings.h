@@ -40,8 +40,9 @@ struct Settings {
     // Jump take-off: keeps a running jump at full distance when the take-off loses one frame of root motion
     // (half-length jumps at 30 FPS). Set false to A/B test.
     bool fix_jump = true;
-    // Steep slides: the script's ground contact bit is kept for 1/30 s after the last real contact, so one
-    // short missed frame at the lip does not cancel the slide animation.
+    // Steep slides: the script's ground contact bit is kept while a miss is shorter than 0.95 of a native frame
+    // (0.95 / 30 s with SlidePtdeSpeed, 0.95 / 60 s without), so one short missed frame at the lip does not cancel
+    // the slide animation. A frame of the selected rate or longer is not held.
     bool fix_slide_contact = true;
     // Slide steering: Havok's root-motion weight threshold follows the frame time, so the body moves with
     // the turn animation instead of the legs only.
