@@ -1,5 +1,6 @@
 #include "settings.h"
 
+#include "extension.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -52,14 +53,51 @@ int parse_max_fps(const std::string& v, int fallback) {
     return static_cast<int>(clamped);
 }
 
+// The INI beside the DLL. Prepare to Co-op Edition's build reads PTDE-Coop-FPS-Unlock.ini first and falls back to
+// PTDE-FPS-Unlock.ini; the FPS Unlock on its own reads only PTDE-FPS-Unlock.ini. Names match in any case (the
+// directory is searched, so a case-sensitive file system works too). When neither exists the first name is
+// returned, which is the one a fresh install is expected to have.
 void ini_path(const wchar_t* dll_path, wchar_t* full, size_t size) {
-    wchar_t path[MAX_PATH];
-    lstrcpynW(path, dll_path, MAX_PATH);
-    wchar_t* slash = wcsrchr(path, L'\\');
+    wchar_t dir[MAX_PATH];
+    lstrcpynW(dir, dll_path, MAX_PATH);
+    wchar_t* slash = wcsrchr(dir, L'\\');
     if (slash) {
         slash[1] = 0;
     }
-    _snwprintf_s(full, size, _TRUNCATE, L"%sPTDE-FPS-Unlock.ini", path);
+    static const wchar_t* const kCoop[] = {L"PTDE-Coop-FPS-Unlock.ini", L"PTDE-FPS-Unlock.ini"};
+    static const wchar_t* const kPlain[] = {L"PTDE-FPS-Unlock.ini"};
+    const bool coop = ptde_extension() != nullptr;
+    const wchar_t* const* names = coop ? kCoop : kPlain;
+    const size_t count = coop ? 2 : 1;
+
+    wchar_t pattern[MAX_PATH];
+    _snwprintf_s(pattern, _TRUNCATE, L"%s*.ini", dir);
+    wchar_t found[2][MAX_PATH] = {};
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileW(pattern, &data);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                continue;
+            }
+            for (size_t i = 0; i < count; ++i) {
+                if (_wcsicmp(data.cFileName, names[i]) == 0) {
+                    lstrcpynW(found[i], data.cFileName, MAX_PATH);
+                }
+            }
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (found[i][0] != 0) {
+            _snwprintf_s(full, size, _TRUNCATE, L"%s%s", dir, found[i]);
+            if (i == 0 && count > 1 && found[1][0] != 0) {
+                LOG_INFO("Settings::read - both %ls and %ls exist; only the first is read", found[0], found[1]);
+            }
+            return;
+        }
+    }
+    _snwprintf_s(full, size, _TRUNCATE, L"%s%s", dir, names[0]);
 }
 
 }  // namespace

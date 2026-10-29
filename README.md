@@ -148,7 +148,7 @@ Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is wel
 
 **Online play: no guarantees, use at your own risk.** The mods change the game's code in memory while it runs. Some fixes also change data the game exchanges with other players (for example the ghost replay data), now matching the native frame rate. FromSoftware's anti-cheat could still treat any modification as cheating, and a ban (including a soft ban) is possible. The authors accept no responsibility for bans, lost progress or anything else that results from using these mods; see also the [LICENSE](LICENSE) (provided "as is", without warranty).
 
-**Prepare to Co-op Edition.** Prepare to Co-op Edition, a co-op mod for Prepare to Die Edition by the same author, is a separate mod with [its own repository](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE). It is built on this mod and includes it: its `xinput1_3.dll` is this mod plus the co-op, and its `PTDE-FPS-Unlock.ini` has this mod's settings as well as its own. If you have Prepare to Co-op, you have the FPS Unlock; do not install both.
+**Prepare to Co-op Edition.** Prepare to Co-op Edition, a co-op mod for Prepare to Die Edition by the same author, is a separate mod with [its own repository](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE). It is built on this mod and includes it: its `xinput1_3.dll` is this mod plus the co-op, and its settings file, `PTDE-Coop-FPS-Unlock.ini`, has this mod's settings as well as its own (that build also reads a `PTDE-FPS-Unlock.ini`, but only when no `PTDE-Coop-FPS-Unlock.ini` is there). If you have Prepare to Co-op, you have the FPS Unlock; do not install both.
 
 ## Recommended display mode
 
