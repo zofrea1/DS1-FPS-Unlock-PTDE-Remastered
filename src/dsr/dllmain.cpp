@@ -79,6 +79,11 @@ DWORD WINAPI worker(void*) {
     g_fix_damping.store(settings.fix_damping ? 1 : 0, std::memory_order_relaxed);
     g_fix_slide.store(settings.fix_slide ? 1 : 0, std::memory_order_relaxed);
     g_fix_jump.store(settings.fix_jump ? 1 : 0, std::memory_order_relaxed);
+    g_fix_slide_contact.store(settings.fix_slide_contact ? 1 : 0, std::memory_order_relaxed);
+    g_fix_slide_steer.store(settings.fix_slide_steer ? 1 : 0, std::memory_order_relaxed);
+    g_fix_soul_counter.store(settings.fix_soul_counter ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixSlideContact: %s, FixSlideSteer: %s, FixSoulCounter: %s", settings.fix_slide_contact ? "true" : "false",
+             settings.fix_slide_steer ? "true" : "false", settings.fix_soul_counter ? "true" : "false");
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
     g_slide_ptde.store(settings.slide_ptde ? 1 : 0, std::memory_order_relaxed);

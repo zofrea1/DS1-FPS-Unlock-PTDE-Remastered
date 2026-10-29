@@ -20,6 +20,11 @@ inline std::atomic<int> g_input_log{0};
 inline std::atomic<int> g_fix_damping{1};
 inline std::atomic<int> g_fix_slide{1};
 inline std::atomic<int> g_fix_jump{1};
+// Steep slides keep their contact bit for 1/30 s, a slide's turn keeps its root motion, and the soul
+// counter follows the frame time (INI FixSlideContact, FixSlideSteer, FixSoulCounter).
+inline std::atomic<int> g_fix_slide_contact{1};
+inline std::atomic<int> g_fix_slide_steer{1};
+inline std::atomic<int> g_fix_soul_counter{1};
 // Per-frame constants of a fixed 60 FPS frame (see patch_frame_constants): timers and fades, the camera
 // pivot ease, and velocities derived from one frame's movement.
 inline std::atomic<int> g_fix_timers{1};

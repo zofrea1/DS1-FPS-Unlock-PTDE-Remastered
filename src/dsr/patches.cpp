@@ -3232,6 +3232,367 @@ bool patch_foot_ik() {
     return true;
 }
 
+// The three Prepare to Die Edition fixes of 1.9.0 that Remastered shares (src/ptde/slidecontact.cpp,
+// slidesteer.cpp, soulcounter.cpp). Remastered's code is the same FromSoftware code, so each site is the
+// twin of the PTDE one. The cutscene camera is not ported: Remastered's cutscenes already run at the frame
+// rate.
+
+double qpc_seconds() {
+    static LARGE_INTEGER freq{};
+    if (freq.QuadPart == 0) {
+        QueryPerformanceFrequency(&freq);
+    }
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    return static_cast<double>(now.QuadPart) / static_cast<double>(freq.QuadPart);
+}
+
+// Calls `target` from a cave in the middle of game code: every volatile register and xmm0-xmm5 are saved and
+// the stack is realigned, since the alignment at the site is not known. `args` loads rcx / rdx and `after`
+// runs with the result in rax; the caller's rcx is at [rbp-0x10].
+template <typename Args, typename After>
+void emit_guarded_call(CaveEmitter& e, const void* target, Args args, After after) {
+    e.b(0x55);                                                            // push rbp
+    for (uint8_t b : {0x48, 0x89, 0xE5}) e.b(b);                          // mov rbp, rsp
+    e.b(0x50);                                                            // push rax   [rbp-0x08]
+    e.b(0x51);                                                            // push rcx   [rbp-0x10]
+    e.b(0x52);                                                            // push rdx   [rbp-0x18]
+    for (uint8_t b : {0x41, 0x50}) e.b(b);                                // push r8
+    for (uint8_t b : {0x41, 0x51}) e.b(b);                                // push r9
+    for (uint8_t b : {0x41, 0x52}) e.b(b);                                // push r10
+    for (uint8_t b : {0x41, 0x53}) e.b(b);                                // push r11   [rbp-0x38]
+    for (uint8_t b : {0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00}) e.b(b);  // sub rsp, 80h
+    for (uint8_t b : {0x48, 0x83, 0xE4, 0xF0}) e.b(b);                    // and rsp, -16
+    static const uint8_t kSave[6][5] = {{0x0F, 0x11, 0x44, 0x24, 0x20}, {0x0F, 0x11, 0x4C, 0x24, 0x30},
+                                        {0x0F, 0x11, 0x54, 0x24, 0x40}, {0x0F, 0x11, 0x5C, 0x24, 0x50},
+                                        {0x0F, 0x11, 0x64, 0x24, 0x60}, {0x0F, 0x11, 0x6C, 0x24, 0x70}};
+    for (const auto& s : kSave) e.put(s, sizeof(s));  // movups [rsp+20h..70h], xmm0-5
+    args(e);
+    e.b(0x48);
+    e.b(0xB8);  // mov rax, target
+    const size_t fn = e.imm64();
+    e.fix64(fn, reinterpret_cast<uint64_t>(target));
+    e.b(0xFF);
+    e.b(0xD0);  // call rax
+    after(e);
+    for (const auto& s : kSave) {  // movups xmm0-5, [rsp+20h..70h]
+        uint8_t load[5];
+        std::memcpy(load, s, sizeof(load));
+        load[1] = 0x10;
+        e.put(load, sizeof(load));
+    }
+    for (uint8_t b : {0x48, 0x8D, 0x65, 0xC8}) e.b(b);  // lea rsp, [rbp-38h]
+    for (uint8_t b : {0x41, 0x5B}) e.b(b);              // pop r11
+    for (uint8_t b : {0x41, 0x5A}) e.b(b);              // pop r10
+    for (uint8_t b : {0x41, 0x59}) e.b(b);              // pop r9
+    for (uint8_t b : {0x41, 0x58}) e.b(b);              // pop r8
+    e.b(0x5A);                                          // pop rdx
+    e.b(0x59);                                          // pop rcx
+    e.b(0x58);                                          // pop rax
+    e.b(0x5D);                                          // pop rbp
+}
+
+bool finish_cave(uint8_t* site, size_t site_size, uint8_t* page, const char* what) {
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        LOG_ERROR("Could not protect the %s stub (Win32=%lu)", what, GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    const intptr_t rel = page - (site + 5);
+    if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) {
+        LOG_ERROR("The %s stub is out of range", what);
+        return false;
+    }
+    uint8_t patch[8];
+    std::memset(patch, 0x90, sizeof(patch));
+    patch[0] = 0xE9;
+    const auto value = static_cast<int32_t>(rel);
+    std::memcpy(patch + 1, &value, 4);
+    if (!write_code(site, patch, site_size)) {
+        LOG_ERROR("Could not patch the %s (Win32=%lu)", what, GetLastError());
+        return false;
+    }
+    return true;
+}
+
+// Soul counter. The dialog that counts a soul pickup up on the HUD (fn 0x6742B0, this in rcx, frame time
+// in xmm1) steps its shown value [+0x228] toward the total [+0x22C] by a step that grows with the amount
+// left (tiers of 10M, 1M, ... 1), once a frame (0x6744DD). The step is multiplied by the frame time over
+// the frame the step was made for (1/30 s, or 1/60 s without HudPtdeSpeed) and the fraction is carried to
+// the next frame, so a large pickup is counted in the same time at any frame rate. One update adds at most
+// four steps, so a hitch does not skip the count ahead.
+constexpr uint32_t kSoulFnRva = 0x6742B0;
+constexpr uint32_t kSoulAddRva = 0x6744DD;  // add dword ptr [rdi+228h], eax
+constexpr int kSoulSlots = 4;
+constexpr double kSoulGapReset = 0.30;
+constexpr double kSoulMaxScale = 4.0;
+std::atomic<int> g_soul_state{0};
+
+struct SoulSlot {
+    const void* dialog = nullptr;
+    double carry = 0.0;
+    double seen = 0.0;
+    int sign = 0;
+    uint32_t stamp = 0;
+};
+SoulSlot g_soul_slots[kSoulSlots];
+uint32_t g_soul_clock = 0;
+
+SoulSlot* soul_slot_for(const void* dialog) {
+    int oldest = 0;
+    for (int i = 0; i < kSoulSlots; ++i) {
+        if (g_soul_slots[i].dialog == dialog) {
+            g_soul_slots[i].stamp = ++g_soul_clock;
+            return &g_soul_slots[i];
+        }
+        if (g_soul_slots[i].stamp < g_soul_slots[oldest].stamp) {
+            oldest = i;
+        }
+    }
+    int pick = oldest;
+    for (int i = 0; i < kSoulSlots; ++i) {
+        if (g_soul_slots[i].dialog == nullptr) {
+            pick = i;
+            break;
+        }
+    }
+    SoulSlot* s = &g_soul_slots[pick];
+    *s = SoulSlot();
+    s->dialog = dialog;
+    s->stamp = ++g_soul_clock;
+    return s;
+}
+
+void soul_add(uint8_t* dialog, int step) {
+    SoulSlot* s = soul_slot_for(dialog);
+    const double now = qpc_seconds();
+    const double gap = s->seen > 0.0 ? now - s->seen : 0.0;
+    s->seen = now;
+    const int sign = step > 0 ? 1 : (step < 0 ? -1 : 0);
+    if (gap > kSoulGapReset || (sign != 0 && s->sign != 0 && sign != s->sign)) {
+        s->carry = 0.0;
+    }
+    if (sign != 0) {
+        s->sign = sign;
+    }
+    double scale = static_cast<double>(g_frame_dt.load(std::memory_order_relaxed)) * static_cast<double>(hud_rate());
+    if (!(scale > 0.0)) {
+        scale = 1.0;
+    }
+    if (scale > kSoulMaxScale) {
+        scale = kSoulMaxScale;
+    }
+    const double scaled = static_cast<double>(step) * scale + s->carry;
+    const int add = static_cast<int>(scaled);  // toward zero, so the carry keeps the step's sign
+    s->carry = scaled - static_cast<double>(add);
+    *reinterpret_cast<int*>(dialog + 0x228) += add;
+}
+
+bool patch_soul_counter() {
+    static const uint8_t kFnExpect[7] = {0x48, 0x8B, 0xC4, 0x55, 0x56, 0x57, 0x41};
+    static const uint8_t kAddExpect[12] = {0x01, 0x87, 0x28, 0x02, 0x00, 0x00, 0x8B, 0x8F, 0x28, 0x02, 0x00, 0x00};
+    uint8_t* fn = image_rva(kSoulFnRva);
+    uint8_t* site = image_rva(kSoulAddRva);
+    if (std::memcmp(fn, kFnExpect, sizeof(kFnExpect)) != 0 || std::memcmp(site, kAddExpect, sizeof(kAddExpect)) != 0) {
+        LOG_ERROR("Soul counter at 0x%08X does not match this build. Not patching.", kSoulAddRva);
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the soul counter stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    CaveEmitter e{page};
+    emit_guarded_call(
+        e, reinterpret_cast<const void*>(&soul_add),
+        [](CaveEmitter& c) {
+            for (uint8_t b : {0x48, 0x89, 0xF9}) c.b(b);  // mov rcx, rdi (the dialog)
+            for (uint8_t b : {0x89, 0xC2}) c.b(b);        // mov edx, eax (the game's step)
+        },
+        [](CaveEmitter&) {});
+    e.b(0xE9);  // jmp back, after the add
+    const size_t back = e.imm32();
+    e.fix32(back, site + 6);
+    if (!finish_cave(site, 6, page, "soul counter")) {
+        return false;
+    }
+    LOG_INFO("Soul counter follows the frame time (site 0x%08X, %s speed, at most 4 steps a hitch)", kSoulAddRva,
+             g_hud_ptde_speed.load(std::memory_order_relaxed) != 0 ? "original game" : "Remastered");
+    return true;
+}
+
+// Slide contact. The script input block (rebuilt each frame by fn 0x38A3E0) holds in the low bits of its byte
+// [+0x3C4] what the physics reported for the character: bit 0 is "feet on the ground / slide" (bit 19 of the
+// state word [+0xC]). On a steep slide that bit can miss for a single short frame at a high frame rate, and
+// the slide animation cancels. The bit is kept for 1/30 s after the last real contact. At 30 FPS and below
+// the next frame is already that long, so it drops as in the game; so does a gap over 0.25 s (a load).
+constexpr uint32_t kSlideContactRva = 0x38A47C;  // mov [rcx+3C4h], r8b
+constexpr int kContactSlots = 64;
+constexpr double kContactHold = 1.0 / 30.0;
+constexpr double kContactGapReset = 0.25;
+std::atomic<int> g_slide_contact_state{0};
+
+struct ContactSlot {
+    const void* block = nullptr;
+    double since = 1.0;  // seconds since the last real contact; kContactHold or more means no hold
+    double seen = 0.0;
+    uint32_t stamp = 0;
+};
+ContactSlot g_contact_slots[kContactSlots];
+uint32_t g_contact_stamp = 0;
+
+ContactSlot* contact_slot_for(const void* block, bool* fresh) {
+    ContactSlot* empty = nullptr;
+    ContactSlot* oldest = &g_contact_slots[0];
+    for (ContactSlot& s : g_contact_slots) {
+        if (s.block == block) {
+            *fresh = false;
+            return &s;
+        }
+        if (s.block == nullptr && empty == nullptr) {
+            empty = &s;
+        }
+        if (s.stamp < oldest->stamp) {
+            oldest = &s;
+        }
+    }
+    ContactSlot* s = empty != nullptr ? empty : oldest;
+    s->block = block;
+    s->since = kContactHold;
+    s->seen = 0.0;
+    *fresh = true;
+    return s;
+}
+
+// The byte the game is about to store (bit 0 is this frame's contact) and the byte to store instead.
+uint8_t slide_contact_byte(const void* block, uint32_t bits) {
+    const uint8_t value = static_cast<uint8_t>(bits);
+    const bool contact = (value & 1) != 0;
+    bool fresh = false;
+    ContactSlot* s = contact_slot_for(block, &fresh);
+    const double now = qpc_seconds();
+    const double gap = !fresh && s->seen > 0.0 ? now - s->seen : 1.0;
+    s->seen = now;
+    s->stamp = ++g_contact_stamp;
+
+    double step = static_cast<double>(g_frame_dt.load(std::memory_order_relaxed));
+    if (!(step > 0.0 && step <= kContactGapReset)) {
+        step = kContactHold;
+    }
+    // A load, or a step that is already one native frame, drops the bit as the game does at 30 FPS.
+    if (fresh || gap > kContactGapReset || !(step * 30.0 < 1.0)) {
+        s->since = contact ? 0.0 : kContactHold;
+        return value;
+    }
+    if (contact) {
+        s->since = 0.0;
+        return value;
+    }
+    if (s->since + step < kContactHold) {
+        s->since += step;
+        return static_cast<uint8_t>(value | 1u);
+    }
+    s->since = kContactHold;
+    return value;
+}
+
+bool patch_slide_contact() {
+    static const uint8_t kStoreExpect[7] = {0x44, 0x88, 0x81, 0xC4, 0x03, 0x00, 0x00};
+    static const uint8_t kReadExpect[8] = {0x44, 0x0F, 0xB6, 0x89, 0xC4, 0x03, 0x00, 0x00};
+    uint8_t* site = image_rva(kSlideContactRva);
+    if (std::memcmp(site, kStoreExpect, sizeof(kStoreExpect)) != 0 ||
+        std::memcmp(image_rva(0x38A3E6), kReadExpect, sizeof(kReadExpect)) != 0) {
+        LOG_ERROR("Slide contact at 0x%08X does not match this build. Not patching.", kSlideContactRva);
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the slide contact stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    CaveEmitter e{page};
+    emit_guarded_call(
+        e, reinterpret_cast<const void*>(&slide_contact_byte),
+        [](CaveEmitter& c) {
+            // rcx is still the block; the byte the game was about to store is in r8b.
+            for (uint8_t b : {0x41, 0x0F, 0xB6, 0xD0}) c.b(b);  // movzx edx, r8b
+        },
+        [](CaveEmitter& c) {
+            for (uint8_t b : {0x48, 0x8B, 0x4D, 0xF0}) c.b(b);              // mov rcx, [rbp-10h] (the block)
+            for (uint8_t b : {0x88, 0x81, 0xC4, 0x03, 0x00, 0x00}) c.b(b);  // mov [rcx+3C4h], al
+        });
+    e.b(0xE9);  // jmp back, after the store
+    const size_t back = e.imm32();
+    e.fix32(back, site + sizeof(kStoreExpect));
+    if (!finish_cave(site, sizeof(kStoreExpect), page, "slide contact")) {
+        return false;
+    }
+    LOG_INFO("Slide contact holds for 1/30 s after the last real contact (site 0x%08X)", kSlideContactRva);
+    return true;
+}
+
+// Slide steering. Havok's root motion for the pose (fn 0x843CC0, timer TtMotionExt) sums the animation
+// layers' weights; when the total is under the skeleton's threshold ([skeleton+0x38], 0.1, set by the
+// constructor at 0x8439B4) the root motion is divided by the threshold instead of the total, so it is scaled
+// down. A slide's turn restarts its animation every frame, so the only live layer is one frame old, and
+// after a short frame its weight is far under 0.1: the legs play the turn and the body barely moves. While
+// the query runs, the threshold is multiplied by (frame time * 30) squared, capped at 1 (the same factor as
+// Prepare to Die Edition). The stored threshold and the pose blending that uses it are unchanged.
+constexpr uint32_t kSteerLoadRva = 0x843E49;  // movss xmm6, dword ptr [r14+38h]
+constexpr uint32_t kSteerCtorRva = 0x8439B4;  // mov dword ptr [rcx+38h], 0.1f
+std::atomic<int> g_slide_steer_state{0};
+std::atomic<float>* g_steer_cell = nullptr;
+
+bool patch_slide_steer() {
+    static const uint8_t kLoadExpect[6] = {0xF3, 0x41, 0x0F, 0x10, 0x76, 0x38};
+    static const uint8_t kSplatExpect[4] = {0x0F, 0xC6, 0xF6, 0x00};  // shufps xmm6, xmm6, 0 at 0x843E56
+    static const uint8_t kCtorExpect[7] = {0xC7, 0x41, 0x38, 0xCD, 0xCC, 0xCC, 0x3D};
+    uint8_t* site = image_rva(kSteerLoadRva);
+    if (std::memcmp(site, kLoadExpect, sizeof(kLoadExpect)) != 0 ||
+        std::memcmp(image_rva(0x843E56), kSplatExpect, sizeof(kSplatExpect)) != 0 ||
+        std::memcmp(image_rva(kSteerCtorRva), kCtorExpect, sizeof(kCtorExpect)) != 0) {
+        LOG_ERROR("Slide steering at 0x%08X does not match this build. Not patching.", kSteerLoadRva);
+        return false;
+    }
+    auto* cell = static_cast<float*>(alloc_near(site));
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!cell || !page) {
+        LOG_ERROR("Could not allocate the slide steering stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    *cell = 1.0f;
+    CaveEmitter e{page};
+    e.put(kLoadExpect, sizeof(kLoadExpect));            // movss xmm6, [r14+38h]
+    for (uint8_t b : {0xF3, 0x0F, 0x59, 0x35}) e.b(b);  // mulss xmm6, [rip+disp] (the scale)
+    const size_t disp = e.imm32();
+    e.fix32(disp, cell);
+    e.b(0xE9);  // jmp back, to the movaps after the load
+    const size_t back = e.imm32();
+    e.fix32(back, site + sizeof(kLoadExpect));
+    if (!finish_cave(site, sizeof(kLoadExpect), page, "slide steering")) {
+        return false;
+    }
+    g_steer_cell = reinterpret_cast<std::atomic<float>*>(cell);
+    LOG_INFO("Slide steering threshold follows the frame time (site 0x%08X)", kSteerLoadRva);
+    return true;
+}
+
+// Called once per frame with the step handed to the game.
+void write_slide_steer(float dt) {
+    if (!g_steer_cell) {
+        return;
+    }
+    float n = dt * 30.0f;
+    if (!(n > 0.0f)) {
+        n = 1.0f;
+    }
+    if (n > 1.0f) {
+        n = 1.0f;
+    }
+    g_steer_cell->store(n * n, std::memory_order_relaxed);
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -3299,6 +3660,21 @@ void try_delayed_patches() {
     if (g_stamina_tick_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_stamina_tick.load(std::memory_order_relaxed) == 0 || patch_stamina_tick();
         g_stamina_tick_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_soul_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_soul_counter.load(std::memory_order_relaxed) == 0 || patch_soul_counter();
+        g_soul_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_slide_contact_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_slide_contact.load(std::memory_order_relaxed) == 0 || patch_slide_contact();
+        g_slide_contact_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_slide_steer_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_slide_steer.load(std::memory_order_relaxed) == 0 || patch_slide_steer();
+        g_slide_steer_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_objgauge_state.compare_exchange_strong(expected, 1)) {
@@ -3443,6 +3819,7 @@ void hook_sim(void* step, float frame_time) {
     const float dt = advance_frame_dt();
     apply_frame_step(dt);
     write_gauge_factors(dt);
+    write_slide_steer(dt);
     if (g_fix_hold.load(std::memory_order_relaxed) != 0) {
         try_install_hold_state();
     }

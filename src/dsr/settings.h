@@ -40,6 +40,14 @@ struct Settings {
     // Jump take-off: keeps a running jump at full distance when the take-off loses one frame of root motion
     // (half-length jumps at 30 FPS). Set false to A/B test.
     bool fix_jump = true;
+    // Steep slides: the script's ground contact bit is kept for 1/30 s after the last real contact, so one
+    // short missed frame at the lip does not cancel the slide animation.
+    bool fix_slide_contact = true;
+    // Slide steering: Havok's root-motion weight threshold follows the frame time, so the body moves with
+    // the turn animation instead of the legs only.
+    bool fix_slide_steer = true;
+    // The HUD soul counter steps with the frame time (at the original game's speed with HudPtdeSpeed).
+    bool fix_soul_counter = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;
