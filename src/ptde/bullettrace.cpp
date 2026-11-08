@@ -89,6 +89,11 @@ struct Seen {
     int fx_tries = 0;
     uint32_t fx_at[8] = {};
     int fx_n = 0;
+    // The glob's effect instance ([bullet+0x60]) as the effect state machine sees it: how many frames it ran for
+    // this glob, and the instance's node tree when the glob was new.
+    uint32_t fx_inst = 0;
+    uint32_t fx_root = 0;  // the state machine's root for it: the root whose first node is the instance
+    int fx_calls = 0;
 };
 Seen g_seen[96];
 int32_t g_kinds[256];  // every bullet id seen once, so a trace that watches the wrong ids still says what flew
@@ -237,11 +242,11 @@ void summarize(Seen& s, const char* why) {
     LOG_INFO("[bullet] %p %d summary (%s): %.2f s, %d updates, %d hit queries, %d sweep contacts, on you %d, near %d, "
              "%d ground contacts, %d landings, first landing %s at update %d (%.2f s); lowest y %.3f, "
              "last (%.3f, %.3f, %.3f); closest to you %.2f m at %.2f s (you at %.2f, %.2f, %.2f); cap %d->%d; "
-             "burst %d%s",
+             "effect %08X root %08X ran its states %d times; burst %d%s",
              s.bullet, s.id, why, now_s() - s.born, s.updates, s.queries, s.contacts, s.player_hits, s.near_hits,
              s.ground, s.lands, s.first_land ? "" : "NONE", s.first_land, s.first_land_age, s.lowest, s.last[0],
              s.last[1], s.last[2], s.closest, s.closest_age, s.closest_you[0], s.closest_you[1], s.closest_you[2],
-             s.cap_born, limiter_requested_fps(), s.burst, s.detailed ? ", detailed" : "");
+             s.cap_born, limiter_requested_fps(), s.fx_inst, s.fx_root, s.fx_calls, s.burst, s.detailed ? ", detailed" : "");
 }
 
 Seen* find(const uint8_t* b) {
@@ -447,6 +452,7 @@ void __stdcall on_update(const uint8_t* b, float dt) {
                  g_burst, state, me[0], me[1], me[2], have_me ? "" : " (unknown)", fixes_last_dt());
     }
     if (!s->fx_searched && s->fx_tries++ < 4) fx_search(*s, b, pos);
+    if (!s->fx_inst) s->fx_inst = rd<uint32_t>(b, 0x60);
     char fxs[400] = {};
     int fl = 0;
     for (int i = 0; i < s->fx_n; ++i) {
@@ -682,6 +688,7 @@ struct Clock {
     int lines = 0;
 };
 Clock g_clock;
+volatile long g_fx_root_calls = 0;  // effect roots through the state machine (0x546550), all effects
 
 void clock_note(const uint8_t* cluster, double now) {
     const float t0 = rd<float>(cluster, 0x10);
@@ -702,8 +709,9 @@ void clock_note(const uint8_t* cluster, double now) {
         ++c.lines;
         ++g_lines;
         LOG_INFO("[bullet] fx clock: cap %d, frame %.4f, %d acceleration calls, step min %.4f avg %.4f max %.4f, "
-                 "%d within 2%% of the frame; last cluster times %.4f -> %.4f",
-                 limiter_requested_fps(), frame, c.calls, c.lo, c.sum / c.calls, c.hi, c.same, c.t0, c.t1);
+                 "%d within 2%% of the frame; last cluster times %.4f -> %.4f; %ld effect roots through the states",
+                 limiter_requested_fps(), frame, c.calls, c.lo, c.sum / c.calls, c.hi, c.same, c.t0, c.t1,
+                 InterlockedExchange(&g_fx_root_calls, 0));
     }
     const int lines = c.lines;
     c = Clock{};
@@ -1236,7 +1244,7 @@ __declspec(naked) void accel_call_stub() {
 constexpr uint32_t kFxStates = 0x00546550;
 constexpr uint8_t kFxStatesBytes[7] = {0x8B, 0x44, 0x24, 0x08, 0x83, 0xEC, 0x10};
 constexpr int kFxRootsPerCap = 4;
-constexpr int kFxCallsPerRoot = 70;
+constexpr int kFxCallsPerRoot = 110;
 constexpr int kFxMaxNodes = 24;
 constexpr int kMaxFxLines = 2400;
 
@@ -1286,7 +1294,30 @@ bool fx_is_glob(const uint8_t* root) {
 }
 
 void __stdcall on_fxroot(const uint8_t* root, uint32_t dtbits) {
-    if (!root || g_fx_lines >= kMaxFxLines || g_lines >= kMaxLines) return;
+    if (!root) return;
+    InterlockedIncrement(&g_fx_root_calls);
+    // A live glob's own effect: matched once by its translation (+0x290) sitting on the glob and the one-frame
+    // burst node, then counted on every call.
+    const uint32_t r = reinterpret_cast<uint32_t>(root);
+    bool glob = false;
+    for (Seen& g : g_seen) {
+        if (g.alive && g.fx_root == r) {
+            ++g.fx_calls;
+            glob = true;
+        }
+    }
+    if (!glob) {
+        const uint32_t first = rd<uint32_t>(root, 0x34);
+        for (Seen& g : g_seen) {
+            if (g.alive && !g.fx_root && g.fx_inst && g.fx_inst == first) {
+                g.fx_root = r;
+                ++g.fx_calls;
+                glob = true;
+                break;
+            }
+        }
+    }
+    if (g_fx_lines >= kMaxFxLines || g_lines >= kMaxLines) return;
     const int cap = limiter_requested_fps();
     if (cap != g_fx_cap) {
         g_fx_cap = cap;
@@ -1298,7 +1329,7 @@ void __stdcall on_fxroot(const uint8_t* root, uint32_t dtbits) {
         if (r.root == root) slot = &r;
     }
     if (!slot) {
-        if (g_fx_taken >= kFxRootsPerCap || !fx_is_glob(root)) return;
+        if (g_fx_taken >= kFxRootsPerCap || !(glob || fx_is_glob(root))) return;
         slot = &g_fx_roots[g_fx_taken++];
         slot->root = root;
         // The tree once: each node's type and the first six dwords of its block.
@@ -1317,10 +1348,43 @@ void __stdcall on_fxroot(const uint8_t* root, uint32_t dtbits) {
         ++g_fx_lines;
         ++g_lines;
         LOG_INFO("[fx] glob effect root %p (cap %d):%s", root, cap, tree);
+        // Each node's states ([[node+0x90]+0x58], 16 bytes: transitions, ?, count, actions) and their transitions
+        // (8 bytes: target state, condition; the condition's vtable +4 tests it).
+        int nk = 0;
+        fx_walk(root, [&](const uint8_t* node) {
+            if (nk++ >= 6 || g_fx_lines >= kMaxFxLines) return;
+            const uint8_t* cls = rd<const uint8_t*>(node, 0x90);
+            const uint32_t table = rd<uint32_t>(cls, 0x58);
+            char st[1800] = {};
+            int sl = 0;
+            for (int i = 0; i < 6 && table; ++i) {
+                const uint8_t* state = reinterpret_cast<const uint8_t*>(table + 16 * i);
+                const uint32_t trans = rd<uint32_t>(state, 0), count = rd<uint32_t>(state, 8);
+                const uint32_t acts = rd<uint32_t>(state, 4), nacts = rd<uint32_t>(state, 0xC);
+                if (count > 16 || nacts > 64) break;
+                sl = appf(st, sizeof(st), sl, " || s%d acts %08X x%u trans x%u", i, acts, nacts, count);
+                for (uint32_t t = 0; t < count && t < 4; ++t) {
+                    const uint8_t* tr = reinterpret_cast<const uint8_t*>(trans + 8 * t);
+                    const uint32_t target = rd<uint32_t>(tr, 0);
+                    const uint8_t* cond = rd<const uint8_t*>(tr, 4);
+                    const uint32_t vt = rd<uint32_t>(cond, 0);
+                    sl = appf(st, sizeof(st), sl, " [-> s%d cond %p vt %08X test %08X: %08X %08X %08X %08X %08X]",
+                              (target && target >= table) ? static_cast<int>((target - table) / 16) : -1, cond, vt,
+                              rd<uint32_t>(reinterpret_cast<const void*>(vt), 4), rd<uint32_t>(cond, 4),
+                              rd<uint32_t>(cond, 8), rd<uint32_t>(cond, 0xC), rd<uint32_t>(cond, 0x10),
+                              rd<uint32_t>(cond, 0x14));
+                }
+            }
+            ++g_fx_lines;
+            ++g_lines;
+            LOG_INFO("[fx] root %p n%d %p type %X states:%s", root, nk - 1, node, rd<uint32_t>(cls, 4), st);
+        });
     }
     ++slot->calls;
+    // Every frame for the first 0.6 s (the glob's ground effect starts at about 0.4 s at 30 FPS), then one a 1/30 s.
     const int every = cap > 30 ? cap / 30 : 1;
-    if (slot->logged >= kFxCallsPerRoot || (slot->calls > 24 && slot->calls % every != 0)) return;
+    const int dense = cap > 0 ? (cap * 6) / 10 : 24;
+    if (slot->logged >= kFxCallsPerRoot || (slot->calls > dense && slot->calls % every != 0)) return;
     ++slot->logged;
     float dt = 0;
     std::memcpy(&dt, &dtbits, 4);
