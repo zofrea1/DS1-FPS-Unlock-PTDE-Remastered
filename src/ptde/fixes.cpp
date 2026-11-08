@@ -19,6 +19,8 @@ namespace {
 alignas(8) volatile double g_timer_dt = 1.0 / 30.0;
 alignas(8) volatile double g_smooth = 1.0 / 30.0;
 alignas(8) volatile double g_damp = 0.95;
+// A landed bullet's ground factor (see the site below): 0.4 per 1/30 s.
+alignas(8) volatile double g_ground_decay = 0.4;
 alignas(8) volatile double g_rate = 30.0;
 alignas(8) volatile double g_slow = 0.8;
 alignas(8) volatile double g_recover = 1.2;
@@ -48,6 +50,10 @@ Site g_sites[] = {
     {0x00EC0F8D, 4, 0x012DF970, &g_gravity, 0, false},    // movss xmm0,[1.0]   slope gravity per frame
     {0x00EC13A6, 4, 0x012DF974, &g_friction, 0, false},   // movss xmm0,[0.65]  ground friction per frame
     {0x00EC184F, 4, 0x011E8388, &g_damp, 1, false},       // movsd xmm2,[0.95]  airborne damping per frame
+    // A ground-crawling bullet (BulletParam FollowType 4, the undead dragon's acid) that lands (0xDAA1D0) gets a
+    // ground factor of 1 at [bullet+0x50], which holds its gravity off (gravity * (1 - factor)); the velocity
+    // update (0xDA6CD0) multiplies the factor by 0.4 every frame and drops it to 0 at 0.1 or below.
+    {0x00DA6DA8, 4, 0x011E8300, &g_ground_decay, 1, false},  // mulsd xmm1,[0.4] -> 0.4 ^ (dt * 30)
     {0x00DF2C55, 4, 0x011E7CF0, &g_timer_dt, 2, false},   // addsd  fade timer += 1/30
     {0x00DF2C7A, 4, 0x011E7CF0, &g_timer_dt, 2, false},   // subsd  fade timer -= 1/30
     {0x00CFB2B6, 4, 0x011E7CF0, &g_timer_dt, 2, false},   // subsd  countdown -= 1/30
@@ -169,6 +175,7 @@ void fixes_update(double dt) {
     g_gravity = static_cast<float>(1.0 * s);
     g_friction = static_cast<float>(std::pow(0.65, s));
     g_damp = std::pow(0.95, s);
+    g_ground_decay = std::pow(0.4, s);
     g_timer_dt = dt;
     g_smooth = 1.0 - std::pow(1.0 - 1.0 / 30.0, s);
     g_rate = 1.0 / dt;
