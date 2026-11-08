@@ -993,7 +993,8 @@ __declspec(naked) void accel_stub() {
 // `add esp, 0x54` at 0x9E6C49 runs.
 __declspec(naked) void accel_call_stub() {
     __asm {
-        call 0A4D420h
+        mov eax, 0A4D420h
+        call eax
     }
     SAVE_ALL
     __asm {
