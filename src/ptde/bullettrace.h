@@ -1,8 +1,9 @@
 #pragma once
 
-// Diagnostic (BulletTrace): logs the dragons' acid, to find why it no longer lands above 30 FPS: at 30 FPS the
-// Valley of Drakes undead dragon's globs land on the floor and spread; at 60 FPS they fly through it (user,
-// 2026-11-07; a glob that landed at 30 FPS keeps spreading when the rate goes to 60).
+// Diagnostic (BulletTrace): logs the dragons' acid. The globs do land at 120 FPS (the ground factor holds); what is
+// left is the drawn particle, and a hit that still lands at 30 and 60 but not at 120 (user, 2026-11-07).
+// [bullet] step is one particle cluster after the integrator 0xA4D420 returns (the same arrays read on entry never
+// moved). [bullet] "on you" / "near you" is a sweep contact on the local player, with the hit entry's shape.
 //
 // Corrected: the Valley of Drakes undead dragon is c3420 (also in the Painted World); its acid is 34200-34209
 // (FollowType 4: falls under gravity 5, hits the map and is put on it by 0xDAA1D0, which reflects it along the
