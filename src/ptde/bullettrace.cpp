@@ -1492,6 +1492,10 @@ void fx_node_text(const uint8_t* node, char* out, int size) {
                   rd<float>(node, 0x7C));
 }
 
+int32_t aid_now(const int32_t* id) {
+    return rd<int32_t>(id, 0, -1);
+}
+
 // 0xB80F70: the basic action handler runs action *id for a node with its arguments (table 0x12DDC60).
 void __stdcall on_fxaction(const int32_t* id, const uint8_t* ctx, const uint8_t* args) {
     Seen* g = fx_owner(ctx);
@@ -1504,6 +1508,57 @@ void __stdcall on_fxaction(const int32_t* id, const uint8_t* ctx, const uint8_t*
              rd<int32_t>(id, 0, -1), g->bullet, now_s() - g->born, limiter_requested_fps(), fixes_last_dt(), nt,
              rd<uint32_t>(args, 0), rd<uint32_t>(args, 4), rd<uint32_t>(args, 8), rd<uint32_t>(args, 0xC),
              rd<uint32_t>(args, 0x10), rd<uint32_t>(args, 0x14));
+    // Action 0x62 goes on only when the node's own parameter 9 ([[node+0x60]][9], group 1 of 0x97A880) evaluates
+    // non-zero: the node definition's parameters 0-12, and parameter 9 evaluated as the game does (vtable +0x28).
+    if (aid_now(id) == 0x62 && g_lines < kMaxLines) {
+        const uint8_t* def = rd<const uint8_t*>(ctx, 0x60);
+        const uint8_t* plist = rd<const uint8_t*>(def, 0);
+        for (int i = 0; i <= 12 && g_lines < kMaxLines; ++i) {
+            const uint8_t* prm = rd<const uint8_t*>(plist, 4 * i);
+            if (!prm) continue;
+            const uint32_t vt = rd<uint32_t>(prm, 0);
+            char data[600] = {};
+            int dl = 0;
+            int ptrs = 0;
+            for (int k = 1; k <= 8; ++k) {
+                const uint32_t v = rd<uint32_t>(prm, 4 * k);
+                float f = 0;
+                std::memcpy(&f, &v, 4);
+                dl = appf(data, sizeof(data), dl, " %08X(%g)", v, f);
+            }
+            for (int k = 1; k <= 8 && ptrs < 2; ++k) {
+                const uint32_t v = rd<uint32_t>(prm, 4 * k);
+                if (!heap_pointer(v) || v == reinterpret_cast<uint32_t>(prm)) continue;
+                ++ptrs;
+                dl = appf(data, sizeof(data), dl, " |+%X:", 4 * k);
+                for (int j = 0; j < 10; ++j) {
+                    const uint32_t w = rd<uint32_t>(reinterpret_cast<const void*>(v), 4 * j);
+                    float f = 0;
+                    std::memcpy(&f, &w, 4);
+                    dl = appf(data, sizeof(data), dl, " %g", f);
+                }
+            }
+            int value = 0x7FFFFFFF;
+            if (i == 9 && vt) {
+                using Eval = int(__thiscall*)(const void*, const void*);
+                const Eval eval = reinterpret_cast<Eval>(rd<uint32_t>(reinterpret_cast<const void*>(vt), 0x28));
+                __try {
+                    value = eval(prm, ctx);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    value = 0x7FFFFFFE;
+                }
+            }
+            ++g_lines;
+            LOG_INFO("[fx] node %p cap %d def param %d: %p vt %08X eval %08X%s%s", ctx, limiter_requested_fps(), i,
+                     prm, vt, rd<uint32_t>(reinterpret_cast<const void*>(vt), 0x28), data,
+                     i == 9 ? "" : "");
+            if (i == 9) {
+                ++g_lines;
+                LOG_INFO("[fx] node %p cap %d: parameter 9 evaluates to %d (0x%08X) with the node at %.4f / %.4f", ctx,
+                         limiter_requested_fps(), value, value, rd<float>(ctx, 0x78), rd<float>(ctx, 0x7C));
+            }
+        }
+    }
     // The parameters of the actions that make the ground part: args[0] lists them (0x5471C0), each one's vtable
     // +0x28 evaluates it for the node. Once per action id and cap.
     const int32_t aid = rd<int32_t>(id, 0, -1);
