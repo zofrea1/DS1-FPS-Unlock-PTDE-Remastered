@@ -1227,6 +1227,137 @@ __declspec(naked) void accel_call_stub() {
     }
 }
 
+// The effect state machine (the game's FX adapter, fn 0x546550, called once a frame for each effect root with
+// (frame time, root, ...)). Each node of the root's tree ([root+0x34], children +0x8C, siblings +0x88, parent +0x84)
+// has its type at [[node+0x90]+4], its state at +0x74 (a pointer into [[node+0x90]+0x58], 16 bytes a state), two
+// timers at +0x78 / +0x7C, a flag at +0x80, and its timing block at [[node+0x60]+0x14]. The undead dragon's glob
+// effect (16012) has a one-frame burst block {1/60, -1/60, -1}: roots with one are logged frame by frame, a few for
+// each cap, to see why that effect's particles are missing above 30 FPS.
+constexpr uint32_t kFxStates = 0x00546550;
+constexpr uint8_t kFxStatesBytes[7] = {0x8B, 0x44, 0x24, 0x08, 0x83, 0xEC, 0x10};
+constexpr int kFxRootsPerCap = 4;
+constexpr int kFxCallsPerRoot = 70;
+constexpr int kFxMaxNodes = 24;
+constexpr int kMaxFxLines = 2400;
+
+struct FxRoot {
+    const uint8_t* root = nullptr;
+    int calls = 0;   // every call
+    int logged = 0;  // lines: every frame for the first 24, then one per 1/30 s of frames
+};
+FxRoot g_fx_roots[kFxRootsPerCap];
+int g_fx_cap = -1;
+int g_fx_taken = 0;
+int g_fx_lines = 0;
+
+template <typename F>
+void fx_walk(const uint8_t* root, F&& each) {
+    const uint8_t* node = rd<const uint8_t*>(root, 0x34);
+    for (int guard = 0; node && guard < 256; ++guard) {
+        each(node);
+        const uint8_t* next = rd<const uint8_t*>(node, 0x8C);
+        if (!next) next = rd<const uint8_t*>(node, 0x88);
+        if (!next) {
+            const uint8_t* up = rd<const uint8_t*>(node, 0x84);
+            while (up && !rd<const uint8_t*>(up, 0x88)) up = rd<const uint8_t*>(up, 0x84);
+            next = up ? rd<const uint8_t*>(up, 0x88) : nullptr;
+        }
+        node = next;
+    }
+}
+
+const uint8_t* fx_block(const uint8_t* node) {
+    const uint8_t* def = rd<const uint8_t*>(node, 0x60);
+    return def ? rd<const uint8_t*>(def, 0x14) : nullptr;
+}
+
+bool fx_is_glob(const uint8_t* root) {
+    bool found = false;
+    fx_walk(root, [&](const uint8_t* node) {
+        const uint8_t* b = fx_block(node);
+        if (!b || found) return;
+        const float life = rd<float>(b, 4), offset = rd<float>(b, 8);
+        if (std::fabs(life - 1.0f / 60.0f) < 1e-4f && std::fabs(offset + 1.0f / 60.0f) < 1e-4f &&
+            rd<int32_t>(b, 0xC, 0) == -1) {
+            found = true;
+        }
+    });
+    return found;
+}
+
+void __stdcall on_fxroot(const uint8_t* root, uint32_t dtbits) {
+    if (!root || g_fx_lines >= kMaxFxLines || g_lines >= kMaxLines) return;
+    const int cap = limiter_requested_fps();
+    if (cap != g_fx_cap) {
+        g_fx_cap = cap;
+        g_fx_taken = 0;
+        for (FxRoot& r : g_fx_roots) r = FxRoot{};
+    }
+    FxRoot* slot = nullptr;
+    for (FxRoot& r : g_fx_roots) {
+        if (r.root == root) slot = &r;
+    }
+    if (!slot) {
+        if (g_fx_taken >= kFxRootsPerCap || !fx_is_glob(root)) return;
+        slot = &g_fx_roots[g_fx_taken++];
+        slot->root = root;
+        // The tree once: each node's type and the first six dwords of its block.
+        char tree[1400] = {};
+        int tl = 0, k = 0;
+        fx_walk(root, [&](const uint8_t* node) {
+            if (k++ >= kFxMaxNodes) return;
+            const uint8_t* cls = rd<const uint8_t*>(node, 0x90);
+            const uint8_t* b = fx_block(node);
+            tl = appf(tree, sizeof(tree), tl, " | n%d %p type %X", k - 1, node, rd<uint32_t>(cls, 4));
+            if (b) {
+                tl = appf(tree, sizeof(tree), tl, " block %g %g %d %g %08X %08X", rd<float>(b, 4), rd<float>(b, 8),
+                          rd<int32_t>(b, 0xC), rd<float>(b, 0x10), rd<uint32_t>(b, 0x14), rd<uint32_t>(b, 0x18));
+            }
+        });
+        ++g_fx_lines;
+        ++g_lines;
+        LOG_INFO("[fx] glob effect root %p (cap %d):%s", root, cap, tree);
+    }
+    ++slot->calls;
+    const int every = cap > 30 ? cap / 30 : 1;
+    if (slot->logged >= kFxCallsPerRoot || (slot->calls > 24 && slot->calls % every != 0)) return;
+    ++slot->logged;
+    float dt = 0;
+    std::memcpy(&dt, &dtbits, 4);
+    char line[1400] = {};
+    int ll = 0, k = 0;
+    fx_walk(root, [&](const uint8_t* node) {
+        if (k++ >= kFxMaxNodes) return;
+        const uint8_t* cls = rd<const uint8_t*>(node, 0x90);
+        const uint32_t table = rd<uint32_t>(cls, 0x58);
+        const uint32_t state = rd<uint32_t>(node, 0x74);
+        const int idx = (table && state >= table) ? static_cast<int>((state - table) / 16) : -1;
+        ll = appf(line, sizeof(line), ll, " | n%d s%d %.4f %.4f %u", k - 1, idx, rd<float>(node, 0x78),
+                  rd<float>(node, 0x7C), rd<uint8_t>(node, 0x80));
+    });
+    ++g_fx_lines;
+    ++g_lines;
+    LOG_INFO("[fx] root %p call %d dt %.4f frame %.4f cap %d%s", root, slot->calls, dt, fixes_last_dt(), cap, line);
+}
+
+__declspec(naked) void fxstates_stub() {
+    SAVE_ALL
+    __asm {
+        mov ecx, [esp + 0xA0 + 4]
+        push ecx
+        mov ecx, [esp + 0xA4 + 8]
+        push ecx
+        call on_fxroot
+    }
+    RESTORE_ALL
+    __asm {
+        mov eax, dword ptr [esp + 8]
+        sub esp, 10h
+        push 0546557h
+        ret
+    }
+}
+
 __declspec(naked) void contact_stub() {
     SAVE_ALL
     __asm {
@@ -1283,11 +1414,13 @@ bool bullettrace_install() {
     ok += hook(kAccel, kAccelPrologue, &accel_stub);
     ok += hook_bytes(kAccelCall, kAccelCallBytes, 5, &accel_call_stub);
     ok += hook(kContact, kContactPrologue, &contact_stub);
-    LOG_INFO("BulletTrace: %d of 10 hooks; the undead dragon's acid (34200-34209), c5390's 53900-53902 and the Gaping "
+    ok += hook_bytes(kFxStates, kFxStatesBytes, 7, &fxstates_stub);
+    LOG_INFO("BulletTrace: %d of 11 hooks; the undead dragon's acid (34200-34209), c5390's 53900-53902 and the Gaping "
              "Dragon's 52600/52601 are logged with their map contacts ([bullet] lines: the first %d of each burst frame "
              "by frame, a summary for every one with its closest approach to you, a line per burst with the cap and the HP "
              "you lost, the particle step after the integrator with the cluster's times, an fx clock line each second, "
-             "a line when a sweep touches you; step and touch budgets start again at every cap change)",
+             "a line when a sweep touches you, [fx] lines for a few glob effects a cap; step and touch budgets start again at "
+             "every cap change)",
              ok, kDetailedPerBurst);
-    return ok == 10;
+    return ok == 11;
 }
