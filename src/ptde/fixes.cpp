@@ -19,8 +19,12 @@ namespace {
 alignas(8) volatile double g_timer_dt = 1.0 / 30.0;
 alignas(8) volatile double g_smooth = 1.0 / 30.0;
 alignas(8) volatile double g_damp = 0.95;
-// A landed bullet's ground factor (see the site below): 0.4 per 1/30 s.
+// A landed bullet's ground factor (see the sites below): 0.4 per 1/30 s, and what a landing stores so that the
+// next update's decay leaves exactly 0.4 (1.0 at 30 FPS).
 alignas(8) volatile double g_ground_decay = 0.4;
+alignas(4) volatile float g_ground_land = 1.0f;
+// The speed a ground-crawling bullet keeps at each landing: the bullet manager's 0.97, per 1/30 s.
+alignas(4) volatile float g_land_keep = 0.97f;
 alignas(8) volatile double g_rate = 30.0;
 alignas(8) volatile double g_slow = 0.8;
 alignas(8) volatile double g_recover = 1.2;
@@ -52,8 +56,12 @@ Site g_sites[] = {
     {0x00EC184F, 4, 0x011E8388, &g_damp, 1, false},       // movsd xmm2,[0.95]  airborne damping per frame
     // A ground-crawling bullet (BulletParam FollowType 4, the undead dragon's acid) that lands (0xDAA1D0) gets a
     // ground factor of 1 at [bullet+0x50], which holds its gravity off (gravity * (1 - factor)); the velocity
-    // update (0xDA6CD0) multiplies the factor by 0.4 every frame and drops it to 0 at 0.1 or below.
+    // update (0xDA6CD0) multiplies the factor by 0.4 every frame and drops it to 0 at 0.1 or below. A sliding
+    // glob lands again every frame, so at 30 FPS it always slides with 0.6 of its gravity. The decay follows the
+    // frame time, and the landing stores 0.4 ^ (1 - dt * 30) instead of 1, so the update after a landing still
+    // leaves 0.4 (0.6 of the gravity) at any frame rate, and a bounce fades by time.
     {0x00DA6DA8, 4, 0x011E8300, &g_ground_decay, 1, false},  // mulsd xmm1,[0.4] -> 0.4 ^ (dt * 30)
+    {0x00DAC020, 4, 0x0115F59C, &g_ground_land, 1, false},   // movss xmm0,[1.0] -> 0.4 ^ (1 - dt * 30)
     {0x00DF2C55, 4, 0x011E7CF0, &g_timer_dt, 2, false},   // addsd  fade timer += 1/30
     {0x00DF2C7A, 4, 0x011E7CF0, &g_timer_dt, 2, false},   // subsd  fade timer -= 1/30
     {0x00CFB2B6, 4, 0x011E7CF0, &g_timer_dt, 2, false},   // subsd  countdown -= 1/30
@@ -131,6 +139,54 @@ void set_group(int group, bool on) {
     }
 }
 
+// The landing (0xDAA1D0) turns a ground-crawling bullet's velocity along the surface and multiplies its speed by
+// (0.5 + 0.5 * cos(turn)) * 0.97, the 0.97 read from the bullet manager ([0x137D6DC] + 0x58). A sliding glob
+// lands about three times a frame at any frame rate, so at 120 FPS it lost that speed four times as fast and
+// stopped short of where it reaches at 30 (down to its BulletParam minimum speed, 1.7 for the undead dragon's
+// acid): it no longer reached a player it hits at 30. The stub loads 0.97 ^ (dt * 30) instead; with the damping
+// group off it loads the manager's own value.
+constexpr uint32_t kLandKeep = 0x00DABF2B;  // movss xmm0, dword ptr [eax+0x58]
+constexpr uint8_t kLandKeepBytes[5] = {0xF3, 0x0F, 0x10, 0x40, 0x58};
+constexpr uint32_t kBulletMan = 0x0137D6DC;
+bool g_land_keep_hooked = false;
+
+__declspec(naked) void land_keep_stub() {
+    __asm {
+        movss xmm0, dword ptr [g_land_keep]
+        push 0DABF30h
+        ret
+    }
+}
+
+bool install_land_keep() {
+    if (std::memcmp(reinterpret_cast<const void*>(kLandKeep), kLandKeepBytes, sizeof(kLandKeepBytes)) != 0) {
+        LOG_ERROR("Bullet landing speed at %08X does not match this build. Not patched.", kLandKeep);
+        return false;
+    }
+    DWORD old = 0;
+    auto* p = reinterpret_cast<uint8_t*>(kLandKeep);
+    if (!VirtualProtect(p, sizeof(kLandKeepBytes), PAGE_EXECUTE_READWRITE, &old)) return false;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&land_keep_stub) - (kLandKeep + 5));
+    p[0] = 0xE9;
+    std::memcpy(p + 1, &rel, 4);
+    FlushInstructionCache(GetCurrentProcess(), p, sizeof(kLandKeepBytes));
+    DWORD ignored = 0;
+    VirtualProtect(p, sizeof(kLandKeepBytes), old, &ignored);
+    return true;
+}
+
+// The bullet manager's landing keep (0.97), or 0.97 before the manager exists.
+float bullet_land_keep() {
+    float k = 0.97f;
+    __try {
+        const uint8_t* man = *reinterpret_cast<const uint8_t* const*>(kBulletMan);
+        if (man) k = *reinterpret_cast<const float*>(man + 0x58);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        k = 0.97f;
+    }
+    return (k > 0.0f && k <= 1.0f) ? k : 0.97f;
+}
+
 }  // namespace
 
 bool fixes_install(const FixFlags& flags) {
@@ -155,6 +211,8 @@ bool fixes_install(const FixFlags& flags) {
         ++ok;
     }
     for (int g = 0; g < kGroups; ++g) set_group(g, g_enabled[g]);
+    g_land_keep_hooked = install_land_keep();
+    if (g_land_keep_hooked) ++ok;
     g_installed = true;
     LOG_INFO("Per-frame fixes: %d sites verified, %d skipped. slide=%d damping=%d timers=%d smoothing=%d graze=%d ui=%d "
              "velocity=%d",
@@ -176,6 +234,11 @@ void fixes_update(double dt) {
     g_friction = static_cast<float>(std::pow(0.65, s));
     g_damp = std::pow(0.95, s);
     g_ground_decay = std::pow(0.4, s);
+    g_ground_land = static_cast<float>(std::pow(0.4, 1.0 - s));
+    if (g_land_keep_hooked) {
+        const float k = bullet_land_keep();
+        g_land_keep = g_enabled[1] ? static_cast<float>(std::pow(static_cast<double>(k), s)) : k;
+    }
     g_timer_dt = dt;
     g_smooth = 1.0 - std::pow(1.0 - 1.0 / 30.0, s);
     g_rate = 1.0 / dt;
