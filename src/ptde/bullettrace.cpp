@@ -6,7 +6,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace {
@@ -59,6 +61,12 @@ struct Seen {
     float lowest = 1e9f;
     float last[3] = {};
     uint32_t serial = 0;
+    // The glob's effect (its sfx slot at +0x58: [+4] the effect system, [+8] the instance): places in the instance's
+    // objects that held the glob's position when first looked at, logged beside it every update after.
+    bool fx_searched = false;
+    int fx_tries = 0;
+    uint32_t fx_at[8] = {};
+    int fx_n = 0;
 };
 Seen g_seen[96];
 int32_t g_kinds[256];  // every bullet id seen once, so a trace that watches the wrong ids still says what flew
@@ -75,6 +83,17 @@ double now_s() {
     LARGE_INTEGER c{};
     QueryPerformanceCounter(&c);
     return static_cast<double>(c.QuadPart) / static_cast<double>(f.QuadPart);
+}
+
+// How many bytes from p can be read without touching a guard page (another thread's stack) or an uncommitted one.
+uint32_t readable_span(uint32_t p, uint32_t want) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(reinterpret_cast<const void*>(p), &mbi, sizeof(mbi))) return 0;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return 0;
+    const DWORD ok = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE;
+    if ((mbi.Protect & ok) == 0) return 0;
+    const uint32_t end = reinterpret_cast<uint32_t>(mbi.BaseAddress) + static_cast<uint32_t>(mbi.RegionSize);
+    return (end - p) < want ? end - p : want;
 }
 
 bool watched(int32_t id) {
@@ -198,6 +217,67 @@ Seen* by_entry(const uint8_t* e) {
     return nullptr;
 }
 
+bool heap_pointer(uint32_t v) {
+    return v >= 0x00010000 && v < 0x7FFE0000 && (v & 3) == 0 && !(v >= 0x00400000 && v < 0x01600000);
+}
+
+// Breadth first (two levels, 0x400 bytes an object) from the glob's effect instance, for three floats within 5 cm of
+// the glob's position.
+void fx_search(Seen& s, const uint8_t* b, const float pos[3]) {
+    const uint8_t* slot = b + 0x58;
+    const uint32_t sys = rd<uint32_t>(slot, 4);
+    const uint32_t inst = rd<uint32_t>(slot, 8);
+    if (!inst) return;  // no effect yet: the next update looks again
+    s.fx_searched = true;
+    const uint32_t fx = rd<uint32_t>(reinterpret_cast<const void*>(inst), 0x64);
+    const uint32_t iface = sys ? rd<uint32_t>(reinterpret_cast<const void*>(sys), 0x15C) : 0;
+    const uint32_t vt = iface ? rd<uint32_t>(reinterpret_cast<const void*>(iface), 0) : 0;
+    const uint32_t setfn = vt ? rd<uint32_t>(reinterpret_cast<const void*>(vt), 0x4C) : 0;
+    uint32_t queue[256];
+    int depth[256];
+    int n = 0;
+    queue[n] = inst;
+    depth[n++] = 0;
+    if (fx && fx != inst) {
+        queue[n] = fx;
+        depth[n++] = 0;
+    }
+    static uint8_t buf[0x400];
+    char where[600] = {};
+    int wl = 0;
+    for (int head = 0; head < n && s.fx_n < 8; ++head) {
+        const uint32_t obj = queue[head];
+        const uint32_t span = readable_span(obj, sizeof(buf)) & ~3u;
+        if (span < 0x10 || !read(reinterpret_cast<const void*>(obj), buf, span)) continue;
+        for (uint32_t o = 0; o + 12 <= span && s.fx_n < 8; o += 4) {
+            float f[3];
+            std::memcpy(f, buf + o, 12);
+            if (std::fabs(f[0] - pos[0]) < 0.05f && std::fabs(f[1] - pos[1]) < 0.05f && std::fabs(f[2] - pos[2]) < 0.05f) {
+                s.fx_at[s.fx_n++] = obj + o;
+                wl += std::snprintf(where + wl, sizeof(where) - wl, " %08X+%X(d%d)", obj, o, depth[head]);
+                o += 8;
+            }
+        }
+        if (depth[head] >= 2) continue;
+        for (uint32_t o = 0; o + 4 <= span && n < 256; o += 4) {
+            uint32_t v;
+            std::memcpy(&v, buf + o, 4);
+            if (!heap_pointer(v)) continue;
+            bool dup = false;
+            for (int k = 0; k < n && !dup; ++k) dup = queue[k] == v;
+            if (dup) continue;
+            queue[n] = v;
+            depth[n++] = depth[head] + 1;
+        }
+    }
+    if (g_lines < kMaxLines) {
+        ++g_lines;
+        LOG_INFO("[bullet] %p %d effect: system %08X (set-transform %08X), instance %08X, object %08X; %d objects searched; "
+                 "the glob's position at:%s",
+                 b, s.id, sys, setfn, inst, fx, n, s.fx_n ? where : " none");
+    }
+}
+
 void __stdcall on_update(const uint8_t* b, float dt) {
     if (!b) return;
     const int state = rd<int32_t>(b, 0x70, 0);
@@ -243,6 +323,14 @@ void __stdcall on_update(const uint8_t* b, float dt) {
         LOG_INFO("[bullet] %p new: bullet %d, burst %d, state %d; player at (%.2f, %.2f, %.2f)%s; frame %.4f s", b, id,
                  g_burst, state, me[0], me[1], me[2], have_me ? "" : " (unknown)", fixes_last_dt());
     }
+    if (!s->fx_searched && s->fx_tries++ < 4) fx_search(*s, b, pos);
+    char fxs[400] = {};
+    int fl = 0;
+    for (int i = 0; i < s->fx_n; ++i) {
+        float f[3] = {};
+        read(reinterpret_cast<const void*>(s->fx_at[i]), f, 12);
+        fl += std::snprintf(fxs + fl, sizeof(fxs) - fl, " (%.3f, %.3f, %.3f)", f[0], f[1], f[2]);
+    }
     const uint32_t handle = rd<uint32_t>(b, 0x54, 0xFFFFFFFF);
     const uint8_t* e = hit_entry(handle);
     float cur[3] = {}, prev[3] = {};
@@ -251,11 +339,12 @@ void __stdcall on_update(const uint8_t* b, float dt) {
         read(e + 0x150, prev, 12);
     }
     LOG_INFO("[bullet] %p %d #%d dt %.4f life %.3f pos (%.3f, %.3f, %.3f) vel (%.2f, %.2f, %.2f) dist %.3f flags %02X "
-             "ground %.3f | entry %08X %s(%.3f, %.3f, %.3f) <- (%.3f, %.3f, %.3f) done %d first %d; queries %d contacts %d",
+             "ground %.3f | entry %08X %s(%.3f, %.3f, %.3f) <- (%.3f, %.3f, %.3f) done %d first %d; queries %d contacts %d"
+             " | effect%s",
              b, id, s->updates, dt, rd<float>(b, 0x1D4), pos[0], pos[1], pos[2], vel[0], vel[1], vel[2],
              rd<float>(b, 0x1D0), rd<uint8_t>(b, 0x270), rd<float>(b, 0x50), handle, e ? "" : "(none) ", cur[0],
              cur[1], cur[2], prev[0], prev[1], prev[2], rd<int32_t>(e, 0xFC), rd<uint8_t>(e, 0x164), s->queries,
-             s->contacts);
+             s->contacts, s->fx_n ? fxs : " -");
 }
 
 // 0xDA9600 also runs when a bullet's life is over (0xDAA0E0), with HitBulletID -1 when it has none: its summary.
