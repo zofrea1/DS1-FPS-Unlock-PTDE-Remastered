@@ -22,7 +22,6 @@ struct Hit {
     uint32_t eip = 0;
     int slot = -1;
     uint32_t count = 0;
-    uint32_t value = 0;
     DWORD tid = 0;
     uint32_t ret[4] = {};
     bool logged = false;
@@ -52,11 +51,22 @@ bool in_text(uint32_t v) {
     return v >= 0x401000 && v < 0x10CC000;
 }
 
+// The handler runs with the thread's watchpoints still set, so it must not touch the watched fields: a read there
+// (the first build logged each field's value) raised the exception again inside the handler while it held the lock,
+// and the game hung as the area loaded (2026-11-07 20:31). The values are logged when the effect loads instead, and
+// a nested exception on the same thread is let through untouched.
+thread_local int t_depth = 0;
+
 LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
     if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !g_armed) return EXCEPTION_CONTINUE_SEARCH;
     CONTEXT* ctx = info->ContextRecord;
     const DWORD dr6 = ctx->Dr6;
     if ((dr6 & 0xF) == 0) return EXCEPTION_CONTINUE_SEARCH;
+    if (t_depth > 0) {
+        ctx->Dr6 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    ++t_depth;
     if (g_total.fetch_add(1) == 0) g_first_hit = GetTickCount64();
     for (int i = 0; i < kSlots; ++i) {
         if (!(dr6 & (1u << i)) || !g_addr[i]) continue;
@@ -73,7 +83,6 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
             h->eip = ctx->Eip;
             h->slot = i;
             h->tid = GetCurrentThreadId();
-            h->value = *static_cast<volatile uint32_t*>(g_addr[i]);
             const uint32_t* sp = reinterpret_cast<const uint32_t*>(ctx->Esp);
             int n = 0;
             for (int s = 0; s < 128 && n < 4; ++s) {
@@ -90,6 +99,7 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
         g_lock.store(0, std::memory_order_release);
     }
     ctx->Dr6 = 0;
+    --t_depth;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
@@ -144,12 +154,10 @@ void report(bool all) {
     for (int k = 0; k < n; ++k) {
         const Hit& h = copy[k];
         if (h.logged && !all) continue;
-        float f;
-        std::memcpy(&f, &h.value, 4);
-        LOG_INFO("SfxWatch: %08X touched the %s of effect %d's first type-2 timing, %u times (value %08X = %g, "
-                 "thread %lu; stack %08X %08X %08X %08X)",
-                 h.eip, h.slot >= 0 ? kNames[h.slot] : "?", g_target, h.count, h.value, f, h.tid, h.ret[0], h.ret[1],
-                 h.ret[2], h.ret[3]);
+        LOG_INFO("SfxWatch: %08X touched the %s of effect %d's first type-2 timing, %u times (thread %lu; stack "
+                 "%08X %08X %08X %08X)",
+                 h.eip, h.slot >= 0 ? kNames[h.slot] : "?", g_target, h.count, h.tid, h.ret[0], h.ret[1], h.ret[2],
+                 h.ret[3]);
     }
 }
 
