@@ -5,12 +5,18 @@ if not exist build\ptde mkdir build\ptde
 
 set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
 
+rem "build_ptde.bat release" leaves the [Diagnostics] tools out (src\common\buildcfg.h); without it they are built in.
+set DIAG=
+set KIND=diagnostics build
+if /i "%~1"=="release" set DIAG=/DFPSU_DIAGNOSTICS=0
+if /i "%~1"=="release" set KIND=release build
+
 rem The sources are listed in src\ptde\sources.txt (a build that bundles another mod uses the same list).
 set RSP=build\ptde\sources.rsp
 > %RSP% (for /f "usebackq eol=# delims=" %%f in ("src\ptde\sources.txt") do @echo %%f)
 >> %RSP% echo src\ptde\extension_none.cpp
 
-cmd /c "call %VCVARS% x86 && cl /nologo /std:c++17 /O2 /MT /EHsc /W3 /LD /Isrc\common /Isrc\ptde @%RSP% /Fobuild\ptde\ /Febuild\ptde\xinput1_3.dll /link /DEF:src\ptde\xinput1_3.def /OPT:REF"
+cmd /c "call %VCVARS% x86 && rc /nologo /Isrc\common /fo build\ptde\version.res src\ptde\version.rc && cl /nologo /std:c++17 /O2 /MT /EHsc /W3 /LD %DIAG% /Isrc\common /Isrc\ptde @%RSP% build\ptde\version.res /Fobuild\ptde\ /Febuild\ptde\xinput1_3.dll /link /DEF:src\ptde\xinput1_3.def /OPT:REF"
 if errorlevel 1 exit /b 1
 
 rem DXVK's 32-bit d3d9.dll for the optional DXVK = true (pinned release, SHA-256 checked).
@@ -19,4 +25,4 @@ set PSModulePath=
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\fetch_dxvk.ps1 -OutDir build\ptde
 if errorlevel 1 exit /b 1
 
-echo Built build\ptde\xinput1_3.dll and build\ptde\dxvk_d3d9.dll
+echo Built build\ptde\xinput1_3.dll (%KIND%) and build\ptde\dxvk_d3d9.dll

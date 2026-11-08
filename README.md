@@ -9,7 +9,7 @@ Looking for co-op in Prepare to Die Edition? [Prepare to Co-op Edition](https://
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
-| Release | `v2.0.0-REMASTERED-DX11` | `v2.0.0-PTDE-DX9` |
+| Release | `v2.0.1-REMASTERED-DX11` | `v2.0.1-PTDE-DX9` |
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` (plus `dxvk_d3d9.dll` for the experimental `DXVK`) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
@@ -92,7 +92,7 @@ Turning the camera with the stick or mouse also raises how tightly it follows, f
 
 All six are on in the included INI, and also when a key is missing (since 1.8.0 `LockOnPtdeSpeed` and `FootIkPtdeSpeed` are too). Set one to `false` for Remastered's own behaviour. The two games also use different versions of Havok (2010 and 2015) for collisions against walls and corners, which these switches do not change.
 
-**Foot IK (`FixFootIk`).** On stairs and slopes Havok's foot placement puts each foot on the ground and the game lowers the hips so both feet reach. Three steps of it moved a fixed fraction per frame: the hips toward the height the feet need (0.2 of the gap a frame), the hips back to normal when neither foot is on the ground (0.6 left a frame), and the blend of the foot placement in and out (0.2 a frame). At a high frame rate the hips followed each step of a staircase several times faster than at the native rate, so running up or down stairs and slopes bobbed. Each fraction now covers the same real time at any frame rate. In Prepare to Die Edition, with `Trace = true`, Ctrl+0 switches it off and on while playing. Remastered kept the original game's per-frame values at 60 FPS, so its hips settle twice as fast as in the original game; `FootIkPtdeSpeed` (on by default) uses the original game's speed. Remastered's Havok also turns each foot toward the slope a fraction per frame; that follows the frame time at Remastered's own speed, since the original game's Havok has no such step.
+**Foot IK (`FixFootIk`).** On stairs and slopes Havok's foot placement puts each foot on the ground and the game lowers the hips so both feet reach. Three steps of it moved a fixed fraction per frame: the hips toward the height the feet need (0.2 of the gap a frame), the hips back to normal when neither foot is on the ground (0.6 left a frame), and the blend of the foot placement in and out (0.2 a frame). At a high frame rate the hips followed each step of a staircase several times faster than at the native rate, so running up or down stairs and slopes bobbed. Each fraction now covers the same real time at any frame rate. Remastered kept the original game's per-frame values at 60 FPS, so its hips settle twice as fast as in the original game; `FootIkPtdeSpeed` (on by default) uses the original game's speed. Remastered's Havok also turns each foot toward the slope a fraction per frame; that follows the frame time at Remastered's own speed, since the original game's Havok has no such step.
 
 **Running jumps (`FixJump`, Remastered).** A running jump does not leave the ground. For the first frames it follows the jump animation, then it keeps the speed from the end of that take-off. At about 30 FPS the take-off is only a few frames, and one of them can have no forward motion. The jump then alternated between stopped and full speed and covered about half the distance, and the sprint-slowdown check cut it further. `FixJump` keeps the faster of those two speeds for the rest of the jump. The height of the arc is unchanged. At 60 FPS and above the two speeds already match, so those jumps are left as they are. Prepare to Die Edition's native rate is 30, and it does not have this key.
 
@@ -192,7 +192,7 @@ Copy the files from the release for your game next to the game's exe (see the ta
 
 Each mod writes a log next to its DLL (`DSR-FPS-Unlock.log` or `PTDE-FPS-Unlock.log`) with a heartbeat every 30 seconds. The first lines show the version, the exe check and each patch applied. With `DXVK = true` the PTDE log says whether DXVK started and on which GPU, and DXVK's own `DARKSOULS_d3d9.log` is in the game folder. If the game freezes, the log says when the simulation stopped advancing; a crash writes a `*-crash.dmp` next to the DLL and a `CRASH:` line to the log. If a game script hits an error the game does not handle, the game closes itself; the log then has a `SCRIPT:` line saying which scripts failed and why. The heartbeat also shows how much memory the scripts use (`script memory MB (low-high)`). Send the log and any dump with a bug report.
 
-The `[Diagnostics]` INI section has development tools (recordings, watchpoints). Leave them off.
+The release DLLs leave out the development diagnostics (recordings, hardware watchpoints, the render thread sampler and their test hotkeys), so the INIs in the release zips have no `[Diagnostics]` section. A diagnostics build has them (see Build), and so does Prepare to Co-op Edition.
 
 ## Build
 
@@ -203,6 +203,8 @@ build.bat
 ```
 
 builds both targets. `build_dsr.bat` and `build_ptde.bat` build one each. `build_ptde.bat` also downloads DXVK 3.1.1 from its GitHub release once (`tools\fetch_dxvk.ps1`, SHA-256 checked) and puts its 32-bit `d3d9.dll` in `build\ptde\dxvk_d3d9.dll`.
+
+These are diagnostics builds: the `[Diagnostics]` INI keys work. `build.bat release` (or `build_dsr.bat release`, `build_ptde.bat release`) compiles the diagnostics out, as the published DLLs are (`FPSU_DIAGNOSTICS=0`, see `src\common\buildcfg.h`). `package_release.bat` makes both release builds, checks that neither DLL imports the diagnostics' thread and keyboard functions or has a TLS section, and writes the two zips to `build\release` with the INIs minus `[Diagnostics]`. Both DLLs carry a version resource (`src\common\version.h`).
 
 | Game | Output |
 | --- | --- |

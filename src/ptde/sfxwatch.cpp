@@ -1,4 +1,7 @@
 #include "sfxwatch.h"
+#include "buildcfg.h"
+
+#if FPSU_DIAGNOSTICS
 
 #include "log.h"
 
@@ -349,3 +352,13 @@ void sfxwatch_tick() {
         report(true);
     }
 }
+
+#else  // A release build leaves this diagnostic out (see buildcfg.h).
+
+void sfxwatch_set_target(int) {}
+bool sfxwatch_wanted() { return false; }
+bool sfxwatch_before_load(const uint8_t*, uint32_t) { return false; }
+void sfxwatch_after_load(const void*) {}
+void sfxwatch_tick() {}
+
+#endif  // FPSU_DIAGNOSTICS

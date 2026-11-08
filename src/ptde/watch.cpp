@@ -1,4 +1,7 @@
 #include "watch.h"
+#include "buildcfg.h"
+
+#if FPSU_DIAGNOSTICS
 
 #include "log.h"
 
@@ -333,3 +336,14 @@ uint32_t watch_exec_ecx(int slot) {
 uint32_t watch_exec_arg0(int slot) {
     return slot >= 0 && slot < kSlots ? g_exec_arg0[slot] : 0;
 }
+
+#else  // A release build leaves this diagnostic out (see buildcfg.h).
+
+void watch_set_spec(const char*) {}
+void watch_poll() {}
+uint32_t watch_exec_ecx(int) { return 0; }
+uint32_t watch_exec_arg0(int) { return 0; }
+void watch_arm_addresses(const uint32_t*, int) {}
+void watch_report_now() {}
+
+#endif  // FPSU_DIAGNOSTICS

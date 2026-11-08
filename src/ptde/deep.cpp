@@ -1,4 +1,7 @@
 #include "deep.h"
+#include "buildcfg.h"
+
+#if FPSU_DIAGNOSTICS
 
 #include "log.h"
 
@@ -192,3 +195,10 @@ void deep_frame(double dt_ms, int) {
     g_ms.push_back(1000.0 * static_cast<double>(now.QuadPart - g_t0.QuadPart) / static_cast<double>(g_freq.QuadPart));
     g_dt.push_back(dt_ms);
 }
+
+#else  // A release build leaves this diagnostic out (see buildcfg.h).
+
+void deep_set_dir(const wchar_t*) {}
+void deep_frame(double, int) {}
+
+#endif  // FPSU_DIAGNOSTICS

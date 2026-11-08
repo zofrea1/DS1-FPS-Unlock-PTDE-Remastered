@@ -1,4 +1,7 @@
 #include "watch.h"
+#include "buildcfg.h"
+
+#if FPSU_DIAGNOSTICS
 
 #include "log.h"
 #include "state.h"
@@ -315,3 +318,11 @@ void watch_note(const void* chr, void* phys) {
     }
     unspin(g_lock);
 }
+
+#else  // A release build leaves this diagnostic out (see buildcfg.h).
+
+bool watch_start(const wchar_t*) { return false; }
+void watch_stop() {}
+void watch_note(const void*, void*) {}
+
+#endif  // FPSU_DIAGNOSTICS

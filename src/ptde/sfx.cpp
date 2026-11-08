@@ -106,10 +106,29 @@ struct Held {
     float was;
     float set;
 };
-thread_local Held t_held[16];
-thread_local int t_depth = 0;
+// The clocks the action calls on a thread have moved, innermost last (an action can run another). Kept in a
+// TlsAlloc slot rather than in thread_local variables, so the DLL has no static TLS section.
+struct HeldStack {
+    Held held[16];
+    int depth;
+};
+DWORD g_held_slot = TLS_OUT_OF_INDEXES;
+
+// This thread's stack, made on its first action call; nullptr only if that allocation failed.
+HeldStack* held_stack() {
+    const DWORD error = GetLastError();  // TlsGetValue clears the thread's last error; the game's code keeps its own
+    auto* stack = static_cast<HeldStack*>(TlsGetValue(g_held_slot));
+    if (!stack) {
+        stack = static_cast<HeldStack*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(HeldStack)));
+        if (stack) TlsSetValue(g_held_slot, stack);
+    }
+    SetLastError(error);
+    return stack;
+}
 
 void __stdcall action_begin(uint8_t* node) {
+    HeldStack* stack = held_stack();
+    if (!stack) return;  // nothing is moved, and action_end then finds an empty stack
     Held h{nullptr, 0.0f, 0.0f};
     if (node) {
         __try {
@@ -127,15 +146,16 @@ void __stdcall action_begin(uint8_t* node) {
             h = Held{nullptr, 0.0f, 0.0f};
         }
     }
-    if (t_depth < 16) t_held[t_depth] = h;
-    ++t_depth;
+    if (stack->depth < 16) stack->held[stack->depth] = h;
+    ++stack->depth;
 }
 
 void __stdcall action_end() {
-    if (t_depth <= 0) return;
-    --t_depth;
-    if (t_depth >= 16) return;
-    const Held h = t_held[t_depth];
+    HeldStack* stack = held_stack();
+    if (!stack || stack->depth <= 0) return;
+    --stack->depth;
+    if (stack->depth >= 16) return;
+    const Held h = stack->held[stack->depth];
     if (!h.node) return;
     __try {
         float* clock = reinterpret_cast<float*>(h.node + 0x7C);
@@ -155,7 +175,9 @@ __declspec(naked) void action_call_stub() {
         push dword ptr [esp + 10h]
         call dword ptr [ebp - 8]
         add esp, 10h
+        push eax  // the action's result, as the game's code after the call sees it
         call action_end
+        pop eax
         ret 10h
     }
 }
@@ -168,6 +190,11 @@ bool sfx_actions_install() {
             LOG_ERROR("Effect action call at %08X does not match this build. Not patching.", site);
             return false;
         }
+    }
+    if (g_held_slot == TLS_OUT_OF_INDEXES) g_held_slot = TlsAlloc();
+    if (g_held_slot == TLS_OUT_OF_INDEXES) {
+        LOG_ERROR("Effect actions: no thread-local slot is free. Not patching.");
+        return false;
     }
     for (uint32_t site : kActionCalls) {
         auto* p = reinterpret_cast<uint8_t*>(site);

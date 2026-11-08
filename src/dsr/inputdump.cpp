@@ -1,4 +1,7 @@
 #include "inputdump.h"
+#include "buildcfg.h"
+
+#if FPSU_DIAGNOSTICS
 
 #include "log.h"
 
@@ -389,3 +392,9 @@ void inputdump_start(const wchar_t* dll_path) {
         LOG_INFO("Input dump available: Scroll Lock starts and stops a recording");
     }
 }
+
+#else  // A release build leaves this diagnostic out (see buildcfg.h).
+
+void inputdump_start(const wchar_t*) {}
+
+#endif  // FPSU_DIAGNOSTICS

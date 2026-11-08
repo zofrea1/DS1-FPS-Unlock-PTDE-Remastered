@@ -1,4 +1,7 @@
 #include "profile.h"
+#include "buildcfg.h"
+
+#if FPSU_DIAGNOSTICS
 
 #include "log.h"
 
@@ -176,3 +179,10 @@ bool profile_start() {
     LOG_INFO("Profiler ready: press F10 in a busy scene to sample the render thread for %d s", kSeconds);
     return true;
 }
+
+#else  // A release build leaves this diagnostic out (see buildcfg.h).
+
+volatile DWORD g_render_thread_id = 0;
+bool profile_start() { return false; }
+
+#endif  // FPSU_DIAGNOSTICS

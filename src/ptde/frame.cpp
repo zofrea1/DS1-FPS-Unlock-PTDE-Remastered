@@ -1,5 +1,6 @@
 #include "frame.h"
 
+#include "buildcfg.h"
 #include "camera.h"
 #include "cutscenecam.h"
 #include "deep.h"
@@ -211,6 +212,7 @@ void frame_boundary() {
         script_sample();
     }
     watch_poll();
+#if FPSU_DIAGNOSTICS  // Trace's hotkeys; a release build has no Trace (see buildcfg.h)
     if (g.cfg.trace) {
         static const int kRates[4] = {30, 60, 120, 240};
         static const int kKeys[4] = {VK_F4, VK_F5, VK_F6, VK_F7};
@@ -229,6 +231,7 @@ void frame_boundary() {
         deep_frame(g.last ? ms_between(g.last, t) : 0.0, g.rate);
         gauge_frame(g.last ? ms_between(g.last, t) : 0.0);
     }
+#endif
     g.last = t;
     survey_report(t);
 }

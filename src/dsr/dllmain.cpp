@@ -1,10 +1,12 @@
 #include "bonfire.h"
+#include "buildcfg.h"
 #include "diag.h"
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
 #include "state.h"
 #include "trace.h"
+#include "version.h"
 #include "inputdump.h"
 #include "watch.h"
 
@@ -26,7 +28,7 @@ DWORD WINAPI worker(void*) {
     GetModuleFileNameW(g_self, dll_path, MAX_PATH);
     log_init(dll_path, L"DSR-FPS-Unlock.log");
     diag_install(dll_path, L"DSR-FPS-Unlock-crash.dmp");
-    LOG_INFO("DS1 Remastered FPS Unlock v2.0.0");
+    LOG_INFO("DS1 Remastered FPS Unlock v" FPSU_VERSION_STR "%s", FPSU_DIAGNOSTICS ? " (diagnostics build)" : "");
 
     wchar_t exe_path[MAX_PATH];
     GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
@@ -34,7 +36,13 @@ DWORD WINAPI worker(void*) {
     WideCharToMultiByte(CP_UTF8, 0, exe_path, -1, exe_narrow, MAX_PATH, nullptr, nullptr);
     LOG_INFO("EXE: %s", exe_narrow);
 
-    const Settings settings = settings_load(dll_path);
+    Settings settings = settings_load(dll_path);
+#if !FPSU_DIAGNOSTICS
+    if (settings.trace || settings.watch || settings.input_log) {
+        LOG_INFO("Trace, Watch and InputLog are diagnostics, which this release build does not include. Ignored.");
+        settings.trace = settings.watch = settings.input_log = false;
+    }
+#endif
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("MaxFPS: %d", settings.target_fps);
     LOG_INFO("BonfireFix: %s", settings.bonfire_unstick ? "true" : "false");

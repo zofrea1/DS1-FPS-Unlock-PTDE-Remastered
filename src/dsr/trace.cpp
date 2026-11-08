@@ -1,4 +1,7 @@
 #include "trace.h"
+#include "buildcfg.h"
+
+#if FPSU_DIAGNOSTICS
 
 #include "log.h"
 #include "patches.h"
@@ -307,3 +310,12 @@ void trace_stop() {
         std::fclose(file);
     }
 }
+
+#else  // A release build leaves this diagnostic out (see buildcfg.h).
+
+bool trace_start(const wchar_t*) { return false; }
+bool trace_active() { return false; }
+void trace_stop() {}
+void trace_log(void*, float, uint64_t, int) {}
+
+#endif  // FPSU_DIAGNOSTICS

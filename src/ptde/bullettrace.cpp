@@ -1,4 +1,7 @@
 #include "bullettrace.h"
+#include "buildcfg.h"
+
+#if FPSU_DIAGNOSTICS
 
 #include "fixes.h"
 #include "limiter.h"
@@ -1775,3 +1778,9 @@ bool bullettrace_install() {
              ok, kDetailedPerBurst);
     return ok == 11;
 }
+
+#else  // A release build leaves this diagnostic out (see buildcfg.h).
+
+bool bullettrace_install() { return false; }
+
+#endif  // FPSU_DIAGNOSTICS

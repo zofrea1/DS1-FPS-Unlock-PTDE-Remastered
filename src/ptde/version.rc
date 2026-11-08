@@ -1,0 +1,33 @@
+// Version resource of the PTDE xinput1_3.dll (build_ptde.bat compiles this with rc).
+#include <winver.h>
+#include "version.h"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION FPSU_VERSION_MAJOR, FPSU_VERSION_MINOR, FPSU_VERSION_PATCH, 0
+PRODUCTVERSION FPSU_VERSION_MAJOR, FPSU_VERSION_MINOR, FPSU_VERSION_PATCH, 0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "zofrea1"
+            VALUE "FileDescription", "DS1 FPS Unlock for Dark Souls: Prepare to Die Edition (loads as xinput1_3.dll)"
+            VALUE "FileVersion", FPSU_VERSION_STR
+            VALUE "InternalName", "PTDE-FPS-Unlock"
+            VALUE "LegalCopyright", "Copyright (c) 2026 zofrea1. MIT License."
+            VALUE "OriginalFilename", "xinput1_3.dll"
+            VALUE "ProductName", "DS1 FPS Unlock (PTDE)"
+            VALUE "ProductVersion", FPSU_VERSION_STR
+            VALUE "Comments", "Open source: https://github.com/zofrea1/DS1-FPS-Unlock-PTDE-Remastered"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

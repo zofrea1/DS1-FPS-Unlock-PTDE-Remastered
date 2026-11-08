@@ -1,3 +1,4 @@
+#include "buildcfg.h"
 #include "bullettrace.h"
 #include "controller.h"
 #include "d3d.h"
@@ -12,6 +13,7 @@
 #include "patches.h"
 #include "settings.h"
 #include "trace.h"
+#include "version.h"
 #include "window.h"
 #include "xinput_proxy.h"
 
@@ -37,7 +39,7 @@ DWORD WINAPI worker(void*) {
     log_init(dll_path, L"PTDE-FPS-Unlock.log");
     xinput_log_target();
     diag_install(dll_path, L"PTDE-FPS-Unlock-crash.dmp");
-    LOG_INFO("DS1 PTDE FPS Unlock v%s", ptde_fps_unlock_version());
+    LOG_INFO("DS1 PTDE FPS Unlock v%s%s", ptde_fps_unlock_version(), FPSU_DIAGNOSTICS ? " (diagnostics build)" : "");
     const PtdeExtension* ext = ptde_extension();
     if (ext) LOG_INFO("Built together with %s", ext->name);
 
@@ -47,7 +49,17 @@ DWORD WINAPI worker(void*) {
     WideCharToMultiByte(CP_UTF8, 0, exe_path, -1, exe_narrow, MAX_PATH, nullptr, nullptr);
     LOG_INFO("EXE: %s", exe_narrow);
 
-    const Settings settings = settings_load(dll_path);
+    Settings settings = settings_load(dll_path);
+#if !FPSU_DIAGNOSTICS
+    if (settings.trace || settings.bullet_trace || settings.sfx_watch || settings.watch[0] || settings.profile ||
+        settings.input_log) {
+        LOG_INFO("Trace, BulletTrace, SfxWatch, Watch, Profile and InputLog are diagnostics, which this release build "
+                 "does not include. Ignored.");
+        settings.trace = settings.bullet_trace = settings.profile = settings.input_log = false;
+        settings.sfx_watch = 0;
+        settings.watch[0] = 0;
+    }
+#endif
     trace_set_dir(dll_path);
     deep_set_dir(dll_path);
     gauge_set_dir(dll_path);
@@ -110,7 +122,13 @@ DWORD WINAPI worker(void*) {
 
 }  // namespace
 
-const char* ptde_fps_unlock_version() { return "2.0.0"; }
+// Kept as a literal: Prepare to Co-op's tools\make_ini.ps1 reads the version from this line.
+const char* ptde_fps_unlock_version() { return "2.0.1"; }
+
+namespace {
+constexpr bool same_text(const char* a, const char* b) { return *a == *b && (*a == 0 || same_text(a + 1, b + 1)); }
+}  // namespace
+static_assert(same_text("2.0.1", FPSU_VERSION_STR), "ptde_fps_unlock_version() and version.h disagree");
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {

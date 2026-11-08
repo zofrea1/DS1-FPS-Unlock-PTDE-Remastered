@@ -1,4 +1,7 @@
 #include "gauge.h"
+#include "buildcfg.h"
+
+#if FPSU_DIAGNOSTICS
 
 #include "log.h"
 #include "watch.h"
@@ -208,3 +211,10 @@ void gauge_frame(double dt_ms) {
     g_ms.push_back(1000.0 * static_cast<double>(now.QuadPart - g_t0.QuadPart) / static_cast<double>(g_freq.QuadPart));
     g_dt.push_back(dt_ms);
 }
+
+#else  // A release build leaves this diagnostic out (see buildcfg.h).
+
+void gauge_set_dir(const wchar_t*) {}
+void gauge_frame(double) {}
+
+#endif  // FPSU_DIAGNOSTICS

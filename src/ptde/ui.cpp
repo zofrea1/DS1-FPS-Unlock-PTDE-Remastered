@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include "buildcfg.h"
 #include "fixes.h"
 #include "log.h"
 
@@ -332,6 +333,9 @@ DWORD WINAPI bonfire_thread(void*) {
     }
     return 0;
 }
+
+// The rest of this namespace is InputLog's diagnostics, which a release build leaves out (see buildcfg.h).
+#if FPSU_DIAGNOSTICS
 
 // ---- HUD shortcut input log -------------------------------------------------------------------
 //
@@ -697,6 +701,8 @@ DWORD WINAPI probe_thread(void*) {
     return 0;
 }
 
+#endif  // FPSU_DIAGNOSTICS
+
 }  // namespace
 
 bool ui_install(const Settings& settings) {
@@ -717,6 +723,7 @@ bool ui_install(const Settings& settings) {
             ok = false;
         }
     }
+#if FPSU_DIAGNOSTICS
     if (settings.input_log) {
         if (HANDLE probe = CreateThread(nullptr, 0, probe_thread, nullptr, 0, nullptr)) {
             CloseHandle(probe);
@@ -729,5 +736,6 @@ bool ui_install(const Settings& settings) {
         ok &= install_input_log();
         ok &= install_dialog_log();
     }
+#endif
     return ok;
 }
