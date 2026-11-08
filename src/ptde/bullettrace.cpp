@@ -550,7 +550,7 @@ void __stdcall on_land(const uint8_t* b, const uint8_t* hit) {
 // again after 0xA4D420 returns. A count of 0 never reaches that call (jbe 0x9E6C4C), so only a call that will happen
 // is pushed. n == 1 is the drawn model (its numbers are local, not world). A world-position cluster is one whose
 // +B4/+B8/+BC point sits within 8 m of a live watched bullet.
-constexpr int kMaxShots = 8;
+constexpr int kMaxShots = 32;
 constexpr int kMaxTracks = 128;
 constexpr int kMaxStepLines = 500;    // clusters that sit near a glob
 constexpr int kMaxLocalLines = 200;   // n == 1 clusters that are not near a glob (the drawn models)
@@ -583,6 +583,7 @@ struct Shot {
     int32_t count = 0;
     bool n1 = false;
     bool by_glob = false;  // not named near: windows.h defines that word as a macro
+    bool tagged = false;   // logged because it was beside a glob earlier, not now
     int32_t near_id = -1;
     double at = 0;
     Snap before;
@@ -710,6 +711,37 @@ void clock_note(const uint8_t* cluster, double now) {
     c.since = now;
 }
 
+// A cluster first seen within 8 m of a glob keeps being logged for 4 s even when its particles go far from the
+// glob: at 120 FPS the clusters beside the globs at 30 FPS were not seen beside them at all.
+struct Tag {
+    const uint8_t* cluster = nullptr;
+    int32_t id = -1;
+    double at = 0;
+};
+Tag g_tags[256];
+
+void tag_cluster(const uint8_t* cluster, int32_t id, double now) {
+    Tag* slot = nullptr;
+    for (Tag& t : g_tags) {
+        if (t.cluster == cluster) {
+            t.at = now;
+            return;
+        }
+        if (!slot && (!t.cluster || now - t.at > 4.0)) slot = &t;
+    }
+    if (slot) *slot = Tag{cluster, id, now};
+}
+
+bool tagged(const uint8_t* cluster, double now, int32_t& id) {
+    for (const Tag& t : g_tags) {
+        if (t.cluster == cluster && now - t.at <= 4.0) {
+            id = t.id;
+            return true;
+        }
+    }
+    return false;
+}
+
 void __stdcall on_accel(const uint8_t* self, const uint8_t* cluster, uint32_t tbits, uint32_t xmmbits) {
     if (!self || !cluster) return;
     const double now = now_s();
@@ -734,6 +766,12 @@ void __stdcall on_accel(const uint8_t* self, const uint8_t* cluster, uint32_t tb
     read_snap(self, cluster, shot.before);
     shot.n1 = count == 1;
     shot.by_glob = soa_near_bullet(shot.before, count, shot.near_id) || ctx_near_bullet(shot.before, shot.near_id);
+    if (shot.by_glob) {
+        tag_cluster(cluster, shot.near_id, now);
+    } else if (tagged(cluster, now, shot.near_id)) {
+        shot.by_glob = true;
+        shot.tagged = true;
+    }
     if (!shot.n1 && !shot.by_glob) return;
     ++g_shot_n;
 }
@@ -850,7 +888,8 @@ void __stdcall on_accel_after(const uint8_t* cluster) {
     if (hidden) al = appf(diff, sizeof(diff), al, " +%d", hidden);
     float xmm = 0;
     std::memcpy(&xmm, &shot.xmmbits, 4);
-    const char* why = shot.by_glob ? (shot.n1 ? "n1 near" : "near") : "n1";
+    const char* why = shot.tagged ? (shot.n1 ? "n1 left" : "left")
+                                  : shot.by_glob ? (shot.n1 ? "n1 near" : "near") : "n1";
     if (shown == 0) {
         if (tr->flat) return;
         if (local_only) {
