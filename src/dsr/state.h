@@ -46,6 +46,9 @@ inline std::atomic<int> g_graze_ptde{1};
 inline std::atomic<int> g_step_down_ptde{1};
 inline std::atomic<int> g_step_height_ptde{1};
 inline std::atomic<int> g_air_damping_ptde{1};
+// 1 = projectiles at the original game's rates (INI BulletPtdeSpeed): a ground-crawling bullet's landing friction
+// and ground factor per 1/30 s, repeating bullet volleys on the 30 FPS schedule; 0 = Remastered's (per 1/60 s).
+inline std::atomic<int> g_bullet_ptde_speed{1};
 inline std::atomic<int> g_fix_lock_on_turn{1};
 // Foot IK follows the frame time (INI FixFootIk), at the original game's speed with FootIkPtdeSpeed.
 inline std::atomic<int> g_fix_foot_ik{1};

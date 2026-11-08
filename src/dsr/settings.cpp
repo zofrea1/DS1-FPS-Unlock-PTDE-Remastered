@@ -113,6 +113,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.step_height_ptde = parse_bool(val);
         } else if (key == "airdampingptde") {
             s.air_damping_ptde = parse_bool(val);
+        } else if (key == "bulletptdespeed") {
+            s.bullet_ptde_speed = parse_bool(val);
         } else if (key == "fixcamera") {
             s.fix_camera = parse_bool(val);
         } else if (key == "watch") {

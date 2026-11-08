@@ -336,6 +336,27 @@ int32_t* g_ghost_units = nullptr;  // ghost replay counter units for this frame 
 float* g_ghost_turn = nullptr;     // 4 x (frame time * 60), the per-frame turn of replays and other players
 float* g_frame_cells = nullptr;    // frame constants page (see patch_frame_constants)
 float* g_foot_cells = nullptr;     // foot IK per-frame values (see patch_foot_ik and FootCell)
+float* g_bullet_cells = nullptr;   // ground-crawling bullet values (see patch_bullets and BulletCell)
+
+// Layout of the bullet cells, read by the patched code.
+enum BulletCell : int {
+    kBulletKeep = 0,   // speed kept at each landing: 0.97 per frame of the chosen rate, over this frame's time
+    kBulletDecay = 1,  // ground factor kept per update: 0.4 per frame of the chosen rate, over this frame's time
+    kBulletLand = 2,   // ground factor a landing stores: 0.4 ^ (1 - frames of the chosen rate in this frame)
+};
+
+// The rate the bullet fixes reproduce: the original game's 30 FPS with BulletPtdeSpeed, Remastered's 60 without.
+double bullet_rate() {
+    return g_bullet_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+}
+
+void write_bullet_cells(float dt) {
+    double n = static_cast<double>(dt) * bullet_rate();
+    n = n < 0.01 ? 0.01 : (n > 10.0 ? 10.0 : n);
+    g_bullet_cells[kBulletKeep] = static_cast<float>(std::pow(0.97, n));
+    g_bullet_cells[kBulletDecay] = static_cast<float>(std::pow(0.4, n));
+    g_bullet_cells[kBulletLand] = static_cast<float>(std::pow(0.4, 1.0 - n));
+}
 
 // Layout of the foot IK cells, read by the patched code.
 enum FootCell : int {
@@ -459,6 +480,9 @@ void apply_frame_step(float dt) {
     }
     if (g_foot_cells) {
         write_foot_cells(dt);
+    }
+    if (g_bullet_cells) {
+        write_bullet_cells(dt);
     }
 }
 
@@ -1393,6 +1417,155 @@ struct CaveEmitter {
         std::memcpy(buf + at, &value, sizeof(value));
     }
 };
+
+// Bullets (the same code as Prepare to Die Edition's, see the PTDE fixes for the trace that found it).
+//  * A ground-crawling bullet (BulletParam FollowType 4, the undead dragon's acid) "lands" about three times a
+//    frame while it slides (fn at 0x425xxx). Each landing turns its velocity along the surface and multiplies the
+//    speed by (0.5 + 0.5 * cos(turn)) * 0.97, the 0.97 from the bullet manager (+0xAC, set by its constructor at
+//    0x4294FC), down to the bullet's minimum speed. Per frame, so at a high frame rate the acid lost its speed
+//    sooner and stopped short (a player standing where it reached at 30 FPS was not hit at 120). The landing also
+//    sets the ground factor [bullet+0x50] to 1, and the velocity update (0x426596) multiplies it by 0.4 every
+//    frame and takes gravity times (1 - factor). Remastered applies all of it per 1/60 s, the original game per
+//    1/30 s: Remastered's acid loses its slide speed twice as fast. The 0.97 load becomes a load of 0.97 per frame
+//    of the chosen rate over this frame's time, the 0.4 likewise, and the landing stores 0.4 ^ (1 - n) so the
+//    update after a landing still leaves 0.4. At the chosen rate nothing changes.
+//  * A bullet emitter that fires repeatedly while its animation event lasts (fn 0x420FD0, BulletParam
+//    shootInterval) counts [+0x300] down by the frame time and fires on the frame after it reaches 0, then sets it
+//    back to shootInterval, so volleys come every (frames to count down + 1) frames: the dragon's 0.01 s acid stream
+//    fires every 0.025 s at 120 FPS, 0.033 s at 60 and 0.0667 s in the original game. After a volley
+//    the countdown is now the chosen rate's period less 1.5 frames, so the next volley comes on the frame nearest
+//    that period at any frame rate.
+constexpr uint32_t kBulletKeepRva = 0x4254C3;     // movss xmm0, [rax + 0xAC]
+constexpr uint32_t kBulletLandRva = 0x425550;     // mov dword ptr [rdi + 0x50], 1.0
+constexpr uint32_t kBulletDecayRva = 0x426596;    // mulss xmm1, [rip + 0.4]
+constexpr uint32_t kBulletEmitterRva = 0x421047;  // comiss xmm6, xmm0 ; movss [rbx + 0x300], xmm0
+std::atomic<int> g_bullet_state{0};
+
+// Called from the emitter stub with shootInterval; returns the countdown to store after a volley.
+float bullet_countdown(float interval) {
+    if (!g_fix_timers.load(std::memory_order_relaxed) || !(interval > 0.0f) || interval > 600.0f) {
+        return interval;
+    }
+    // The game's own count at the chosen rate: subtract one frame (in float, as the game does) until the
+    // countdown is not above 0; the volley is the frame after.
+    const double rate = bullet_rate();
+    const float step = static_cast<float>(1.0 / rate);
+    float t = interval;
+    int frames = 0;
+    while (t > 0.0f && frames < 40000) {
+        t -= step;
+        ++frames;
+    }
+    const double period = (frames + 1) / rate;
+    const double count = period - 1.5 * static_cast<double>(g_frame_dt.load(std::memory_order_relaxed));
+    return static_cast<float>(count > 0.0 ? count : 0.0);
+}
+
+bool patch_bullets() {
+    const bool slide = g_fix_damping.load(std::memory_order_relaxed) != 0;
+    const bool volleys = g_fix_timers.load(std::memory_order_relaxed) != 0;
+    if (!slide && !volleys) {
+        return true;
+    }
+    uint8_t* keep = image_rva(kBulletKeepRva);
+    uint8_t* land = image_rva(kBulletLandRva);
+    uint8_t* decay = image_rva(kBulletDecayRva);
+    uint8_t* emitter = image_rva(kBulletEmitterRva);
+    static constexpr uint8_t kKeep[] = {0xF3, 0x0F, 0x10, 0x80, 0xAC, 0x00, 0x00, 0x00};
+    static constexpr uint8_t kLand[] = {0xC7, 0x47, 0x50, 0x00, 0x00, 0x80, 0x3F};
+    static constexpr uint8_t kEmitter[] = {0x0F, 0x2F, 0xF0, 0xF3, 0x0F, 0x11, 0x83, 0x00, 0x03, 0x00, 0x00};
+    const bool decay_ok = decay[0] == 0xF3 && decay[1] == 0x0F && decay[2] == 0x59 && decay[3] == 0x0D &&
+                          rip_mulss_is(decay, 0.4f, 0x0D);
+    if (std::memcmp(keep, kKeep, sizeof(kKeep)) != 0 || std::memcmp(land, kLand, sizeof(kLand)) != 0 || !decay_ok ||
+        std::memcmp(emitter, kEmitter, sizeof(kEmitter)) != 0) {
+        LOG_ERROR("Bullet landing / emitter code does not match this build. Not patched.");
+        return false;
+    }
+    auto* cells = static_cast<float*>(alloc_near(keep));
+    auto* code = static_cast<uint8_t*>(alloc_near(keep));
+    if (!cells || !code) {
+        LOG_ERROR("Could not allocate the bullet caves (Win32=%lu)", GetLastError());
+        return false;
+    }
+    g_bullet_cells = cells;
+    write_bullet_cells(current_step());
+
+    // Stubs, entered by `call`. The landing store: push rax ; mov eax, [rip + land cell] ; mov [rdi + 0x50], eax ;
+    // pop rax ; ret (no flags change).
+    CaveEmitter e{code};
+    const size_t land_stub = e.len;
+    e.b(0x50);
+    e.b(0x8B);
+    e.b(0x05);
+    const size_t land_cell = e.imm32();
+    e.b(0x89);
+    e.b(0x47);
+    e.b(0x50);
+    e.b(0x58);
+    e.b(0xC3);
+    e.fix32(land_cell, &cells[kBulletLand]);
+    // The emitter: the countdown from bullet_countdown(shootInterval), then the replaced comiss for the jb after.
+    // Inside the stub rsp is 8 off 16, so 0x38 restores the alignment for the call (0x20 shadow + a save slot).
+    const size_t emit_stub = e.len;
+    const uint8_t kEmitStub1[] = {0x48, 0x83, 0xEC, 0x38,               // sub rsp, 38h
+                                  0xF3, 0x0F, 0x11, 0x44, 0x24, 0x20,   // movss [rsp+20h], xmm0
+                                  0x48, 0xB8};                          // mov rax, imm64
+    e.put(kEmitStub1, sizeof(kEmitStub1));
+    const size_t fn = e.imm64();
+    const uint8_t kEmitStub2[] = {0xFF, 0xD0,                                      // call rax
+                                  0xF3, 0x0F, 0x11, 0x83, 0x00, 0x03, 0x00, 0x00,  // movss [rbx+300h], xmm0
+                                  0xF3, 0x0F, 0x10, 0x44, 0x24, 0x20,              // movss xmm0, [rsp+20h]
+                                  0x48, 0x83, 0xC4, 0x38,                          // add rsp, 38h
+                                  0x0F, 0x2F, 0xF0,                                // comiss xmm6, xmm0
+                                  0xC3};                                           // ret
+    e.put(kEmitStub2, sizeof(kEmitStub2));
+    e.fix64(fn, reinterpret_cast<uint64_t>(&bullet_countdown));
+    DWORD old = 0;
+    if (!VirtualProtect(code, 0x1000, PAGE_EXECUTE_READ, &old)) {
+        LOG_ERROR("Could not make the bullet stubs executable (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), code, e.len);
+
+    const auto call_to = [](uint8_t* site, size_t size, const void* target) {
+        const intptr_t rel = reinterpret_cast<intptr_t>(target) - reinterpret_cast<intptr_t>(site + 5);
+        if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) return false;
+        DWORD prot = 0;
+        if (!VirtualProtect(site, size, PAGE_EXECUTE_READWRITE, &prot)) return false;
+        site[0] = 0xE8;
+        const int32_t value = static_cast<int32_t>(rel);
+        std::memcpy(site + 1, &value, 4);
+        for (size_t i = 5; i < size; ++i) site[i] = 0x90;
+        FlushInstructionCache(GetCurrentProcess(), site, size);
+        VirtualProtect(site, size, prot, &prot);
+        return true;
+    };
+
+    bool ok = true;
+    if (slide) {
+        // [rax + disp32] -> [rip + disp32]: only the ModRM byte (mod 00, reg xmm0, rm 101), then the displacement.
+        DWORD prot = 0;
+        if (VirtualProtect(keep + 3, 1, PAGE_EXECUTE_READWRITE, &prot)) {
+            keep[3] = 0x05;
+            VirtualProtect(keep + 3, 1, prot, &prot);
+            FlushInstructionCache(GetCurrentProcess(), keep + 3, 1);
+            ok = write_disp32(keep + 4, keep + 8, &cells[kBulletKeep]) && ok;
+        } else {
+            ok = false;
+        }
+        ok = write_disp32(decay + 4, decay + 8, &cells[kBulletDecay]) && ok;
+        ok = call_to(land, sizeof(kLand), code + land_stub) && ok;
+    }
+    if (volleys) {
+        ok = call_to(emitter, sizeof(kEmitter), code + emit_stub) && ok;
+    }
+    LOG_INFO("Bullets: %s%s%s at %s (landing keep %.4f, ground decay %.4f a frame now)", slide ? "acid slide" : "",
+             slide && volleys ? " and " : "", volleys ? "volley schedule" : "",
+             g_bullet_ptde_speed.load(std::memory_order_relaxed) != 0 ? "the original game's rate (per 1/30 s)"
+                                                                      : "Remastered's rate (per 1/60 s)",
+             cells[kBulletKeep], cells[kBulletDecay]);
+    return ok;
+}
 
 // Ground snap ("step down"). Every frame the physics body is lifted by the step
 // height [phys+0xE4] (0.31), moved, then snapped back down onto ground within
@@ -3658,6 +3831,11 @@ void try_delayed_patches() {
     if (g_decay_state.compare_exchange_strong(expected, 1)) {
         const bool ok = !g_fix_damping.load(std::memory_order_relaxed) || patch_decay();
         g_decay_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_bullet_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = patch_bullets();
+        g_bullet_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_slide_state.compare_exchange_strong(expected, 1)) {

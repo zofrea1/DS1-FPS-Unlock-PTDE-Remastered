@@ -82,6 +82,11 @@ struct Settings {
     bool step_down_ptde = true;
     bool step_height_ptde = true;
     bool air_damping_ptde = true;
+    // Projectiles at the original game's rates (INI BulletPtdeSpeed): a ground-crawling bullet (the undead dragon's
+    // acid) loses speed at each landing per 1/30 s and fades its ground hold per 1/30 s, and repeating bullets fire
+    // on the original game's 30 FPS schedule. false: Remastered's own rates (per 1/60 s) at any frame rate. The
+    // slide needs FixDamping, the schedule FixTimers.
+    bool bullet_ptde_speed = true;
     // Lock-on body turn (torso, head and hips toward the target) follows the frame time.
     bool fix_lock_on_turn = true;
     // Foot IK (feet on stairs and slopes, the pelvis lowered to reach them) follows the frame time (INI FixFootIk).
