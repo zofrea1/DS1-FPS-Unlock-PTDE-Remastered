@@ -473,7 +473,7 @@ struct Shot {
     uint32_t tbits = 0;
     int32_t count = 0;
     bool n1 = false;
-    bool near = false;
+    bool by_glob = false;  // not named near: windows.h defines that word as a macro
     int32_t near_id = -1;
     double at = 0;
     Snap before;
@@ -578,8 +578,8 @@ void __stdcall on_accel(const uint8_t* self, const uint8_t* cluster, uint32_t tb
     shot.at = now;
     read_snap(self, cluster, shot.before);
     shot.n1 = count == 1;
-    shot.near = soa_near_bullet(shot.before, count, shot.near_id) || ctx_near_bullet(shot.before, shot.near_id);
-    if (!shot.n1 && !shot.near) return;
+    shot.by_glob = soa_near_bullet(shot.before, count, shot.near_id) || ctx_near_bullet(shot.before, shot.near_id);
+    if (!shot.n1 && !shot.by_glob) return;
     ++g_shot_n;
 }
 
@@ -622,7 +622,7 @@ void __stdcall on_accel_after(const uint8_t* cluster) {
     if (g_lines >= kMaxLines || now - g_burst_last > kStepWindow) return;
     Track* tr = track_for(cluster);
     if (!tr) return;
-    const bool local_only = shot.n1 && !shot.near;
+    const bool local_only = shot.n1 && !shot.by_glob;
     Snap after;
     read_snap(shot.self, cluster, after);
     char diff[900] = {};
@@ -680,7 +680,7 @@ void __stdcall on_accel_after(const uint8_t* cluster) {
     if (hidden) al = appf(diff, sizeof(diff), al, " +%d", hidden);
     float xmm = 0;
     std::memcpy(&xmm, &shot.xmmbits, 4);
-    const char* why = shot.near ? (shot.n1 ? "n1 near" : "near") : "n1";
+    const char* why = shot.by_glob ? (shot.n1 ? "n1 near" : "near") : "n1";
     if (shown == 0) {
         if (tr->flat) return;
         if (local_only) {
@@ -761,15 +761,15 @@ void note_player_touch(Seen& s, const uint8_t* entry, const float* point, const 
     const PlayerRefs me = player_refs();
     const bool match = same_player(victim, me) || same_player(owner, me) || same_player(obj, me) || same_player(obj8, me);
     float dist = 0;
-    bool near = false;
+    bool beside = false;
     if (me.have) {
         const float dx = p[0] - me.pos[0], dy = p[1] - me.pos[1], dz = p[2] - me.pos[2];
         dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-        near = kind != 0 && dist < kPlayerNear;
+        beside = kind != 0 && dist < kPlayerNear;
     }
     if (match) ++s.player_hits;
-    if (near) ++s.near_hits;
-    if ((!match && !near) || g_player_lines >= kMaxPlayerLines || g_lines >= kMaxLines) return;
+    if (beside) ++s.near_hits;
+    if ((!match && !beside) || g_player_lines >= kMaxPlayerLines || g_lines >= kMaxLines) return;
     ++g_player_lines;
     ++g_lines;
     float shape[12] = {};
