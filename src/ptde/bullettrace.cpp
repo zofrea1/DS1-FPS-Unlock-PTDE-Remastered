@@ -1,6 +1,7 @@
 #include "bullettrace.h"
 
 #include "fixes.h"
+#include "limiter.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -74,6 +75,14 @@ struct Seen {
     float lowest = 1e9f;
     float last[3] = {};
     uint32_t serial = 0;
+    int burst = 0;
+    int cap_born = 0;
+    // Closest the glob's centre came to the player's body (a 1.7 m upright segment from the feet), when, and where
+    // the player stood then. The hit radius is 0.3 growing to 0.6, so a glob that never comes within about 1 m
+    // cannot touch the player at any frame rate.
+    float closest = 1e9f;
+    double closest_age = 0;
+    float closest_you[3] = {};
     // The glob's effect (its sfx slot at +0x58: [+4] the effect system, [+8] the instance): places in the instance's
     // objects that held the glob's position when first looked at, logged beside it every update after.
     bool fx_searched = false;
@@ -89,6 +98,26 @@ int g_lines = 0;
 double g_burst_last = -100;
 int g_burst_detailed = 0;
 int g_burst = 0;
+
+// One line per burst once its last glob is over: the cap it was fired and ended under, how many globs and how far
+// apart, the closest any came to the player, the sweep contacts on the player and the HP the player lost.
+struct Burst {
+    int id = 0;
+    int cap_first = 0;
+    int cap_last = 0;
+    int globs = 0;
+    int alive = 0;
+    double first = 0;
+    double last_birth = 0;
+    float closest = 1e9f;
+    int on_you = 0;
+    int hp_first = -1;
+    int hp_low = -1;
+    int hp_max = 0;
+    float you_lo[3] = {1e9f, 1e9f, 1e9f};
+    float you_hi[3] = {-1e9f, -1e9f, -1e9f};
+};
+Burst g_bursts[16];
 
 double now_s() {
     static LARGE_INTEGER f{};
@@ -168,17 +197,51 @@ const uint8_t* hit_entry(uint32_t handle) {
     return e && rd<uint32_t>(e, 0) == handle ? e : nullptr;
 }
 
+const uint8_t* player_chr() {
+    const uint8_t* wcm = rd<const uint8_t*>(reinterpret_cast<const void*>(kWorldChrMan), 0);
+    const uint8_t* first = rd<const uint8_t*>(wcm, 4);
+    return rd<const uint8_t*>(first, 0);
+}
+
+Burst& burst_slot(int id) {
+    return g_bursts[id & 15];
+}
+
+void burst_report(Burst& b) {
+    if (b.id == 0) return;
+    const int id = b.id;
+    b.id = 0;
+    if (g_lines >= kMaxLines) return;
+    ++g_lines;
+    const double span = b.last_birth - b.first;
+    const int threes = b.globs / 3;
+    LOG_INFO("[bullet] burst %d over: cap %d->%d, %d globs in %.2f s (%.3f s between threes), closest to you %.2f m, "
+             "sweep contacts on you %d, HP %d -> lowest %d (max %d), you x %.2f..%.2f y %.2f..%.2f z %.2f..%.2f",
+             id, b.cap_first, b.cap_last, b.globs, span, threes > 1 ? span / (threes - 1) : 0.0, b.closest, b.on_you,
+             b.hp_first, b.hp_low, b.hp_max, b.you_lo[0], b.you_hi[0], b.you_lo[1], b.you_hi[1], b.you_lo[2],
+             b.you_hi[2]);
+}
+
 void summarize(Seen& s, const char* why) {
     if (!s.alive) return;
     s.alive = false;
+    Burst& b = burst_slot(s.burst);
+    if (b.id == s.burst) {
+        b.on_you += s.player_hits;
+        if (s.closest < b.closest) b.closest = s.closest;
+        b.cap_last = limiter_requested_fps();
+        if (--b.alive <= 0) burst_report(b);
+    }
     if (g_lines >= kMaxLines) return;
     ++g_lines;
     LOG_INFO("[bullet] %p %d summary (%s): %.2f s, %d updates, %d hit queries, %d sweep contacts, on you %d, near %d, "
              "%d ground contacts, %d landings, first landing %s at update %d (%.2f s); lowest y %.3f, "
-             "last (%.3f, %.3f, %.3f); burst %d%s",
+             "last (%.3f, %.3f, %.3f); closest to you %.2f m at %.2f s (you at %.2f, %.2f, %.2f); cap %d->%d; "
+             "burst %d%s",
              s.bullet, s.id, why, now_s() - s.born, s.updates, s.queries, s.contacts, s.player_hits, s.near_hits,
              s.ground, s.lands, s.first_land ? "" : "NONE", s.first_land, s.first_land_age, s.lowest, s.last[0],
-             s.last[1], s.last[2], g_burst, s.detailed ? ", detailed" : "");
+             s.last[1], s.last[2], s.closest, s.closest_age, s.closest_you[0], s.closest_you[1], s.closest_you[2],
+             s.cap_born, limiter_requested_fps(), s.burst, s.detailed ? ", detailed" : "");
 }
 
 Seen* find(const uint8_t* b) {
@@ -209,11 +272,27 @@ Seen* start(const uint8_t* b, int32_t id) {
     slot->alive = true;
     slot->serial = ++g_serial;
     slot->born = now_s();
+    const int cap = limiter_requested_fps();
     if (slot->born - g_burst_last > kBurstGap) {
         ++g_burst;
         g_burst_detailed = 0;
+        Burst& old = burst_slot(g_burst);
+        if (old.id) burst_report(old);  // 16 bursts ago and still not over: report what it has
+        old = Burst{};
+        old.id = g_burst;
+        old.cap_first = cap;
+        old.first = slot->born;
     }
     g_burst_last = slot->born;
+    slot->burst = g_burst;
+    slot->cap_born = cap;
+    Burst& cur = burst_slot(g_burst);
+    if (cur.id == g_burst) {
+        ++cur.globs;
+        ++cur.alive;
+        cur.last_birth = slot->born;
+        cur.cap_last = cap;
+    }
     slot->detailed = g_burst_detailed < kDetailedPerBurst;
     if (slot->detailed) ++g_burst_detailed;
     return slot;
@@ -326,12 +405,42 @@ void __stdcall on_update(const uint8_t* b, float dt) {
     read(b + 0x30, vel, 16);
     std::memcpy(s->last, pos, 12);
     if (pos[1] < s->lowest) s->lowest = pos[1];
+    float me[3] = {};
+    if (player_pos(me)) {
+        const float dx = pos[0] - me[0], dz = pos[2] - me[2];
+        float dy = 0;
+        if (pos[1] < me[1]) {
+            dy = me[1] - pos[1];
+        } else if (pos[1] > me[1] + 1.7f) {
+            dy = pos[1] - (me[1] + 1.7f);
+        }
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < s->closest) {
+            s->closest = d;
+            s->closest_age = now_s() - s->born;
+            std::memcpy(s->closest_you, me, 12);
+        }
+        Burst& b = burst_slot(s->burst);
+        if (b.id == s->burst) {
+            for (int k = 0; k < 3; ++k) {
+                if (me[k] < b.you_lo[k]) b.you_lo[k] = me[k];
+                if (me[k] > b.you_hi[k]) b.you_hi[k] = me[k];
+            }
+            const int hp = rd<int32_t>(player_chr(), 0x2D4, -1);
+            if (hp >= 0) {
+                if (b.hp_first < 0) {
+                    b.hp_first = hp;
+                    b.hp_max = rd<int32_t>(player_chr(), 0x2D8, 0);
+                }
+                if (b.hp_low < 0 || hp < b.hp_low) b.hp_low = hp;
+            }
+        }
+    }
     if (!s->detailed || g_lines >= kMaxLines || s->update_lines >= kMaxUpdateLines) return;
     if (s->first_land && s->updates > s->first_land + kUpdatesAfterLanding) return;
     ++s->update_lines;
     ++g_lines;
     if (fresh) {
-        float me[3] = {};
         const bool have_me = player_pos(me);
         ++g_lines;
         LOG_INFO("[bullet] %p new: bullet %d, burst %d, state %d; player at (%.2f, %.2f, %.2f)%s; frame %.4f s", b, id,
@@ -449,7 +558,7 @@ constexpr int kMaxFlatNear = 24;
 constexpr int kMaxFlatLocal = 24;
 constexpr int kMaxNearPerCluster = 48;   // about one line each 0.05 s, so a 2.3 s glob is covered at 120 FPS too
 constexpr int kMaxLocalPerCluster = 8;
-constexpr int kMaxPlayerLines = 400;
+constexpr int kMaxPlayerLines = 150;  // per cap
 constexpr float kPlayerNear = 2.5f;
 constexpr float kParticleNear = 8.0f;
 constexpr double kStepWindow = 4.0;
@@ -556,9 +665,55 @@ int appf(char* b, int n, int at, const char* fmt, ...) {
     return at > n - 1 ? n - 1 : at;
 }
 
+// 0xA4D420 integrates from the cluster's +0x10 to its +0x14 (its step is +0x14 - +0x10, the curves are read at
+// both). Once a second: those steps against the game's frame time, for every acceleration cluster, so the next
+// log says whether the effect clock follows the frame.
+constexpr int kMaxClockLines = 600;
+struct Clock {
+    double since = 0;
+    int calls = 0;
+    int same = 0;  // step within 2 % of the frame
+    float lo = 1e9f;
+    float hi = -1e9f;
+    double sum = 0;
+    float t0 = 0;
+    float t1 = 0;
+    int lines = 0;
+};
+Clock g_clock;
+
+void clock_note(const uint8_t* cluster, double now) {
+    const float t0 = rd<float>(cluster, 0x10);
+    const float t1 = rd<float>(cluster, 0x14);
+    const float step = t1 - t0;
+    const float frame = static_cast<float>(fixes_last_dt());
+    Clock& c = g_clock;
+    if (c.since == 0) c.since = now;
+    ++c.calls;
+    if (frame > 0 && std::fabs(step - frame) <= 0.02f * frame) ++c.same;
+    if (step < c.lo) c.lo = step;
+    if (step > c.hi) c.hi = step;
+    c.sum += step;
+    c.t0 = t0;
+    c.t1 = t1;
+    if (now - c.since < 1.0) return;
+    if (c.lines < kMaxClockLines && g_lines < kMaxLines) {
+        ++c.lines;
+        ++g_lines;
+        LOG_INFO("[bullet] fx clock: cap %d, frame %.4f, %d acceleration calls, step min %.4f avg %.4f max %.4f, "
+                 "%d within 2%% of the frame; last cluster times %.4f -> %.4f",
+                 limiter_requested_fps(), frame, c.calls, c.lo, c.sum / c.calls, c.hi, c.same, c.t0, c.t1);
+    }
+    const int lines = c.lines;
+    c = Clock{};
+    c.lines = lines;
+    c.since = now;
+}
+
 void __stdcall on_accel(const uint8_t* self, const uint8_t* cluster, uint32_t tbits, uint32_t xmmbits) {
     if (!self || !cluster) return;
     const double now = now_s();
+    if (rd<int32_t>(cluster, 0x18, 0) > 0) clock_note(cluster, now);
     if (now - g_burst_last > kStepWindow) return;
     while (g_shot_n > 0 && now - g_shots[0].at > 1.0) {
         for (int i = 1; i < g_shot_n; ++i) g_shots[i - 1] = g_shots[i];
@@ -616,6 +771,21 @@ Track* track_for(const uint8_t* cluster) {
 
 // Called from the stolen `call 0xA4D420`, after it returns and before `add esp, 0x54`.
 void __stdcall on_accel_after(const uint8_t* cluster) {
+    // Each cap gets its own step budget, so a 30 / 60 / 120 comparison is in one log.
+    static int budget_cap = -1;
+    const int cap = limiter_requested_fps();
+    if (cap != budget_cap) {
+        budget_cap = cap;
+        g_step_lines = 0;
+        g_local_lines = 0;
+        g_flat_near = 0;
+        g_flat_local = 0;
+        for (Track& t : g_tracks) t = Track{};
+        if (g_lines < kMaxLines) {
+            ++g_lines;
+            LOG_INFO("[bullet] step budgets reset for cap %d", cap);
+        }
+    }
     Shot shot;
     if (!take_shot(cluster, shot)) return;
     const double now = now_s();
@@ -692,15 +862,17 @@ void __stdcall on_accel_after(const uint8_t* cluster) {
         }
         tr->flat = true;
         ++g_lines;
-        LOG_INFO("[bullet] step %p cluster %p n %d flat xmm %.5f (%08X) arg2 %08X frame %.4f %s glob %d", shot.self,
-                 cluster, shot.count, xmm, shot.xmmbits, shot.tbits, fixes_last_dt(), why, shot.near_id);
+        LOG_INFO("[bullet] step %p cluster %p n %d flat xmm %.5f (%08X) arg2 %08X frame %.4f t %.4f->%.4f ctx34 %.4f "
+                 "cap %d %s glob %d",
+                 shot.self, cluster, shot.count, xmm, shot.xmmbits, shot.tbits, fixes_last_dt(), shot.before.c10[0],
+                 shot.before.c10[1], shot.before.ctx[13], cap, why, shot.near_id);
         return;
     }
     // One line per cluster per 0.05 s (0.10 s for a local model), so 120 FPS does not spend the whole cap in the
     // first fifth of a second. Each line is that call's own step, entry against the integrator's write.
-    const int cap = local_only ? kMaxLocalPerCluster : kMaxNearPerCluster;
+    const int per_cluster = local_only ? kMaxLocalPerCluster : kMaxNearPerCluster;
     const double gap = local_only ? 0.10 : 0.05;
-    if (tr->lines >= cap || (tr->lines > 0 && now - tr->logged_at < gap)) return;
+    if (tr->lines >= per_cluster || (tr->lines > 0 && now - tr->logged_at < gap)) return;
     if (local_only) {
         if (g_local_lines >= kMaxLocalLines) return;
         ++g_local_lines;
@@ -712,8 +884,10 @@ void __stdcall on_accel_after(const uint8_t* cluster) {
     ++tr->lines;
     tr->logged_at = now;
     ++g_lines;
-    LOG_INFO("[bullet] step %p cluster %p n %d xmm %.5f (%08X) arg2 %08X frame %.4f %s glob %d |%s", shot.self,
-             cluster, shot.count, xmm, shot.xmmbits, shot.tbits, fixes_last_dt(), why, shot.near_id, diff);
+    LOG_INFO("[bullet] step %p cluster %p n %d xmm %.5f (%08X) arg2 %08X frame %.4f t %.4f->%.4f ctx34 %.4f cap %d %s "
+             "glob %d |%s",
+             shot.self, cluster, shot.count, xmm, shot.xmmbits, shot.tbits, fixes_last_dt(), shot.before.c10[0],
+             shot.before.c10[1], shot.before.ctx[13], cap, why, shot.near_id, diff);
 }
 
 // 0xDF1E70, once a frame for each attack hit entry: the sweep of its shape from where it was to where it is.
@@ -769,6 +943,11 @@ void note_player_touch(Seen& s, const uint8_t* entry, const float* point, const 
     }
     if (match) ++s.player_hits;
     if (beside) ++s.near_hits;
+    static int lines_cap = -1;
+    if (limiter_requested_fps() != lines_cap) {
+        lines_cap = limiter_requested_fps();
+        g_player_lines = 0;
+    }
     if ((!match && !beside) || g_player_lines >= kMaxPlayerLines || g_lines >= kMaxLines) return;
     ++g_player_lines;
     ++g_lines;
@@ -1067,7 +1246,9 @@ bool bullettrace_install() {
     ok += hook(kContact, kContactPrologue, &contact_stub);
     LOG_INFO("BulletTrace: %d of 10 hooks; the undead dragon's acid (34200-34209), c5390's 53900-53902 and the Gaping "
              "Dragon's 52600/52601 are logged with their map contacts ([bullet] lines: the first %d of each burst frame "
-             "by frame, a summary for every one, the particle step after the integrator, a line when a sweep touches you)",
+             "by frame, a summary for every one with its closest approach to you, a line per burst with the cap and the HP "
+             "you lost, the particle step after the integrator with the cluster's times, an fx clock line each second, "
+             "a line when a sweep touches you; step and touch budgets start again at every cap change)",
              ok, kDetailedPerBurst);
     return ok == 10;
 }

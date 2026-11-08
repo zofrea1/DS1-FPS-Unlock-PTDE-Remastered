@@ -15,6 +15,8 @@ enum LimitPoint { kLimitEarly, kLimitPresent, kLimitBoundary };
 void limiter_start(int fps);
 // A new rate from any thread (the Trace keys); the waiting thread takes it up at its next wait.
 void limiter_set_fps(int fps);
+// The rate last asked for (0 = no cap), from any thread.
+int limiter_requested_fps();
 void limiter_set_point(LimitPoint point);
 LimitPoint limiter_point();
 bool limiter_is_on();

@@ -138,6 +138,10 @@ void limiter_set_fps(int fps) {
     InterlockedExchange(&g_requested, fps > 0 ? fps : 0);
 }
 
+int limiter_requested_fps() {
+    return static_cast<int>(g_requested);
+}
+
 void limiter_set_point(LimitPoint point) {
     InterlockedExchange(&g_point, point);
 }
