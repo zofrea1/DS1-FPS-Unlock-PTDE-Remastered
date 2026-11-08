@@ -9,3 +9,13 @@
 // fn 0xD19CF0 (stdcall(name, data, size), which registers an effect file with the FFX library before
 // it is parsed) walks the raw file through its pointer-offset table and raises those intervals.
 bool sfx_install(bool raise = true);
+
+// Effect actions on the 30 FPS frame grid. When an effect node changes state the FX library runs that state's
+// actions (FXBasicActionHandler, routines by id at 0x12DDC60), and they read their parameters at the node's clock
+// [node+0x7C]. At 30 FPS a state change only ever happens on a frame boundary, so that clock reads a whole number
+// of 1/30 s frames; effects were authored around that. The undead dragon's acid (16012): its emitter resets the
+// clock on one state, moves on the next frame, and spawns its ground part with a count curve read at that clock:
+// 1/30 s at 30 FPS, but 1/60 or 1/120 s at higher rates, where the count is 0 and the acid on the ground never
+// appears. While an action runs, the clock is rounded up to the next 30 FPS frame and then put back (unless the
+// action set it). At 30 FPS nothing changes.
+bool sfx_actions_install();

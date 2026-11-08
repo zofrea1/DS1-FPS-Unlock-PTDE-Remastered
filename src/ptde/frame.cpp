@@ -432,6 +432,9 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_sfx_spawn_rate || sfxwatch_wanted()) {
             sfx_install(settings.fix_sfx_spawn_rate);
         }
+        if (settings.fix_sfx_actions) {
+            sfx_actions_install();
+        }
         if (settings.fix_slide_contact) {
             slidecontact_install();
         }

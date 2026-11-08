@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -95,7 +96,95 @@ void* __stdcall hk_register(const void* name, uint8_t* data, uint32_t size) {
     return resource;
 }
 
+// Both action dispatchers end in `call [ebp-8] ; add esp,10h` (cdecl routine(handler, node, args, x)): 0xB80F70
+// (an action id from a state's list) and 0xB81010 (an action another action runs, as 0x62 runs 4).
+constexpr uint32_t kActionCalls[2] = {0x00B80FB5, 0x00B81053};
+constexpr uint8_t kActionCallBytes[6] = {0xFF, 0x55, 0xF8, 0x83, 0xC4, 0x10};
+
+struct Held {
+    uint8_t* node;
+    float was;
+    float set;
+};
+thread_local Held t_held[16];
+thread_local int t_depth = 0;
+
+void __stdcall action_begin(uint8_t* node) {
+    Held h{nullptr, 0.0f, 0.0f};
+    if (node) {
+        __try {
+            float* clock = reinterpret_cast<float*>(node + 0x7C);
+            const float t = *clock;
+            // The next 30 FPS frame at or after t, with a tenth of a frame of slack for a 30 FPS frame that ran
+            // a little long.
+            const double frames = std::ceil(static_cast<double>(t) * 30.0 - 0.1);
+            const float q = frames > 0.0 ? static_cast<float>(frames / 30.0) : 0.0f;
+            if (t >= 0.0f && q > t) {
+                *clock = q;
+                h = Held{node, t, q};
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            h = Held{nullptr, 0.0f, 0.0f};
+        }
+    }
+    if (t_depth < 16) t_held[t_depth] = h;
+    ++t_depth;
+}
+
+void __stdcall action_end() {
+    if (t_depth <= 0) return;
+    --t_depth;
+    if (t_depth >= 16) return;
+    const Held h = t_held[t_depth];
+    if (!h.node) return;
+    __try {
+        float* clock = reinterpret_cast<float*>(h.node + 0x7C);
+        if (*clock == h.set) *clock = h.was;  // an action that set the clock itself keeps its value
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Entered by `call` in place of `call [ebp-8] ; add esp,10h`: [esp] the return, then handler, node, args, x.
+__declspec(naked) void action_call_stub() {
+    __asm {
+        push dword ptr [esp + 8]
+        call action_begin
+        push dword ptr [esp + 10h]
+        push dword ptr [esp + 10h]
+        push dword ptr [esp + 10h]
+        push dword ptr [esp + 10h]
+        call dword ptr [ebp - 8]
+        add esp, 10h
+        call action_end
+        ret 10h
+    }
+}
+
 }  // namespace
+
+bool sfx_actions_install() {
+    for (uint32_t site : kActionCalls) {
+        if (std::memcmp(reinterpret_cast<const void*>(site), kActionCallBytes, sizeof(kActionCallBytes)) != 0) {
+            LOG_ERROR("Effect action call at %08X does not match this build. Not patching.", site);
+            return false;
+        }
+    }
+    for (uint32_t site : kActionCalls) {
+        auto* p = reinterpret_cast<uint8_t*>(site);
+        DWORD old = 0;
+        if (!VirtualProtect(p, sizeof(kActionCallBytes), PAGE_EXECUTE_READWRITE, &old)) return false;
+        p[0] = 0xE8;
+        const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&action_call_stub) - (site + 5));
+        std::memcpy(p + 1, &rel, 4);
+        p[5] = 0x90;
+        FlushInstructionCache(GetCurrentProcess(), p, sizeof(kActionCallBytes));
+        DWORD ignored = 0;
+        VirtualProtect(p, sizeof(kActionCallBytes), old, &ignored);
+    }
+    LOG_INFO("Effect actions read their node's clock on the 30 FPS frame grid (sites %08X, %08X)", kActionCalls[0],
+             kActionCalls[1]);
+    return true;
+}
 
 bool sfx_install(bool raise) {
     g_raise = raise;
