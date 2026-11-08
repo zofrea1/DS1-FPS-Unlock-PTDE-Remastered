@@ -258,15 +258,21 @@ void __stdcall on_update(const uint8_t* b, float dt) {
              s->contacts);
 }
 
+// 0xDA9600 also runs when a bullet's life is over (0xDAA0E0), with HitBulletID -1 when it has none: its summary.
+// (The game frees a bullet that is over without another update, so a summary from the update never came.)
 void __stdcall on_hit_bullet(const uint8_t* b, int32_t target, const float* where) {
     Seen* s = find(b);
-    if (!s || g_lines >= kMaxLines) return;
-    ++g_lines;
-    float p[4] = {};
-    const bool have = where && read(where, p, 16);
-    LOG_INFO("[bullet] %p %d makes hit bullet %d at (%.3f, %.3f, %.3f)%s, target %d, flags %02X, life %.3f", b, s->id,
-             rd<int32_t>(b, 0x2A8, -1), p[0], p[1], p[2], have ? "" : " (unreadable)", target,
-             rd<uint8_t>(b, 0x270), rd<float>(b, 0x1D4));
+    if (!s) return;
+    const int32_t hit = rd<int32_t>(b, 0x2A8, -1);
+    if (hit >= 0 && s->detailed && g_lines < kMaxLines) {
+        ++g_lines;
+        float p[4] = {};
+        const bool have = where && read(where, p, 16);
+        LOG_INFO("[bullet] %p %d makes hit bullet %d at (%.3f, %.3f, %.3f)%s, target %d, flags %02X, life %.3f", b,
+                 s->id, hit, p[0], p[1], p[2], have ? "" : " (unreadable)", target, rd<uint8_t>(b, 0x270),
+                 rd<float>(b, 0x1D4));
+    }
+    summarize(*s, rd<float>(b, 0x1D4) <= 0.0f ? "life over" : "hit");
 }
 
 // 0x1025950: the bullet's state takes map hits (vtable +0x20), the hit's +0x34 is below 0x40, and the victim
