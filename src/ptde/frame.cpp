@@ -18,6 +18,7 @@
 #include "slidesteer.h"
 #include "snap.h"
 #include "bullettrace.h"
+#include "sfxwatch.h"
 #include "soulcounter.h"
 #include "trace.h"
 #include "turn.h"
@@ -203,6 +204,7 @@ void frame_boundary() {
         }
         const double step = g.driver ? static_cast<double>(g.written) : 1.0 / 30.0;
         fixes_update(step);
+        sfxwatch_tick();
         footik_update(step);
         slidesteer_update(step);
         ghost_frame(step);
@@ -425,8 +427,10 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_ghosts) {
             ghost_install();
         }
-        if (settings.fix_sfx_spawn_rate) {
-            sfx_install();
+        // SfxWatch shares the effect registration hook; a Watch of player fields keeps the debug registers.
+        if (settings.sfx_watch > 0 && settings.watch[0] == 0) sfxwatch_set_target(settings.sfx_watch);
+        if (settings.fix_sfx_spawn_rate || sfxwatch_wanted()) {
+            sfx_install(settings.fix_sfx_spawn_rate);
         }
         if (settings.fix_slide_contact) {
             slidecontact_install();

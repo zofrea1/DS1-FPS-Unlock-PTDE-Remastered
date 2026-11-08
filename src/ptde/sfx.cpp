@@ -1,6 +1,7 @@
 #include "sfx.h"
 
 #include "log.h"
+#include "sfxwatch.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -20,6 +21,7 @@ using RegisterFn = void*(__stdcall*)(const void* name, uint8_t* data, uint32_t s
 RegisterFn g_orig = nullptr;
 std::atomic<int> g_effects{0};
 std::atomic<int> g_raised{0};
+bool g_raise = true;  // FixSfxSpawnRate; the hook also serves SfxWatch alone
 
 uint32_t rd32(const uint8_t* d, uint32_t o) {
     uint32_t v;
@@ -76,7 +78,8 @@ int raise_intervals(uint8_t* d, uint32_t size) {
 void* __stdcall hk_register(const void* name, uint8_t* data, uint32_t size) {
     int raised = 0;
     __try {
-        raised = raise_intervals(data, size);
+        sfxwatch_on_register(data, size);
+        raised = g_raise ? raise_intervals(data, size) : 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         raised = 0;
     }
@@ -91,7 +94,8 @@ void* __stdcall hk_register(const void* name, uint8_t* data, uint32_t size) {
 
 }  // namespace
 
-bool sfx_install() {
+bool sfx_install(bool raise) {
+    g_raise = raise;
     // mov eax,[0x013787C8] ; push esi ; push edi
     static const uint8_t kExpect[7] = {0xA1, 0xC8, 0x87, 0x37, 0x01, 0x56, 0x57};
     auto* site = reinterpret_cast<uint8_t*>(kRegisterEffect);
@@ -117,6 +121,8 @@ bool sfx_install() {
     FlushInstructionCache(GetCurrentProcess(), site, kStolen);
     DWORD ignored = 0;
     VirtualProtect(site, kStolen, old, &ignored);
-    LOG_INFO("Effect spawn intervals below 1/30 s are raised to 1/30 s as effects load (Remastered's 60 FPS rule)");
+    if (raise) {
+        LOG_INFO("Effect spawn intervals below 1/30 s are raised to 1/30 s as effects load (Remastered's 60 FPS rule)");
+    }
     return true;
 }

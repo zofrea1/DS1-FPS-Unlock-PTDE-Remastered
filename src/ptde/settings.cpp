@@ -206,6 +206,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.trace = parse_bool(val);
         } else if (key == "bullettrace") {
             s.bullet_trace = parse_bool(val);
+        } else if (key == "sfxwatch") {
+            s.sfx_watch = std::atoi(val.c_str());
         } else if (key == "profile") {
             s.profile = parse_bool(val);
         } else if (key == "skippresentrepeat") {

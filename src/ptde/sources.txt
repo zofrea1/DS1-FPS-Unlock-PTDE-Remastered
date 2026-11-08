@@ -33,6 +33,7 @@ src\ptde\slidesteer.cpp
 src\ptde\cutscenecam.cpp
 src\ptde\soulcounter.cpp
 src\ptde\bullettrace.cpp
+src\ptde\sfxwatch.cpp
 src\ptde\script.cpp
 src\ptde\dxvk.cpp
 src\ptde\intro.cpp

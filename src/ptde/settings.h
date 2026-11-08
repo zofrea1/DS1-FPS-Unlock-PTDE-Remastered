@@ -70,6 +70,8 @@ struct Settings {
     bool trace = false;
     // Diagnostic: log the dragons' acid and the pool it leaves ([bullet] lines, see bullettrace.h).
     bool bullet_trace = false;
+    // Diagnostic: an effect id whose first emitter timing block gets hardware watchpoints (see sfxwatch.h); 0 = off.
+    int sfx_watch = 0;
     // Diagnostic: hash every vertex shader constant upload to count presents whose content did
     // not change. Costs noticeable CPU per frame; leave off for normal play.
     bool content_probe = false;

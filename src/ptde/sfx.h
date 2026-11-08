@@ -8,4 +8,4 @@
 // nothing else changed. This applies the same rule to every effect as the game loads it: a detour on
 // fn 0xD19CF0 (stdcall(name, data, size), which registers an effect file with the FFX library before
 // it is parsed) walks the raw file through its pointer-offset table and raises those intervals.
-bool sfx_install();
+bool sfx_install(bool raise = true);
