@@ -68,6 +68,8 @@ struct Settings {
     // Diagnostic: F9 records the player's state to a CSV; F4/F5/F6/F7 switch the frame
     // rate live to 30/60/120/240 FPS.
     bool trace = false;
+    // Diagnostic: log the dragons' acid and the pool it leaves ([bullet] lines, see bullettrace.h).
+    bool bullet_trace = false;
     // Diagnostic: hash every vertex shader constant upload to count presents whose content did
     // not change. Costs noticeable CPU per frame; leave off for normal play.
     bool content_probe = false;

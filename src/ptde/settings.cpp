@@ -204,6 +204,8 @@ Settings settings_load(const wchar_t* dll_path) {
             std::strncpy(s.watch, val.c_str(), sizeof(s.watch) - 1);
         } else if (key == "trace") {
             s.trace = parse_bool(val);
+        } else if (key == "bullettrace") {
+            s.bullet_trace = parse_bool(val);
         } else if (key == "profile") {
             s.profile = parse_bool(val);
         } else if (key == "skippresentrepeat") {

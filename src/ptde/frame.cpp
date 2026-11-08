@@ -17,6 +17,7 @@
 #include "slidecontact.h"
 #include "slidesteer.h"
 #include "snap.h"
+#include "bullettrace.h"
 #include "soulcounter.h"
 #include "trace.h"
 #include "turn.h"
@@ -441,6 +442,9 @@ bool frame_install(const Settings& settings) {
         }
     }
     script_install(settings.driver && settings.fix_script_memory);
+    if (settings.bullet_trace) {
+        bullettrace_install();
+    }
     present_install(settings);
     if (settings.profile) {
         profile_start();

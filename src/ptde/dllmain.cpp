@@ -1,3 +1,4 @@
+#include "bullettrace.h"
 #include "controller.h"
 #include "d3d.h"
 #include "deep.h"
@@ -85,6 +86,10 @@ DWORD WINAPI worker(void*) {
     if (!settings.fps_unlock) {
         LOG_INFO("FPSUnlock is false. The game is unchanged%s.",
                  settings.skip_intro ? ", except the start-up notice and logos (SkipIntro)" : "");
+        // A diagnostic, so the original 30 FPS game can be compared with the unlocked one.
+        if (settings.bullet_trace) {
+            bullettrace_install();
+        }
         return 0;
     }
     if (patches_probe(settings)) {
