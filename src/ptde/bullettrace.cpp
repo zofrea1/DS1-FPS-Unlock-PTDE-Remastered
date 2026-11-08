@@ -1442,13 +1442,124 @@ constexpr uint32_t kFxCreate = 0x00971560;  // push ebx ; mov ebx,esp ; sub esp,
 constexpr uint32_t kFxCreateExit = 0x00972092;
 constexpr uint32_t kFxFailSites[5] = {0x009715F7, 0x00971621, 0x009716F1, 0x00971814, 0x0097189C};
 
+// The glob that owns an effect node: climb the parents (+0x84) to the top node, which is the bullet's instance.
+Seen* fx_owner(const uint8_t* node) {
+    if (!node) return nullptr;
+    const uint8_t* top = node;
+    for (int i = 0; i < 12; ++i) {
+        const uint8_t* up = rd<const uint8_t*>(top, 0x84);
+        if (!up) break;
+        top = up;
+    }
+    const uint32_t t = reinterpret_cast<uint32_t>(top);
+    for (Seen& g : g_seen) {
+        if (g.alive && g.fx_inst && g.fx_inst == t) return &g;
+    }
+    return nullptr;
+}
+
+// Lines for the first few globs a cap: every action their effect nodes run and every effect creation one of their
+// nodes starts.
+constexpr int kFxActGlobsPerCap = 3;
+constexpr int kMaxFxActLines = 900;
+const Seen* g_fx_act_globs[kFxActGlobsPerCap] = {};
+int g_fx_act_cap = -1;
+int g_fx_act_n = 0;
+int g_fx_act_lines = 0;
+
+bool fx_act_wanted(const Seen* g) {
+    if (!g || g_fx_act_lines >= kMaxFxActLines || g_lines >= kMaxLines) return false;
+    const int cap = limiter_requested_fps();
+    if (cap != g_fx_act_cap) {
+        g_fx_act_cap = cap;
+        g_fx_act_n = 0;
+        for (const Seen*& x : g_fx_act_globs) x = nullptr;
+    }
+    for (const Seen* x : g_fx_act_globs) {
+        if (x == g) return true;
+    }
+    if (g_fx_act_n >= kFxActGlobsPerCap) return false;
+    g_fx_act_globs[g_fx_act_n++] = g;
+    return true;
+}
+
+void fx_node_text(const uint8_t* node, char* out, int size) {
+    const uint8_t* cls = rd<const uint8_t*>(node, 0x90);
+    const uint32_t table = rd<uint32_t>(cls, 0x58);
+    const uint32_t state = rd<uint32_t>(node, 0x74);
+    const int idx = (table && state >= table) ? static_cast<int>((state - table) / 16) : -1;
+    std::snprintf(out, size, "%p type %X s%d %.4f %.4f", node, rd<uint32_t>(cls, 4), idx, rd<float>(node, 0x78),
+                  rd<float>(node, 0x7C));
+}
+
+// 0xB80F70: the basic action handler runs action *id for a node with its arguments (table 0x12DDC60).
+void __stdcall on_fxaction(const int32_t* id, const uint8_t* ctx, const uint8_t* args) {
+    Seen* g = fx_owner(ctx);
+    if (!fx_act_wanted(g)) return;
+    char nt[96] = {};
+    fx_node_text(ctx, nt, sizeof(nt));
+    ++g_fx_act_lines;
+    ++g_lines;
+    LOG_INFO("[fx] action %X glob %p age %.4f cap %d frame %.4f node %s args %08X %08X %08X %08X %08X %08X",
+             rd<int32_t>(id, 0, -1), g->bullet, now_s() - g->born, limiter_requested_fps(), fixes_last_dt(), nt,
+             rd<uint32_t>(args, 0), rd<uint32_t>(args, 4), rd<uint32_t>(args, 8), rd<uint32_t>(args, 0xC),
+             rd<uint32_t>(args, 0x10), rd<uint32_t>(args, 0x14));
+}
+
+// 0x971560 entry: an effect creation; logged when one of its first four arguments is a node of a followed glob.
+void __stdcall on_fxcreate(const uint32_t* stack) {
+    const uint32_t ret = rd<uint32_t>(stack, 0);
+    for (int i = 1; i <= 4; ++i) {
+        const uint8_t* arg = reinterpret_cast<const uint8_t*>(rd<uint32_t>(stack, 4 * i));
+        if (!arg || !heap_pointer(reinterpret_cast<uint32_t>(arg))) continue;
+        Seen* g = fx_owner(arg);
+        if (!g || !fx_act_wanted(g)) continue;
+        char nt[96] = {};
+        fx_node_text(arg, nt, sizeof(nt));
+        ++g_fx_act_lines;
+        ++g_lines;
+        LOG_INFO("[fx] create from %08X glob %p age %.4f cap %d (arg %d node %s) args %08X %08X %08X %08X %08X %08X",
+                 ret, g->bullet, now_s() - g->born, limiter_requested_fps(), i, nt, rd<uint32_t>(stack, 4),
+                 rd<uint32_t>(stack, 8), rd<uint32_t>(stack, 12), rd<uint32_t>(stack, 16), rd<uint32_t>(stack, 20),
+                 rd<uint32_t>(stack, 24));
+        return;
+    }
+}
+
 __declspec(naked) void fxcreate_stub() {
     __asm {
         lock inc dword ptr [g_fx_creates]
+        pushad
+        lea eax, [esp + 20h]
+        push eax
+        call on_fxcreate
+        popad
         push ebx
         mov ebx, esp
         sub esp, 8
         push 0971566h
+        ret
+    }
+}
+
+// thiscall (ecx = handler), [esp+4] id*, [esp+8] node, [esp+0Ch] args; push ebp ; mov ebp,esp ; sub esp,8
+__declspec(naked) void fxaction_stub() {
+    SAVE_ALL
+    __asm {
+        mov eax, [esp + 0xA0 + 0Ch]
+        push eax
+        mov eax, [esp + 0xA4 + 8]
+        push eax
+        mov eax, [esp + 0xA8 + 4]
+        push eax
+        call on_fxaction
+    }
+    RESTORE_ALL
+    __asm {
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        push 0B80F76h
         ret
     }
 }
@@ -1557,7 +1668,9 @@ bool bullettrace_install() {
             std::memcpy(want + 1, &rel, 4);
             fx_ok += hook_bytes(kFxFailSites[i], want, 5, reinterpret_cast<const void*>(kFailStubs[i])) ? 1 : 0;
         }
-        LOG_INFO("BulletTrace: effect creation counters, %d of 6 sites", fx_ok);
+        static const uint8_t kActionBytes[6] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08};
+        fx_ok += hook_bytes(0x00B80F70, kActionBytes, 6, &fxaction_stub) ? 1 : 0;
+        LOG_INFO("BulletTrace: effect creation counters and the action handler, %d of 7 sites", fx_ok);
     }
     LOG_INFO("BulletTrace: %d of 11 hooks; the undead dragon's acid (34200-34209), c5390's 53900-53902 and the Gaping "
              "Dragon's 52600/52601 are logged with their map contacts ([bullet] lines: the first %d of each burst frame "
