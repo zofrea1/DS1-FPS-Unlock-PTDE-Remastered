@@ -39,6 +39,8 @@ struct Seen {
     uint32_t serial = 0;
 };
 Seen g_seen[64];
+int32_t g_kinds[256];  // every bullet id seen once, so a trace that watches the wrong ids still says what flew
+int g_kind_count = 0;
 uint32_t g_serial = 0;
 int g_lines = 0;
 
@@ -137,6 +139,18 @@ void __stdcall on_update(const uint8_t* b, float dt) {
     const int state = rd<int32_t>(b, 0x70, 0);
     if (state < 1 || state > 3) return;  // 4: over, until the game frees it
     const int32_t id = state_id(b, state);
+    if (id >= 0 && g_kind_count < 256) {
+        bool known = false;
+        for (int i = 0; i < g_kind_count && !known; ++i) known = g_kinds[i] == id;
+        if (!known) {
+            g_kinds[g_kind_count++] = id;
+            ++g_lines;
+            float pos[3] = {};
+            read(b + 0x10, pos, 12);
+            LOG_INFO("[bullet] first of its kind: bullet %d (state %d) at (%.2f, %.2f, %.2f)", id, state, pos[0],
+                     pos[1], pos[2]);
+        }
+    }
     if (!watched(id)) return;
     bool fresh = false;
     Seen* s = seen_for(b, id, &fresh);
