@@ -97,6 +97,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.menu_input_filter = parse_bool(val);
         } else if (key == "bonfirefix" || key == "bonfireunstick") {
             s.bonfire_unstick = parse_bool(val);
+        } else if (key == "startoffline" || key == "disableonlinemode") {
+            s.start_offline = parse_bool(val);
         } else if (key == "trace") {
             s.trace = parse_bool(val);
         } else if (key == "fixstepdown") {

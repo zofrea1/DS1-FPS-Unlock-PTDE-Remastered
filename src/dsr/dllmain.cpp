@@ -43,6 +43,8 @@ DWORD WINAPI worker(void*) {
         LOG_INFO("FPSUnlock is false. The game is unchanged.");
         return 0;
     }
+    g_start_offline.store(settings.start_offline ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("StartOffline: %s", settings.start_offline ? "true" : "false");
     if ((settings.trace || settings.watch) && !trace_start(dll_path)) {
         LOG_ERROR("Trace was requested but the CSV could not be opened");
     }

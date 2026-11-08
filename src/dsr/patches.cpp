@@ -4675,6 +4675,80 @@ bool camera_trace(CameraTrace* out) {
     return true;
 }
 
+namespace {
+
+// Start offline (INI StartOffline). The boot flow is a step machine (constructor 0x801990) that runs
+// table[step] on every update from a table of step functions at 0x1C8B080, filled by a static initializer
+// (0x371B0) before WinMain. Step 45 (fn 0x803D80) decides whether to log in: it gets the network options
+// (fn 0x755D40, [[GameDataMan 0x1C8A530]+0x58]) and, when the launch setting byte +0x3F (Network settings >
+// Launch setting: 1 Start Online, 0 Start Offline, as the FrpgMenuDlgNetworkOption dialog stores it at
+// 0x14B087) is 0, calls 0x2CB0C0(0) and goes to the offline steps (0x3B); otherwise it goes to the login
+// (0x2E). Nothing else reads that byte (the dialog shows and stores it). The table entry, plain data, is
+// swapped for a function that sets the launch setting to Start Offline and then runs the game's step, so
+// the game takes its own offline path and the menu shows the setting it started with. Seamless Co-op
+// (ds1sc.dll) runs its own networking and is left alone.
+constexpr uint32_t kLaunchStepSlot = 0x1C8B1E8;  // table entry 45
+constexpr uint32_t kLaunchStepFn = 0x803D80;
+constexpr uint32_t kNetworkOptionsFn = 0x755D40;
+constexpr size_t kLaunchSetting = 0x3F;
+
+using LaunchStepFn = uint64_t (*)(void* flow);
+using NetworkOptionsFn = uint8_t* (*)();
+LaunchStepFn g_launch_step = nullptr;
+NetworkOptionsFn g_network_options = nullptr;
+
+bool seamless_coop_loaded() {
+    return GetModuleHandleW(L"ds1sc.dll") != nullptr;
+}
+
+uint64_t hook_launch_step(void* flow) {
+    if (seamless_coop_loaded()) {
+        static std::atomic<int> said{0};
+        if (said.exchange(1) == 0) {
+            LOG_INFO("StartOffline: Seamless Co-op is loaded, so the launch setting is left as it is");
+        }
+    } else if (uint8_t* options = g_network_options()) {
+        const uint8_t was = options[kLaunchSetting];
+        options[kLaunchSetting] = 0;
+        LOG_INFO("StartOffline: starting offline (the launch setting was %s)", was ? "Start Online" : "Start Offline");
+    }
+    return g_launch_step(flow);
+}
+
+bool install_start_offline() {
+    if (seamless_coop_loaded()) {
+        LOG_INFO("StartOffline: Seamless Co-op is loaded, so the launch setting is left as it is");
+        return true;
+    }
+    // push rbx ; sub rsp,20h ; mov rbx,rcx ; call <network options> ; cmp byte ptr [rax+3Fh],0 ; jne
+    static const uint8_t kStepHead[] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0xE8};
+    static const uint8_t kStepCheck[] = {0x80, 0x78, 0x3F, 0x00, 0x75};
+    // mov rax,[rip+GameDataMan] ; mov rax,[rax+58h] ; ret
+    static const uint8_t kOptionsTail[] = {0x48, 0x8B, 0x40, 0x58, 0xC3};
+    auto** slot = reinterpret_cast<void**>(image_rva(kLaunchStepSlot));
+    uint8_t* step = image_rva(kLaunchStepFn);
+    uint8_t* options = image_rva(kNetworkOptionsFn);
+    int32_t rel = 0;
+    std::memcpy(&rel, step + sizeof(kStepHead), sizeof(rel));
+    const uint8_t* check = step + sizeof(kStepHead) + 4;
+    if (*slot != step || std::memcmp(step, kStepHead, sizeof(kStepHead)) != 0 || check + rel != options ||
+        std::memcmp(check, kStepCheck, sizeof(kStepCheck)) != 0 || options[0] != 0x48 || options[1] != 0x8B ||
+        options[2] != 0x05 || std::memcmp(options + 7, kOptionsTail, sizeof(kOptionsTail)) != 0) {
+        LOG_ERROR("StartOffline: the launch step does not match this build (table entry %p). Not changing it.", *slot);
+        return false;
+    }
+    g_launch_step = reinterpret_cast<LaunchStepFn>(step);
+    g_network_options = reinterpret_cast<NetworkOptionsFn>(options);
+    if (!patch_pointer(slot, reinterpret_cast<void*>(hook_launch_step))) {
+        LOG_ERROR("StartOffline: could not swap the launch step (Win32=%lu)", GetLastError());
+        return false;
+    }
+    LOG_INFO("StartOffline: the game will start offline (launch step 0x%08X)", kLaunchStepFn);
+    return true;
+}
+
+}  // namespace
+
 bool patches_apply() {
     g_image = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(g_image);
@@ -4730,6 +4804,10 @@ bool patches_apply() {
     if (!wait_for_window(120000)) {
         LOG_ERROR("The game window did not appear within 120 seconds");
         return false;
+    }
+    // A data swap, made well before the title screen: the step table is filled before the window exists.
+    if (g_start_offline.load(std::memory_order_relaxed) != 0) {
+        install_start_offline();
     }
     Sleep(1500);  // let start-up settle before anything is modified
     g_install_ms = GetTickCount64();

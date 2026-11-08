@@ -49,6 +49,8 @@ inline std::atomic<int> g_air_damping_ptde{1};
 // 1 = projectiles at the original game's rates (INI BulletPtdeSpeed): a ground-crawling bullet's landing friction
 // and ground factor per 1/30 s, repeating bullet volleys on the 30 FPS schedule; 0 = Remastered's (per 1/60 s).
 inline std::atomic<int> g_bullet_ptde_speed{1};
+// 1 = the game starts offline (INI StartOffline): the launch setting is set to Start Offline when the boot flow reads it.
+inline std::atomic<int> g_start_offline{1};
 inline std::atomic<int> g_fix_lock_on_turn{1};
 // Foot IK follows the frame time (INI FixFootIk), at the original game's speed with FootIkPtdeSpeed.
 inline std::atomic<int> g_fix_foot_ik{1};
