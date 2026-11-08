@@ -19,6 +19,8 @@ constexpr uint32_t kMapHitGate = 0x01025950;    // a bullet's contact with the m
 constexpr uint32_t kMapHit = 0x00DAC120;        // ... passed: edi = bullet, [esp+4] hit, [esp+8] flag
 constexpr uint32_t kGroundHit = 0x010258B0;     // a map-colliding bullet's map contact: eax = bullet, [esp+4] hit, [esp+8] victim
 constexpr uint32_t kLand = 0x00DAA1D0;          // ... taken (snap onto the surface, slide): edi = bullet, [esp+4] hit
+constexpr uint32_t kAccel = 0x009E6B20;         // the effect library's acceleration movement, once a frame a particle cluster:
+                                                // ecx = the movement, [esp+4] the cluster, [esp+8] a time value
 constexpr uint32_t kQuery = 0x00DF1E70;         // each attack hit entry's sweep, once a frame: [esp+4] entry
 constexpr uint32_t kContact = 0x00DF1CB0;       // each contact an attack's sweep finds: [esp+4] entry, [esp+8] point, edi = victim
 constexpr uint32_t kWorldChrMan = 0x0137DC70;
@@ -27,6 +29,8 @@ constexpr uint32_t kHitMan = 0x0137D6AC;  // the attack hit entries (0x1E0 each)
 constexpr uint8_t kPrologue[6] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0};
 // push ecx ; push ebx ; mov ebx,[esp+0Ch]
 constexpr uint8_t kContactPrologue[6] = {0x51, 0x53, 0x8B, 0x5C, 0x24, 0x0C};
+// push ebx ; mov ebx,esp ; sub esp,8
+constexpr uint8_t kAccelPrologue[6] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08};
 
 // The undead dragon (c3420, Valley of Drakes and the Painted World): 34200-34209, its acid (FollowType 4: falls,
 // lands on the map and slides). c5390's 53900-53902 and the Gaping Dragon's (c5260) 52600 and its pool 52601.
@@ -422,6 +426,31 @@ void __stdcall on_land(const uint8_t* b, const uint8_t* hit) {
              rd<float>(b, 0x50), s->updates);
 }
 
+// 0x9E6B20 (FXClusterMovement_Acceleration's update, type 0x37 = the glob's particles' pond2 type 55): for 3 s after
+// a burst starts, each small cluster's time value, count and the first four entries of its arrays at +0xB0..+0xC8
+// (handed to the SIMD integrator 0xA4D420), to see where the glob's model particle goes.
+int g_accel_lines = 0;
+void __stdcall on_accel(const uint8_t* self, const uint8_t* cluster, uint32_t tbits) {
+    if (g_accel_lines >= 1500 || g_lines >= kMaxLines || now_s() - g_burst_last > 3.0) return;
+    const int32_t count = rd<int32_t>(cluster, 0x18, 0);
+    if (count <= 0 || count > 64) return;
+    float tv;
+    std::memcpy(&tv, &tbits, 4);
+    char arr[700] = {};
+    int al = 0;
+    for (int k = 0; k < 7; ++k) {
+        const uint8_t* a = rd<const uint8_t*>(cluster, 0xB0 + 4 * k);
+        float f[4] = {};
+        const bool ok = a && readable_span(reinterpret_cast<uint32_t>(a), 16) == 16 && read(a, f, 16);
+        al += std::snprintf(arr + al, sizeof(arr) - al, " +%X:%s(%.3f %.3f %.3f %.3f)", 0xB0 + 4 * k, ok ? "" : "?", f[0],
+                            f[1], f[2], f[3]);
+    }
+    ++g_accel_lines;
+    ++g_lines;
+    LOG_INFO("[bullet] accel %p cluster %p n %d t %.5f (%08X) frame %.4f |%s", self, cluster, count, tv, tbits,
+             fixes_last_dt(), arr);
+}
+
 // 0xDF1E70, once a frame for each attack hit entry: the sweep of its shape from where it was to where it is.
 void __stdcall on_query(const uint8_t* entry) {
     Seen* s = by_entry(entry);
@@ -600,6 +629,26 @@ __declspec(naked) void query_stub() {
     }
 }
 
+__declspec(naked) void accel_stub() {
+    SAVE_ALL
+    __asm {
+        mov edx, [esp + 0xA0 + 0x08]
+        push edx
+        mov edx, [esp + 0xA4 + 0x04]
+        push edx
+        push ecx
+        call on_accel
+    }
+    RESTORE_ALL
+    __asm {
+        push ebx
+        mov ebx, esp
+        sub esp, 8
+        push 09E6B26h
+        ret
+    }
+}
+
 __declspec(naked) void contact_stub() {
     SAVE_ALL
     __asm {
@@ -649,10 +698,11 @@ bool bullettrace_install() {
     ok += hook(kGroundHit, kPrologue, &ground_hit_stub);
     ok += hook(kLand, kPrologue, &land_stub);
     ok += hook(kQuery, kPrologue, &query_stub);
+    ok += hook(kAccel, kAccelPrologue, &accel_stub);
     ok += hook(kContact, kContactPrologue, &contact_stub);
-    LOG_INFO("BulletTrace: %d of 8 hooks; the undead dragon's acid (34200-34209), c5390's 53900-53902 and the Gaping "
+    LOG_INFO("BulletTrace: %d of 9 hooks; the undead dragon's acid (34200-34209), c5390's 53900-53902 and the Gaping "
              "Dragon's 52600/52601 are logged with their map contacts ([bullet] lines: the first %d of each burst frame "
              "by frame, a summary for every one)",
              ok, kDetailedPerBurst);
-    return ok == 8;
+    return ok == 9;
 }
