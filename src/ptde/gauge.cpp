@@ -1,5 +1,5 @@
 #include "gauge.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -212,7 +212,7 @@ void gauge_frame(double dt_ms) {
     g_dt.push_back(dt_ms);
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 void gauge_set_dir(const wchar_t*) {}
 void gauge_frame(double) {}

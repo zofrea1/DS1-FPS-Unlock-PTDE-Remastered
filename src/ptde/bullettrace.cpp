@@ -1,5 +1,5 @@
 #include "bullettrace.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -1779,7 +1779,7 @@ bool bullettrace_install() {
     return ok == 11;
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 bool bullettrace_install() { return false; }
 

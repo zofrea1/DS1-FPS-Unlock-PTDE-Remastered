@@ -1,5 +1,5 @@
 #include "watch.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -319,7 +319,7 @@ void watch_note(const void* chr, void* phys) {
     unspin(g_lock);
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 bool watch_start(const wchar_t*) { return false; }
 void watch_stop() {}

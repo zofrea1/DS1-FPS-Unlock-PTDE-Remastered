@@ -1,5 +1,5 @@
 #include "inputdump.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -393,7 +393,7 @@ void inputdump_start(const wchar_t* dll_path) {
     }
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 void inputdump_start(const wchar_t*) {}
 

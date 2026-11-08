@@ -1,5 +1,5 @@
 #include "deep.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -196,7 +196,7 @@ void deep_frame(double dt_ms, int) {
     g_dt.push_back(dt_ms);
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 void deep_set_dir(const wchar_t*) {}
 void deep_frame(double, int) {}

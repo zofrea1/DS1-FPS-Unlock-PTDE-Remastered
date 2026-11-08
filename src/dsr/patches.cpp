@@ -5,7 +5,7 @@
 #include "profile.h"
 #include "state.h"
 #include "trace.h"
-#include "version.h"
+#include "fpsu_version.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

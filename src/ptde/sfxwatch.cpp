@@ -1,5 +1,5 @@
 #include "sfxwatch.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -353,7 +353,7 @@ void sfxwatch_tick() {
     }
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 void sfxwatch_set_target(int) {}
 bool sfxwatch_wanted() { return false; }

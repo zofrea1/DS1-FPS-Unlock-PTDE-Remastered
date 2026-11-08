@@ -204,7 +204,7 @@ build.bat
 
 builds both targets. `build_dsr.bat` and `build_ptde.bat` build one each. `build_ptde.bat` also downloads DXVK 3.1.1 from its GitHub release once (`tools\fetch_dxvk.ps1`, SHA-256 checked) and puts its 32-bit `d3d9.dll` in `build\ptde\dxvk_d3d9.dll`.
 
-These are diagnostics builds: the `[Diagnostics]` INI keys work. `build.bat release` (or `build_dsr.bat release`, `build_ptde.bat release`) compiles the diagnostics out, as the published DLLs are (`FPSU_DIAGNOSTICS=0`, see `src\common\buildcfg.h`). `package_release.bat` makes both release builds, checks that neither DLL imports the diagnostics' thread and keyboard functions or has a TLS section, and writes the two zips to `build\release` with the INIs minus `[Diagnostics]`. Both DLLs carry a version resource (`src\common\version.h`).
+These are diagnostics builds: the `[Diagnostics]` INI keys work. `build.bat release` (or `build_dsr.bat release`, `build_ptde.bat release`) compiles the diagnostics out, as the published DLLs are (`FPSU_DIAGNOSTICS=0`, see `src\common\fpsu_buildcfg.h`). `package_release.bat` makes both release builds, checks that neither DLL imports the diagnostics' thread and keyboard functions or has a TLS section, and writes the two zips to `build\release` with the INIs minus `[Diagnostics]`. Both DLLs carry a version resource (`src\common\fpsu_version.h`).
 
 | Game | Output |
 | --- | --- |

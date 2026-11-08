@@ -1,4 +1,4 @@
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 #include "bullettrace.h"
 #include "controller.h"
 #include "d3d.h"
@@ -13,7 +13,7 @@
 #include "patches.h"
 #include "settings.h"
 #include "trace.h"
-#include "version.h"
+#include "fpsu_version.h"
 #include "window.h"
 #include "xinput_proxy.h"
 
@@ -128,7 +128,7 @@ const char* ptde_fps_unlock_version() { return "2.0.1"; }
 namespace {
 constexpr bool same_text(const char* a, const char* b) { return *a == *b && (*a == 0 || same_text(a + 1, b + 1)); }
 }  // namespace
-static_assert(same_text("2.0.1", FPSU_VERSION_STR), "ptde_fps_unlock_version() and version.h disagree");
+static_assert(same_text("2.0.1", FPSU_VERSION_STR), "ptde_fps_unlock_version() and fpsu_version.h disagree");
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {

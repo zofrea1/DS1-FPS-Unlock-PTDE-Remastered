@@ -1,6 +1,6 @@
 #include "ui.h"
 
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 #include "fixes.h"
 #include "log.h"
 
@@ -334,7 +334,7 @@ DWORD WINAPI bonfire_thread(void*) {
     return 0;
 }
 
-// The rest of this namespace is InputLog's diagnostics, which a release build leaves out (see buildcfg.h).
+// The rest of this namespace is InputLog's diagnostics, which a release build leaves out (see fpsu_buildcfg.h).
 #if FPSU_DIAGNOSTICS
 
 // ---- HUD shortcut input log -------------------------------------------------------------------

@@ -1,5 +1,5 @@
 #include "watch.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -337,7 +337,7 @@ uint32_t watch_exec_arg0(int slot) {
     return slot >= 0 && slot < kSlots ? g_exec_arg0[slot] : 0;
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 void watch_set_spec(const char*) {}
 void watch_poll() {}

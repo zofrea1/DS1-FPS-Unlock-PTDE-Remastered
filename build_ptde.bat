@@ -5,7 +5,7 @@ if not exist build\ptde mkdir build\ptde
 
 set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
 
-rem "build_ptde.bat release" leaves the [Diagnostics] tools out (src\common\buildcfg.h); without it they are built in.
+rem "build_ptde.bat release" leaves the [Diagnostics] tools out (src\common\fpsu_buildcfg.h); without it they are built in.
 set DIAG=
 set KIND=diagnostics build
 if /i "%~1"=="release" set DIAG=/DFPSU_DIAGNOSTICS=0

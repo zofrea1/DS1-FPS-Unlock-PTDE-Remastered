@@ -1,6 +1,6 @@
 // Version resource of the PTDE xinput1_3.dll (build_ptde.bat compiles this with rc).
 #include <winver.h>
-#include "version.h"
+#include "fpsu_version.h"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION FPSU_VERSION_MAJOR, FPSU_VERSION_MINOR, FPSU_VERSION_PATCH, 0

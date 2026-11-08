@@ -1,5 +1,5 @@
 #include "trace.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -311,7 +311,7 @@ void trace_stop() {
     }
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 bool trace_start(const wchar_t*) { return false; }
 bool trace_active() { return false; }

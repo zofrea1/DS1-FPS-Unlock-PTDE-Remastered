@@ -1,5 +1,5 @@
 #include "trace.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -230,7 +230,7 @@ void trace_frame(double dt_ms, int target_fps) {
     std::fprintf(g_file, "\n");
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 void trace_frame(double, int) {}
 void trace_set_dir(const wchar_t*) {}

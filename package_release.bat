@@ -4,7 +4,7 @@ cd /d "%~dp0"
 set VERSION=2.0.1
 set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
 
-rem Release builds of both DLLs: the [Diagnostics] tools compiled out (src\common\buildcfg.h).
+rem Release builds of both DLLs: the [Diagnostics] tools compiled out (src\common\fpsu_buildcfg.h).
 call "%~dp0build.bat" release
 if errorlevel 1 exit /b 1
 

@@ -1,5 +1,5 @@
 #include "profile.h"
-#include "buildcfg.h"
+#include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
 
@@ -180,7 +180,7 @@ bool profile_start() {
     return true;
 }
 
-#else  // A release build leaves this diagnostic out (see buildcfg.h).
+#else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 volatile DWORD g_render_thread_id = 0;
 bool profile_start() { return false; }
