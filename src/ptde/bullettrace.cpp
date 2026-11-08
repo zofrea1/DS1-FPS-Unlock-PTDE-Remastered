@@ -1504,6 +1504,45 @@ void __stdcall on_fxaction(const int32_t* id, const uint8_t* ctx, const uint8_t*
              rd<int32_t>(id, 0, -1), g->bullet, now_s() - g->born, limiter_requested_fps(), fixes_last_dt(), nt,
              rd<uint32_t>(args, 0), rd<uint32_t>(args, 4), rd<uint32_t>(args, 8), rd<uint32_t>(args, 0xC),
              rd<uint32_t>(args, 0x10), rd<uint32_t>(args, 0x14));
+    // The parameters of the actions that make the ground part: args[0] lists them (0x5471C0), each one's vtable
+    // +0x28 evaluates it for the node. Once per action id and cap.
+    const int32_t aid = rd<int32_t>(id, 0, -1);
+    static int dumped_cap[3] = {-1, -1, -1};
+    const int slot = aid == 0x62 ? 0 : aid == 0x10 ? 1 : aid == 0x15 ? 2 : -1;
+    if (slot < 0 || dumped_cap[slot] == limiter_requested_fps()) return;
+    dumped_cap[slot] = limiter_requested_fps();
+    const uint8_t* list = rd<const uint8_t*>(args, 0);
+    const uint32_t count = rd<uint32_t>(args, 4);
+    for (uint32_t i = 0; i < count && i < 4 && g_lines < kMaxLines; ++i) {
+        const uint8_t* prm = rd<const uint8_t*>(list, 4 * i);
+        const uint32_t vt = rd<uint32_t>(prm, 0);
+        char data[400] = {};
+        int dl = 0;
+        for (int k = 1; k <= 10; ++k) {
+            const uint32_t v = rd<uint32_t>(prm, 4 * k);
+            float f = 0;
+            std::memcpy(&f, &v, 4);
+            dl = appf(data, sizeof(data), dl, " %08X(%g)", v, f);
+        }
+        // a pointer field often holds the keys: the first eight dwords behind field 1 and 2
+        const uint8_t* k1 = rd<const uint8_t*>(prm, 4);
+        const uint8_t* k2 = rd<const uint8_t*>(prm, 8);
+        const uint8_t* const keys[2] = {k1, k2};
+        for (const uint8_t* kp : keys) {
+            if (!kp || !heap_pointer(reinterpret_cast<uint32_t>(kp))) continue;
+            dl = appf(data, sizeof(data), dl, " |");
+            for (int k = 0; k < 8; ++k) {
+                const uint32_t v = rd<uint32_t>(kp, 4 * k);
+                float f = 0;
+                std::memcpy(&f, &v, 4);
+                dl = appf(data, sizeof(data), dl, " %g", f);
+            }
+        }
+        ++g_lines;
+        LOG_INFO("[fx] action %X param %u: %p vt %08X eval %08X (+2C %08X):%s", aid, i, prm, vt,
+                 rd<uint32_t>(reinterpret_cast<const void*>(vt), 0x28),
+                 rd<uint32_t>(reinterpret_cast<const void*>(vt), 0x2C), data);
+    }
 }
 
 // 0x971560 entry: an effect creation; logged when one of its first four arguments is a node of a followed glob.
