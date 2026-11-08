@@ -187,6 +187,71 @@ float bullet_land_keep() {
     return (k > 0.0f && k <= 1.0f) ? k : 0.97f;
 }
 
+// A bullet emitter that fires repeatedly while its animation event lasts (BulletParam shootInterval > 0, the
+// undead dragon's acid among them) runs fn 0xDAF900 every frame: while its countdown [+0x2F0] is above 0 it
+// subtracts the frame time, otherwise it fires a volley and sets the countdown to shootInterval. The decrement
+// and the shot are a frame apart, so volleys come every (frames to count down + 1) frames: 4 frames (0.133 s) for
+// 0.1 at 30 FPS, but 0.117-0.133 s at 60 and 0.108-0.117 s at 120, which fired 54 acid globs a burst instead of
+// 45. The countdown stored after a volley is now the period the game has at 30 FPS less one and a half frames,
+// so the next volley comes on the frame nearest that period at any frame rate (4 frames at 30 FPS, as before).
+constexpr uint32_t kEmitReset = 0x00DAF966;  // xorps xmm1,xmm1 ; comiss xmm1,xmm0 ; movss [edi+0x2F0],xmm0
+constexpr uint8_t kEmitResetBytes[14] = {0x0F, 0x57, 0xC9, 0x0F, 0x2F, 0xC8, 0xF3, 0x0F,
+                                         0x11, 0x87, 0xF0, 0x02, 0x00, 0x00};
+bool g_emit_hooked = false;
+
+float __stdcall emit_countdown(float interval, float dt) {
+    if (!g_enabled[2] || !(interval > 0.0f) || !(dt > 0.0f) || interval > 600.0f) return interval;
+    // The game's own count at 30 FPS: subtract 1/30 (in double, stored as float) until the countdown is not
+    // above 0; the volley is the frame after.
+    const float step = 1.0f / 30.0f;
+    float t = interval;
+    int frames = 0;
+    while (t > 0.0f && frames < 20000) {
+        t = static_cast<float>(static_cast<double>(t) - static_cast<double>(step));
+        ++frames;
+    }
+    const double period = (frames + 1) / 30.0;
+    const double count = period - 1.5 * static_cast<double>(dt);
+    return static_cast<float>(count > 0.0 ? count : 0.0);
+}
+
+__declspec(naked) void emit_reset_stub() {
+    __asm {
+        // xmm0 = shootInterval; the caller's frame time is at [esp+0Ch].
+        sub esp, 4
+        movss dword ptr [esp], xmm0
+        push dword ptr [esp + 10h]
+        push dword ptr [esp + 4]
+        call emit_countdown
+        fstp dword ptr [edi + 2F0h]
+        movss xmm0, dword ptr [esp]
+        add esp, 4
+        // The jb at 0xDAF974 tests 0 < shootInterval, as the replaced comiss did.
+        xorps xmm1, xmm1
+        comiss xmm1, xmm0
+        push 0DAF974h
+        ret
+    }
+}
+
+bool install_emit_reset() {
+    if (std::memcmp(reinterpret_cast<const void*>(kEmitReset), kEmitResetBytes, sizeof(kEmitResetBytes)) != 0) {
+        LOG_ERROR("Bullet emitter countdown at %08X does not match this build. Not patched.", kEmitReset);
+        return false;
+    }
+    DWORD old = 0;
+    auto* p = reinterpret_cast<uint8_t*>(kEmitReset);
+    if (!VirtualProtect(p, sizeof(kEmitResetBytes), PAGE_EXECUTE_READWRITE, &old)) return false;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&emit_reset_stub) - (kEmitReset + 5));
+    p[0] = 0xE9;
+    std::memcpy(p + 1, &rel, 4);
+    for (size_t i = 5; i < sizeof(kEmitResetBytes); ++i) p[i] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), p, sizeof(kEmitResetBytes));
+    DWORD ignored = 0;
+    VirtualProtect(p, sizeof(kEmitResetBytes), old, &ignored);
+    return true;
+}
+
 }  // namespace
 
 bool fixes_install(const FixFlags& flags) {
@@ -213,6 +278,8 @@ bool fixes_install(const FixFlags& flags) {
     for (int g = 0; g < kGroups; ++g) set_group(g, g_enabled[g]);
     g_land_keep_hooked = install_land_keep();
     if (g_land_keep_hooked) ++ok;
+    g_emit_hooked = install_emit_reset();
+    if (g_emit_hooked) ++ok;
     g_installed = true;
     LOG_INFO("Per-frame fixes: %d sites verified, %d skipped. slide=%d damping=%d timers=%d smoothing=%d graze=%d ui=%d "
              "velocity=%d",
