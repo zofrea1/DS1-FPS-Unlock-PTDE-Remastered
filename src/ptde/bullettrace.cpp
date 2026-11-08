@@ -689,6 +689,11 @@ struct Clock {
 };
 Clock g_clock;
 volatile long g_fx_root_calls = 0;  // effect roots through the state machine (0x546550), all effects
+// Effect instance creation (fn 0x971560) and its five ways to fail, each a jmp to its exit 0x972092: no free
+// instance after a cleanup (0x9715F7), the resource gave nothing (0x971621), emit permission refused (0x9716F1), the
+// game's adapter gave nothing (0x971814), building the instance failed (0x97189C).
+volatile long g_fx_creates = 0;
+volatile long g_fx_fail[5] = {};
 
 void clock_note(const uint8_t* cluster, double now) {
     const float t0 = rd<float>(cluster, 0x10);
@@ -709,9 +714,13 @@ void clock_note(const uint8_t* cluster, double now) {
         ++c.lines;
         ++g_lines;
         LOG_INFO("[bullet] fx clock: cap %d, frame %.4f, %d acceleration calls, step min %.4f avg %.4f max %.4f, "
-                 "%d within 2%% of the frame; last cluster times %.4f -> %.4f; %ld effect roots through the states",
+                 "%d within 2%% of the frame; last cluster times %.4f -> %.4f; %ld effect roots through the states; "
+                 "%ld effect creations, failed: pool %ld, resource %ld, permission %ld, adapter %ld, build %ld",
                  limiter_requested_fps(), frame, c.calls, c.lo, c.sum / c.calls, c.hi, c.same, c.t0, c.t1,
-                 InterlockedExchange(&g_fx_root_calls, 0));
+                 InterlockedExchange(&g_fx_root_calls, 0), InterlockedExchange(&g_fx_creates, 0),
+                 InterlockedExchange(&g_fx_fail[0], 0), InterlockedExchange(&g_fx_fail[1], 0),
+                 InterlockedExchange(&g_fx_fail[2], 0), InterlockedExchange(&g_fx_fail[3], 0),
+                 InterlockedExchange(&g_fx_fail[4], 0));
     }
     const int lines = c.lines;
     c = Clock{};
@@ -1363,6 +1372,13 @@ void __stdcall on_fxroot(const uint8_t* root, uint32_t dtbits) {
                 const uint32_t acts = rd<uint32_t>(state, 4), nacts = rd<uint32_t>(state, 0xC);
                 if (count > 16 || nacts > 64) break;
                 sl = appf(st, sizeof(st), sl, " || s%d acts %08X x%u trans x%u", i, acts, nacts, count);
+                // Actions are 0x1C bytes: an id and its arguments in place (0xA52660 -> 0xA560F0 -> 0x972830).
+                for (uint32_t a = 0; a < nacts && a < 3; ++a) {
+                    const uint8_t* act = reinterpret_cast<const uint8_t*>(acts + 0x1C * a);
+                    sl = appf(st, sizeof(st), sl, " (act %X: %08X %08X %08X %08X %08X %08X)", rd<uint32_t>(act, 0),
+                              rd<uint32_t>(act, 4), rd<uint32_t>(act, 8), rd<uint32_t>(act, 0xC),
+                              rd<uint32_t>(act, 0x10), rd<uint32_t>(act, 0x14), rd<uint32_t>(act, 0x18));
+                }
                 for (uint32_t t = 0; t < count && t < 4; ++t) {
                     const uint8_t* tr = reinterpret_cast<const uint8_t*>(trans + 8 * t);
                     const uint32_t target = rd<uint32_t>(tr, 0);
@@ -1418,6 +1434,57 @@ __declspec(naked) void fxstates_stub() {
         mov eax, dword ptr [esp + 8]
         sub esp, 10h
         push 0546557h
+        ret
+    }
+}
+
+constexpr uint32_t kFxCreate = 0x00971560;  // push ebx ; mov ebx,esp ; sub esp,8
+constexpr uint32_t kFxCreateExit = 0x00972092;
+constexpr uint32_t kFxFailSites[5] = {0x009715F7, 0x00971621, 0x009716F1, 0x00971814, 0x0097189C};
+
+__declspec(naked) void fxcreate_stub() {
+    __asm {
+        lock inc dword ptr [g_fx_creates]
+        push ebx
+        mov ebx, esp
+        sub esp, 8
+        push 0971566h
+        ret
+    }
+}
+
+__declspec(naked) void fxfail0_stub() {
+    __asm {
+        lock inc dword ptr [g_fx_fail]
+        push 0972092h
+        ret
+    }
+}
+__declspec(naked) void fxfail1_stub() {
+    __asm {
+        lock inc dword ptr [g_fx_fail + 4]
+        push 0972092h
+        ret
+    }
+}
+__declspec(naked) void fxfail2_stub() {
+    __asm {
+        lock inc dword ptr [g_fx_fail + 8]
+        push 0972092h
+        ret
+    }
+}
+__declspec(naked) void fxfail3_stub() {
+    __asm {
+        lock inc dword ptr [g_fx_fail + 12]
+        push 0972092h
+        ret
+    }
+}
+__declspec(naked) void fxfail4_stub() {
+    __asm {
+        lock inc dword ptr [g_fx_fail + 16]
+        push 0972092h
         ret
     }
 }
@@ -1479,6 +1546,19 @@ bool bullettrace_install() {
     ok += hook_bytes(kAccelCall, kAccelCallBytes, 5, &accel_call_stub);
     ok += hook(kContact, kContactPrologue, &contact_stub);
     ok += hook_bytes(kFxStates, kFxStatesBytes, 7, &fxstates_stub);
+    {
+        static const uint8_t kCreateBytes[6] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08};
+        static void (*const kFailStubs[5])() = {fxfail0_stub, fxfail1_stub, fxfail2_stub, fxfail3_stub, fxfail4_stub};
+        int fx_ok = hook_bytes(kFxCreate, kCreateBytes, 6, &fxcreate_stub) ? 1 : 0;
+        for (int i = 0; i < 5; ++i) {
+            // Each site is a jmp rel32 to the exit; check that before taking it over.
+            uint8_t want[5] = {0xE9};
+            const int32_t rel = static_cast<int32_t>(kFxCreateExit - (kFxFailSites[i] + 5));
+            std::memcpy(want + 1, &rel, 4);
+            fx_ok += hook_bytes(kFxFailSites[i], want, 5, reinterpret_cast<const void*>(kFailStubs[i])) ? 1 : 0;
+        }
+        LOG_INFO("BulletTrace: effect creation counters, %d of 6 sites", fx_ok);
+    }
     LOG_INFO("BulletTrace: %d of 11 hooks; the undead dragon's acid (34200-34209), c5390's 53900-53902 and the Gaping "
              "Dragon's 52600/52601 are logged with their map contacts ([bullet] lines: the first %d of each burst frame "
              "by frame, a summary for every one with its closest approach to you, a line per burst with the cap and the HP "
