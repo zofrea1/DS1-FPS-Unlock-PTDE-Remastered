@@ -20,8 +20,11 @@ struct Settings {
     bool bonfire_unstick = true;
     // Start the game offline (INI StartOffline, DisableOnlineMode accepted): when the boot flow reads the launch
     // setting (Network settings > Launch setting), it is set to Start Offline first, so the game takes its own
-    // offline path. Left alone when Seamless Co-op (ds1sc.dll) is loaded.
+    // offline path. Left alone when Seamless Co-op (ds1sc.dll) is loaded. Applies whether or not FPSUnlock is on.
     bool start_offline = true;
+    // Skip the start-up logos (INI SkipIntro, IntroSkip accepted): the logo dialog is never opened and the game
+    // goes straight on to the title screen. Applies whether or not FPSUnlock is on.
+    bool skip_intro = true;
     // Writes DSR-FPS-Unlock-trace.csv with per-character update samples. Off by
     // default: the file is large and the hook costs a little per update.
     bool trace = false;

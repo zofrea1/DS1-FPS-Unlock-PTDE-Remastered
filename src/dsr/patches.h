@@ -4,6 +4,10 @@
 // Returns false when this executable is not the supported build.
 bool patches_apply();
 
+// SkipIntro and StartOffline alone (FPSUnlock off): recognizes the executable, waits for the game window and
+// swaps the boot flow's step-table entries. patches_apply does the same as part of its install.
+bool boot_flow_apply();
+
 // The ground snap's last decision for a physics body (for the trace): whether the lift happened and
 // the factor the ladder-exit cap applied to the snap. False when the body has no record.
 bool ground_snap_debug(const void* phys, float* factor, int* lifted);

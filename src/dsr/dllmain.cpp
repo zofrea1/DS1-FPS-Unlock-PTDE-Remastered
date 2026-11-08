@@ -38,13 +38,21 @@ DWORD WINAPI worker(void*) {
     LOG_INFO("FPSUnlock: %s", settings.fps_unlock ? "true" : "false");
     LOG_INFO("MaxFPS: %d", settings.target_fps);
     LOG_INFO("BonfireFix: %s", settings.bonfire_unstick ? "true" : "false");
-    // FPSUnlock is the master switch: nothing below, diagnostics included, runs without it.
+    g_start_offline.store(settings.start_offline ? 1 : 0, std::memory_order_relaxed);
+    g_skip_intro.store(settings.skip_intro ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("StartOffline: %s, SkipIntro: %s", settings.start_offline ? "true" : "false",
+             settings.skip_intro ? "true" : "false");
+    // FPSUnlock is the master switch: nothing below, diagnostics included, runs without it. StartOffline and
+    // SkipIntro have their own switches.
     if (!settings.fps_unlock) {
-        LOG_INFO("FPSUnlock is false. The game is unchanged.");
+        if (settings.start_offline || settings.skip_intro) {
+            LOG_INFO("FPSUnlock is false. Only StartOffline and SkipIntro apply.");
+            boot_flow_apply();
+        } else {
+            LOG_INFO("FPSUnlock is false. The game is unchanged.");
+        }
         return 0;
     }
-    g_start_offline.store(settings.start_offline ? 1 : 0, std::memory_order_relaxed);
-    LOG_INFO("StartOffline: %s", settings.start_offline ? "true" : "false");
     if ((settings.trace || settings.watch) && !trace_start(dll_path)) {
         LOG_ERROR("Trace was requested but the CSV could not be opened");
     }

@@ -99,6 +99,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.bonfire_unstick = parse_bool(val);
         } else if (key == "startoffline" || key == "disableonlinemode") {
             s.start_offline = parse_bool(val);
+        } else if (key == "skipintro" || key == "introskip") {
+            s.skip_intro = parse_bool(val);
         } else if (key == "trace") {
             s.trace = parse_bool(val);
         } else if (key == "fixstepdown") {

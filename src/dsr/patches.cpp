@@ -4747,9 +4747,87 @@ bool install_start_offline() {
     return true;
 }
 
-}  // namespace
+// SkipIntro. On PC the boot flow goes from step 1 (InitMenu, fn 0x801BC0) straight to step 3 (step 2, the
+// console attention dialog, is never used). Step 3 (fn 0x803330) waits until the title menu is free (fn
+// 0x681EA0: menu flag 0x11 clear and a byte), then sets menu flag 0x3C (fn 0x71ABF0(0x3C, 1); flags at
+// [MenuMan 0x1C88D98]+0x30+id*4), which opens the logo dialog (FrpgMenuDlgLogo), and goes to step 4 (fn
+// 0x803370), which waits until the dialog's last logo clears the flag (0x70F1B2) and goes on to the title
+// screen. Nothing else sets that flag. The table entry is swapped for a function that does the same without
+// setting the flag, so the dialog never opens and step 4 goes straight on. A swap, not a code patch: another
+// mod that patches the step's code or skips the logos its own way (Seamless Co-op) leads to the same place,
+// and a table entry another mod has already replaced is left alone.
+constexpr uint32_t kLogoStepSlot = 0x1C8B098;  // table entry 3
+constexpr uint32_t kLogoStepFn = 0x803330;
+constexpr uint32_t kTitleFreeFn = 0x681EA0;
 
-bool patches_apply() {
+using TitleFreeFn = bool (*)();
+TitleFreeFn g_title_free = nullptr;
+
+uint64_t hook_logo_step(void* flow) {
+    if (!g_title_free()) {
+        return 0;
+    }
+    *reinterpret_cast<int32_t*>(static_cast<uint8_t*>(flow) + 0x10) = 4;  // step 4, with no logo dialog open
+    static std::atomic<int> said{0};
+    if (said.exchange(1) == 0) {
+        LOG_INFO("SkipIntro: the start-up logos were skipped");
+    }
+    return 0;
+}
+
+bool install_skip_intro() {
+    // push rbx ; sub rsp,20h ; mov rbx,rcx ; call <title free> ; test al,al ; je ; mov edx,1 ; lea ecx,[rdx+3Bh] ;
+    // call <set menu flag> ; mov dword ptr [rbx+10h],4
+    static const uint8_t kStepHead[] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0xE8};
+    static const uint8_t kStepMid[] = {0x84, 0xC0, 0x74, 0x14, 0xBA, 0x01, 0x00, 0x00, 0x00, 0x8D, 0x4A, 0x3B, 0xE8};
+    static const uint8_t kStepNext[] = {0xC7, 0x43, 0x10, 0x04, 0x00, 0x00, 0x00};
+    // sub rsp,28h ; mov ecx,11h ; call <menu flag>
+    static const uint8_t kFreeHead[] = {0x48, 0x83, 0xEC, 0x28, 0xB9, 0x11, 0x00, 0x00, 0x00, 0xE8};
+    auto** slot = reinterpret_cast<void**>(image_rva(kLogoStepSlot));
+    uint8_t* step = image_rva(kLogoStepFn);
+    uint8_t* free_fn = image_rva(kTitleFreeFn);
+    if (*slot != step) {
+        LOG_INFO("SkipIntro: the logo step was already replaced (table entry %p, another mod?); left as it is", *slot);
+        return true;
+    }
+    int32_t rel = 0;
+    std::memcpy(&rel, step + sizeof(kStepHead), sizeof(rel));
+    const uint8_t* mid = step + sizeof(kStepHead) + 4;
+    const uint8_t* next = mid + sizeof(kStepMid) + 4;
+    if (std::memcmp(step, kStepHead, sizeof(kStepHead)) != 0 || mid + rel != free_fn ||
+        std::memcmp(mid, kStepMid, sizeof(kStepMid)) != 0 || std::memcmp(next, kStepNext, sizeof(kStepNext)) != 0 ||
+        std::memcmp(free_fn, kFreeHead, sizeof(kFreeHead)) != 0) {
+        LOG_ERROR("SkipIntro: the logo step does not match this build. The logos are shown.");
+        return false;
+    }
+    g_title_free = reinterpret_cast<TitleFreeFn>(free_fn);
+    if (!patch_pointer(slot, reinterpret_cast<void*>(hook_logo_step))) {
+        LOG_ERROR("SkipIntro: could not swap the logo step (Win32=%lu)", GetLastError());
+        return false;
+    }
+    LOG_INFO("SkipIntro: the start-up logos will be skipped (logo step 0x%08X)", kLogoStepFn);
+    return true;
+}
+
+// The boot flow's table swaps (SkipIntro, StartOffline), once the game window is up: the table is filled
+// before the window exists and is first read after it.
+void install_boot_flow() {
+    static std::atomic<int> done{0};
+    if (done.exchange(1) != 0) {
+        return;
+    }
+    if (g_skip_intro.load(std::memory_order_relaxed) != 0) {
+        install_skip_intro();
+    } else {
+        LOG_INFO("SkipIntro: false (the start-up logos are shown)");
+    }
+    if (g_start_offline.load(std::memory_order_relaxed) != 0) {
+        install_start_offline();
+    }
+}
+
+// The executable must be the supported build before anything at an RVA is touched.
+bool recognize_image() {
     g_image = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(g_image);
     if (!g_image || dos->e_magic != IMAGE_DOS_SIGNATURE) {
@@ -4770,7 +4848,32 @@ bool patches_apply() {
         return false;
     }
     LOG_INFO("Recognized %s", kBuild.name);
+    return true;
+}
+
+}  // namespace
+
+bool boot_flow_apply() {
+    if (!recognize_image()) {
+        return false;
+    }
+    if (!wait_for_window(120000)) {
+        LOG_ERROR("The game window did not appear within 120 seconds");
+        return false;
+    }
+    install_boot_flow();
+    return true;
+}
+
+bool patches_apply() {
+    if (!recognize_image()) {
+        return false;
+    }
     if (!validate_static_sites()) {
+        // SkipIntro and StartOffline check their own sites and still apply.
+        if (wait_for_window(120000)) {
+            install_boot_flow();
+        }
         return false;
     }
 
@@ -4805,10 +4908,8 @@ bool patches_apply() {
         LOG_ERROR("The game window did not appear within 120 seconds");
         return false;
     }
-    // A data swap, made well before the title screen: the step table is filled before the window exists.
-    if (g_start_offline.load(std::memory_order_relaxed) != 0) {
-        install_start_offline();
-    }
+    // Table swaps, made well before the logos end: the step table is filled before the window exists.
+    install_boot_flow();
     Sleep(1500);  // let start-up settle before anything is modified
     g_install_ms = GetTickCount64();
     g_qpc_thunk = make_qpc_thunk();
