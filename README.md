@@ -9,7 +9,7 @@ Looking for co-op in Prepare to Die Edition? [Prepare to Co-op Edition](https://
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
-| Release | `v2.0.1-REMASTERED-DX11` | `v2.0.1-PTDE-DX9` |
+| Release | `v2.0.0-REMASTERED-DX11` | `v2.0.1-PTDE-DX9` |
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini` (plus `dxvk_d3d9.dll` for the experimental `DXVK`) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
@@ -192,7 +192,7 @@ Copy the files from the release for your game next to the game's exe (see the ta
 
 Each mod writes a log next to its DLL (`DSR-FPS-Unlock.log` or `PTDE-FPS-Unlock.log`) with a heartbeat every 30 seconds. The first lines show the version, the exe check and each patch applied. With `DXVK = true` the PTDE log says whether DXVK started and on which GPU, and DXVK's own `DARKSOULS_d3d9.log` is in the game folder. If the game freezes, the log says when the simulation stopped advancing; a crash writes a `*-crash.dmp` next to the DLL and a `CRASH:` line to the log. If a game script hits an error the game does not handle, the game closes itself; the log then has a `SCRIPT:` line saying which scripts failed and why. The heartbeat also shows how much memory the scripts use (`script memory MB (low-high)`). Send the log and any dump with a bug report.
 
-The release DLLs leave out the development diagnostics (recordings, hardware watchpoints, the render thread sampler and their test hotkeys), so the INIs in the release zips have no `[Diagnostics]` section. A diagnostics build has them (see Build), and so does Prepare to Co-op Edition.
+From v2.0.1 the PTDE release DLL leaves out the development diagnostics (recordings, hardware watchpoints, the render thread sampler and their test hotkeys), so the INI in its zip has no `[Diagnostics]` section; Remastered follows with its next release. A diagnostics build has them (see Build), and so does Prepare to Co-op Edition.
 
 ## Build
 
