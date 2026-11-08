@@ -15,6 +15,8 @@ constexpr uint32_t kBulletUpdate = 0x00DAC240;  // BulletIns update: eax = bulle
 constexpr uint32_t kHitBullet = 0x00DA9600;     // a bullet's hit bullet: [esp+4] bullet, [esp+8] target, [esp+0xC] position
 constexpr uint32_t kMapHitGate = 0x01025950;    // a bullet's contact with the map: eax = bullet, [esp+4] hit, [esp+8] victim
 constexpr uint32_t kMapHit = 0x00DAC120;        // ... passed: edi = bullet, [esp+4] hit, [esp+8] flag
+constexpr uint32_t kGroundHit = 0x010258B0;     // a map-colliding bullet's map contact: eax = bullet, [esp+4] hit, [esp+8] victim
+constexpr uint32_t kLand = 0x00DAA1D0;          // ... taken (snap onto the surface, slide): edi = bullet, [esp+4] hit
 constexpr uint32_t kContact = 0x00DF1CB0;       // each contact an attack's sweep finds: [esp+4] entry, [esp+8] point, edi = victim
 constexpr uint32_t kWorldChrMan = 0x0137DC70;
 constexpr uint32_t kHitMan = 0x0137D6AC;  // the attack hit entries (0x1E0 each), by the handle a bullet keeps at +0x54
@@ -23,11 +25,13 @@ constexpr uint8_t kPrologue[6] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0};
 // push ecx ; push ebx ; mov ebx,[esp+0Ch]
 constexpr uint8_t kContactPrologue[6] = {0x51, 0x53, 0x8B, 0x5C, 0x24, 0x0C};
 
-// The Valley of Drakes undead dragon (c5390): 53900 (its breath, no effect), 53901 (the acid globs, six a fan,
-// two fans), 53902 (a slow cloud). The Gaping Dragon (c5260): 52600 and the pool it leaves, 52601.
-constexpr int32_t kWatched[] = {53900, 53901, 53902, 52600, 52601};
-constexpr int kLinesPerBullet = 40;
-constexpr int kMaxLines = 8000;
+// The undead dragon (c3420, Valley of Drakes and the Painted World): 34200-34209, its acid (FollowType 4: falls,
+// lands on the map and slides). c5390's 53900-53902 and the Gaping Dragon's (c5260) 52600 and its pool 52601.
+constexpr int32_t kWatched[] = {34200, 34201, 34202, 34203, 34204, 34205, 34206, 34207, 34208, 34209,
+                                53900, 53901, 53902, 52600, 52601};
+constexpr int kLinesPerBullet = 24;
+constexpr int kContactsPerBullet = 12;
+constexpr int kMaxLines = 14000;
 
 struct Seen {
     const uint8_t* bullet = nullptr;
@@ -175,9 +179,9 @@ void __stdcall on_update(const uint8_t* b, float dt) {
         read(e + 0x150, prev, 12);
     }
     LOG_INFO("[bullet] %p %d #%d dt %.4f life %.3f pos (%.3f, %.3f, %.3f) vel (%.2f, %.2f, %.2f) dist %.3f state %d "
-             "flags %02X hit-timer %.3f | entry %p %s(%.3f, %.3f, %.3f) <- (%.3f, %.3f, %.3f) ttl %.3f done %d first %d",
+             "flags %02X ground %.3f | entry %p %s(%.3f, %.3f, %.3f) <- (%.3f, %.3f, %.3f) ttl %.3f done %d first %d",
              b, id, s->lines, dt, rd<float>(b, 0x1D4), pos[0], pos[1], pos[2], vel[0], vel[1], vel[2],
-             rd<float>(b, 0x1D0), state, rd<uint8_t>(b, 0x270), rd<float>(b, 0x1DC), e, e ? "" : "(none) ",
+             rd<float>(b, 0x1D0), state, rd<uint8_t>(b, 0x270), rd<float>(b, 0x50), e, e ? "" : "(none) ",
              cur[0], cur[1], cur[2], prev[0], prev[1], prev[2], rd<float>(e, 0xF8), rd<int32_t>(e, 0xFC),
              rd<uint8_t>(e, 0x164));
 }
@@ -213,10 +217,34 @@ void __stdcall on_map_hit(const uint8_t* b, const uint8_t* hit, uint32_t flag) {
              bullet_id(b), p[0], p[1], p[2], flag & 0xFF, rd<float>(b, 0x1DC));
 }
 
+// 0x10258B0 (the map, for a bullet that does not go through it): 0xDA3190 (its state takes map hits, not
+// isPenetrateMap) and the hit's +0x34 below 0x40 lead to 0xDAA1D0, which puts it on the surface (+0xE0 the normal).
+void __stdcall on_ground_hit(const uint8_t* b, const uint8_t* hit) {
+    if (!b || g_lines >= kMaxLines || !watched(bullet_id(b))) return;
+    ++g_lines;
+    float p[3] = {}, n[3] = {}, v[3] = {};
+    read(hit + 0xD0, p, 12);
+    read(hit + 0xE0, n, 12);
+    read(b + 0x30, v, 12);
+    LOG_INFO("[bullet] %p %d map contact (ground) at (%.3f, %.3f, %.3f) normal (%.2f, %.2f, %.2f): hit+34 %d, vel "
+             "(%.2f, %.2f, %.2f), ground %.3f, state %d",
+             b, bullet_id(b), p[0], p[1], p[2], n[0], n[1], n[2], rd<int32_t>(hit, 0x34, -1), v[0], v[1], v[2],
+             rd<float>(b, 0x50), rd<int32_t>(b, 0x70));
+}
+
+void __stdcall on_land(const uint8_t* b, const uint8_t* hit) {
+    if (!b || g_lines >= kMaxLines || !watched(bullet_id(b))) return;
+    ++g_lines;
+    float p[3] = {};
+    read(b + 0x10, p, 12);
+    LOG_INFO("[bullet] %p %d lands: taken at bullet (%.3f, %.3f, %.3f), ground %.3f", b, bullet_id(b), p[0], p[1], p[2],
+             rd<float>(b, 0x50));
+}
+
 void __stdcall on_contact(const uint8_t* entry, const float* point, const uint8_t* victim) {
     if (g_lines >= kMaxLines) return;
     Seen* s = by_entry(entry);
-    if (!s || s->contacts >= 24) return;
+    if (!s || s->contacts >= kContactsPerBullet) return;
     ++s->contacts;
     ++g_lines;
     float p[3] = {};
@@ -331,6 +359,42 @@ __declspec(naked) void map_hit_stub() {
     }
 }
 
+__declspec(naked) void ground_hit_stub() {
+    SAVE_ALL
+    __asm {
+        mov ecx, [esp + 0xA0 + 0x04]
+        push ecx
+        push eax
+        call on_ground_hit
+    }
+    RESTORE_ALL
+    __asm {
+        push ebp
+        mov ebp, esp
+        and esp, 0FFFFFFF0h
+        push 010258B6h
+        ret
+    }
+}
+
+__declspec(naked) void land_stub() {
+    SAVE_ALL
+    __asm {
+        mov ecx, [esp + 0xA0 + 0x04]
+        push ecx
+        push edi
+        call on_land
+    }
+    RESTORE_ALL
+    __asm {
+        push ebp
+        mov ebp, esp
+        and esp, 0FFFFFFF0h
+        push 0DAA1D6h
+        ret
+    }
+}
+
 __declspec(naked) void contact_stub() {
     SAVE_ALL
     __asm {
@@ -377,9 +441,11 @@ bool bullettrace_install() {
     ok += hook(kHitBullet, kPrologue, &hit_bullet_stub);
     ok += hook(kMapHitGate, kPrologue, &map_gate_stub);
     ok += hook(kMapHit, kPrologue, &map_hit_stub);
+    ok += hook(kGroundHit, kPrologue, &ground_hit_stub);
+    ok += hook(kLand, kPrologue, &land_stub);
     ok += hook(kContact, kContactPrologue, &contact_stub);
-    LOG_INFO("BulletTrace: %d of 5 hooks; the Valley of Drakes undead dragon's acid (53900-53902) and the Gaping "
-             "Dragon's (52600, 52601) are logged with their map contacts ([bullet] lines)",
+    LOG_INFO("BulletTrace: %d of 7 hooks; the undead dragon's acid (34200-34209), c5390's 53900-53902 and the Gaping "
+             "Dragon's 52600/52601 are logged with their map contacts ([bullet] lines)",
              ok);
-    return ok == 5;
+    return ok == 7;
 }
