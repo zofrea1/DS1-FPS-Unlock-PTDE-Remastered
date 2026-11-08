@@ -77,8 +77,9 @@ int raise_intervals(uint8_t* d, uint32_t size) {
 
 void* __stdcall hk_register(const void* name, uint8_t* data, uint32_t size) {
     int raised = 0;
+    bool watching = false;
     __try {
-        sfxwatch_on_register(data, size);
+        watching = sfxwatch_before_load(data, size);
         raised = g_raise ? raise_intervals(data, size) : 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         raised = 0;
@@ -89,7 +90,9 @@ void* __stdcall hk_register(const void* name, uint8_t* data, uint32_t size) {
     if (effects == 1 || effects % 500 == 0) {
         LOG_INFO("Effect spawn intervals: %d raised to 1/30 s in the %d effects loaded so far", total, effects);
     }
-    return g_orig(name, data, size);
+    void* resource = g_orig(name, data, size);
+    if (watching) sfxwatch_after_load(resource);
+    return resource;
 }
 
 }  // namespace
