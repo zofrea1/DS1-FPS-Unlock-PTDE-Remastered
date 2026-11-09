@@ -145,6 +145,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_speffect_timing = parse_bool(val);
         } else if (key == "speffectptdespeed") {
             s.speffect_ptde_speed = parse_bool(val);
+        } else if (key == "fixbullethittiming") {
+            s.fix_bullet_hit_timing = parse_bool(val);
         } else if (key == "fixsoulcounter") {
             s.fix_soul_counter = parse_bool(val);
         } else if (key == "fixstaminatick") {

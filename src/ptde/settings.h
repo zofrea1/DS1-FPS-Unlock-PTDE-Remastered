@@ -74,6 +74,9 @@ struct Settings {
     // SpEffect lifetimes expire on the original game's 30 FPS frames (see speffect.h and effectlife.h): status
     // build-up from effects that are applied again and again (Blighttown's swamp) at the original rate.
     bool fix_speffect_timing = true;
+    // Bullet hit records run out on the original game's 30 FPS frames (see hitrecord.h and effectlife.h): Poison
+    // and Toxic Mist clouds and other lingering attacks hit a target standing in them at the original rate.
+    bool fix_bullet_hit_timing = true;
     // Stand the character up if it stays seated at a bonfire with no menu open (reverse hollowing bug).
     bool bonfire_unstick = true;
     // Diagnostic: log the HUD shortcut (D-pad) actions with timestamps.

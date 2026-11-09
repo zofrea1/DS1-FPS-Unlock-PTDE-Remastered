@@ -25,6 +25,7 @@
 #include "roll.h"
 #include "switchback.h"
 #include "speffect.h"
+#include "hitrecord.h"
 #include "trace.h"
 #include "turn.h"
 #include "ui.h"
@@ -459,6 +460,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_speffect_timing) {
             speffect_install();
+        }
+        if (settings.fix_bullet_hit_timing) {
+            hitrecord_install();
         }
         if (settings.fix_roll_direction) {
             roll_install();

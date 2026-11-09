@@ -40,6 +40,9 @@ inline std::atomic<int> g_stick_input_ptde_speed{1};
 // SpEffectPtdeSpeed, else of Remastered's own 60 FPS.
 inline std::atomic<int> g_fix_speffect_timing{1};
 inline std::atomic<int> g_speffect_ptde_speed{1};
+// Bullet hit records run out on native frames (INI FixBulletHitTiming): the original game's 30 FPS with
+// BulletPtdeSpeed, else Remastered's own 60 FPS.
+inline std::atomic<int> g_fix_bullet_hit_timing{1};
 // Per-frame constants of a fixed 60 FPS frame (see patch_frame_constants): timers and fades, the camera
 // pivot ease, and velocities derived from one frame's movement.
 inline std::atomic<int> g_fix_timers{1};

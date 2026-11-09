@@ -76,6 +76,9 @@ struct Settings {
     // the original game's 30 FPS frames; false: Remastered's own 60 FPS frames.
     bool fix_speffect_timing = true;
     bool speffect_ptde_speed = true;
+    // Bullet hit records run out on native frames (src/common/effectlife.h), so Poison and Toxic Mist clouds and
+    // other lingering attacks hit a target standing in them at the native rate (frames of BulletPtdeSpeed's rate).
+    bool fix_bullet_hit_timing = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;

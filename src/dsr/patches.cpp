@@ -4133,6 +4133,53 @@ bool patch_speffect_timing() {
     return true;
 }
 
+// Bullet hit records on the native frame grid (src/common/effectlife.h). Remastered's records are the original
+// game's with x64 offsets: record +0 entries, +8 lifetime, +0x18 count; entry +0 target id, +4 remaining time,
+// +8 next. The bullet manager's update (fn 0x3C8DD0) counts them down with the frame step (fn 0x3C4DA0, record
+// fn 0x3C4360) before it updates the bullets. Every entry gets its time in fn 0x3C4E40 (the insert is inlined in
+// five places, all calling it) at 0x3C4EC7: movss [r8+4], xmm6 ; jmp to the epilogue. That goes to a cave that
+// stores the adjusted time and jumps back to the game's jmp.
+constexpr uint32_t kHitRecordTimeRva = 0x3C4EC7;
+std::atomic<int> g_hitrecord_state{0};
+
+void store_hit_record_time(uint8_t* entry, float life) {
+    *reinterpret_cast<float*>(entry + 4) =
+        hitrecord_adjust(life, static_cast<double>(current_step()), bullet_rate());
+}
+
+bool patch_bullet_hit_timing() {
+    static const uint8_t kExpect[8] = {0xF3, 0x41, 0x0F, 0x11, 0x70, 0x04, 0xEB, 0x02};
+    uint8_t* site = image_rva(kHitRecordTimeRva);
+    if (std::memcmp(site, kExpect, sizeof(kExpect)) != 0) {
+        LOG_ERROR("Bullet hit record timing at 0x%08X does not match this build. Not patching.", kHitRecordTimeRva);
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the bullet hit record stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    CaveEmitter e{page};
+    emit_guarded_call(
+        e, reinterpret_cast<const void*>(&store_hit_record_time),
+        [](CaveEmitter& c) {
+            for (uint8_t b : {0x4C, 0x89, 0xC1}) c.b(b);  // mov rcx, r8 (the entry)
+            for (uint8_t b : {0x0F, 0x28, 0xCE}) c.b(b);  // movaps xmm1, xmm6 (the record's lifetime)
+        },
+        [](CaveEmitter&) {});
+    e.b(0xE9);  // jmp back to the game's jmp to the epilogue
+    const size_t back = e.imm32();
+    e.fix32(back, site + 6);
+    if (!finish_cave(site, 6, page, "bullet hit record timing")) {
+        return false;
+    }
+    LOG_INFO("Bullet hit records run out on %s frames (site 0x%08X)",
+             g_bullet_ptde_speed.load(std::memory_order_relaxed) != 0 ? "the original game's 30 FPS"
+                                                                       : "Remastered's 60 FPS",
+             kHitRecordTimeRva);
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -4225,6 +4272,11 @@ void try_delayed_patches() {
     if (g_switchback_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_switchback.load(std::memory_order_relaxed) == 0 || patch_switchback();
         g_switchback_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_hitrecord_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_bullet_hit_timing.load(std::memory_order_relaxed) == 0 || patch_bullet_hit_timing();
+        g_hitrecord_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_roll_state.compare_exchange_strong(expected, 1)) {

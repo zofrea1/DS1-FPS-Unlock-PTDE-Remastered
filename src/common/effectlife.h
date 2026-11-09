@@ -46,3 +46,27 @@ inline float effectlife_adjust(float life, double dt, double rate) {
     if (!(t > 0.5 * dt)) return life;
     return static_cast<float>(t);
 }
+
+// Bullet hit records on the native frame grid (INI FixBulletHitTiming).
+//
+// A bullet that can hit the same target more than once (BulletParam dmgHitRecordLifeTime > 0: the clouds of
+// Poison Mist and Toxic Mist 0.2 s (rows 2510, 2610), Acid Surge 0.4 s, the Vow of Silence and Tranquil Walk of
+// Peace areas 0.5 s, Chaos Storm 1.5 s, Great Chaos Fireball's lava 2 s, and enemy multi-hit attacks) keeps a
+// shared record of the targets it hit, each entry with the remaining time before that target can be hit again. The bullet manager's update (PTDE fn 0xDEA960) first
+// counts every entry down by the frame time (fn 0xDF2540) and drops the ones at or below zero, then updates the
+// bullets, whose hit test (fn 0xDF12E0) skips targets still in the record. So a target standing in the area is
+// hit again after the whole frames the countdown takes: float steps of 1/30 in the original game, where
+// float(0.2) needs 7 (0.233 s) and 0.15 needs 5 (0.167 s). At 240 FPS the same records last 0.2 and 0.15 s,
+// so those areas hit 17% and 11% more often, 0.5 s ones (16 frames) 7% and 2 s ones (61 frames) 2%.
+//
+// The fix gives a new entry (fn 0xFD7CF0, the one place entries get their time) n / rate - dt / 2, with n the
+// frames the game counts it down at the native rate, so the update that drops it comes n native frames after
+// the hit, to the nearest frame. At the native rate and below, and on frames at least 0.8 of a native frame
+// long, the game's time is kept.
+inline float hitrecord_adjust(float life, double dt, double rate) {
+    if (!(life > 0.0f) || !(dt > 0.0) || !(rate > 0.0) || dt >= 0.8 / rate) return life;
+    const int n = effectlife_native_frames(life, rate);
+    const double t = n / rate - 0.5 * dt;
+    if (!(t > 0.5 * dt)) return life;
+    return static_cast<float>(t);
+}

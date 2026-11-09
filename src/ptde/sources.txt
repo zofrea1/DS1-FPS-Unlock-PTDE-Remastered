@@ -39,6 +39,7 @@ src\ptde\dxvk.cpp
 src\ptde\intro.cpp
 src\ptde\flick.cpp
 src\ptde\speffect.cpp
+src\ptde\hitrecord.cpp
 src\ptde\roll.cpp
 src\common\rollhistory.cpp
 src\ptde\switchback.cpp
