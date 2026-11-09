@@ -38,4 +38,5 @@ src\ptde\script.cpp
 src\ptde\dxvk.cpp
 src\ptde\intro.cpp
 src\ptde\flick.cpp
+src\ptde\speffect.cpp
 src\common\stickflick.cpp

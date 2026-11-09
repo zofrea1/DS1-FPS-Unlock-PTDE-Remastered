@@ -65,6 +65,9 @@ struct Settings {
     // Kick (forward + R1) and jumping attack (forward + R2): the stick flick keeps the original game's 30 FPS
     // timing in real time (see flick.h and stickflick.h).
     bool fix_stick_flick = true;
+    // SpEffect lifetimes expire on the original game's 30 FPS frames (see speffect.h and effectlife.h): status
+    // build-up from effects that are applied again and again (Blighttown's swamp) at the original rate.
+    bool fix_speffect_timing = true;
     // Stand the character up if it stays seated at a bonfire with no menu open (reverse hollowing bug).
     bool bonfire_unstick = true;
     // Diagnostic: log the HUD shortcut (D-pad) actions with timestamps.
