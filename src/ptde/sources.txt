@@ -39,4 +39,6 @@ src\ptde\dxvk.cpp
 src\ptde\intro.cpp
 src\ptde\flick.cpp
 src\ptde\speffect.cpp
+src\ptde\roll.cpp
+src\common\rollhistory.cpp
 src\common\stickflick.cpp

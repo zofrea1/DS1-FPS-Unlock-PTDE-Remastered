@@ -62,10 +62,13 @@ struct Settings {
     bool slide_ptde_speed = true;
     // Kick (forward + R1) and jumping attack (forward + R2): the stick flick (a push from neutral past 0.3
     // between two frames) and the press that has to come with it follow native frames in real time
-    // (src/common/stickflick.h). stick_flick_ptde_speed (INI StickFlickPtdeSpeed): native frames of the original
-    // game's 30 FPS; false: Remastered's own 60 FPS (half as long, so a kick needs a quicker push).
+    // (src/common/stickflick.h). The roll direction's memory of the stick (5 entries) covers native frames
+    // (src/common/rollhistory.h). stick_input_ptde_speed (INI StickInputPtdeSpeed, also StickFlickPtdeSpeed): native
+    // frames of the original game's 30 FPS for both; false: Remastered's own 60 FPS (half as long, so a kick needs a
+    // quicker push and the roll remembers the stick for half as long).
     bool fix_stick_flick = true;
-    bool stick_flick_ptde_speed = true;
+    bool fix_roll_direction = true;
+    bool stick_input_ptde_speed = true;
     // SpEffect lifetimes expire on native frames (src/common/effectlife.h), so status build-up from effects that
     // are applied again and again (Blighttown's swamp) keeps its rate. speffect_ptde_speed (INI SpEffectPtdeSpeed):
     // the original game's 30 FPS frames; false: Remastered's own 60 FPS frames.

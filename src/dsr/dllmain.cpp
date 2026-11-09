@@ -105,9 +105,10 @@ DWORD WINAPI worker(void*) {
              settings.fix_slide_contact ? "true" : "false", settings.fix_slide_steer ? "true" : "false",
              settings.slide_ptde_speed ? "true" : "false", settings.fix_soul_counter ? "true" : "false");
     g_fix_stick_flick.store(settings.fix_stick_flick ? 1 : 0, std::memory_order_relaxed);
-    g_stick_flick_ptde_speed.store(settings.stick_flick_ptde_speed ? 1 : 0, std::memory_order_relaxed);
-    LOG_INFO("FixStickFlick: %s, StickFlickPtdeSpeed: %s", settings.fix_stick_flick ? "true" : "false",
-             settings.stick_flick_ptde_speed ? "true" : "false");
+    g_fix_roll_direction.store(settings.fix_roll_direction ? 1 : 0, std::memory_order_relaxed);
+    g_stick_input_ptde_speed.store(settings.stick_input_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixStickFlick: %s, FixRollDirection: %s, StickInputPtdeSpeed: %s", settings.fix_stick_flick ? "true" : "false",
+             settings.fix_roll_direction ? "true" : "false", settings.stick_input_ptde_speed ? "true" : "false");
     g_fix_speffect_timing.store(settings.fix_speffect_timing ? 1 : 0, std::memory_order_relaxed);
     g_speffect_ptde_speed.store(settings.speffect_ptde_speed ? 1 : 0, std::memory_order_relaxed);
     LOG_INFO("FixSpEffectTiming: %s, SpEffectPtdeSpeed: %s", settings.fix_speffect_timing ? "true" : "false",

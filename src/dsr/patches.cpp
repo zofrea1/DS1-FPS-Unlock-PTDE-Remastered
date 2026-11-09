@@ -4,6 +4,7 @@
 #include "log.h"
 #include "profile.h"
 #include "effectlife.h"
+#include "rollhistory.h"
 #include "state.h"
 #include "stickflick.h"
 #include "trace.h"
@@ -3855,7 +3856,7 @@ bool patch_stick_flick() {
         LOG_ERROR("Stick flick at 0x%08X does not match this build. Not patching.", kFlickCallRva);
         return false;
     }
-    const bool ptde = g_stick_flick_ptde_speed.load(std::memory_order_relaxed) != 0;
+    const bool ptde = g_stick_input_ptde_speed.load(std::memory_order_relaxed) != 0;
     StickFlickLayout layout;
     layout.neutral = 0x23D;
     layout.timers = 0x308;
@@ -3905,6 +3906,73 @@ bool patch_stick_flick() {
     }
     LOG_INFO("Kick and jumping attack input (stick flick) follow %s frames (call 0x%08X, pad update slot 0x%08X)",
              ptde ? "the original game's 30 FPS" : "Remastered's 60 FPS", kFlickCallRva, kPadUpdateSlotRva);
+    return true;
+}
+
+// Roll direction (src/common/rollhistory.h). Remastered's PadManipulator stick ring (fn 0x398920, rdi =
+// manipulator, xmm13 = frame time): forward/back +0x264, side +0x2B4, index +0x304, length at 0x1A2C098 (6). After
+// this update's entry is written, the walk at 0x398A23..0x398ADB leaves the weighted forward/back in xmm6, the side
+// in xmm11, this update's values in xmm8 / xmm12 (xmm10 = 0, xmm9 = abs mask, both untouched). The walk goes to a
+// cave that calls rollhistory_compute and loads those four registers, then on at 0x398ADC. Native frames of 30 FPS
+// with StickInputPtdeSpeed, else Remastered's 60 (where its 5 entries cover 0.067 s).
+constexpr uint32_t kRollWalkRva = 0x398A23;
+constexpr uint32_t kRollAfterRva = 0x398ADC;
+constexpr uint32_t kRollRingSizeRva = 0x1A2C098;
+std::atomic<int> g_roll_state{0};
+alignas(16) float g_roll_out[4];
+
+void roll_walk(uint8_t* manip, float dt) {
+    rollhistory_compute(manip, dt, g_roll_out);
+}
+
+bool patch_roll_direction() {
+    static const uint8_t kWalkExpect[15] = {0x41, 0x0F, 0x28, 0xF2,                     // movaps xmm6, xmm10
+                                            0x45, 0x0F, 0x28, 0xDA,                     // movaps xmm11, xmm10
+                                            0x48, 0x63, 0x8F, 0x04, 0x03, 0x00, 0x00};  // movsxd rcx, [rdi+304h]
+    static const uint8_t kAfterExpect[7] = {0x80, 0xBE, 0x1D, 0x02, 0x00, 0x00, 0x00};  // cmp byte [rsi+21Dh], 0
+    uint8_t* site = image_rva(kRollWalkRva);
+    const auto* ring_size = reinterpret_cast<const int*>(image_rva(kRollRingSizeRva));
+    if (std::memcmp(site, kWalkExpect, sizeof(kWalkExpect)) != 0 ||
+        std::memcmp(image_rva(kRollAfterRva), kAfterExpect, sizeof(kAfterExpect)) != 0 || *ring_size != 6) {
+        LOG_ERROR("Roll direction history at 0x%08X does not match this build. Not patching.", kRollWalkRva);
+        return false;
+    }
+    const bool ptde = g_stick_input_ptde_speed.load(std::memory_order_relaxed) != 0;
+    RollHistoryLayout layout;
+    layout.ring_y = 0x264;
+    layout.ring_x = 0x2B4;
+    layout.index = 0x304;
+    rollhistory_configure(layout, ring_size, ptde ? 30.0 : 60.0);
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the roll direction stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    CaveEmitter e{page};
+    emit_guarded_call(
+        e, reinterpret_cast<const void*>(&roll_walk),
+        [](CaveEmitter& c) {
+            for (uint8_t b : {0x48, 0x89, 0xF9}) c.b(b);        // mov rcx, rdi (the manipulator)
+            for (uint8_t b : {0x41, 0x0F, 0x28, 0xCD}) c.b(b);  // movaps xmm1, xmm13 (the frame time)
+        },
+        [](CaveEmitter& c) {
+            c.b(0x48);
+            c.b(0xB8);  // mov rax, g_roll_out (rax is restored by the epilogue)
+            const size_t out = c.imm64();
+            c.fix64(out, reinterpret_cast<uint64_t>(&g_roll_out[0]));
+            for (uint8_t b : {0xF3, 0x0F, 0x10, 0x30}) c.b(b);              // movss xmm6, [rax]
+            for (uint8_t b : {0xF3, 0x44, 0x0F, 0x10, 0x58, 0x04}) c.b(b);  // movss xmm11, [rax+4]
+            for (uint8_t b : {0xF3, 0x44, 0x0F, 0x10, 0x40, 0x08}) c.b(b);  // movss xmm8, [rax+8]
+            for (uint8_t b : {0xF3, 0x44, 0x0F, 0x10, 0x60, 0x0C}) c.b(b);  // movss xmm12, [rax+12]
+        });
+    e.b(0xE9);  // jmp on, past the game's walk
+    const size_t back = e.imm32();
+    e.fix32(back, image_rva(kRollAfterRva));
+    if (!finish_cave(site, 8, page, "roll direction")) {
+        return false;
+    }
+    LOG_INFO("Roll direction reads the stick over %s last 4 frames (site 0x%08X)",
+             ptde ? "the original game's (1/30 s)" : "Remastered's (1/60 s)", kRollWalkRva);
     return true;
 }
 
@@ -4052,6 +4120,11 @@ void try_delayed_patches() {
     if (g_slide_steer_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_slide_steer.load(std::memory_order_relaxed) == 0 || patch_slide_steer();
         g_slide_steer_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_roll_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_roll_direction.load(std::memory_order_relaxed) == 0 || patch_roll_direction();
+        g_roll_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_speffect_state.compare_exchange_strong(expected, 1)) {

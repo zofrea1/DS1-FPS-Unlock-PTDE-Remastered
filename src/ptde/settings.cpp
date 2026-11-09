@@ -192,6 +192,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_soul_counter = parse_bool(val);
         } else if (key == "fixstickflick") {
             s.fix_stick_flick = parse_bool(val);
+        } else if (key == "fixrolldirection") {
+            s.fix_roll_direction = parse_bool(val);
         } else if (key == "fixspeffecttiming") {
             s.fix_speffect_timing = parse_bool(val);
         } else if (key == "fixui") {

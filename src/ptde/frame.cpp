@@ -22,6 +22,7 @@
 #include "sfxwatch.h"
 #include "soulcounter.h"
 #include "flick.h"
+#include "roll.h"
 #include "speffect.h"
 #include "trace.h"
 #include "turn.h"
@@ -457,6 +458,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_speffect_timing) {
             speffect_install();
+        }
+        if (settings.fix_roll_direction) {
+            roll_install();
         }
     }
     script_install(settings.driver && settings.fix_script_memory);

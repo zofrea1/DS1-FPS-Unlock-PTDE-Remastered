@@ -30,10 +30,11 @@ inline std::atomic<int> g_fix_soul_counter{1};
 // SlidePtdeSpeed); 0 = Remastered's own 60 FPS feel.
 inline std::atomic<int> g_slide_ptde_speed{1};
 // Kick (forward + R1) and jumping attack (forward + R2): the stick flick and the press that goes with it follow
-// native frames in real time (INI FixStickFlick), of the original game's 30 FPS with StickFlickPtdeSpeed, else of
-// Remastered's own 60 FPS.
+// native frames in real time (INI FixStickFlick); the roll direction's memory of the stick covers native frames
+// (INI FixRollDirection). Both of the original game's 30 FPS with StickInputPtdeSpeed, else of Remastered's own 60.
 inline std::atomic<int> g_fix_stick_flick{1};
-inline std::atomic<int> g_stick_flick_ptde_speed{1};
+inline std::atomic<int> g_fix_roll_direction{1};
+inline std::atomic<int> g_stick_input_ptde_speed{1};
 // SpEffect lifetimes expire on native frames (INI FixSpEffectTiming): of the original game's 30 FPS with
 // SpEffectPtdeSpeed, else of Remastered's own 60 FPS.
 inline std::atomic<int> g_fix_speffect_timing{1};

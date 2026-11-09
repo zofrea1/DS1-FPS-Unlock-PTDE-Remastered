@@ -135,8 +135,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.slide_ptde_speed = parse_bool(val);
         } else if (key == "fixstickflick") {
             s.fix_stick_flick = parse_bool(val);
-        } else if (key == "stickflickptdespeed") {
-            s.stick_flick_ptde_speed = parse_bool(val);
+        } else if (key == "stickinputptdespeed" || key == "stickflickptdespeed") {
+            s.stick_input_ptde_speed = parse_bool(val);
+        } else if (key == "fixrolldirection") {
+            s.fix_roll_direction = parse_bool(val);
         } else if (key == "fixspeffecttiming") {
             s.fix_speffect_timing = parse_bool(val);
         } else if (key == "speffectptdespeed") {
