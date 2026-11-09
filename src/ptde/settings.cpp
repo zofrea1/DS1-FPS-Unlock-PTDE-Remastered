@@ -190,6 +190,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_cutscene_camera = parse_bool(val);
         } else if (key == "fixsoulcounter") {
             s.fix_soul_counter = parse_bool(val);
+        } else if (key == "fixstickflick") {
+            s.fix_stick_flick = parse_bool(val);
         } else if (key == "fixui") {
             s.fix_ui = parse_bool(val);
         } else if (key == "bonfireunstick") {

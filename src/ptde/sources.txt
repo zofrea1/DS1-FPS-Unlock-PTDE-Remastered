@@ -37,3 +37,5 @@ src\ptde\sfxwatch.cpp
 src\ptde\script.cpp
 src\ptde\dxvk.cpp
 src\ptde\intro.cpp
+src\ptde\flick.cpp
+src\common\stickflick.cpp

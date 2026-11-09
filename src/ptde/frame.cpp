@@ -21,6 +21,7 @@
 #include "bullettrace.h"
 #include "sfxwatch.h"
 #include "soulcounter.h"
+#include "flick.h"
 #include "trace.h"
 #include "turn.h"
 #include "ui.h"
@@ -449,6 +450,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_soul_counter) {
             soulcounter_install();
+        }
+        if (settings.fix_stick_flick) {
+            flick_install();
         }
     }
     script_install(settings.driver && settings.fix_script_memory);

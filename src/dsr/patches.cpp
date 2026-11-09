@@ -4,6 +4,7 @@
 #include "log.h"
 #include "profile.h"
 #include "state.h"
+#include "stickflick.h"
 #include "trace.h"
 #include "fpsu_version.h"
 
@@ -3807,6 +3808,99 @@ void write_slide_steer(float dt) {
     g_steer_cell->store(n * n, std::memory_order_relaxed);
 }
 
+// Kick (forward + R1) and jumping attack (forward + R2): the stick flick (src/common/stickflick.h). Remastered's
+// flick is fn 0x399290 (rcx = manipulator, rdx = 16-byte result, xmm2 = frame time, xmm3 = side, 5th argument =
+// forward; returns the result), the original game's code with its state at +0x23D (neutral byte) and +0x308 (four
+// direction timers) and its values at 0x1A2C0A4 (0.06 s), 0x1A2C0A8 (0.3), 0x1A2C0AC (0.2). It is called once,
+// from PadManipulator::Update (fn 0x396860, vtable 0x132F1E8 slot 8 at 0x132F228; rcx = manipulator, xmm1 = frame
+// time, r8 = character), at 0x397191. The call goes to the real-time version through a near stub, and the update
+// slot gets a wrapper that holds a fresh R1 / R2 press while it could still become a kick or a jumping attack.
+constexpr uint32_t kFlickFnRva = 0x399290;
+constexpr uint32_t kFlickCallRva = 0x397191;  // call 140399290h
+constexpr uint32_t kPadUpdateFnRva = 0x396860;
+constexpr uint32_t kPadUpdateSlotRva = 0x132F228;
+constexpr uint32_t kFlickWindowRva = 0x1A2C0A4;
+constexpr uint32_t kFlickOnRva = 0x1A2C0A8;
+constexpr uint32_t kFlickNeutralRva = 0x1A2C0AC;
+std::atomic<int> g_stick_flick_state{0};
+using PadUpdateFn = void (*)(void* self, float dt, void* chr);
+PadUpdateFn g_pad_update = nullptr;
+
+void hook_pad_update(void* self, float dt, void* chr) {
+    g_pad_update(self, dt, chr);
+    stickflick_after_update(static_cast<uint8_t*>(self));
+}
+
+bool patch_stick_flick() {
+    static const uint8_t kCallExpect[5] = {0xE8, 0xFA, 0x20, 0x00, 0x00};
+    static const uint8_t kFnExpect[16] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x50, 0x0F, 0x29,
+                                          0x74, 0x24, 0x40, 0x0F, 0x29, 0x7C, 0x24, 0x30};
+    uint8_t* site = image_rva(kFlickCallRva);
+    void** slot = reinterpret_cast<void**>(image_rva(kPadUpdateSlotRva));
+    const auto* window = reinterpret_cast<const float*>(image_rva(kFlickWindowRva));
+    const auto* on = reinterpret_cast<const float*>(image_rva(kFlickOnRva));
+    const auto* neutral = reinterpret_cast<const float*>(image_rva(kFlickNeutralRva));
+    auto near_value = [](const float* p, float v) { return *p > v - 1e-4f && *p < v + 1e-4f; };
+    if (std::memcmp(site, kCallExpect, sizeof(kCallExpect)) != 0 ||
+        std::memcmp(image_rva(kFlickFnRva), kFnExpect, sizeof(kFnExpect)) != 0 ||
+        *slot != image_rva(kPadUpdateFnRva) || !near_value(window, 0.06f) || !near_value(on, 0.3f) ||
+        !near_value(neutral, 0.2f)) {
+        LOG_ERROR("Stick flick at 0x%08X does not match this build. Not patching.", kFlickCallRva);
+        return false;
+    }
+    const bool ptde = g_stick_flick_ptde_speed.load(std::memory_order_relaxed) != 0;
+    StickFlickLayout layout;
+    layout.neutral = 0x23D;
+    layout.timers = 0x308;
+    StickFlickConsts consts;
+    consts.window = window;
+    consts.on = on;
+    consts.neutral = neutral;
+    stickflick_configure(layout, consts, ptde ? 30.0 : 60.0);
+
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("Could not allocate the stick flick stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    CaveEmitter e{page};
+    e.b(0x48);
+    e.b(0xB8);  // mov rax, stickflick_compute (same arguments and result as the game's function)
+    const size_t fn = e.imm64();
+    e.fix64(fn, reinterpret_cast<uint64_t>(&stickflick_compute));
+    e.b(0xFF);
+    e.b(0xE0);  // jmp rax
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        LOG_ERROR("Could not protect the stick flick stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    const intptr_t rel = page - (site + 5);
+    if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) {
+        LOG_ERROR("The stick flick stub is out of range");
+        return false;
+    }
+    g_pad_update = reinterpret_cast<PadUpdateFn>(*slot);
+    if (!patch_pointer(slot, reinterpret_cast<void*>(&hook_pad_update))) {
+        g_pad_update = nullptr;
+        LOG_ERROR("Could not hook the pad update (Win32=%lu)", GetLastError());
+        return false;
+    }
+    uint8_t call[5];
+    call[0] = 0xE8;
+    const auto value = static_cast<int32_t>(rel);
+    std::memcpy(call + 1, &value, 4);
+    if (!write_code(site, call, sizeof(call))) {
+        patch_pointer(slot, reinterpret_cast<void*>(g_pad_update));
+        LOG_ERROR("Could not patch the stick flick (Win32=%lu)", GetLastError());
+        return false;
+    }
+    LOG_INFO("Kick and jumping attack input (stick flick) follow %s frames (call 0x%08X, pad update slot 0x%08X)",
+             ptde ? "the original game's 30 FPS" : "Remastered's 60 FPS", kFlickCallRva, kPadUpdateSlotRva);
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -3894,6 +3988,11 @@ void try_delayed_patches() {
     if (g_slide_steer_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_slide_steer.load(std::memory_order_relaxed) == 0 || patch_slide_steer();
         g_slide_steer_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_stick_flick_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_stick_flick.load(std::memory_order_relaxed) == 0 || patch_stick_flick();
+        g_stick_flick_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_objgauge_state.compare_exchange_strong(expected, 1)) {

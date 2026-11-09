@@ -60,6 +60,12 @@ struct Settings {
     // SlidePtdeSpeed); false reproduces Remastered's own 60 FPS slide. Remastered kept the original game's
     // animation blend times, so a restarted slide turn carries a quarter of the weight at 60 FPS.
     bool slide_ptde_speed = true;
+    // Kick (forward + R1) and jumping attack (forward + R2): the stick flick (a push from neutral past 0.3
+    // between two frames) and the press that has to come with it follow native frames in real time
+    // (src/common/stickflick.h). stick_flick_ptde_speed (INI StickFlickPtdeSpeed): native frames of the original
+    // game's 30 FPS; false: Remastered's own 60 FPS (half as long, so a kick needs a quicker push).
+    bool fix_stick_flick = true;
+    bool stick_flick_ptde_speed = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;

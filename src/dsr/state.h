@@ -29,6 +29,11 @@ inline std::atomic<int> g_fix_soul_counter{1};
 // 1 = FixSlideContact / FixSlideSteer keep the original game's 30 FPS feel at any frame rate (INI
 // SlidePtdeSpeed); 0 = Remastered's own 60 FPS feel.
 inline std::atomic<int> g_slide_ptde_speed{1};
+// Kick (forward + R1) and jumping attack (forward + R2): the stick flick and the press that goes with it follow
+// native frames in real time (INI FixStickFlick), of the original game's 30 FPS with StickFlickPtdeSpeed, else of
+// Remastered's own 60 FPS.
+inline std::atomic<int> g_fix_stick_flick{1};
+inline std::atomic<int> g_stick_flick_ptde_speed{1};
 // Per-frame constants of a fixed 60 FPS frame (see patch_frame_constants): timers and fades, the camera
 // pivot ease, and velocities derived from one frame's movement.
 inline std::atomic<int> g_fix_timers{1};

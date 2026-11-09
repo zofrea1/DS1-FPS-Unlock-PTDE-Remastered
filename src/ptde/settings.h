@@ -62,6 +62,9 @@ struct Settings {
     bool fix_cutscene_camera = true;
     // HUD soul counter steps with the frame time, at most four of the game's steps per update (see soulcounter.h).
     bool fix_soul_counter = true;
+    // Kick (forward + R1) and jumping attack (forward + R2): the stick flick keeps the original game's 30 FPS
+    // timing in real time (see flick.h and stickflick.h).
+    bool fix_stick_flick = true;
     // Stand the character up if it stays seated at a bonfire with no menu open (reverse hollowing bug).
     bool bonfire_unstick = true;
     // Diagnostic: log the HUD shortcut (D-pad) actions with timestamps.
