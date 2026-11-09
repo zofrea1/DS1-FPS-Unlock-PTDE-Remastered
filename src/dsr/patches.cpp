@@ -374,6 +374,7 @@ enum FrameCell : int {
     kCellDt = 4,        // frame time (1/60 at 60 FPS)
     kCellInvDt = 5,     // 1 / frame time (60 at 60 FPS)
     kCellEase = 6,      // a 1/60 per-frame ease over this frame: 1 - (1 - 1/60) ^ (frame time * 60)
+    kCellRagdollGain = 7,  // the ragdoll driver's pull per second: the game's 60, or 1 / frame time below 60 FPS
 };
 
 void write_frame_cells(float dt) {
@@ -384,6 +385,7 @@ void write_frame_cells(float dt) {
     g_frame_cells[kCellDt] = dt;
     g_frame_cells[kCellInvDt] = inv;
     g_frame_cells[kCellEase] = static_cast<float>(1.0 - std::pow(1.0 - 1.0 / 60.0, static_cast<double>(dt) * 60.0));
+    g_frame_cells[kCellRagdollGain] = inv < 60.0f ? inv : 60.0f;
 }
 
 constexpr float kMinStep = 1.0f / 2000.0f;
@@ -2939,7 +2941,11 @@ bool patch_camera_gains() {
 //     ChrFollowCam::Update: the pivot [+0x190] eases toward [+0x194] and [+0x1A4] toward [+0x1A8] by
 //     1/60 of the gap a frame (the original game used 1/30 at 30 FPS)
 //   velocities (FixVelocity)
-//     powered ragdoll (0x2B5FD0): a body is pulled toward its target with velocity (target - pos) * 60
+//     ragdoll driver (0x2B5FD0): the root body is pulled toward its pose with (pose - position) * 60. That is a
+//     pull per second, not a frame rate: 1.3.0 to 2.0.0 used 1 / frame time, so a pose that jumped (a body or an
+//     enemy loading in, a body held off its pose by the floor) was pulled at 240 * the gap at 240 FPS and flung
+//     the bodies and the characters touching them. The cell keeps the game's 60, and 1 / frame time only below
+//     60 FPS, where 60 * dt would pass the pose (PTDE: src/ptde/fixes.cpp)
 //     3D sound sources (0x3C6E70, 0x3C7520): velocity = (position - last frame's position) * 60, which
 //     FMOD uses for the Doppler shift
 // At exactly 60 FPS every cell equals the game's own constant.
@@ -2963,7 +2969,7 @@ constexpr FrameConstSite kFrameConstSites[] = {
     {0x31AE07, {0xF3, 0x0F, 0x5E, 0x05}, 4, 8, k60, kCellInvDt, 0},    // divss xmm0, [60]    treasure glow fade out
     {0x239641, {0xF3, 0x0F, 0x59, 0x0D}, 4, 8, k1_60, kCellEase, 1},   // mulss xmm1, [1/60]  camera pivot ease
     {0x239669, {0xF3, 0x0F, 0x59, 0x0D}, 4, 8, k1_60, kCellEase, 1},   // mulss xmm1, [1/60]  camera look-at ease
-    {0x2B60D6, {0xF3, 0x0F, 0x59, 0x05}, 4, 8, k60, kCellInvDt, 2},    // mulss xmm0, [60]    powered ragdoll
+    {0x2B60D6, {0xF3, 0x0F, 0x59, 0x05}, 4, 8, k60, kCellRagdollGain, 2},  // mulss xmm0, [60]  ragdoll driver
     {0x3C7067, {0x0F, 0x28, 0x05}, 3, 7, k60, kCellInvDtVec, 2},       // movaps xmm0, [60 x4] sound velocity
     {0x3C76F5, {0x0F, 0x28, 0x05}, 3, 7, k60, kCellInvDtVec, 2},       // movaps xmm0, [60 x4] sound velocity
 };
