@@ -23,6 +23,7 @@
 #include "soulcounter.h"
 #include "flick.h"
 #include "roll.h"
+#include "switchback.h"
 #include "speffect.h"
 #include "trace.h"
 #include "turn.h"
@@ -461,6 +462,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_roll_direction) {
             roll_install();
+        }
+        if (settings.fix_switchback) {
+            switchback_install();
         }
     }
     script_install(settings.driver && settings.fix_script_memory);

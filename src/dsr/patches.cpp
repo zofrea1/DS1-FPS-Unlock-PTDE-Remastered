@@ -8,6 +8,7 @@
 #include "state.h"
 #include "stickflick.h"
 #include "trace.h"
+#include "turnhistory.h"
 #include "fpsu_version.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -3976,6 +3977,105 @@ bool patch_roll_direction() {
     return true;
 }
 
+// Switchback animation (src/common/turnhistory.h). Remastered's TurnAnim (vtable 0x1330CB8): slot 3 at 0x1330CD0
+// (0x39F5C0: rcx turn, rdx out, xmm2 frame time, r9 input, 3 stack arguments; returns out) writes the ring (angle
+// +0x90, dir +0x108, index +0x180, length +0x184) and gets a wrapper that records the new entry. The movement
+// update asks 0x39F980 (rcx turn, xmm1 threshold in degrees, r8 out; al) at 0x38218D (sprint, 105 at 0x1A2C158) and
+// 0x382247 (run, 105 at 0x1A2C154); both calls go through near stubs to the native-grid check, which hands back to
+// 0x39F980 at the native rate and below. Native frames of 30 FPS with StickInputPtdeSpeed, else 60.
+constexpr uint32_t kTurnWriterSlotRva = 0x1330CD0;
+constexpr uint32_t kTurnWriterFnRva = 0x39F5C0;
+constexpr uint32_t kTurnCheckFnRva = 0x39F980;
+constexpr uint32_t kTurnCheckSprintRva = 0x38218D;
+constexpr uint32_t kTurnCheckRunRva = 0x382247;
+std::atomic<int> g_switchback_state{0};
+using TurnWriterFn = void* (*)(void* self, void* out, float dt, void* a4, void* a5, void* a6, uint64_t a7);
+using TurnCheckFn = bool (*)(void* self, float threshold, uint32_t* out);
+TurnWriterFn g_turn_writer = nullptr;
+TurnCheckFn g_turn_check = nullptr;
+
+void* hook_turn_writer(void* self, void* out, float dt, void* a4, void* a5, void* a6, uint64_t a7) {
+    void* r = g_turn_writer(self, out, dt, a4, a5, a6, a7);
+    turnhistory_record(static_cast<const uint8_t*>(self), current_step());
+    return r;
+}
+
+bool hook_turn_check(void* self, float threshold, uint32_t* out) {
+    const int r = turnhistory_check(static_cast<const uint8_t*>(self), threshold, out);
+    if (r < 0) return g_turn_check(self, threshold, out);
+    return r != 0;
+}
+
+bool patch_switchback() {
+    static const uint8_t kCheckFnExpect[7] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x4C, 0x63};
+    void** slot = reinterpret_cast<void**>(image_rva(kTurnWriterSlotRva));
+    uint8_t* sites[2] = {image_rva(kTurnCheckSprintRva), image_rva(kTurnCheckRunRva)};
+    auto call_target = [](const uint8_t* site) {
+        int32_t rel = 0;
+        std::memcpy(&rel, site + 1, 4);
+        return site + 5 + rel;
+    };
+    if (*slot != image_rva(kTurnWriterFnRva) || sites[0][0] != 0xE8 || sites[1][0] != 0xE8 ||
+        call_target(sites[0]) != image_rva(kTurnCheckFnRva) || call_target(sites[1]) != image_rva(kTurnCheckFnRva) ||
+        std::memcmp(image_rva(kTurnCheckFnRva), kCheckFnExpect, sizeof(kCheckFnExpect)) != 0) {
+        LOG_ERROR("Switchback check at 0x%08X does not match this build. Not patching.", kTurnCheckSprintRva);
+        return false;
+    }
+    const bool ptde = g_stick_input_ptde_speed.load(std::memory_order_relaxed) != 0;
+    TurnHistoryLayout layout;
+    layout.angle = 0x90;
+    layout.dir = 0x108;
+    layout.index = 0x180;
+    layout.size = 0x184;
+    turnhistory_configure(layout, ptde ? 30.0 : 60.0);
+    g_turn_check = reinterpret_cast<TurnCheckFn>(image_rva(kTurnCheckFnRva));
+    // One near stub for both calls: mov rax, hook_turn_check ; jmp rax (same arguments and result).
+    auto* page = static_cast<uint8_t*>(alloc_near(sites[0]));
+    if (!page) {
+        LOG_ERROR("Could not allocate the switchback stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    CaveEmitter e{page};
+    e.b(0x48);
+    e.b(0xB8);
+    const size_t fn = e.imm64();
+    e.fix64(fn, reinterpret_cast<uint64_t>(&hook_turn_check));
+    e.b(0xFF);
+    e.b(0xE0);
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        LOG_ERROR("Could not protect the switchback stub (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    for (uint8_t* site : sites) {
+        const intptr_t rel = page - (site + 5);
+        if (rel < static_cast<intptr_t>(INT32_MIN) || rel > static_cast<intptr_t>(INT32_MAX)) {
+            LOG_ERROR("The switchback stub is out of range");
+            return false;
+        }
+    }
+    g_turn_writer = reinterpret_cast<TurnWriterFn>(*slot);
+    if (!patch_pointer(slot, reinterpret_cast<void*>(&hook_turn_writer))) {
+        g_turn_writer = nullptr;
+        LOG_ERROR("Could not hook the turn ring writer (Win32=%lu)", GetLastError());
+        return false;
+    }
+    for (uint8_t* site : sites) {
+        uint8_t call[5];
+        call[0] = 0xE8;
+        const auto value = static_cast<int32_t>(page - (site + 5));
+        std::memcpy(call + 1, &value, 4);
+        if (!write_code(site, call, sizeof(call))) {
+            LOG_ERROR("Could not patch the switchback check (Win32=%lu)", GetLastError());
+            return false;
+        }
+    }
+    LOG_INFO("Switchback animation checks the stick over %s frames (sites 0x%08X, 0x%08X)",
+             ptde ? "the original game's 30 FPS" : "Remastered's 60 FPS", kTurnCheckSprintRva, kTurnCheckRunRva);
+    return true;
+}
+
 // SpEffect lifetimes on the native frame grid (src/common/effectlife.h). Remastered's effect node is the original
 // game's with x64 offsets: +0 remaining time, +4 full duration, +8 tick timer, +0x29 expired, +0x38 row. Its update
 // is fn 0x408C00. The new node's time is stored in fn 0x408960 at 0x4089A8 (comiss xmm1, xmm0 ; movss [rbx], xmm0)
@@ -4120,6 +4220,11 @@ void try_delayed_patches() {
     if (g_slide_steer_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_slide_steer.load(std::memory_order_relaxed) == 0 || patch_slide_steer();
         g_slide_steer_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_switchback_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_switchback.load(std::memory_order_relaxed) == 0 || patch_switchback();
+        g_switchback_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_roll_state.compare_exchange_strong(expected, 1)) {

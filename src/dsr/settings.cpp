@@ -137,6 +137,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_stick_flick = parse_bool(val);
         } else if (key == "stickinputptdespeed" || key == "stickflickptdespeed") {
             s.stick_input_ptde_speed = parse_bool(val);
+        } else if (key == "fixswitchback") {
+            s.fix_switchback = parse_bool(val);
         } else if (key == "fixrolldirection") {
             s.fix_roll_direction = parse_bool(val);
         } else if (key == "fixspeffecttiming") {

@@ -68,6 +68,9 @@ struct Settings {
     // Roll direction: the game's short memory of the stick (5 entries of 1/30 s) covers the same time at any frame
     // rate (see roll.h and rollhistory.h).
     bool fix_roll_direction = true;
+    // Switchback (reversal) animation: the turn it looks for is measured over the original game's frames
+    // (see switchback.h and turnhistory.h).
+    bool fix_switchback = true;
     // SpEffect lifetimes expire on the original game's 30 FPS frames (see speffect.h and effectlife.h): status
     // build-up from effects that are applied again and again (Blighttown's swamp) at the original rate.
     bool fix_speffect_timing = true;

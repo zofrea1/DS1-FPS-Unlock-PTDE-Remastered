@@ -68,6 +68,8 @@ struct Settings {
     // quicker push and the roll remembers the stick for half as long).
     bool fix_stick_flick = true;
     bool fix_roll_direction = true;
+    // Switchback animation: the turn it looks for is measured over native frames (src/common/turnhistory.h).
+    bool fix_switchback = true;
     bool stick_input_ptde_speed = true;
     // SpEffect lifetimes expire on native frames (src/common/effectlife.h), so status build-up from effects that
     // are applied again and again (Blighttown's swamp) keeps its rate. speffect_ptde_speed (INI SpEffectPtdeSpeed):

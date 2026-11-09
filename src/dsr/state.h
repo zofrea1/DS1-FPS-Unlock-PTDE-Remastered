@@ -34,6 +34,7 @@ inline std::atomic<int> g_slide_ptde_speed{1};
 // (INI FixRollDirection). Both of the original game's 30 FPS with StickInputPtdeSpeed, else of Remastered's own 60.
 inline std::atomic<int> g_fix_stick_flick{1};
 inline std::atomic<int> g_fix_roll_direction{1};
+inline std::atomic<int> g_fix_switchback{1};
 inline std::atomic<int> g_stick_input_ptde_speed{1};
 // SpEffect lifetimes expire on native frames (INI FixSpEffectTiming): of the original game's 30 FPS with
 // SpEffectPtdeSpeed, else of Remastered's own 60 FPS.

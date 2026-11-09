@@ -106,6 +106,8 @@ DWORD WINAPI worker(void*) {
              settings.slide_ptde_speed ? "true" : "false", settings.fix_soul_counter ? "true" : "false");
     g_fix_stick_flick.store(settings.fix_stick_flick ? 1 : 0, std::memory_order_relaxed);
     g_fix_roll_direction.store(settings.fix_roll_direction ? 1 : 0, std::memory_order_relaxed);
+    g_fix_switchback.store(settings.fix_switchback ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixSwitchback: %s", settings.fix_switchback ? "true" : "false");
     g_stick_input_ptde_speed.store(settings.stick_input_ptde_speed ? 1 : 0, std::memory_order_relaxed);
     LOG_INFO("FixStickFlick: %s, FixRollDirection: %s, StickInputPtdeSpeed: %s", settings.fix_stick_flick ? "true" : "false",
              settings.fix_roll_direction ? "true" : "false", settings.stick_input_ptde_speed ? "true" : "false");
