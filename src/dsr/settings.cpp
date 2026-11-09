@@ -137,6 +137,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_stick_flick = parse_bool(val);
         } else if (key == "stickflickptdespeed") {
             s.stick_flick_ptde_speed = parse_bool(val);
+        } else if (key == "fixspeffecttiming") {
+            s.fix_speffect_timing = parse_bool(val);
+        } else if (key == "speffectptdespeed") {
+            s.speffect_ptde_speed = parse_bool(val);
         } else if (key == "fixsoulcounter") {
             s.fix_soul_counter = parse_bool(val);
         } else if (key == "fixstaminatick") {

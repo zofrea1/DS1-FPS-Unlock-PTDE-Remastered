@@ -3,6 +3,7 @@
 #include "diag.h"
 #include "log.h"
 #include "profile.h"
+#include "effectlife.h"
 #include "state.h"
 #include "stickflick.h"
 #include "trace.h"
@@ -3907,6 +3908,63 @@ bool patch_stick_flick() {
     return true;
 }
 
+// SpEffect lifetimes on the native frame grid (src/common/effectlife.h). Remastered's effect node is the original
+// game's with x64 offsets: +0 remaining time, +4 full duration, +8 tick timer, +0x29 expired, +0x38 row. Its update
+// is fn 0x408C00. The new node's time is stored in fn 0x408960 at 0x4089A8 (comiss xmm1, xmm0 ; movss [rbx], xmm0)
+// and a refreshed node's in fn 0x408A80 at 0x408AC4 (comiss xmm0, xmm1 ; movss [rbx], xmm1). Each pair goes to a
+// cave that stores the adjusted time, does the game's comiss with the game's value, and jumps back to its jb.
+constexpr uint32_t kEffectNewRva = 0x4089A8;
+constexpr uint32_t kEffectRefreshRva = 0x408AC4;
+std::atomic<int> g_speffect_state{0};
+
+void store_effect_life(float* slot, float life) {
+    const double rate = g_speffect_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+    *slot = effectlife_adjust(life, static_cast<double>(current_step()), rate);
+}
+
+bool patch_speffect_timing() {
+    static const uint8_t kNewExpect[9] = {0x0F, 0x2F, 0xC8, 0xF3, 0x0F, 0x11, 0x03, 0x72, 0x0D};
+    static const uint8_t kRefreshExpect[9] = {0x0F, 0x2F, 0xC1, 0xF3, 0x0F, 0x11, 0x0B, 0x72, 0x0D};
+    uint8_t* sites[2] = {image_rva(kEffectNewRva), image_rva(kEffectRefreshRva)};
+    if (std::memcmp(sites[0], kNewExpect, sizeof(kNewExpect)) != 0 ||
+        std::memcmp(sites[1], kRefreshExpect, sizeof(kRefreshExpect)) != 0) {
+        LOG_ERROR("SpEffect timing at 0x%08X does not match this build. Not patching.", kEffectNewRva);
+        return false;
+    }
+    for (int i = 0; i < 2; ++i) {
+        auto* page = static_cast<uint8_t*>(alloc_near(sites[i]));
+        if (!page) {
+            LOG_ERROR("Could not allocate the SpEffect timing stub (Win32=%lu)", GetLastError());
+            return false;
+        }
+        const bool refresh = i == 1;
+        CaveEmitter e{page};
+        emit_guarded_call(
+            e, reinterpret_cast<const void*>(&store_effect_life),
+            [refresh](CaveEmitter& c) {
+                for (uint8_t b : {0x48, 0x89, 0xD9}) c.b(b);               // mov rcx, rbx (the node)
+                if (!refresh) for (uint8_t b : {0x0F, 0x28, 0xC8}) c.b(b);  // movaps xmm1, xmm0 (the time)
+            },
+            [](CaveEmitter&) {});
+        if (refresh) {
+            for (uint8_t b : {0x0F, 0x2F, 0xC1}) e.b(b);  // comiss xmm0, xmm1
+        } else {
+            for (uint8_t b : {0x0F, 0x2F, 0xC8}) e.b(b);  // comiss xmm1, xmm0
+        }
+        e.b(0xE9);  // jmp back to the game's jb
+        const size_t back = e.imm32();
+        e.fix32(back, sites[i] + 7);
+        if (!finish_cave(sites[i], 7, page, "SpEffect timing")) {
+            return false;
+        }
+    }
+    LOG_INFO("SpEffect lifetimes expire on %s frames (sites 0x%08X, 0x%08X)",
+             g_speffect_ptde_speed.load(std::memory_order_relaxed) != 0 ? "the original game's 30 FPS"
+                                                                         : "Remastered's 60 FPS",
+             kEffectNewRva, kEffectRefreshRva);
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -3994,6 +4052,11 @@ void try_delayed_patches() {
     if (g_slide_steer_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_slide_steer.load(std::memory_order_relaxed) == 0 || patch_slide_steer();
         g_slide_steer_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_speffect_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_speffect_timing.load(std::memory_order_relaxed) == 0 || patch_speffect_timing();
+        g_speffect_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_stick_flick_state.compare_exchange_strong(expected, 1)) {

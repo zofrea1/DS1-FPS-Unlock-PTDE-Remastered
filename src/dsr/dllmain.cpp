@@ -108,6 +108,10 @@ DWORD WINAPI worker(void*) {
     g_stick_flick_ptde_speed.store(settings.stick_flick_ptde_speed ? 1 : 0, std::memory_order_relaxed);
     LOG_INFO("FixStickFlick: %s, StickFlickPtdeSpeed: %s", settings.fix_stick_flick ? "true" : "false",
              settings.stick_flick_ptde_speed ? "true" : "false");
+    g_fix_speffect_timing.store(settings.fix_speffect_timing ? 1 : 0, std::memory_order_relaxed);
+    g_speffect_ptde_speed.store(settings.speffect_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    LOG_INFO("FixSpEffectTiming: %s, SpEffectPtdeSpeed: %s", settings.fix_speffect_timing ? "true" : "false",
+             settings.speffect_ptde_speed ? "true" : "false");
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
     g_slide_ptde.store(settings.slide_ptde ? 1 : 0, std::memory_order_relaxed);

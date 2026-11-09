@@ -66,6 +66,11 @@ struct Settings {
     // game's 30 FPS; false: Remastered's own 60 FPS (half as long, so a kick needs a quicker push).
     bool fix_stick_flick = true;
     bool stick_flick_ptde_speed = true;
+    // SpEffect lifetimes expire on native frames (src/common/effectlife.h), so status build-up from effects that
+    // are applied again and again (Blighttown's swamp) keeps its rate. speffect_ptde_speed (INI SpEffectPtdeSpeed):
+    // the original game's 30 FPS frames; false: Remastered's own 60 FPS frames.
+    bool fix_speffect_timing = true;
+    bool speffect_ptde_speed = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;

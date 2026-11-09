@@ -34,6 +34,10 @@ inline std::atomic<int> g_slide_ptde_speed{1};
 // Remastered's own 60 FPS.
 inline std::atomic<int> g_fix_stick_flick{1};
 inline std::atomic<int> g_stick_flick_ptde_speed{1};
+// SpEffect lifetimes expire on native frames (INI FixSpEffectTiming): of the original game's 30 FPS with
+// SpEffectPtdeSpeed, else of Remastered's own 60 FPS.
+inline std::atomic<int> g_fix_speffect_timing{1};
+inline std::atomic<int> g_speffect_ptde_speed{1};
 // Per-frame constants of a fixed 60 FPS frame (see patch_frame_constants): timers and fades, the camera
 // pivot ease, and velocities derived from one frame's movement.
 inline std::atomic<int> g_fix_timers{1};
