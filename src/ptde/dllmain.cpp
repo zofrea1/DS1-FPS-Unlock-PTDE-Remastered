@@ -6,6 +6,7 @@
 #include "diag.h"
 #include "dsfix.h"
 #include "extension.h"
+#include "ffx.h"
 #include "frame.h"
 #include "gauge.h"
 #include "intro.h"
@@ -109,6 +110,12 @@ DWORD WINAPI worker(void*) {
             controller_install(settings);
         }
         frame_install(settings);
+        // Last: it looks for the library's exact debug prologues (see ffx.h).
+        if (settings.fast_effects) {
+            ffx_install();
+        } else {
+            LOG_INFO("FastEffects is false. The effects library keeps its debug checks.");
+        }
     }
     if (settings.borderless) {
         if (dsfix.borderless) {

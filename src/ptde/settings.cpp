@@ -230,6 +230,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.async_readback = parse_bool(val);
         } else if (key == "filtersamplerstates") {
             s.filter_sampler_states = parse_bool(val);
+        } else if (key == "fasteffects") {
+            s.fast_effects = parse_bool(val);
         } else if (key == "borderlessfullscreen") {
             s.borderless = parse_bool(val);
         } else if (key == "fixcontroller") {

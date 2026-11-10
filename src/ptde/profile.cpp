@@ -36,6 +36,15 @@ constexpr int kStackDwords = 2048;  // how far above ESP the stack is searched f
 constexpr int kMaxSamples = 125000; // 10 s at 1 kHz for up to 12 threads
 
 bool g_enabled = false;
+
+// The effects library (FFX), linked as a debug build: 0x960000..0xBA6000 less the non-debug code between.
+bool in_ffx(uint32_t a) {
+    const uint32_t b = a >> 16;
+    if (b >= 0x96 && b <= 0x9E) return true;
+    if (b == 0xA0 || (b >= 0xA3 && b <= 0xA8)) return true;
+    if (b >= 0xB7 && b <= 0xB9) return true;
+    return a >= 0xBA0000 && a < 0xBA6000;
+}
 uint32_t g_text_lo = 0, g_text_hi = 0;  // the game's code (.text), fixed base 0x400000
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -703,8 +712,21 @@ void capture() {
                 ++outside_by_module[(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m)) << 32) | s.ret[0]];
             }
         }
+        int ffx_self = 0, ffx_incl = 0;
+        for (int k = 0; k < n; ++k) {
+            const Sample& s = g_samples[k];
+            if (s.thread != ti) continue;
+            bool under = in_ffx(s.eip);
+            if (under) ++ffx_self;
+            for (int r = 0; r < s.nret && !under; ++r) under = in_ffx(s.ret[r]);
+            if (under) ++ffx_incl;
+        }
         char line[1000];
-        int len = std::snprintf(line, sizeof(line), "[prof]   modules:");
+        int len = 0;
+        if (ffx_incl)
+            LOG_INFO("[prof]   effects library (FFX, a debug build): %.1f%% self, %.1f%% with what it calls",
+                     100.0 * ffx_self / total, 100.0 * ffx_incl / total);
+        len = std::snprintf(line, sizeof(line), "[prof]   modules:");
         for (auto& e : top_of(modules, 8)) {
             char name[96];
             module_name(e.first, name, sizeof(name));

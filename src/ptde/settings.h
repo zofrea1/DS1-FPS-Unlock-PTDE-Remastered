@@ -103,6 +103,8 @@ struct Settings {
     // instead of waiting for the GPU, and sampler state calls that repeat the value in place skip Direct3D.
     bool async_readback = true;
     bool filter_sampler_states = true;
+    // The effects library's debug checks (stack fills and guard checks, see ffx.h) are skipped.
+    bool fast_effects = true;
     // Make the game window borderless and cover its monitor. Needs the game set to
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
     bool borderless = false;
