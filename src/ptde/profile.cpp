@@ -1,4 +1,6 @@
 #include "profile.h"
+
+#include "d3dperf.h"
 #include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
@@ -29,8 +31,8 @@ namespace {
 constexpr int kCaptureSeconds = 10;
 constexpr int kReportSeconds = 5;
 constexpr int kMaxPicked = 12;      // threads sampled during a capture
-constexpr int kMaxRets = 10;        // game return addresses kept per sample
-constexpr int kStackDwords = 192;   // how far above ESP the stack is searched for them
+constexpr int kMaxRets = 20;        // game return addresses kept per sample
+constexpr int kStackDwords = 2048;  // how far above ESP the stack is searched for them (8 KB)
 constexpr int kMaxSamples = 125000; // 10 s at 1 kHz for up to 12 threads
 
 bool g_enabled = false;
@@ -420,6 +422,19 @@ void report() {
         lock_part("tex-lock", tex, g_prev_tex, false);
         lock_part("surf-lock", surf, g_prev_surf, false);
         lock_part("rt-readback", rtdata, g_prev_rtdata, false);
+        {
+            static unsigned long prev_async = 0, prev_waits = 0, prev_filtered = 0;
+            const unsigned long a = d3dperf_readback_async(), w = d3dperf_readback_waits(),
+                                fs = d3dperf_filtered_samplers();
+            if (a != prev_async || w != prev_waits)
+                n += std::snprintf(line + n, sizeof(line) - n, " (async %.1f/frame, %.1f not ready)",
+                                   (a - prev_async) / f, (w - prev_waits) / f);
+            if (fs != prev_filtered)
+                n += std::snprintf(line + n, sizeof(line) - n, " | ss filtered %.0f/frame", (fs - prev_filtered) / f);
+            prev_async = a;
+            prev_waits = w;
+            prev_filtered = fs;
+        }
         if (gd.calls != g_prev_getdata.calls)
             n += std::snprintf(line + n, sizeof(line) - n, " query-getdata %.1f/frame (%.1f not ready) %.3f ms/frame",
                                (gd.calls - g_prev_getdata.calls) / f, (gd.extra - g_prev_getdata.extra) / f,

@@ -90,16 +90,76 @@ bool rejected_subtype(uint8_t subtype) {
     }
 }
 
+// Windows answers a read of an empty XInput slot by searching for new devices (cfgmgr32 device enumeration in the
+// kernel), about a millisecond each time. Polled every frame, the three empty slots cost the game thread half its
+// time while the pad was idle (that is when the other slots are checked for a pad in use), so standing still ran
+// slower than walking. Microsoft's guidance is to check empty slots every few seconds; here an empty slot is checked
+// again after a second, and a connected slot's type is read once per connection.
+constexpr ULONGLONG kEmptySlotRetryMs = 1000;
+
+struct SlotCache {
+    ULONGLONG retry_at = 0;
+    bool connected = false;
+    bool type_known = false;
+    bool rejected = false;
+};
+SlotCache g_slots[4];
+
+// The first empty-slot checks are timed once for the log.
+int g_empty_timed = 0;
+double g_empty_ms = 0.0;
+
+double qpc_ms() {
+    static LARGE_INTEGER freq = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return f;
+    }();
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return static_cast<double>(now.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
+
+void note_disconnected(int index, ULONGLONG now) {
+    SlotCache& slot = g_slots[index];
+    slot.connected = false;
+    slot.type_known = false;
+    slot.retry_at = now + kEmptySlotRetryMs;
+}
+
 bool read_slot(int index, PadState* pad) {
     if (index < 0 || index > 3) {
         return false;
     }
-    PadState state{};
-    if (xinput_get_state(static_cast<DWORD>(index), &state) != 0) {
+    SlotCache& slot = g_slots[index];
+    const ULONGLONG now = GetTickCount64();
+    if (!slot.connected && now < slot.retry_at) {
         return false;
     }
-    PadCaps caps{};
-    if (xinput_get_caps(static_cast<DWORD>(index), &caps) == 0 && rejected_subtype(caps.subtype)) {
+    PadState state{};
+    const double t0 = g_empty_timed < 8 ? qpc_ms() : 0.0;
+    if (xinput_get_state(static_cast<DWORD>(index), &state) != 0) {
+        if (g_empty_timed < 8) {
+            g_empty_ms += qpc_ms() - t0;
+            if (++g_empty_timed == 8) {
+                LOG_INFO("Controller: checking an empty XInput slot takes %.3f ms; empty slots are checked once a "
+                         "second",
+                         g_empty_ms / 8.0);
+            }
+        }
+        note_disconnected(index, now);
+        return false;
+    }
+    if (!slot.connected) {
+        slot.connected = true;
+        slot.type_known = false;
+    }
+    if (!slot.type_known) {
+        PadCaps caps{};
+        slot.rejected = xinput_get_caps(static_cast<DWORD>(index), &caps) == 0 && rejected_subtype(caps.subtype);
+        slot.type_known = true;
+    }
+    if (slot.rejected) {
         return false;
     }
     if (pad) {
@@ -158,6 +218,14 @@ int __stdcall adopt_pad(uint8_t* self) {
 DWORD __stdcall poll_get_state(DWORD index, void* state) {
     DWORD result = xinput_get_state(index, state);
     uint8_t* self = g_poll_device;
+    if (index < 4) {
+        if (result != 0) {
+            note_disconnected(static_cast<int>(index), GetTickCount64());
+        } else if (!g_slots[index].connected) {
+            g_slots[index].connected = true;
+            g_slots[index].type_known = false;
+        }
+    }
     if (result == 0) {
         g_down_since = 0;
         if (self && state && idle_pad(*static_cast<PadState*>(state))) {
