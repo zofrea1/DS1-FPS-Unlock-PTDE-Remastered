@@ -23,7 +23,8 @@ struct Settings {
     // Exclusive fullscreen refresh rate: -1 leaves the game's choice alone, 0 uses the
     // highest rate the display offers at the game's resolution, N asks for N Hz.
     int fullscreen_refresh = -1;
-    // Press F10 in a busy scene to sample the render thread for 15 s and log where the time goes.
+    // Diagnostic: a [perf] line every 5 s (frame, game update and render times, thread CPU use, Direct3D calls per
+    // frame); F10 samples every busy thread for 10 s and logs where the time goes (see profile.h).
     bool profile = false;
     // Frame-rate independence fixes for constants tuned for 30 FPS (see fixes.h).
     bool fix_slide = true;

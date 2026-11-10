@@ -4,6 +4,7 @@
 #include "dxvk.h"
 #include "extension.h"
 #include "log.h"
+#include "profile.h"
 #include "settings.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -191,6 +192,13 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
     }
     if (settings().fps_unlock) adjust_present_parameters(d3d, adapter, pp, "CreateDevice");
     const HRESULT hr = g_create_device(d3d, adapter, type, window, flags, pp, out);
+    LOG_INFO("CreateDevice: adapter %u, type %d, behavior flags 0x%08lX%s%s%s%s%s%s, hr 0x%08lX", adapter,
+             static_cast<int>(type), flags, (flags & D3DCREATE_HARDWARE_VERTEXPROCESSING) ? " hardware-vp" : "",
+             (flags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) ? " SOFTWARE-vp" : "",
+             (flags & D3DCREATE_MIXED_VERTEXPROCESSING) ? " MIXED-vp" : "",
+             (flags & D3DCREATE_MULTITHREADED) ? " multithreaded" : "",
+             (flags & D3DCREATE_FPU_PRESERVE) ? " fpu-preserve" : "", (flags & D3DCREATE_PUREDEVICE) ? " pure" : "",
+             static_cast<unsigned long>(hr));
     if (SUCCEEDED(hr) && out && *out) {
         const PtdeExtension* ext = ptde_extension();
         if (ext && ext->device_created) ext->device_created(*out);
@@ -213,6 +221,10 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         if (aspect_is_active()) {
             aspect_hook_device(*out);
         }
+    }
+    // Last, so the census counts what the game calls and chains into every hook above.
+    if (SUCCEEDED(hr) && out && *out && profile_enabled()) {
+        profile_hook_device(*out);
     }
     return hr;
 }

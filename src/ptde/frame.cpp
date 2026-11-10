@@ -254,6 +254,9 @@ int __fastcall hook_getcmd(void* self, void* edx) {
     }
     if (cmd == 2 || cmd == 5) {
         frame_boundary();
+        if (profile_enabled()) {
+            profile_frame_boundary();
+        }
         if (cmd == 2) {
             LARGE_INTEGER stamp{};
             QueryPerformanceCounter(&stamp);
@@ -264,6 +267,9 @@ int __fastcall hook_getcmd(void* self, void* edx) {
         QueryPerformanceCounter(&stamp);
         const double span = ms_between(g.t_cmd2, stamp.QuadPart);
         ++g.spans;
+        if (profile_enabled()) {
+            profile_render_span(span);
+        }
         g.span_sum += span;
         if (span > g.span_max) g.span_max = span;
     }
@@ -274,7 +280,15 @@ bool make_writable(void* address, size_t size);
 
 char hook_game_frame() {
     limiter_wait_early();
-    return g_game_frame();
+    if (!profile_enabled()) {
+        return g_game_frame();
+    }
+    LARGE_INTEGER a{}, b{};
+    QueryPerformanceCounter(&a);
+    const char result = g_game_frame();
+    QueryPerformanceCounter(&b);
+    profile_game_frame(1000.0 * static_cast<double>(b.QuadPart - a.QuadPart) / static_cast<double>(g.freq.QuadPart));
+    return result;
 }
 
 // The cap's early point. Refuses an unexpected build instead of jumping into the wrong function.
