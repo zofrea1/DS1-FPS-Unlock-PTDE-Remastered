@@ -433,16 +433,25 @@ void report() {
         lock_part("rt-readback", rtdata, g_prev_rtdata, false);
         {
             static unsigned long prev_async = 0, prev_waits = 0, prev_filtered = 0;
+            static unsigned long prev_switches = 0, prev_applies = 0, prev_recorded = 0;
             const unsigned long a = d3dperf_readback_async(), w = d3dperf_readback_waits(),
                                 fs = d3dperf_filtered_samplers();
+            unsigned long sw = 0, ap = 0, rec = 0;
+            d3dperf_filter_stats(&sw, &ap, &rec);
             if (a != prev_async || w != prev_waits)
                 n += std::snprintf(line + n, sizeof(line) - n, " (async %.1f/frame, %.1f not ready)",
                                    (a - prev_async) / f, (w - prev_waits) / f);
-            if (fs != prev_filtered)
-                n += std::snprintf(line + n, sizeof(line) - n, " | ss filtered %.0f/frame", (fs - prev_filtered) / f);
+            n += std::snprintf(line + n, sizeof(line) - n,
+                               " | ss filtered %.0f/frame (restarts: %.1f thread changes, %.1f state blocks applied "
+                               "a frame; %.0f recorded)",
+                               (fs - prev_filtered) / f, (sw - prev_switches) / f, (ap - prev_applies) / f,
+                               (rec - prev_recorded) / f);
             prev_async = a;
             prev_waits = w;
             prev_filtered = fs;
+            prev_switches = sw;
+            prev_applies = ap;
+            prev_recorded = rec;
         }
         if (gd.calls != g_prev_getdata.calls)
             n += std::snprintf(line + n, sizeof(line) - n, " query-getdata %.1f/frame (%.1f not ready) %.3f ms/frame",

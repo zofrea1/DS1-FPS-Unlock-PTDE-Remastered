@@ -227,8 +227,14 @@ constexpr int kTypes = 14;
 DWORD g_value[kSamplers][kTypes];
 uint32_t g_known[kSamplers];  // a bit per type: g_value holds what the device has
 volatile bool g_recording = false;
-volatile DWORD g_owner = 0;  // the thread that sets sampler states (the render thread)
+// The thread whose sampler states the cache follows: the last one to set any. The title screen's are set by another
+// thread than the game's render thread; a cache kept for the first thread only filtered nothing once in the game.
+volatile DWORD g_owner = 0;
 volatile LONG g_filtered = 0;
+volatile LONG g_switches = 0;  // the setting thread changed (the cache starts over)
+volatile LONG g_applies = 0;   // state blocks applied (the cache starts over)
+volatile LONG g_recorded = 0;  // calls recorded into a state block (passed through)
+int g_switches_logged = 0;
 
 void forget_samplers() {
     for (auto& bits : g_known) {
@@ -249,13 +255,20 @@ int sampler_index(DWORD sampler) {
 HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMPLERSTATETYPE type, DWORD value) {
     const int index = sampler_index(sampler);
     const DWORD self = GetCurrentThreadId();
-    if (g_owner == 0) {
-        g_owner = self;
-    }
-    if (index < 0 || type <= 0 || type >= kTypes || g_recording || self != g_owner) {
-        if (self != g_owner) {
-            forget_samplers();
+    if (self != g_owner) {
+        if (g_owner != 0 && g_switches_logged < 4) {
+            ++g_switches_logged;
+            LOG_INFO("FilterSamplerStates: sampler states now come from thread %lu (were thread %lu)", self, g_owner);
         }
+        g_owner = self;
+        forget_samplers();
+        InterlockedIncrement(&g_switches);
+    }
+    if (g_recording) {
+        InterlockedIncrement(&g_recorded);
+        return g_set_sampler(device, sampler, type, value);
+    }
+    if (index < 0 || type <= 0 || type >= kTypes) {
         return g_set_sampler(device, sampler, type, value);
     }
     const uint32_t bit = 1u << type;
@@ -276,6 +289,7 @@ HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMP
 HRESULT WINAPI hook_apply(IDirect3DStateBlock9* block) {
     const HRESULT hr = g_apply(block);
     forget_samplers();
+    InterlockedIncrement(&g_applies);
     return hr;
 }
 
@@ -398,4 +412,10 @@ unsigned long d3dperf_readback_async() {
 
 unsigned long d3dperf_readback_waits() {
     return static_cast<unsigned long>(g_waits);
+}
+
+void d3dperf_filter_stats(unsigned long* switches, unsigned long* applies, unsigned long* recorded) {
+    *switches = static_cast<unsigned long>(g_switches);
+    *applies = static_cast<unsigned long>(g_applies);
+    *recorded = static_cast<unsigned long>(g_recorded);
 }

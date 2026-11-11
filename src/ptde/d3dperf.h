@@ -24,3 +24,6 @@ void d3dperf_reset();
 unsigned long d3dperf_filtered_samplers();
 unsigned long d3dperf_readback_async();
 unsigned long d3dperf_readback_waits();
+// Why the filter started over: the setting thread changed, a state block was applied; and calls recorded into a
+// state block (passed through), since the start.
+void d3dperf_filter_stats(unsigned long* switches, unsigned long* applies, unsigned long* recorded);
