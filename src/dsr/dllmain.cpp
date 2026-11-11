@@ -117,6 +117,8 @@ DWORD WINAPI worker(void*) {
              settings.speffect_ptde_speed ? "true" : "false");
     g_fix_bullet_hit_timing.store(settings.fix_bullet_hit_timing ? 1 : 0, std::memory_order_relaxed);
     LOG_INFO("FixBulletHitTiming: %s", settings.fix_bullet_hit_timing ? "true" : "false");
+    g_fix_sfx_distortion.store(settings.fix_sfx_distortion ? 1 : 0, std::memory_order_relaxed);
+    g_sfx_distortion_ptde_speed.store(settings.sfx_distortion_ptde_speed ? 1 : 0, std::memory_order_relaxed);
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
     g_slide_ptde.store(settings.slide_ptde ? 1 : 0, std::memory_order_relaxed);

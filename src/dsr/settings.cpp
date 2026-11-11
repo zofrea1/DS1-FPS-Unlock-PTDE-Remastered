@@ -147,6 +147,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.speffect_ptde_speed = parse_bool(val);
         } else if (key == "fixbullethittiming") {
             s.fix_bullet_hit_timing = parse_bool(val);
+        } else if (key == "fixsfxdistortion") {
+            s.fix_sfx_distortion = parse_bool(val);
+        } else if (key == "sfxdistortionptdespeed") {
+            s.sfx_distortion_ptde_speed = parse_bool(val);
         } else if (key == "fixsoulcounter") {
             s.fix_soul_counter = parse_bool(val);
         } else if (key == "fixstaminatick") {

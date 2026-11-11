@@ -4141,6 +4141,75 @@ bool patch_speffect_timing() {
 // stores the adjusted time and jumps back to the game's jmp.
 constexpr uint32_t kHitRecordTimeRva = 0x3C4EC7;
 std::atomic<int> g_hitrecord_state{0};
+std::atomic<int> g_distortion_state{0};
+
+// Heat haze (distortion particles, FXParticleAppearance_Distortion) on the native frame grid. The haze scrolls its
+// normal map by a phase the game integrates in real time: phase += speed(t) * (t - t_prev) (0x141180750; the step is
+// subss xmm6, [r8+14h] at 0x14118079A, xmm7 = [r8+18h] the node clock now). One native frame's step is a tenth of the
+// pattern for the fast heat ripple (speed 3) at 30 FPS, a twentieth at 60; at 240 FPS it is drawn so finely that it
+// reads as shaking instead of a rolling wave. The step is taken between the two clock values rounded to the 1/30 s
+// grid (SfxDistortionPtdeSpeed, the original game's look and that of effects ported from it) or the 1/60 s grid
+// (Remastered's own), so the pattern jumps as it does at that rate while size, colour and position follow every frame.
+// The relay uses SSE only: the flags of the cmp before the site are read by a jump after it.
+bool patch_sfx_distortion() {
+    constexpr uint32_t kSiteRva = 0x0118079A;   // subss xmm6, dword ptr [r8+14h]
+    constexpr uint32_t kClockRva = 0x01180781;  // movss xmm7, dword ptr [r8+18h]
+    static const uint8_t kSite[] = {0xF3, 0x41, 0x0F, 0x5C, 0x70, 0x14};
+    static const uint8_t kClock[] = {0xF3, 0x41, 0x0F, 0x10, 0x78, 0x18};
+    uint8_t* site = g_image + kSiteRva;
+    if (std::memcmp(site, kSite, sizeof(kSite)) != 0 || std::memcmp(g_image + kClockRva, kClock, sizeof(kClock)) != 0) {
+        LOG_ERROR("FixSfxDistortion: the heat haze step at %p does not match this build. Not patching.", site);
+        return false;
+    }
+    auto* relay = static_cast<uint8_t*>(alloc_near(site));
+    if (!relay) {
+        LOG_ERROR("FixSfxDistortion: no memory near the game for the relay. Not patching.");
+        return false;
+    }
+    const float rate = g_sfx_distortion_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0f : 60.0f;
+    float* k = reinterpret_cast<float*>(relay + 0x80);
+    k[0] = rate;
+    k[1] = 0.5f;
+    k[2] = 1.0f / rate;
+    uint8_t* p = relay;
+    auto put = [&](std::initializer_list<uint8_t> bytes) {
+        for (uint8_t b : bytes) *p++ = b;
+    };
+    auto rip32 = [&](const void* target) {  // disp32 of an instruction that ends right after it
+        const int32_t disp = static_cast<int32_t>(reinterpret_cast<const uint8_t*>(target) - (p + 4));
+        std::memcpy(p, &disp, 4);
+        p += 4;
+    };
+    put({0x48, 0x8D, 0x64, 0x24, 0xF0});        // lea rsp, [rsp-10h]
+    put({0xF3, 0x0F, 0x7F, 0x2C, 0x24});        // movdqu [rsp], xmm5
+    put({0xF3, 0x41, 0x0F, 0x10, 0x70, 0x18});  // movss xmm6, [r8+18h]   clock now
+    put({0xF3, 0x0F, 0x59, 0x35}); rip32(&k[0]);  // mulss xmm6, rate
+    put({0xF3, 0x0F, 0x58, 0x35}); rip32(&k[1]);  // addss xmm6, 0.5
+    put({0x66, 0x0F, 0x3A, 0x0A, 0xF6, 0x09});  // roundss xmm6, xmm6, floor
+    put({0xF3, 0x41, 0x0F, 0x10, 0x68, 0x14});  // movss xmm5, [r8+14h]   clock at the previous update
+    put({0xF3, 0x0F, 0x59, 0x2D}); rip32(&k[0]);  // mulss xmm5, rate
+    put({0xF3, 0x0F, 0x58, 0x2D}); rip32(&k[1]);  // addss xmm5, 0.5
+    put({0x66, 0x0F, 0x3A, 0x0A, 0xED, 0x09});  // roundss xmm5, xmm5, floor
+    put({0xF3, 0x0F, 0x5C, 0xF5});              // subss xmm6, xmm5        whole frames crossed
+    put({0xF3, 0x0F, 0x59, 0x35}); rip32(&k[2]);  // mulss xmm6, 1/rate
+    put({0xF3, 0x0F, 0x6F, 0x2C, 0x24});        // movdqu xmm5, [rsp]
+    put({0x48, 0x8D, 0x64, 0x24, 0x10});        // lea rsp, [rsp+10h]
+    put({0xE9}); rip32(site + sizeof(kSite));   // jmp back
+    DWORD old = 0;
+    VirtualProtect(relay, 0x1000, PAGE_EXECUTE_READ, &old);
+    FlushInstructionCache(GetCurrentProcess(), relay, 0x100);
+    if (!VirtualProtect(site, sizeof(kSite), PAGE_EXECUTE_READWRITE, &old)) return false;
+    site[0] = 0xE9;
+    const int32_t rel = static_cast<int32_t>(relay - (site + 5));
+    std::memcpy(site + 1, &rel, 4);
+    site[5] = 0x90;
+    DWORD ignored = 0;
+    VirtualProtect(site, sizeof(kSite), old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(kSite));
+    LOG_INFO("FixSfxDistortion: heat haze scrolls on the %s frame grid (%p)",
+             rate == 30.0f ? "original game's 30 FPS" : "60 FPS", site);
+    return true;
+}
 
 void store_hit_record_time(uint8_t* entry, float life) {
     *reinterpret_cast<float*>(entry + 4) =
@@ -4277,6 +4346,11 @@ void try_delayed_patches() {
     if (g_hitrecord_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_bullet_hit_timing.load(std::memory_order_relaxed) == 0 || patch_bullet_hit_timing();
         g_hitrecord_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_distortion_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_sfx_distortion.load(std::memory_order_relaxed) == 0 || patch_sfx_distortion();
+        g_distortion_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_roll_state.compare_exchange_strong(expected, 1)) {

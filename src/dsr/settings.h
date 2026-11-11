@@ -79,6 +79,10 @@ struct Settings {
     // Bullet hit records run out on native frames (src/common/effectlife.h), so Poison and Toxic Mist clouds and
     // other lingering attacks hit a target standing in them at the native rate (frames of BulletPtdeSpeed's rate).
     bool fix_bullet_hit_timing = true;
+    // Heat haze (distortion effects) scrolls on the native frame grid (patch_sfx_distortion): the original game's 30 FPS
+    // with SfxDistortionPtdeSpeed, else Remastered's 60.
+    bool fix_sfx_distortion = true;
+    bool sfx_distortion_ptde_speed = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;
