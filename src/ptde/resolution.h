@@ -20,6 +20,8 @@ void resolution_reset();
 
 // The depth of field's smooth composite on or off (RemoteControl `dof`, for comparing with the game's own).
 void resolution_set_smooth_dof(bool on);
+// Diagnostics: the composite shows only blur level 1-3 everywhere (0: the game's weights).
+void resolution_force_dof_level(int level);
 
 // Sun and moon with DSfix's render resolution. The lens flare (sun, moon) measures how much of a 24x24 pixel probe at the
 // sun is visible with an occlusion query, and takes a new count only while it is below 1.5 x the probe's expected

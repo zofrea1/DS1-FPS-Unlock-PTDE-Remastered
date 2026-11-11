@@ -149,6 +149,8 @@ IDirect3DPixelShader9* g_dof_ours = nullptr;
 IDirect3DDevice9* g_dof_device = nullptr;
 volatile bool g_dof_bound = false;
 volatile bool g_dof_enabled = true;
+volatile bool g_dof_game_bound = false;  // the game's composite (ours or its own) is the bound shader
+volatile LONG g_dof_force = 0;           // diagnostics: 1-3 shows only that blur level
 volatile LONG g_dof_draws = 0;
 
 HRESULT WINAPI hk_create_texture(IDirect3DDevice9* dev, UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT f,
@@ -213,6 +215,12 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     }
     g_copy_bound = copy;
     g_dof_bound = dof;
+    if (ps) {
+        std::lock_guard<std::mutex> lock(g_lock);
+        g_dof_game_bound = g_dof_shaders.count(ps) != 0;
+    } else {
+        g_dof_game_bound = false;
+    }
     if (dof) {
         // The game's sizes; the draw sets them again from the textures it binds.
         const float sizes[8] = {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180};
@@ -316,6 +324,17 @@ IDirect3DTexture9* proxy_of(IDirect3DDevice9* dev, IDirect3DTexture9* src, UINT 
 }
 
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    const LONG force = g_dof_force;
+    if (force >= 1 && force <= 3 && g_dof_game_bound) {
+        // blend = (0, level 1, level 2, level 3) from saturate(blurW * c66 + c67): c66 = 0, c67 = the cumulative mask.
+        float saved[8] = {};
+        dev->GetPixelShaderConstantF(66, saved, 2);
+        float forced[8] = {0, 0, 0, 0, 0, force <= 1 ? 1.0f : 0.0f, force <= 2 ? 1.0f : 0.0f, 1.0f};
+        dev->SetPixelShaderConstantF(66, forced, 2);
+        const HRESULT hr = g_dof_bound ? dof_draw(dev, type, count, data, stride) : o_draw_up(dev, type, count, data, stride);
+        dev->SetPixelShaderConstantF(66, saved, 2);
+        return hr;
+    }
     if (g_dof_bound) return dof_draw(dev, type, count, data, stride);
     IDirect3DBaseTexture9* tex = g_tex0;
     if (g_copy_bound && tex && tex->GetType() == D3DRTYPE_TEXTURE) {
@@ -428,6 +447,7 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
 }
 
 void resolution_set_smooth_dof(bool on) { g_dof_enabled = on; }
+void resolution_force_dof_level(int level) { g_dof_force = level; }
 
 void resolution_reset() {
     for (auto& t : g_chain) {

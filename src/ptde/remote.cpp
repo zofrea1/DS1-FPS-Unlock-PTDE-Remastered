@@ -1253,6 +1253,9 @@ void run(const std::string& line) {
     } else if (c == "dof") {
         resolution_set_smooth_dof(num(1, 1) != 0);
         out("dof %s", num(1, 1) != 0 ? "smooth (ours)" : "the game's");
+    } else if (c == "dofforce") {
+        resolution_force_dof_level(static_cast<int>(num(1, 0)));
+        out("dofforce %ld", num(1, 0));
     } else if (c == "god") {
         g_god = num(1, 1) != 0;
         out("god %d", g_god ? 1 : 0);
