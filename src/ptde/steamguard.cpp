@@ -23,6 +23,7 @@ constexpr double kSlowMs = 4.0;          // a pause (and for the log)
 constexpr double kInForceS = 60.0;       // the gate holds this long after the last pause seen
 
 volatile LONG g_running = 0;
+bool g_started = false;  // on, on Windows (not under Proton / Wine): the networking queue may go in
 LONGLONG g_freq = 0;
 volatile LONGLONG g_last_quick = 0;  // the end of the canary's latest quick answer
 volatile LONGLONG g_last_pause = 0;  // the end of the canary's latest slow answer (0: none yet)
@@ -289,6 +290,7 @@ void steamguard_start(bool enabled, bool hook_game_imports) {
         LOG_INFO("SteamPauseGuard: not needed under Proton / Wine (the Steam Deck's Steam has no such pause)");
         return;
     }
+    g_started = true;
     if (hook_game_imports) {
         void* orig = nullptr;
         if (patch_slot(import_slot("steam_api.dll", "SteamAPI_RunCallbacks"), reinterpret_cast<void*>(&hk_run_callbacks),
@@ -353,7 +355,7 @@ void steamguard_take_distance_filter(void** vtable_copy) {
 }
 
 void steamguard_wrap_networking(void* networking) {
-    if (!networking || g_net_vtable || !g_freq) return;  // g_freq: the guard was started (Windows, on)
+    if (!networking || g_net_vtable || !g_started) return;
     void** vt = *static_cast<void***>(networking);
     void** copy = static_cast<void**>(VirtualAlloc(nullptr, kNetSlots * sizeof(void*), MEM_COMMIT | MEM_RESERVE,
                                                    PAGE_READWRITE));
