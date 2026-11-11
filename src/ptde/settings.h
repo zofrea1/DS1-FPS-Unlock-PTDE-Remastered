@@ -103,6 +103,12 @@ struct Settings {
     // instead of waiting for the GPU, and sampler state calls that repeat the value in place skip Direct3D.
     bool async_readback = true;
     bool filter_sampler_states = true;
+    // Vertex shader constants that repeat what the device holds skip Direct3D (see d3dperf.h).
+    bool filter_shader_constants = true;
+    // Depth-stencil and offscreen surfaces made and released every frame are kept and handed out again (surfpool.h).
+    bool reuse_surfaces = true;
+    // The game's read locks count without kernel calls (rwlock.h).
+    bool fast_read_locks = true;
     // The effects library's debug checks (stack fills and guard checks, see ffx.h) are skipped.
     bool fast_effects = true;
     // Two hot render-thread math helpers run as SSE with identical results (see rendermath.h).

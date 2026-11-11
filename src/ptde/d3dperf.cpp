@@ -261,10 +261,26 @@ void describe(const void* address, char* out, size_t size) {
     }
 }
 
+// FilterShaderConstants: what the device's vertex shader float constants hold (256 registers), as last set through the
+// filter. Calls that repeat it are answered here, and a call that changes only some registers is cut to the changed
+// run. d3d9 has two versions of the method: the class table's (it records into a state block while one is recorded)
+// and a fast path the device puts in its own table outside recording; each hooked copy calls the version it replaced.
+constexpr int kSetVsConstSlot = 94;
+constexpr UINT kVsRegs = 256;
+using SetVsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
+SetVsConstFn g_vsc_a = nullptr;  // the live table's (normally the fast path)
+SetVsConstFn g_vsc_b = nullptr;  // the class table's, when it differs
+bool g_vsc_enabled = false;
+bool g_ss_enabled = false;  // FilterSamplerStates (the hook is also there when only the constants are filtered)
+alignas(16) uint32_t g_vs[kVsRegs][4];
+uint8_t g_vs_known[kVsRegs];
+volatile LONG g_vsc_calls = 0, g_vsc_regs = 0, g_vsc_skipped = 0, g_vsc_sent = 0;
+
 void forget_samplers() {
     for (auto& bits : g_known) {
         bits = 0;
     }
+    std::memset(g_vs_known, 0, sizeof(g_vs_known));
 }
 
 int sampler_index(DWORD sampler) {
@@ -294,6 +310,9 @@ HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMP
         InterlockedIncrement(&g_recorded);
         return g_set_sampler(device, sampler, type, value);
     }
+    if (!g_ss_enabled) {
+        return g_set_sampler(device, sampler, type, value);
+    }
     if (index < 0 || type <= 0 || type >= kTypes) {
         return g_set_sampler(device, sampler, type, value);
     }
@@ -310,6 +329,65 @@ HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMP
         g_known[index] &= ~bit;
     }
     return hr;
+}
+
+HRESULT set_vsc(SetVsConstFn original, IDirect3DDevice9* device, UINT start, const float* data, UINT count) {
+    g_vsc_calls = g_vsc_calls + 1;
+    g_vsc_regs = g_vsc_regs + static_cast<LONG>(count);
+    const DWORD self = GetCurrentThreadId();
+    if (self != g_owner) {
+        g_owner = self;
+        forget_samplers();
+        InterlockedIncrement(&g_switches);
+    }
+    if (g_recording || !data || count == 0 || start >= kVsRegs || count > kVsRegs - start) {
+        if (!g_recording) {
+            // Out of the range the cache covers (or nothing to set): forget what it could change, pass it on.
+            for (UINT r = start; r < kVsRegs && r - start < count; ++r) g_vs_known[r] = 0;
+        }
+        return original(device, start, data, count);
+    }
+    const uint32_t* src = reinterpret_cast<const uint32_t*>(data);
+    UINT first = count, last = 0;
+    for (UINT i = 0; i < count; ++i) {
+        const UINT r = start + i;
+        if (!g_vs_known[r] || std::memcmp(g_vs[r], src + i * 4, 16) != 0) {
+            if (first == count) first = i;
+            last = i;
+        }
+    }
+    if (first == count) {
+        g_vsc_skipped = g_vsc_skipped + 1;
+        return D3D_OK;
+    }
+    const UINT n = last - first + 1;
+    const HRESULT hr = original(device, start + first, data + first * 4, n);
+    g_vsc_sent = g_vsc_sent + static_cast<LONG>(n);
+    if (SUCCEEDED(hr)) {
+        std::memcpy(g_vs[start + first], src + first * 4, n * 16);
+        std::memset(&g_vs_known[start + first], 1, n);
+    } else {
+        std::memset(&g_vs_known[start + first], 0, n);
+    }
+    return hr;
+}
+
+HRESULT WINAPI hook_vsc_a(IDirect3DDevice9* device, UINT start, const float* data, UINT count) {
+    return set_vsc(g_vsc_a, device, start, data, count);
+}
+
+HRESULT WINAPI hook_vsc_b(IDirect3DDevice9* device, UINT start, const float* data, UINT count) {
+    return set_vsc(g_vsc_b, device, start, data, count);
+}
+
+// The hook for a copy of the method that holds `original`, or null when it is neither known version (a second
+// unknown version is left alone).
+void* vsc_hook_for(void* original) {
+    if (!g_vsc_enabled || !original) return nullptr;
+    if (original == reinterpret_cast<void*>(g_vsc_a)) return reinterpret_cast<void*>(&hook_vsc_a);
+    if (!g_vsc_b) g_vsc_b = reinterpret_cast<SetVsConstFn>(original);
+    if (original == reinterpret_cast<void*>(g_vsc_b)) return reinterpret_cast<void*>(&hook_vsc_b);
+    return nullptr;
 }
 
 HRESULT WINAPI hook_apply(IDirect3DStateBlock9* block) {
@@ -390,6 +468,15 @@ int hook_table_sources(IDirect3DDevice9* device, void** live) {
             }
             continue;
         }
+        if (g_vsc_enabled && g_vsc_a && *slot == reinterpret_cast<void*>(g_vsc_a)) {
+            // The fast path copy of SetVertexShaderConstantF.
+            if (write_pointer(slot, reinterpret_cast<void*>(&hook_vsc_a))) {
+                ++hooked;
+                LOG_INFO("FilterShaderConstants: device+0x%X holds SetVertexShaderConstantF too: hooked",
+                         static_cast<unsigned>(i * sizeof(void*)));
+            }
+            continue;
+        }
         // A pointer to a whole table with the original methods: the class table BeginStateBlock copies.
         void** t = reinterpret_cast<void**>(*slot);
         if (!t || t == live) continue;
@@ -410,6 +497,14 @@ int hook_table_sources(IDirect3DDevice9* device, void** live) {
                 LOG_INFO("FilterSamplerStates: device+0x%X points to a method table (%s) the device copies from: "
                          "hooked",
                          static_cast<unsigned>(i * sizeof(void*)), where);
+                // Its SetVertexShaderConstantF: the version that records while a state block is recorded.
+                if (void* vh = vsc_hook_for(t[kSetVsConstSlot])) {
+                    char fn[160];
+                    describe(t[kSetVsConstSlot], fn, sizeof(fn));
+                    if (write_pointer(&t[kSetVsConstSlot], vh)) {
+                        LOG_INFO("FilterShaderConstants: SetVertexShaderConstantF in that table (%s) hooked", fn);
+                    }
+                }
             }
         }
     }
@@ -462,6 +557,19 @@ bool install_filter(IDirect3DDevice9* game_device) {
     }
     void* set = patch_slot(real, kSetSamplerSlot, reinterpret_cast<void*>(&hook_set_sampler));
     if (set && !g_set_sampler) g_set_sampler = reinterpret_cast<SetSamplerFn>(set);
+    if (g_vsc_enabled) {
+        void* vsc = patch_slot(real, kSetVsConstSlot, reinterpret_cast<void*>(&hook_vsc_a));
+        if (vsc && !g_vsc_a) g_vsc_a = reinterpret_cast<SetVsConstFn>(vsc);
+        if (g_vsc_a) {
+            char fn[160];
+            describe(reinterpret_cast<const void*>(g_vsc_a), fn, sizeof(fn));
+            LOG_INFO("FilterShaderConstants: vertex shader constants that repeat what the device holds skip Direct3D "
+                     "(SetVertexShaderConstantF %s)",
+                     fn);
+        } else {
+            g_vsc_enabled = false;
+        }
+    }
     g_filter_device = real;
     g_filter_table = *reinterpret_cast<void***>(real);
     const int sources = hook_table_sources(real, g_filter_table);
@@ -477,7 +585,7 @@ bool install_filter(IDirect3DDevice9* game_device) {
 
 }  // namespace
 
-void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filter) {
+void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filter, bool constants) {
     if (!game_device) {
         return;
     }
@@ -491,7 +599,9 @@ void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filt
                      "instead of waiting for the GPU");
         }
     }
-    if (filter && !g_set_sampler) {
+    if ((filter || constants) && !g_set_sampler) {
+        g_vsc_enabled = constants;
+        g_ss_enabled = filter;
         install_filter(game_device);
     }
 }
@@ -526,6 +636,14 @@ void d3dperf_frame() {
         patch_slot(g_filter_device, kEndBlockSlot, reinterpret_cast<void*>(&hook_end_block));
         patch_slot(g_filter_device, kSetSamplerSlot, reinterpret_cast<void*>(&hook_set_sampler));
     }
+    // The constants' slot, when the table holds a known original version again.
+    if (g_vsc_enabled) {
+        void** live = *reinterpret_cast<void***>(g_filter_device);
+        void* current = live[kSetVsConstSlot];
+        if (current != reinterpret_cast<void*>(&hook_vsc_a) && current != reinterpret_cast<void*>(&hook_vsc_b)) {
+            if (void* vh = vsc_hook_for(current)) patch_slot(g_filter_device, kSetVsConstSlot, vh);
+        }
+    }
 }
 
 void d3dperf_reset() {
@@ -557,4 +675,11 @@ void d3dperf_filter_stats(unsigned long* switches, unsigned long* applies, unsig
     *switches = static_cast<unsigned long>(g_switches);
     *applies = static_cast<unsigned long>(g_applies);
     *recorded = static_cast<unsigned long>(g_recorded);
+}
+
+void d3dperf_constant_stats(unsigned long* calls, unsigned long* regs, unsigned long* skipped, unsigned long* sent) {
+    *calls = static_cast<unsigned long>(g_vsc_calls);
+    *regs = static_cast<unsigned long>(g_vsc_regs);
+    *skipped = static_cast<unsigned long>(g_vsc_skipped);
+    *sent = static_cast<unsigned long>(g_vsc_sent);
 }

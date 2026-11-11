@@ -8,6 +8,7 @@
 #include "extension.h"
 #include "ffx.h"
 #include "rendermath.h"
+#include "rwlock.h"
 #include "frame.h"
 #include "gauge.h"
 #include "intro.h"
@@ -119,6 +120,11 @@ DWORD WINAPI worker(void*) {
         }
         if (settings.fast_render_math || settings.fast_effects) {
             rendermath_install(settings.fast_render_math, settings.fast_effects);
+        }
+        if (settings.fast_read_locks) {
+            rwlock_install();
+        } else {
+            LOG_INFO("FastReadLocks is false. The game's read locks keep their kernel calls.");
         }
     }
     if (settings.borderless) {

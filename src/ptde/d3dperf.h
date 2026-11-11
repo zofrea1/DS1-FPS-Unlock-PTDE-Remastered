@@ -15,7 +15,10 @@ struct IDirect3DDevice9;
 //    almost all repeating what is already set. A call that sets the value already in place is answered without
 //    reaching Direct3D. The filter sits on the Direct3D device itself (below DSfix when DSfix wraps it), so every
 //    caller's changes pass through it; state blocks, a device reset and another thread clear what it knows.
-void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filter);
+//  * FilterShaderConstants: vertex shader float constants (500 to 700 calls and up to 37,000 registers a frame) that
+//    repeat what the device holds are answered without reaching Direct3D, and a call that changes only some registers
+//    is cut to the changed run. Same device-level hooks and cache rules as the sampler filter.
+void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filter, bool constants);
 // Once a frame on the render thread: the filter follows the device's method table if it changes.
 void d3dperf_frame();
 // Before IDirect3DDevice9::Reset: drops the readback copies and everything the filter knows.
@@ -30,3 +33,5 @@ unsigned long d3dperf_readback_waits();
 // Why the filter started over: the setting thread changed, a state block was applied; and calls recorded into a
 // state block (passed through), since the start.
 void d3dperf_filter_stats(unsigned long* switches, unsigned long* applies, unsigned long* recorded);
+// FilterShaderConstants since the start: calls and registers reaching the filter, calls answered, registers sent on.
+void d3dperf_constant_stats(unsigned long* calls, unsigned long* regs, unsigned long* skipped, unsigned long* sent);

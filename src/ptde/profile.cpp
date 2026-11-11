@@ -1,6 +1,7 @@
 #include "profile.h"
 
 #include "d3dperf.h"
+#include "surfpool.h"
 #include "fpsu_buildcfg.h"
 
 #if FPSU_DIAGNOSTICS
@@ -453,6 +454,26 @@ void report() {
                                (seen - prev_seen) / f, (fs - prev_filtered) / f, (sw - prev_switches) / f,
                                (ap - prev_applies) / f, (rec - prev_recorded) / f);
             prev_seen = seen;
+            static unsigned long prev_vc = 0, prev_vr = 0, prev_vk = 0, prev_vs = 0;
+            unsigned long vc = 0, vr = 0, vk = 0, vs = 0;
+            d3dperf_constant_stats(&vc, &vr, &vk, &vs);
+            if (vc != prev_vc)
+                n += std::snprintf(line + n, sizeof(line) - n,
+                                   " | vs constants reaching the filter %.0f calls %.0f regs/frame: %.0f calls answered, "
+                                   "%.0f regs sent",
+                                   (vc - prev_vc) / f, (vr - prev_vr) / f, (vk - prev_vk) / f, (vs - prev_vs) / f);
+            static unsigned long prev_pr = 0, prev_pc = 0;
+            unsigned long pr = 0, pc = 0;
+            surfpool_stats(&pr, &pc);
+            if (pr != prev_pr || pc != prev_pc)
+                n += std::snprintf(line + n, sizeof(line) - n, " | surfaces reused %.2f/frame, created %.2f/frame",
+                                   (pr - prev_pr) / f, (pc - prev_pc) / f);
+            prev_pr = pr;
+            prev_pc = pc;
+            prev_vc = vc;
+            prev_vr = vr;
+            prev_vk = vk;
+            prev_vs = vs;
             prev_async = a;
             prev_waits = w;
             prev_filtered = fs;

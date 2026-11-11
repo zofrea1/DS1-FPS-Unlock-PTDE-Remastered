@@ -2,6 +2,7 @@
 
 #include "aspect.h"
 #include "d3dperf.h"
+#include "surfpool.h"
 #include "dxvk.h"
 #include "extension.h"
 #include "log.h"
@@ -162,6 +163,7 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
         d3d->Release();
     }
     d3dperf_reset();
+    surfpool_reset();
     const HRESULT hr = g_reset(device, pp);
     if (SUCCEEDED(hr) && aspect_is_active()) {
         aspect_hook_device(device);
@@ -223,7 +225,11 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         if (aspect_is_active()) {
             aspect_hook_device(*out);
         }
-        d3dperf_hook_device(*out, settings().async_readback, settings().filter_sampler_states);
+        d3dperf_hook_device(*out, settings().async_readback, settings().filter_sampler_states,
+                            settings().filter_shader_constants);
+        if (settings().reuse_surfaces) {
+            surfpool_hook_device(*out);
+        }
     }
     // Last, so the census counts what the game calls and chains into every hook above.
     if (SUCCEEDED(hr) && out && *out && profile_enabled()) {

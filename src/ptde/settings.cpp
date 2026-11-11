@@ -230,6 +230,12 @@ Settings settings_load(const wchar_t* dll_path) {
             s.async_readback = parse_bool(val);
         } else if (key == "filtersamplerstates") {
             s.filter_sampler_states = parse_bool(val);
+        } else if (key == "filtershaderconstants") {
+            s.filter_shader_constants = parse_bool(val);
+        } else if (key == "reusesurfaces") {
+            s.reuse_surfaces = parse_bool(val);
+        } else if (key == "fastreadlocks") {
+            s.fast_read_locks = parse_bool(val);
         } else if (key == "fasteffects") {
             s.fast_effects = parse_bool(val);
         } else if (key == "fastrendermath") {

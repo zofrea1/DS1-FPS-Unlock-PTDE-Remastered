@@ -1,4 +1,4 @@
 ptde_image.bin
 *.exe
 *.obj
-out.txt
+*out.txt
