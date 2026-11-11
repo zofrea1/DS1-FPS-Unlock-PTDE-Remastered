@@ -210,6 +210,24 @@ int main(int argc, char** argv) {
         reinterpret_cast<FSplat>(0x9847C0)(o1, a[5]);
         ffx_splat(o2, a[5]);
         same(o1, o2, 16, "ffx splat", it);
+        // float-to-integer converters (and the x87 control word left as it was)
+        struct { uintptr_t orig; void* repl; const char* name; } ti[] = {
+            {0x9B21A0, (void*)&ffx_to_int_1, "to-int x1"}, {0x9B32A0, (void*)&ffx_to_int_65536, "to-int x65536"},
+            {0x9B3030, (void*)&ffx_to_int_256, "to-int x256"}, {0x9B3510, (void*)&ffx_to_int_2p24, "to-int x2^24"}};
+        for (auto& t : ti) {
+            // half the time values in the integer range the game uses (0..255, 0..1, +-large)
+            if (it & 1) for (int i = 0; i < 4; ++i) { float v = static_cast<float>(static_cast<int>(rng() % 200001) - 100000) / 97.0f; std::memcpy(&c[i], &v, 4); }
+            fill(o1, 4); std::memcpy(o2, o1, 16);
+            unsigned short cw1 = 0, cw2 = 0, cw0 = 0;
+            __asm fnstcw cw0
+            reinterpret_cast<F2>(t.orig)(o1, c);
+            __asm fnstcw cw1
+            reinterpret_cast<F2>(t.repl)(o2, c);
+            __asm fnstcw cw2
+            same(o1, o2, 16, t.name, it);
+            if (cw1 != cw0 || cw2 != cw0) { std::printf("x87 control word changed by %s\n", t.name); ++g_fail; }
+            fill(c, 4);
+        }
         fill(o1, 4); std::memcpy(o2, o1, 16);
         reinterpret_cast<FSplat>(0x984920)(o1, a[6]);
         reinterpret_cast<FSplat>(&ffx_splat_x87)(o2, a[6]);

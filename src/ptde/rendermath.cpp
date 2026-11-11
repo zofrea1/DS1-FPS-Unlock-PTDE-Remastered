@@ -272,6 +272,45 @@ float* __cdecl ffx_sub(float* out, const float* a, const float* b) {
     return vec4_sub(out, a, b);
 }
 
+// Four 32-bit integers = each lane of v times scale, truncated toward zero as a 64-bit integer, low 32 bits kept. The
+// originals (0x9B21A0 x1, 0x9B32A0 x65536, 0x9B3030 x256, 0x9B3510 x2^24: particle colours and coordinates) multiply
+// through the engine's four-float multiply, then for every lane switch the x87 rounding to truncation, fistp a qword
+// and switch it back. fisttp truncates without touching the control word and stores the same integer (NaN and
+// overflow included: the integer indefinite); the product is a float multiply either way. cdecl (out, v).
+uint32_t* ffx_trunc4(uint32_t* out, const float* v, float scale) {
+    alignas(16) float p[4];
+    _mm_store_ps(p, _mm_mul_ps(_mm_loadu_ps(v), _mm_set1_ps(scale)));
+    alignas(8) uint32_t q[8];
+    __asm {
+        fld dword ptr [p]
+        fisttp qword ptr [q]
+        fld dword ptr [p + 4]
+        fisttp qword ptr [q + 8]
+        fld dword ptr [p + 8]
+        fisttp qword ptr [q + 16]
+        fld dword ptr [p + 12]
+        fisttp qword ptr [q + 24]
+    }
+    out[0] = q[0];
+    out[1] = q[2];
+    out[2] = q[4];
+    out[3] = q[6];
+    return out;
+}
+
+uint32_t* __cdecl ffx_to_int_1(uint32_t* out, const float* v) {
+    return ffx_trunc4(out, v, 1.0f);
+}
+uint32_t* __cdecl ffx_to_int_65536(uint32_t* out, const float* v) {
+    return ffx_trunc4(out, v, *reinterpret_cast<const float*>(0x112DA6C));
+}
+uint32_t* __cdecl ffx_to_int_256(uint32_t* out, const float* v) {
+    return ffx_trunc4(out, v, *reinterpret_cast<const float*>(0x11E8610));
+}
+uint32_t* __cdecl ffx_to_int_2p24(uint32_t* out, const float* v) {
+    return ffx_trunc4(out, v, *reinterpret_cast<const float*>(0x112DA70));
+}
+
 struct Site {
     const char* name;
     uintptr_t address;
@@ -316,6 +355,14 @@ const uint8_t kSet4Body[] = {0x8B, 0x43, 0x0C, 0x89, 0x45, 0xE0, 0x8B, 0x4B, 0x1
 const uint8_t kSplatBody[] = {0x8B, 0x43, 0x0C, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8B, 0x53, 0x0C, 0x52, 0x8B, 0x43, 0x0C, 0x50};
 const uint8_t kSplatX87Body[] = {0x51, 0xD9, 0x43, 0x0C, 0xD9, 0x1C, 0x24, 0x8D, 0x45, 0xB0, 0x50, 0xE8, 0x67, 0xF1, 0xA7, 0xFF};
 const uint8_t kSubWrapBody[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x86, 0x28, 0xA9};
+// The float-to-integer converters' prologue (a 0x110-byte frame) and what follows their fill (at +0x2F: the scale).
+const uint8_t kFfxHead110[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04,
+                               0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC,
+                               0x10, 0x01, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xF0, 0xFE, 0xFF, 0xFF};
+const uint8_t kToInt1Body[] = {0x51, 0xD9, 0xE8, 0xD9, 0x1C, 0x24, 0x8D, 0x85, 0x40, 0xFF, 0xFF, 0xFF, 0x50, 0xE8, 0x3F, 0x27};
+const uint8_t kToInt65536Body[] = {0x51, 0xD9, 0x05, 0x6C, 0xDA, 0x12, 0x01, 0xD9, 0x1C, 0x24, 0x8D, 0x85, 0x40, 0xFF, 0xFF, 0xFF};
+const uint8_t kToInt256Body[] = {0x51, 0xD9, 0x05, 0x10, 0x86, 0x1E, 0x01, 0xD9, 0x1C, 0x24, 0x8D, 0x85, 0x40, 0xFF, 0xFF, 0xFF};
+const uint8_t kToInt2p24Body[] = {0x51, 0xD9, 0x05, 0x70, 0xDA, 0x12, 0x01, 0xD9, 0x1C, 0x24, 0x8D, 0x85, 0x40, 0xFF, 0xFF, 0xFF};
 
 const Site kCoreSites[] = {
     {"four-float add", 0x4078D0, kAddHead, sizeof(kAddHead), nullptr, 0, 0, reinterpret_cast<const void*>(&vec4_add)},
@@ -343,6 +390,14 @@ const Site kFfxSites[] = {
      reinterpret_cast<const void*>(&ffx_splat_x87)},
     {"subtract", 0x984B60, kFfxHead50, sizeof(kFfxHead50), kSubWrapBody, 0x29, sizeof(kSubWrapBody),
      reinterpret_cast<const void*>(&ffx_sub)},
+    {"to-integer x1", 0x9B21A0, kFfxHead110, sizeof(kFfxHead110), kToInt1Body, 0x2F, sizeof(kToInt1Body),
+     reinterpret_cast<const void*>(&ffx_to_int_1)},
+    {"to-integer x65536", 0x9B32A0, kFfxHead110, sizeof(kFfxHead110), kToInt65536Body, 0x2F, sizeof(kToInt65536Body),
+     reinterpret_cast<const void*>(&ffx_to_int_65536)},
+    {"to-integer x256", 0x9B3030, kFfxHead110, sizeof(kFfxHead110), kToInt256Body, 0x2F, sizeof(kToInt256Body),
+     reinterpret_cast<const void*>(&ffx_to_int_256)},
+    {"to-integer x2^24", 0x9B3510, kFfxHead110, sizeof(kFfxHead110), kToInt2p24Body, 0x2F, sizeof(kToInt2p24Body),
+     reinterpret_cast<const void*>(&ffx_to_int_2p24)},
 };
 
 bool matches(const Site& s) {
@@ -409,8 +464,8 @@ bool rendermath_install(bool core, bool effects) {
         const int n = install_table("FastEffects", kFfxSites, sizeof(kFfxSites) / sizeof(kFfxSites[0]));
         ok = ok && n == static_cast<int>(sizeof(kFfxSites) / sizeof(kFfxSites[0]));
         if (n) {
-            LOG_INFO("FastEffects: %d of the effects library's vector wrappers (set, splat, subtract) replaced with "
-                     "direct code (same results)",
+            LOG_INFO("FastEffects: %d of the effects library's vector helpers (set, splat, subtract, float-to-integer) replaced "
+                     "with direct code (same results)",
                      n);
         }
     }
