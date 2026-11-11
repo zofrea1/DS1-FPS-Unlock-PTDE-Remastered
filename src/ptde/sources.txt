@@ -23,6 +23,7 @@ src\ptde\gamma.cpp
 src\ptde\aspect.cpp
 src\ptde\profile.cpp
 src\ptde\remote.cpp
+src\ptde\resolution.cpp
 src\ptde\trace.cpp
 src\ptde\watch.cpp
 src\ptde\fixes.cpp

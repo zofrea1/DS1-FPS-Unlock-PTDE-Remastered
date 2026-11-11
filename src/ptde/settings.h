@@ -54,6 +54,10 @@ struct Settings {
     bool fix_sfx_actions = true;
     // Heat haze (distortion effects) scrolls on the 30 FPS frame grid, as it was authored (see sfx.h).
     bool fix_sfx_distortion = true;
+    // Internal render resolution of the 3D scene (resolution.h); 0 = the game's own 1024x720.
+    int render_width = 0;
+    int render_height = 0;
+    bool render_scale_post = false;  // experiment: scale the post-processing targets too
     // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
     bool fix_ui = true;
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each

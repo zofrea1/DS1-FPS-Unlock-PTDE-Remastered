@@ -16,6 +16,7 @@
 #include "gamma.h"
 #include "profile.h"
 #include "remote.h"
+#include "resolution.h"
 #include "script.h"
 #include "sfx.h"
 #include "slidecontact.h"
@@ -466,6 +467,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_sfx_distortion) {
             sfx_distortion_install();
+        }
+        if (settings.render_width > 0 && settings.render_height > 0) {
+            resolution_install(settings.render_width, settings.render_height, settings.render_scale_post);
         }
         if (settings.fix_slide_contact) {
             slidecontact_install();

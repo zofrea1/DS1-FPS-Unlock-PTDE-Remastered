@@ -305,6 +305,15 @@ void name_shader(const DWORD* code, void* shader, const char* prefix) {
     CreateDirectoryW(dir.c_str(), nullptr);
     std::wstring path = dir + L"\\" + widen(name) + L".txt";
     if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return;
+    {
+        // The bytecode too (fpsu-shaders\NAME.bin), for matching a shader in release code.
+        const std::wstring bin = dir + L"\\" + widen(name) + L".bin";
+        FILE* fb = _wfopen(bin.c_str(), L"wb");
+        if (fb) {
+            std::fwrite(code, 4, n + 1, fb);
+            std::fclose(fb);
+        }
+    }
     XBuffer* text = nullptr;
     if (x_disassemble && SUCCEEDED(x_disassemble(code, FALSE, nullptr, &text)) && text) {
         FILE* f = _wfopen(path.c_str(), L"wb");
@@ -521,6 +530,33 @@ HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, H
     return hr;
 }
 
+// Game code return addresses on the current stack (the game's .text), for logging who made a call.
+bool read_word(const uintptr_t* p, uintptr_t* v) {
+    __try {
+        *v = *p;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+std::string game_stack(const void* from, int want) {
+    const uintptr_t* sp = static_cast<const uintptr_t*>(from);
+    std::string st;
+    char b[16];
+    int found = 0;
+    for (int i = 0; i < 400 && found < want; ++i) {
+        uintptr_t a = 0;
+        if (!read_word(sp + i, &a)) break;
+        if (a >= 0x00401000 && a < 0x010CC000) {
+            std::snprintf(b, sizeof(b), " %X", static_cast<unsigned>(a));
+            st += b;
+            ++found;
+        }
+    }
+    return st;
+}
+
 // Tracked objects leave the list on their last Release (per class: a class's method table is shared).
 using ReleaseFn = ULONG(WINAPI*)(IUnknown*);
 struct ReleaseHook {
@@ -575,8 +611,9 @@ void track(void* p, char kind, UINT w, UINT h, D3DFORMAT f, DWORD usage, const c
         hook_release(p);
     }
     char fb[16];
-    out("create %c%d %s %ux%u %s usage 0x%lX caller %p", kind, id, what, w, h, fmt_name(f, fb),
-        static_cast<unsigned long>(usage), caller);
+    const std::string st = game_stack(_AddressOfReturnAddress(), 6);
+    out("create %c%d %s %ux%u %s usage 0x%lX caller %p game%s", kind, id, what, w, h, fmt_name(f, fb),
+        static_cast<unsigned long>(usage), caller, st.c_str());
 }
 
 HRESULT WINAPI hk_create_texture(IDirect3DDevice9* dev, UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT f,
@@ -962,6 +999,8 @@ void write_flag(int id, int value) {
 std::mutex g_game_lock;
 std::vector<std::vector<std::string>> g_game_cmds;
 volatile bool g_god = false;
+float g_hold_pos[3] = {};
+ULONGLONG g_hold_until = 0;
 
 // Keeps the player's HP at its maximum (chr +0x2D4 HP, +0x2D8 max HP) while `god` is on.
 void god_tick() {
@@ -991,7 +1030,10 @@ void run_game(const std::vector<std::string>& t) {
         }
         float p[3] = {fnum(1), fnum(2), fnum(3)};
         std::memcpy(reinterpret_cast<void*>(phys + 0x10), p, sizeof(p));
-        out("tp %.2f %.2f %.2f", p[0], p[1], p[2]);
+        // tp X Y Z MS: keep the player there for MS ms (the ground there may still be loading).
+        std::memcpy(g_hold_pos, p, sizeof(p));
+        g_hold_until = GetTickCount64() + static_cast<ULONGLONG>(num(4, 0));
+        out("tp %.2f %.2f %.2f (held %ld ms)", p[0], p[1], p[2], num(4, 0));
     } else if (c == "warp") {
         uint32_t gm = 0;
         if (!safe_read(kGameMan, &gm, 4) || !gm) {
@@ -1043,7 +1085,13 @@ void run(const std::string& line) {
     } else if (c == "pos") {
         float p[3];
         if (player_position(p)) {
-            out("pos %.3f %.3f %.3f", p[0], p[1], p[2]);
+            uintptr_t wcm = 0, first = 0, chr = 0;
+            int map = -1;
+            if (safe_read(0x0137DC70, &wcm, 4) && wcm && safe_read(wcm + 4, &first, 4) && first &&
+                safe_read(first, &chr, 4) && chr) {
+                safe_read(chr + 0x444, &map, 4);
+            }
+            out("pos %.3f %.3f %.3f map 0x%08X", p[0], p[1], p[2], static_cast<unsigned>(map));
         } else {
             out("pos: no player");
         }
@@ -1179,13 +1227,18 @@ void remote_hook_device(IDirect3DDevice9* dev) {
 
 void remote_pad(DWORD index, void* state, DWORD* result) {
     if (!g_on || index != 0 || !state || !result) return;
+    std::lock_guard<std::mutex> lock(g_pad_lock);
+    const ULONGLONG now = GetTickCount64();
+    // Only while a command holds input: otherwise slot 0 reads exactly as the real one (a player's own pad on
+    // another slot must not lose to an always-connected idle slot 0).
+    // and for 30 s after it, so a sequence of presses does not reconnect the pad each time (the game ignores a
+    // freshly connected pad briefly).
+    if (now >= g_pad_until + 30000 && now >= g_stick_until + 30000) return;
     auto* s = static_cast<XState*>(state);
     if (*result != 0) {
         std::memset(s, 0, sizeof(*s));
         *result = 0;
     }
-    std::lock_guard<std::mutex> lock(g_pad_lock);
-    const ULONGLONG now = GetTickCount64();
     if (now < g_pad_until) {
         s->buttons |= g_pad_buttons;
         if (g_pad_lt) s->lt = g_pad_lt;
@@ -1201,6 +1254,10 @@ void remote_pad(DWORD index, void* state, DWORD* result) {
 void remote_game_frame() {
     if (!g_on) return;
     if (g_god) god_tick();
+    if (g_hold_until && GetTickCount64() < g_hold_until) {
+        const uintptr_t phys = player_physics();
+        if (phys) std::memcpy(reinterpret_cast<void*>(phys + 0x10), g_hold_pos, sizeof(g_hold_pos));
+    }
     std::vector<std::vector<std::string>> cmds;
     {
         std::lock_guard<std::mutex> lock(g_game_lock);

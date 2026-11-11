@@ -182,6 +182,14 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_sfx_actions = parse_bool(val);
         } else if (key == "fixsfxdistortion") {
             s.fix_sfx_distortion = parse_bool(val);
+        } else if (key == "renderscalepost") {
+            s.render_scale_post = parse_bool(val);
+        } else if (key == "renderresolution") {
+            int w = 0, h = 0;
+            if (std::sscanf(val.c_str(), "%dx%d", &w, &h) == 2 || std::sscanf(val.c_str(), "%d %d", &w, &h) == 2) {
+                s.render_width = w;
+                s.render_height = h;
+            }
         } else if (key == "fixstaminatick") {
             s.fix_stamina_tick = parse_bool(val);
         } else if (key == "fixslidecontact") {

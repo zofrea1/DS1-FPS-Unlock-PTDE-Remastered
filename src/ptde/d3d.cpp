@@ -9,6 +9,7 @@
 #include "log.h"
 #include "profile.h"
 #include "remote.h"
+#include "resolution.h"
 #include "settings.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -167,6 +168,7 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     }
     d3dperf_reset();
     surfpool_reset();
+    resolution_reset();
     const HRESULT hr = g_reset(device, pp);
     if (SUCCEEDED(hr) && aspect_is_active()) {
         aspect_hook_device(device);
@@ -237,6 +239,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             surfpool_hook_device(*out);
         }
         gamma_hook_device(*out, settings().gamma_ramp, g_dxvk_active);
+        resolution_hook_device(*out);
     }
     if (SUCCEEDED(hr) && out && *out && remote_enabled()) {
         remote_hook_device(*out);

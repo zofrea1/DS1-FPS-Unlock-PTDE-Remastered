@@ -45,8 +45,10 @@ constexpr uint8_t kAccelPrologue[6] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08};
 
 // The undead dragon (c3420, Valley of Drakes and the Painted World): 34200-34209, its acid (FollowType 4: falls,
 // lands on the map and slides). c5390's 53900-53902 and the Gaping Dragon's (c5260) 52600 and its pool 52601.
+// The Hydra (c4500, Darkroot Basin): 45000 -> 24 x 45009 globs, 45010/45011 spits, 45020 -> 36 x 45021 spray.
 constexpr int32_t kWatched[] = {34200, 34201, 34202, 34203, 34204, 34205, 34206, 34207, 34208, 34209,
-                                53900, 53901, 53902, 52600, 52601};
+                                53900, 53901, 53902, 52600, 52601,
+                                45000, 45009, 45010, 45011, 45020, 45021};
 // The undead dragon fires three globs every 0.1 s for about two seconds: the first few of a burst are logged
 // frame by frame, every one gets a summary when it is over.
 constexpr int kDetailedPerBurst = 6;
