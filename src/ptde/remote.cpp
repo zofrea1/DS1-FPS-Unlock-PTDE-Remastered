@@ -5,6 +5,7 @@
 #if FPSU_DIAGNOSTICS
 
 #include "limiter.h"
+#include "resolution.h"
 #include "watch.h"
 #include "log.h"
 
@@ -1249,6 +1250,9 @@ void run(const std::string& line) {
     } else if (c == "vbwatch") {
         g_vb_ps = t.size() > 1 ? t[1] : "";
         out("vbwatch %s", g_vb_ps.c_str());
+    } else if (c == "dof") {
+        resolution_set_smooth_dof(num(1, 1) != 0);
+        out("dof %s", num(1, 1) != 0 ? "smooth (ours)" : "the game's");
     } else if (c == "god") {
         g_god = num(1, 1) != 0;
         out("god %d", g_god ? 1 : 0);

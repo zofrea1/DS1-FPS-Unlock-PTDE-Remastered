@@ -148,6 +148,7 @@ std::unordered_set<void*> g_dof_shaders;
 IDirect3DPixelShader9* g_dof_ours = nullptr;
 IDirect3DDevice9* g_dof_device = nullptr;
 volatile bool g_dof_bound = false;
+volatile bool g_dof_enabled = true;
 volatile LONG g_dof_draws = 0;
 
 HRESULT WINAPI hk_create_texture(IDirect3DDevice9* dev, UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT f,
@@ -208,7 +209,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     if (ps) {
         std::lock_guard<std::mutex> lock(g_lock);
         copy = g_copy_shaders.count(ps) != 0;
-        dof = g_dof_ours && g_dof_device == dev && g_dof_shaders.count(ps) != 0;
+        dof = g_dof_enabled && g_dof_ours && g_dof_device == dev && g_dof_shaders.count(ps) != 0;
     }
     g_copy_bound = copy;
     g_dof_bound = dof;
@@ -425,6 +426,8 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
     p = patch_slot(dev, 75, reinterpret_cast<void*>(&hk_set_scissor));
     if (p && !o_set_scissor) o_set_scissor = reinterpret_cast<SetScissorFn>(p);
 }
+
+void resolution_set_smooth_dof(bool on) { g_dof_enabled = on; }
 
 void resolution_reset() {
     for (auto& t : g_chain) {

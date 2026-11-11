@@ -18,6 +18,9 @@ void resolution_bypass_dsfix(bool on);
 // Before a device Reset: releases the reduced copies (default pool).
 void resolution_reset();
 
+// The depth of field's smooth composite on or off (RemoteControl `dof`, for comparing with the game's own).
+void resolution_set_smooth_dof(bool on);
+
 // Sun and moon with DSfix's render resolution. The lens flare (sun, moon) measures how much of a 24x24 pixel probe at the
 // sun is visible with an occlusion query, and takes a new count only while it is below 1.5 x the probe's expected
 // area (w x h x 0.8; 0.8 = the 1024 wide scene in the 1280 wide frame buffer; 0xFD3A20). DSfix enlarges the scene and
