@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
@@ -191,11 +192,19 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "renderscalepost") {
             s.render_scale_post = parse_bool(val);
         } else if (key == "renderresolution") {
+            const std::string v = lower(trim(val));
             int w = 0, h = 0;
-            if (std::sscanf(val.c_str(), "%dx%d", &w, &h) == 2 || std::sscanf(val.c_str(), "%d %d", &w, &h) == 2) {
+            if (v.empty() || v == "auto") {
+                s.render_width = s.render_height = -1;
+            } else if (v == "off" || v == "false" || v == "0") {
+                s.render_width = s.render_height = 0;
+            } else if (std::sscanf(v.c_str(), "%dx%d", &w, &h) == 2 || std::sscanf(v.c_str(), "%d %d", &w, &h) == 2) {
                 s.render_width = w;
                 s.render_height = h;
             }
+        } else if (key == "supersampling") {
+            const float f = static_cast<float>(std::atof(val.c_str()));
+            s.supersampling = f < 1.0f ? 1.0f : (f > 2.0f ? 2.0f : f);
         } else if (key == "fixstaminatick") {
             s.fix_stamina_tick = parse_bool(val);
         } else if (key == "fixslidecontact") {

@@ -54,9 +54,12 @@ struct Settings {
     bool fix_sfx_actions = true;
     // Heat haze (distortion effects) scrolls on the 30 FPS frame grid, as it was authored (see sfx.h).
     bool fix_sfx_distortion = true;
-    // Internal render resolution of the 3D scene (resolution.h); 0 = the game's own 1024x720.
-    int render_width = 0;
-    int render_height = 0;
+    // Internal render resolution of the 3D scene and the HUD (resolution.h): -1 = auto (the monitor's resolution),
+    // 0 = the game's own 1024x720 (HUD 1280x720), else width x height.
+    int render_width = -1;
+    int render_height = -1;
+    // Renders this many times the resolution above in each direction and scales the picture down (anti-aliasing).
+    float supersampling = 1.0f;
     bool render_scale_post = false;
     // Anisotropic filtering level for surface textures (0/1 = the game's own filtering).
     int anisotropic_filtering = 16;

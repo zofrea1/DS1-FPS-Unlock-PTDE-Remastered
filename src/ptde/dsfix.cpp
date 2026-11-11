@@ -39,9 +39,9 @@ namespace {
 DsfixInfo g_last;
 }  // namespace
 
-bool dsfix_filtering_override() { return g_last.present && g_last.filtering_override != 0; }
+bool dsfix_filtering_override() { return g_last.dll_found && g_last.ini_found && g_last.filtering_override != 0; }
 bool dsfix_changes_resolution() {
-    return g_last.present && g_last.ini_found && (g_last.render_width != 1024 || g_last.render_height != 720);
+    return g_last.dll_found && g_last.ini_found && (g_last.render_width != 1024 || g_last.render_height != 720);
 }
 
 void dsfix_render_size(int* width, int* height) {
@@ -89,6 +89,12 @@ DsfixInfo dsfix_probe_impl(const wchar_t* game_dir) {
             }
         }
     }
-    info.present = info.ini_found || non_system_dinput8(game_dir);
+    {
+        wchar_t dll[MAX_PATH];
+        lstrcpynW(dll, game_dir, MAX_PATH);
+        lstrcatW(dll, L"DINPUT8.dll");
+        info.dll_found = GetFileAttributesW(dll) != INVALID_FILE_ATTRIBUTES;
+    }
+    info.present = info.ini_found || info.dll_found || non_system_dinput8(game_dir);
     return info;
 }

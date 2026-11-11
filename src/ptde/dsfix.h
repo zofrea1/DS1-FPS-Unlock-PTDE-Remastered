@@ -10,6 +10,7 @@ struct DsfixInfo {
     int fps_limit = 0;         // DSfix.ini "FPSlimit", 0 if not set
     bool borderless = false;   // DSfix.ini "borderlessFullscreen 1"
     bool skip_intro = false;   // DSfix.ini "skipIntro 1"
+    bool dll_found = false;      // a DINPUT8.dll file beside the game (DSfix only acts when it loads)
     int filtering_override = 0;  // DSfix.ini "filteringOverride" (0 off, 1 trilinear, 2 anisotropic)
     int render_width = 1024;     // DSfix.ini "renderWidth" / "renderHeight" (1024x720 = the game's own)
     int render_height = 720;

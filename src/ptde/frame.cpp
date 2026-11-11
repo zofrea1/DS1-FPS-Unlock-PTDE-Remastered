@@ -474,12 +474,29 @@ bool frame_install(const Settings& settings) {
             dsfix_render_size(&dw, &dh);
             resolution_dsfix_sun(dw, dh);
         }
-        if (settings.render_width > 0 && settings.render_height > 0) {
+        int rw = settings.render_width, rh = settings.render_height;
+        if (rw < 0 || rh < 0) {
+            // auto: the primary monitor's current mode (the game's window or full screen covers it).
+            DEVMODEW mode{};
+            mode.dmSize = sizeof(mode);
+            if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmPelsWidth >= 640 &&
+                mode.dmPelsHeight >= 360) {
+                rw = static_cast<int>(mode.dmPelsWidth);
+                rh = static_cast<int>(mode.dmPelsHeight);
+            } else {
+                rw = rh = 0;
+            }
+        }
+        if (rw > 0 && rh > 0 && settings.supersampling > 1.0f) {
+            rw = static_cast<int>(rw * settings.supersampling + 0.5f) & ~1;
+            rh = static_cast<int>(rh * settings.supersampling + 0.5f) & ~1;
+        }
+        if (rw > 0 && rh > 0) {
             if (dsfix_changes_resolution()) {
                 LOG_INFO("Resolution: DSfix sets its own render resolution (renderWidth/renderHeight), so ours steps "
                          "aside");
             } else {
-                resolution_install(settings.render_width, settings.render_height, settings.render_scale_post);
+                resolution_install(rw, rh, settings.render_scale_post);
             }
         }
         if (settings.fix_slide_contact) {
