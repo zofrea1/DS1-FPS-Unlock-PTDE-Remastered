@@ -5,6 +5,7 @@
 #if FPSU_DIAGNOSTICS
 
 #include "limiter.h"
+#include "watch.h"
 #include "log.h"
 
 #include <d3d9.h>
@@ -667,8 +668,52 @@ HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
     if (g_capturing && r) cap("SetScissor %ld,%ld-%ld,%ld", r->left, r->top, r->right, r->bottom);
     return o_set_scissor(dev, r);
 }
+bool safe_read_any(uintptr_t a, void* outp, size_t n) {
+    __try {
+        std::memcpy(outp, reinterpret_cast<const void*>(a), n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// vbwatch PS: while capturing, draws made with that pixel shader also log their first vertices (stream 0).
+std::string g_vb_ps, g_cur_ps;
+
+void log_vertices(IDirect3DDevice9* dev, UINT start, UINT verts) {
+    IDirect3DVertexBuffer9* vb = nullptr;
+    UINT offset = 0, stride = 0;
+    if (FAILED(dev->GetStreamSource(0, &vb, &offset, &stride)) || !vb || !stride) {
+        cap("  vb: none");
+        if (vb) vb->Release();
+        return;
+    }
+    D3DVERTEXBUFFER_DESC d{};
+    vb->GetDesc(&d);
+    void* p = nullptr;
+    const UINT n = verts < 8 ? verts : 8;
+    if (SUCCEEDED(vb->Lock(offset + start * stride, n * stride, &p, D3DLOCK_READONLY)) && p) {
+        const float* f = static_cast<const float*>(p);
+        const UINT nf = stride / 4;
+        for (UINT v = 0; v < n; ++v) {
+            std::string line;
+            char b[32];
+            for (UINT k = 0; k < nf && k < 12; ++k) {
+                std::snprintf(b, sizeof(b), " %g", f[v * nf + k]);
+                line += b;
+            }
+            cap("  v%u:%s", v, line.c_str());
+        }
+        vb->Unlock();
+    } else {
+        cap("  vb: lock failed (usage 0x%lX pool %d)", static_cast<unsigned long>(d.Usage), static_cast<int>(d.Pool));
+    }
+    vb->Release();
+}
+
 HRESULT WINAPI hk_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, UINT start, UINT count) {
     cap("Draw type %d start %u prims %u", static_cast<int>(t), start, count);
+    if (g_capturing && !g_vb_ps.empty() && g_cur_ps == g_vb_ps) log_vertices(dev, start, count * 3);
     return o_draw(dev, t, start, count);
 }
 HRESULT WINAPI hk_draw_idx(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, INT base, UINT mn, UINT nv, UINT si, UINT pc) {
@@ -708,10 +753,51 @@ HRESULT WINAPI hk_set_vs(IDirect3DDevice9* dev, void* sh) {
     return o_set_vs(dev, sh);
 }
 HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, void* sh) {
-    if (g_capturing) cap("SetPS %s", shader_name(sh).c_str());
+    if (g_capturing) {
+        g_cur_ps = shader_name(sh);
+        cap("SetPS %s", g_cur_ps.c_str());
+    }
     return o_set_ps(dev, sh);
 }
+// scanval REG: at the watched shader's next upload of REG, find that float's bits in the game's writable memory.
+volatile LONG g_scan_reg = -1;
+
+void scan_value(const float* src) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, src, 4);
+    out("scanval: looking for %g (0x%08X), constant data at %p", *src, bits, src);
+    MEMORY_BASIC_INFORMATION mbi{};
+    uintptr_t a = 0x10000;
+    int hits = 0;
+    while (a < 0x7FFF0000 && VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof(mbi))) {
+        const uintptr_t lo = reinterpret_cast<uintptr_t>(mbi.BaseAddress), hi = lo + mbi.RegionSize;
+        const bool rw = mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                        (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY));
+        if (rw) {
+            for (uintptr_t q = lo; q + 4 <= hi && hits < 60; q += 4) {
+                uint32_t w = 0;
+                if (!safe_read_any(q, &w, 4)) break;
+                if (w == bits && q != reinterpret_cast<uintptr_t>(src)) {
+                    float n[8] = {};
+                    safe_read_any(q - 16, n, 32);
+                    out("  %08X: %g %g %g %g [%g] %g %g %g", static_cast<unsigned>(q), n[0], n[1], n[2], n[3], n[4],
+                        n[5], n[6], n[7]);
+                    ++hits;
+                }
+            }
+        }
+        a = hi;
+    }
+    out("scanval: %d places", hits);
+}
+
 HRESULT WINAPI hk_set_ps_const(IDirect3DDevice9* dev, UINT start, const float* v, UINT count) {
+    if (g_scan_reg >= 0 && v && !g_vb_ps.empty() && g_cur_ps == g_vb_ps &&
+        static_cast<UINT>(g_scan_reg) >= start && static_cast<UINT>(g_scan_reg) < start + count) {
+        const LONG reg = g_scan_reg;
+        g_scan_reg = -1;
+        scan_value(v + (reg - start) * 4);
+    }
     if (g_capturing && v) {
         std::string s;
         char b[96];
@@ -721,6 +807,23 @@ HRESULT WINAPI hk_set_ps_const(IDirect3DDevice9* dev, UINT start, const float* v
             s += b;
         }
         cap("PSConst %u+%u%s", start, count, s.c_str());
+        if (!g_vb_ps.empty() && g_cur_ps == g_vb_ps) {
+            // Who uploads the watched shader's constants: game code return addresses on the stack.
+            const uintptr_t* sp = reinterpret_cast<const uintptr_t*>(_AddressOfReturnAddress());
+            std::string st;
+            char b[16];
+            int found = 0;
+            for (int i = 0; i < 160 && found < 12; ++i) {
+                uintptr_t a = 0;
+                if (!safe_read_any(reinterpret_cast<uintptr_t>(sp + i), &a, 4)) break;
+                if (a >= 0x00401000 && a < 0x010CC000) {
+                    std::snprintf(b, sizeof(b), " %X", static_cast<unsigned>(a));
+                    st += b;
+                    ++found;
+                }
+            }
+            cap("  stack:%s", st.c_str());
+        }
     }
     return o_set_ps_const(dev, start, v, count);
 }
@@ -960,6 +1063,19 @@ void run(const std::string& line) {
         g_seq_next = 0;
         g_seq_left = static_cast<LONG>(num(3, 10));
         out("rtseq %s: T%ld, %ld every %ld ms", t[1].c_str(), num(2, 0), num(3, 10), num(4, 33));
+    } else if (c == "watch" && t.size() > 1) {
+        const uint32_t addr = static_cast<uint32_t>(std::strtoul(t[1].c_str(), nullptr, 16));
+        watch_arm_addresses(&addr, 1);
+        out("watch %08X armed (writers go to the main log on watchreport)", addr);
+    } else if (c == "watchreport") {
+        watch_report_now();
+        out("watchreport: see PTDE-FPS-Unlock.log");
+    } else if (c == "scanval") {
+        g_scan_reg = static_cast<LONG>(num(1, 8));
+        out("scanval: c%ld at the next %s upload (while a frame capture runs)", num(1, 8), g_vb_ps.c_str());
+    } else if (c == "vbwatch") {
+        g_vb_ps = t.size() > 1 ? t[1] : "";
+        out("vbwatch %s", g_vb_ps.c_str());
     } else if (c == "god") {
         g_god = num(1, 1) != 0;
         out("god %d", g_god ? 1 : 0);
