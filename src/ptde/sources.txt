@@ -16,6 +16,7 @@ src\ptde\present.cpp
 src\ptde\d3d.cpp
 src\ptde\d3dperf.cpp
 src\ptde\ffx.cpp
+src\ptde\rendermath.cpp
 src\ptde\aspect.cpp
 src\ptde\profile.cpp
 src\ptde\trace.cpp

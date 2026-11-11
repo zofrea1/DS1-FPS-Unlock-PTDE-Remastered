@@ -7,6 +7,7 @@
 #include "dsfix.h"
 #include "extension.h"
 #include "ffx.h"
+#include "rendermath.h"
 #include "frame.h"
 #include "gauge.h"
 #include "intro.h"
@@ -115,6 +116,9 @@ DWORD WINAPI worker(void*) {
             ffx_install();
         } else {
             LOG_INFO("FastEffects is false. The effects library keeps its debug checks.");
+        }
+        if (settings.fast_render_math) {
+            rendermath_install();
         }
     }
     if (settings.borderless) {

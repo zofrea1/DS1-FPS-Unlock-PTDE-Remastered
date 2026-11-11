@@ -105,6 +105,8 @@ struct Settings {
     bool filter_sampler_states = true;
     // The effects library's debug checks (stack fills and guard checks, see ffx.h) are skipped.
     bool fast_effects = true;
+    // Two hot render-thread math helpers run as SSE with identical results (see rendermath.h).
+    bool fast_render_math = true;
     // Make the game window borderless and cover its monitor. Needs the game set to
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
     bool borderless = false;
