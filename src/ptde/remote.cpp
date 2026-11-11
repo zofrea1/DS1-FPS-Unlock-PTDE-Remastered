@@ -886,8 +886,21 @@ HRESULT WINAPI hk_query_issue(IDirect3DQuery9* q, DWORD flags) {
     if (g_capturing) cap("Query Q%d issue %s", query_id(q), (flags & D3DISSUE_BEGIN) ? "begin" : "end");
     return o_query_issue(q, flags);
 }
+// The caller's EDI at GetData (the lens flare code 0xFD3A20 keeps its LensFlareDrawEntity there).
+volatile uint32_t g_query_edi = 0;
+
 HRESULT WINAPI hk_query_get_data(IDirect3DQuery9* q, void* data, DWORD size, DWORD flags) {
+    const uint32_t edi = g_query_edi;
     const HRESULT hr = o_query_get_data(q, data, size, flags);
+    if (g_query_frames > 0 && reinterpret_cast<uintptr_t>(_ReturnAddress()) == 0x00FD3A52 && edi) {
+        float wh[2] = {};
+        uint32_t stored = 0;
+        safe_read_any(edi + 0x40, &stored, 4);
+        safe_read_any(edi + 0x60, wh, 8);
+        out("lensflare %08X: result %ld hr 0x%08lX, stored %u, size %g x %g (expected %.0f px, kept below %.0f)",
+            edi, hr == S_OK && data ? static_cast<long>(*static_cast<const DWORD*>(data)) : -1L,
+            static_cast<unsigned long>(hr), stored, wh[1], wh[0], wh[0] * wh[1] * 0.8, wh[0] * wh[1] * 0.8 * 1.5);
+    }
     if ((g_capturing || g_query_frames > 0) && hr == S_OK && data && size >= 4 && q->GetType() == D3DQUERYTYPE_OCCLUSION) {
         const unsigned long pixels = *static_cast<const DWORD*>(data);
         if (g_capturing) cap("Query Q%d result %lu pixels", query_id(q), pixels);
@@ -895,6 +908,13 @@ HRESULT WINAPI hk_query_get_data(IDirect3DQuery9* q, void* data, DWORD size, DWO
     }
     return hr;
 }
+__declspec(naked) void hk_query_get_data_stub() {
+    __asm {
+        mov g_query_edi, edi
+        jmp hk_query_get_data
+    }
+}
+
 void* patch(void* object, int slot, void* replacement);
 HRESULT WINAPI hk_create_query(IDirect3DDevice9* dev, D3DQUERYTYPE t, IDirect3DQuery9** q) {
     const HRESULT hr = o_create_query(dev, t, q);
@@ -909,7 +929,7 @@ HRESULT WINAPI hk_create_query(IDirect3DDevice9* dev, D3DQUERYTYPE t, IDirect3DQ
         if (!o_query_issue) {
             o_query_issue = reinterpret_cast<QueryIssueFn>(patch(*q, kQueryIssue, reinterpret_cast<void*>(&hk_query_issue)));
             o_query_get_data =
-                reinterpret_cast<QueryGetDataFn>(patch(*q, kQueryGetData, reinterpret_cast<void*>(&hk_query_get_data)));
+                reinterpret_cast<QueryGetDataFn>(patch(*q, kQueryGetData, reinterpret_cast<void*>(&hk_query_get_data_stub)));
         }
     }
     return hr;
@@ -1111,6 +1131,46 @@ void run(const std::string& line) {
         g_seq_next = 0;
         g_seq_left = static_cast<LONG>(num(3, 10));
         out("rtseq %s: T%ld, %ld every %ld ms", t[1].c_str(), num(2, 0), num(3, 10), num(4, 33));
+    } else if (c == "qptr" && t.size() > 1) {
+        // The IDirect3DQuery9 pointer of query Qn.
+        const int want = static_cast<int>(num(1, 0));
+        std::lock_guard<std::mutex> lock(g_res_lock);
+        for (const auto& kv : g_queries) {
+            if (kv.second == want) out("qptr Q%d = %08X", want, static_cast<unsigned>(reinterpret_cast<uintptr_t>(kv.first)));
+        }
+    } else if (c == "findptr" && t.size() > 1) {
+        const uint32_t v = static_cast<uint32_t>(std::strtoul(t[1].c_str(), nullptr, 16));
+        MEMORY_BASIC_INFORMATION mbi{};
+        uintptr_t a = 0x10000;
+        int hits = 0;
+        while (a < 0x7FFF0000 && VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof(mbi)) && hits < 40) {
+            const uintptr_t lo = reinterpret_cast<uintptr_t>(mbi.BaseAddress), hi = lo + mbi.RegionSize;
+            const bool rw = mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY));
+            if (rw) {
+                for (uintptr_t q = lo; q + 4 <= hi && hits < 40; q += 4) {
+                    uint32_t w = 0;
+                    if (!safe_read_any(q, &w, 4)) break;
+                    if (w == v) {
+                        out("  findptr %08X at %08X", v, static_cast<unsigned>(q));
+                        ++hits;
+                    }
+                }
+            }
+            a = hi;
+        }
+        out("findptr %08X: %d places", v, hits);
+    } else if (c == "peek" && t.size() > 1) {
+        const uintptr_t a = std::strtoul(t[1].c_str(), nullptr, 16);
+        const int n = static_cast<int>(num(2, 16));
+        for (int i = 0; i < n && i < 256; i += 4) {
+            uint32_t w[4] = {};
+            if (!safe_read_any(a + i * 4, w, 16)) break;
+            float f[4];
+            std::memcpy(f, w, 16);
+            out("  %08X: %08X %08X %08X %08X | %g %g %g %g", static_cast<unsigned>(a + i * 4), w[0], w[1], w[2], w[3],
+                f[0], f[1], f[2], f[3]);
+        }
     } else if (c == "watch" && t.size() > 1) {
         const uint32_t addr = static_cast<uint32_t>(std::strtoul(t[1].c_str(), nullptr, 16));
         watch_arm_addresses(&addr, 1);

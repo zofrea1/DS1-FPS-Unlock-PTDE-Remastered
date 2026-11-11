@@ -240,6 +240,35 @@ void resolution_reset() {
     g_tex0 = nullptr;
 }
 
+namespace {
+// fld qword ptr [0x011E7DE8] (0.8) in the lens flare's visibility function; the address operand is at +2.
+constexpr uint32_t kSunScaleLoad = 0x00FD3A52;
+constexpr uint8_t kSunScaleBytes[] = {0xDD, 0x05, 0xE8, 0x7D, 0x1E, 0x01};
+double g_sun_scale = 0.8;
+}  // namespace
+
+bool resolution_dsfix_sun(int render_width, int render_height) {
+    if (render_width <= 0 || render_height <= 0) return false;
+    auto* p = reinterpret_cast<uint8_t*>(kSunScaleLoad);
+    if (std::memcmp(p, kSunScaleBytes, sizeof(kSunScaleBytes)) != 0) {
+        LOG_ERROR("Sun and moon: the lens flare code at %08X does not match this build. Not patching.", kSunScaleLoad);
+        return false;
+    }
+    const double factor = (static_cast<double>(render_width) * render_height) / (1024.0 * 720.0);
+    if (factor <= 1.0) return false;
+    g_sun_scale = 0.8 * factor;
+    DWORD old = 0;
+    if (!VirtualProtect(p + 2, 4, PAGE_EXECUTE_READWRITE, &old)) return false;
+    const uint32_t addr = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_sun_scale));
+    std::memcpy(p + 2, &addr, 4);
+    DWORD ignored = 0;
+    VirtualProtect(p + 2, 4, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), p, sizeof(kSunScaleBytes));
+    LOG_INFO("Sun and moon: DSfix renders at %dx%d, so the lens flare's visibility probe is expected %.2f times larger "
+             "(they no longer stay hidden after something passes in front)", render_width, render_height, factor);
+    return true;
+}
+
 bool resolution_install(int width, int height, bool scale_post) {
     g_scale_post = scale_post;
     if (width < 64 || height < 64 || width > 8192 || height > 8192) return false;

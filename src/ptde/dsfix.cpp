@@ -44,6 +44,11 @@ bool dsfix_changes_resolution() {
     return g_last.present && g_last.ini_found && (g_last.render_width != 1024 || g_last.render_height != 720);
 }
 
+void dsfix_render_size(int* width, int* height) {
+    *width = g_last.render_width;
+    *height = g_last.render_height;
+}
+
 DsfixInfo dsfix_probe_impl(const wchar_t* game_dir);
 
 DsfixInfo dsfix_probe(const wchar_t* game_dir) {

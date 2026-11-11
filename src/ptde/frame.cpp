@@ -469,6 +469,11 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_sfx_distortion) {
             sfx_distortion_install();
         }
+        if (dsfix_changes_resolution() && settings.fix_sun_with_dsfix) {
+            int dw = 0, dh = 0;
+            dsfix_render_size(&dw, &dh);
+            resolution_dsfix_sun(dw, dh);
+        }
         if (settings.render_width > 0 && settings.render_height > 0) {
             if (dsfix_changes_resolution()) {
                 LOG_INFO("Resolution: DSfix sets its own render resolution (renderWidth/renderHeight), so ours steps "

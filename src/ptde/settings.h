@@ -61,7 +61,9 @@ struct Settings {
     // Anisotropic filtering level for surface textures (0/1 = the game's own filtering).
     int anisotropic_filtering = 16;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
-    bool hide_mouse_cursor = true;  // experiment: scale the post-processing targets too
+    bool hide_mouse_cursor = true;
+    // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.
+    bool fix_sun_with_dsfix = true;  // experiment: scale the post-processing targets too
     // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
     bool fix_ui = true;
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each

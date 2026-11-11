@@ -182,6 +182,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_sfx_actions = parse_bool(val);
         } else if (key == "fixsfxdistortion") {
             s.fix_sfx_distortion = parse_bool(val);
+        } else if (key == "fixsun") {
+            s.fix_sun_with_dsfix = parse_bool(val);
         } else if (key == "hidemousecursor") {
             s.hide_mouse_cursor = parse_bool(val);
         } else if (key == "anisotropicfiltering") {

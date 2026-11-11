@@ -14,3 +14,12 @@ struct IDirect3DDevice9;
 void resolution_hook_device(IDirect3DDevice9* device);
 // Before a device Reset: releases the reduced copies (default pool).
 void resolution_reset();
+
+// Sun and moon with DSfix's render resolution. The lens flare (sun, moon) measures how much of a 24x24 pixel probe at the
+// sun is visible with an occlusion query, and takes a new count only while it is below 1.5 x the probe's expected
+// area (w x h x 0.8; 0.8 = the 1024 wide scene in the 1280 wide frame buffer; 0xFD3A20). DSfix enlarges the scene and
+// its viewports behind the game's back, so the probe grows with it: once the sun is uncovered its count is far above
+// that limit and is never taken, and the sun or moon stays hidden until it leaves the screen and comes back. Here the
+// expected area grows by DSfix's enlargement too. (Our own RenderResolution needs nothing: the game sizes its frame
+// buffer and viewports itself and the probe stays 24x24.)
+bool resolution_dsfix_sun(int render_width, int render_height);
