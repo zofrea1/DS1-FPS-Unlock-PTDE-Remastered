@@ -21,7 +21,10 @@ bool profile_enabled();
 // there) and times Present, buffer and texture locks, query waits and render target read-backs.
 void profile_hook_device(IDirect3DDevice9* device);
 
-// The game thread's update (WinMain's frame call), measured around the call.
+// The game thread's update (WinMain's frame call), measured around the call. Its start also arms the spike watch:
+// an update that runs past max(4 ms, 3x the average) is sampled every millisecond until it ends, and logged as a
+// [spike] line (hottest code, the game and DLL call sites it was under, time since the last spike).
+void profile_game_frame_begin();
 void profile_game_frame(double ms);
 // The render thread's frame: once at each frame boundary, and the time from the start of its frame work (command 2)
 // to its end (command 4).

@@ -288,6 +288,7 @@ char hook_game_frame() {
         return g_game_frame();
     }
     LARGE_INTEGER a{}, b{};
+    profile_game_frame_begin();
     QueryPerformanceCounter(&a);
     const char result = g_game_frame();
     QueryPerformanceCounter(&b);

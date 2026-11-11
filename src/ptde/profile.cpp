@@ -813,6 +813,151 @@ void capture() {
     LOG_INFO("[prof] done");
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Spike watch: a game update that runs long (a hitch) is sampled while it runs, and reported when it ends.
+// ---------------------------------------------------------------------------------------------------------------
+volatile LONGLONG g_update_start = 0;  // qpc at the start of the update in progress, 0 between updates
+volatile LONGLONG g_last_start = 0;    // the last finished update: its start and length
+volatile double g_last_ms = 0.0;
+volatile double g_update_avg = 1.0;    // running average of the update (ms)
+constexpr double kSpikeMinMs = 4.0;
+constexpr int kSpikeSamples = 256;
+constexpr int kSpikeReports = 400;     // per session
+uint32_t g_own_lo = 0, g_own_hi = 0;   // this DLL
+
+struct SpikeSample {
+    uint32_t eip;
+    uint8_t nret;
+    uint32_t ret[kMaxRets];
+};
+SpikeSample g_spike[kSpikeSamples];
+uint32_t g_spike_stack[kStackDwords];
+
+// A return address into [lo, hi): the bytes before it are a call.
+bool is_return_into(uint32_t v, uint32_t lo, uint32_t hi) {
+    if (v < lo + 8 || v >= hi) return false;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(v);
+    if (p[-5] == 0xE8) return true;
+    if (p[-6] == 0xFF && (p[-5] == 0x15 || (p[-5] & 0xF8) == 0x90) && p[-5] != 0x94) return true;
+    if (p[-7] == 0xFF && p[-6] == 0x94) return true;
+    if (p[-3] == 0xFF && (p[-2] & 0xF8) == 0x50 && p[-2] != 0x54) return true;
+    if (p[-4] == 0xFF && p[-3] == 0x54) return true;
+    if (p[-2] == 0xFF && ((p[-1] & 0xF8) == 0xD0 || ((p[-1] & 0xF8) == 0x10 && p[-1] != 0x14 && p[-1] != 0x15)))
+        return true;
+    return false;
+}
+
+void spike_report(int n, double ms, double cpu_ms, double since_s, double at_s, int index) {
+    ModuleCache mc;
+    std::unordered_map<uint32_t, int> self, under;
+    for (int k = 0; k < n; ++k) {
+        const SpikeSample& s = g_spike[k];
+        const bool in_game = s.eip >= g_text_lo && s.eip < g_text_hi;
+        ++self[in_game ? (s.eip & ~0xFu) : ((s.eip & ~0xFFu) | 1u)];
+        uint32_t seen[kMaxRets];
+        int seen_n = 0;
+        for (int r = 0; r < s.nret; ++r) {
+            bool dup = false;
+            for (int q = 0; q < seen_n; ++q) dup = dup || seen[q] == s.ret[r];
+            if (!dup) {
+                seen[seen_n++] = s.ret[r];
+                ++under[s.ret[r]];
+            }
+        }
+    }
+    char line[1600];
+    int len = std::snprintf(line, sizeof(line),
+                            "[spike] #%d at %.2f s: game update %.1f ms (cpu %.1f ms), %.2f s after the last, %d samples | self:",
+                            index, at_s, ms, cpu_ms, since_s, n);
+    for (auto& e : top_of(self, 6)) {
+        char where[160];
+        describe_address(mc, e.first & ~1u, where, sizeof(where));
+        len += std::snprintf(line + len, sizeof(line) - len, " %s x%d", where, e.second);
+    }
+    len += std::snprintf(line + len, sizeof(line) - len, " | under:");
+    for (auto& e : top_of(under, 16)) {
+        char where[160];
+        describe_address(mc, e.first, where, sizeof(where));
+        len += std::snprintf(line + len, sizeof(line) - len, " %s x%d", where, e.second);
+    }
+    LOG_INFO("%s", line);
+}
+
+DWORD WINAPI spike_thread(void*) {
+    HANDLE h = nullptr;
+    uintptr_t stack_base = 0;
+    LONGLONG sampling = 0;
+    int n = 0, reports = 0;
+    uint64_t cycles0 = 0;
+    LONGLONG last_spike = 0;
+    const LONGLONG t_begin = qpc();
+    for (;;) {
+        Sleep(1);
+        if (reports >= kSpikeReports) return 0;
+        if (!h) {
+            if (!g_game_thread_id || g_cycles_per_s <= 0.0) continue;
+            h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+                           g_game_thread_id);
+            if (!h) return 0;
+            CONTEXT ctx{};
+            ctx.ContextFlags = CONTEXT_CONTROL;
+            if (SuspendThread(h) != static_cast<DWORD>(-1)) {
+                const bool got = GetThreadContext(h, &ctx) != 0;
+                ResumeThread(h);
+                MEMORY_BASIC_INFORMATION mbi{};
+                if (got && ctx.Esp &&
+                    VirtualQuery(reinterpret_cast<const void*>(static_cast<uintptr_t>(ctx.Esp)), &mbi, sizeof(mbi)) &&
+                    mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_READWRITE))
+                    stack_base = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            }
+            if (!stack_base) return 0;
+            LOG_INFO("[spike] watching the game thread: a game update over %.0f ms (or 3x the average) is sampled "
+                     "every millisecond while it runs", kSpikeMinMs);
+        }
+        const LONGLONG start = g_update_start;
+        const LONGLONG now = qpc();
+        if (sampling && start != sampling) {
+            // That update has ended (the game thread stores its length before clearing the start).
+            const double ms = g_last_start == sampling ? g_last_ms : ms_of(now - sampling);
+            const double cpu_ms = 1000.0 * static_cast<double>(thread_cycles(h) - cycles0) / g_cycles_per_s;
+            const double since = last_spike ? static_cast<double>(sampling - last_spike) / g_freq.QuadPart : 0.0;
+            spike_report(n, ms, cpu_ms, since, static_cast<double>(sampling - t_begin) / g_freq.QuadPart, ++reports);
+            last_spike = sampling;
+            sampling = 0;
+            n = 0;
+        }
+        if (!start) continue;
+        const double threshold = (std::max)(kSpikeMinMs, 3.0 * g_update_avg);
+        if (ms_of(now - start) < threshold) continue;
+        if (!sampling) {
+            sampling = start;
+            n = 0;
+            cycles0 = thread_cycles(h);
+        }
+        if (n >= kSpikeSamples) continue;
+        // Between Suspend and Resume nothing may allocate, log or fault (see capture()).
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_CONTROL;
+        int words = 0;
+        if (SuspendThread(h) == static_cast<DWORD>(-1)) continue;
+        const bool got = GetThreadContext(h, &ctx) != 0;
+        if (got && ctx.Esp && ctx.Esp < stack_base && stack_base - ctx.Esp < 0x1000000) {
+            words = static_cast<int>((stack_base - ctx.Esp) / 4);
+            if (words > kStackDwords) words = kStackDwords;
+            std::memcpy(g_spike_stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(ctx.Esp)), words * 4);
+        }
+        ResumeThread(h);
+        if (!got) continue;
+        SpikeSample& s = g_spike[n++];
+        s.eip = ctx.Eip;
+        s.nret = 0;
+        for (int w = 0; w < words && s.nret < kMaxRets; ++w) {
+            const uint32_t v = g_spike_stack[w];
+            if (is_game_return(v) || is_return_into(v, g_own_lo, g_own_hi)) s.ret[s.nret++] = v;
+        }
+    }
+}
+
 DWORD WINAPI profile_thread(void*) {
     calibrate_cycles();
     bool was_down = false;
@@ -840,9 +985,18 @@ DWORD WINAPI profile_thread(void*) {
 
 bool profile_enabled() { return g_enabled; }
 
+void profile_game_frame_begin() {
+    if (!g_game_thread_id) g_game_thread_id = GetCurrentThreadId();
+    g_update_start = qpc();
+}
+
 void profile_game_frame(double ms) {
     if (!g_game_thread_id) g_game_thread_id = GetCurrentThreadId();
     g_game_ms.add(ms);
+    g_last_ms = ms;
+    g_last_start = g_update_start;
+    g_update_start = 0;
+    g_update_avg = g_update_avg * 0.98 + (ms < 50.0 ? ms : 50.0) * 0.02;
 }
 
 void profile_frame_boundary() {
@@ -921,6 +1075,19 @@ bool profile_start() {
     }
     SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
     CloseHandle(thread);
+    HMODULE own = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&profile_start), &own) && own) {
+        const auto* odos = reinterpret_cast<const IMAGE_DOS_HEADER*>(own);
+        const auto* ont = reinterpret_cast<const IMAGE_NT_HEADERS32*>(reinterpret_cast<const uint8_t*>(own) + odos->e_lfanew);
+        g_own_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(own)) + 0x1000;
+        g_own_hi = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(own)) + ont->OptionalHeader.SizeOfImage;
+    }
+    HANDLE spikes = CreateThread(nullptr, 0, spike_thread, nullptr, 0, nullptr);
+    if (spikes) {
+        SetThreadPriority(spikes, THREAD_PRIORITY_TIME_CRITICAL);
+        CloseHandle(spikes);
+    }
     LOG_INFO("Profiler ready: a [perf] line every %d s; press F10 in a slow scene to sample every busy thread for %d s",
              kReportSeconds, kCaptureSeconds);
     return true;
@@ -933,6 +1100,7 @@ volatile DWORD g_game_thread_id = 0;
 bool profile_start() { return false; }
 bool profile_enabled() { return false; }
 void profile_hook_device(IDirect3DDevice9*) {}
+void profile_game_frame_begin() {}
 void profile_game_frame(double) {}
 void profile_frame_boundary() {}
 void profile_render_span(double) {}
