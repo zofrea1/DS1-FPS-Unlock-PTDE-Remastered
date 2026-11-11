@@ -117,8 +117,8 @@ DWORD WINAPI worker(void*) {
         } else {
             LOG_INFO("FastEffects is false. The effects library keeps its debug checks.");
         }
-        if (settings.fast_render_math) {
-            rendermath_install();
+        if (settings.fast_render_math || settings.fast_effects) {
+            rendermath_install(settings.fast_render_math, settings.fast_effects);
         }
     }
     if (settings.borderless) {

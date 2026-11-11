@@ -350,11 +350,11 @@ double ms_of(int64_t ticks) { return 1000.0 * static_cast<double>(ticks) / stati
 
 void report() {
     const int64_t now = qpc();
-    const double window = static_cast<double>(now - g_report_prev) / g_freq.QuadPart;
-    if (g_report_prev == 0 || window <= 0.0) {
-        g_report_prev = now;
-        return;
-    }
+    double window = static_cast<double>(now - g_report_prev) / g_freq.QuadPart;
+    // Right after a capture (g_report_prev 0): every counter is read and its baseline moved on, but nothing is
+    // logged, so the next line does not count the capture's frames and CPU time.
+    const bool quiet = g_report_prev == 0 || window <= 0.0;
+    if (quiet) window = 1.0;
     g_report_prev = now;
     const LONG frames = InterlockedExchange(&g_frames, 0);
     const Accum game = g_game_ms, render = g_render_ms, frame = g_frame_ms;
@@ -471,7 +471,7 @@ void report() {
     }
     float xyz[3];
     if (player_position(xyz)) n += std::snprintf(line + n, sizeof(line) - n, " | pos %.1f %.1f %.1f", xyz[0], xyz[1], xyz[2]);
-    LOG_INFO("%s", line);
+    if (!quiet) LOG_INFO("%s", line);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -761,6 +761,25 @@ void capture() {
             module_name(reinterpret_cast<HMODULE>(static_cast<uintptr_t>(e.first >> 32)), name, sizeof(name));
             LOG_INFO("[prof]     %5.1f%%  %s under ret %08X", 100.0 * e.second / total, name,
                      static_cast<uint32_t>(e.first));
+        }
+        // Every game code block with two samples or more, for adding up by function offline (the profile of the
+        // effects library is flat: many small functions under 1% each).
+        if (p.tid == g_render_thread_id || p.tid == g_game_thread_id) {
+            std::vector<std::pair<uint32_t, int>> blocks;
+            for (auto& e : exclusive)
+                if (!(e.first & 1u) && e.second >= 2) blocks.push_back(e);
+            std::sort(blocks.begin(), blocks.end());
+            LOG_INFO("[prof]   self histogram (%u game code blocks, 16 bytes, samples of %d):",
+                     static_cast<unsigned>(blocks.size()), p.samples);
+            char hist[400];
+            int hl = 0;
+            for (size_t b = 0; b < blocks.size(); ++b) {
+                hl += std::snprintf(hist + hl, sizeof(hist) - hl, " %X:%d", blocks[b].first, blocks[b].second);
+                if (hl > 330 || b + 1 == blocks.size()) {
+                    LOG_INFO("[prof]   hist%s", hist);
+                    hl = 0;
+                }
+            }
         }
     }
     LOG_INFO("[prof] done");

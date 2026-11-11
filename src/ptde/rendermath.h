@@ -1,12 +1,16 @@
 #pragma once
 
-// FastRenderMath: two small math helpers the render thread calls tens of thousands of times a frame, replaced with
-// SSE versions that give bit-identical results.
+// Bit-identical SSE replacements for small vector helpers the render thread calls tens of thousands of times a
+// frame (each entry jumps to the replacement).
 //
-//  * 0x4078D0, a four-float add: each lane is widened to double, added and rounded back to float, then stored one
-//    float at a time. A double sum of two floats rounds to the same float as a float add (double has more than
-//    twice float's precision), so one addps gives the same bits.
-//  * 0x421E70, a 3x4 matrix add (out in ecx, A in eax, B on the stack, callee pops it) built from three calls of the
-//    above; its callers then read each row back as two 8-byte loads of four 4-byte stores, which the CPU cannot
-//    forward and stalls on. Called only by the draw traversal (0xF6B8xx..0xF6D3xx).
-bool rendermath_install();
+//  core (FastRenderMath): the engine's four-float add (0x4078D0), subtract (0x417420), multiply (0x5537E0) and
+//    multiply-add (0x553700), ported Xbox 360 vector code compiled as scalar SSE through double, and the 3x4 matrix
+//    add (0x421E70: out in ecx, A in eax, B on the stack, callee pops it) built from three adds, whose callers stall on
+//    reading back four 4-byte stores as two 8-byte loads. A double sum, difference or product of two floats rounds to
+//    the same float as the float operation (double has more than twice float's precision), so addps/subps/mulps give
+//    the same bits; the multiply-add rounds a*b+c once from double, so it stays in double, two lanes at a time.
+//  effects (FastEffects): the effects library's debug-build wrappers that set (0x984890), splat (0x9847C0,
+//    0x984920 through the x87 stack) and subtract (0x984B60) four floats.
+//
+// Each table is checked in full before any of it is written.
+bool rendermath_install(bool core, bool effects);
