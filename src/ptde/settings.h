@@ -52,6 +52,8 @@ struct Settings {
     // so emitters spawn as densely as at 30 FPS.
     bool fix_sfx_spawn_rate = true;
     bool fix_sfx_actions = true;
+    // Heat haze (distortion effects) scrolls on the 30 FPS frame grid, as it was authored (see sfx.h).
+    bool fix_sfx_distortion = true;
     // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
     bool fix_ui = true;
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each

@@ -19,3 +19,12 @@ bool sfx_install(bool raise = true);
 // appears. While an action runs, the clock is rounded up to the next 30 FPS frame and then put back (unless the
 // action set it). At 30 FPS nothing changes.
 bool sfx_actions_install();
+
+// Heat haze (distortion particles, FXParticleAppearance_Distortion) on the 30 FPS frame grid. The haze scrolls its
+// normal map across the particle by a phase the game integrates in real time: phase += speed(t) * (t - t_prev) at
+// 0xB94BB0 (node clock now and at the previous update; speed 3 texture widths a second for Quelaag's lava). At 30 FPS
+// that is a jump of a tenth of the texture each frame, which reads as a rolling wave; at 240 FPS the same motion is
+// drawn eight times finer and reads as shaking. Here the step is taken between the two clock values rounded to the
+// 30 FPS grid: at 30 FPS it is the same step, above it the pattern jumps 30 times a second as at 30 FPS. Size,
+// colour and position still follow every frame.
+bool sfx_distortion_install();

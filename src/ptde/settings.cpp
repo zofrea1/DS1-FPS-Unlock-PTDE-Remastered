@@ -180,6 +180,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_sfx_spawn_rate = parse_bool(val);
         } else if (key == "fixsfxactions") {
             s.fix_sfx_actions = parse_bool(val);
+        } else if (key == "fixsfxdistortion") {
+            s.fix_sfx_distortion = parse_bool(val);
         } else if (key == "fixstaminatick") {
             s.fix_stamina_tick = parse_bool(val);
         } else if (key == "fixslidecontact") {

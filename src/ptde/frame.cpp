@@ -464,6 +464,9 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_sfx_actions) {
             sfx_actions_install();
         }
+        if (settings.fix_sfx_distortion) {
+            sfx_distortion_install();
+        }
         if (settings.fix_slide_contact) {
             slidecontact_install();
         }

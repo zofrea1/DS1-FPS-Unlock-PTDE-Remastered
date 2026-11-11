@@ -213,6 +213,58 @@ bool sfx_actions_install() {
     return true;
 }
 
+namespace {
+
+// 0xB94C19: fld [ebp-0Ch] (clock now); fsub [ebp-10h] (clock at the previous update); fstp [ebp-14h] (the step).
+constexpr uint32_t kDistortionStep = 0x00B94C19;
+constexpr uint8_t kDistortionStepBytes[] = {0xD9, 0x45, 0xF4, 0xD8, 0x65, 0xF0, 0xD9, 0x5D, 0xEC};
+// What follows it, as a check that this is the function the patch was written for.
+constexpr uint8_t kDistortionNextBytes[] = {0x8B, 0x43, 0x0C, 0x8B, 0x48, 0x70};
+
+float grid30(float t) { return std::floor(t * 30.0f + 0.5f) / 30.0f; }
+
+float __cdecl distortion_grid_step(float now, float prev) { return grid30(now) - grid30(prev); }
+
+// Called in place of the three instructions, inside the game function's frame (ebp is the game's).
+__declspec(naked) void distortion_step_stub() {
+    __asm {
+        push eax
+        push ecx
+        push edx
+        push dword ptr [ebp - 10h]
+        push dword ptr [ebp - 0Ch]
+        call distortion_grid_step
+        add esp, 8
+        fstp dword ptr [ebp - 14h]
+        pop edx
+        pop ecx
+        pop eax
+        ret
+    }
+}
+
+}  // namespace
+
+bool sfx_distortion_install() {
+    auto* p = reinterpret_cast<uint8_t*>(kDistortionStep);
+    if (std::memcmp(p, kDistortionStepBytes, sizeof(kDistortionStepBytes)) != 0 ||
+        std::memcmp(p + sizeof(kDistortionStepBytes), kDistortionNextBytes, sizeof(kDistortionNextBytes)) != 0) {
+        LOG_ERROR("Heat haze step at %08X does not match this build. Not patching.", kDistortionStep);
+        return false;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(p, sizeof(kDistortionStepBytes), PAGE_EXECUTE_READWRITE, &old)) return false;
+    p[0] = 0xE8;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&distortion_step_stub) - (kDistortionStep + 5));
+    std::memcpy(p + 1, &rel, 4);
+    std::memset(p + 5, 0x90, sizeof(kDistortionStepBytes) - 5);
+    FlushInstructionCache(GetCurrentProcess(), p, sizeof(kDistortionStepBytes));
+    DWORD ignored = 0;
+    VirtualProtect(p, sizeof(kDistortionStepBytes), old, &ignored);
+    LOG_INFO("Heat haze scrolls on the 30 FPS frame grid (%08X)", kDistortionStep);
+    return true;
+}
+
 bool sfx_install(bool raise) {
     g_raise = raise;
     // mov eax,[0x013787C8] ; push esi ; push edi
