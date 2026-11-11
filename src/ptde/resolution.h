@@ -12,6 +12,9 @@ bool resolution_install(int width, int height, bool scale_post = false);
 struct IDirect3DDevice9;
 // From CreateDevice: the hooks that hand the post-processing copies a 1024x720 version of the scene.
 void resolution_hook_device(IDirect3DDevice9* device);
+// DSfix is there: the original-size post targets are made under its device wrapper (before resolution_hook_device).
+void resolution_bypass_dsfix(bool on);
+
 // Before a device Reset: releases the reduced copies (default pool).
 void resolution_reset();
 

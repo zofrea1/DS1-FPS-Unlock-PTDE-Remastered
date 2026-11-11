@@ -469,11 +469,6 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_sfx_distortion) {
             sfx_distortion_install();
         }
-        if (dsfix_changes_resolution() && settings.fix_sun_with_dsfix) {
-            int dw = 0, dh = 0;
-            dsfix_render_size(&dw, &dh);
-            resolution_dsfix_sun(dw, dh);
-        }
         int rw = settings.render_width, rh = settings.render_height;
         if (rw < 0 || rh < 0) {
             // auto: the primary monitor's current mode (the game's window or full screen covers it).
@@ -492,12 +487,19 @@ bool frame_install(const Settings& settings) {
             rh = static_cast<int>(rh * settings.supersampling + 0.5f) & ~1;
         }
         if (rw > 0 && rh > 0) {
+            // Ours takes precedence over DSfix's renderWidth/renderHeight: the game creates its targets at our size
+            // and DSfix (which looks for the game's 1024x720 targets) leaves them alone.
             if (dsfix_changes_resolution()) {
-                LOG_INFO("Resolution: DSfix sets its own render resolution (renderWidth/renderHeight), so ours steps "
-                         "aside");
-            } else {
-                resolution_install(rw, rh, settings.render_scale_post);
+                LOG_INFO("Resolution: DSfix's renderWidth/renderHeight are set; this mod's resolution takes precedence");
             }
+            if (resolution_install(rw, rh, settings.render_scale_post) && dsfix_loaded()) {
+                resolution_bypass_dsfix(!settings.render_scale_post);
+            }
+        } else if (dsfix_changes_resolution() && settings.fix_sun_with_dsfix) {
+            // DSfix's own resolution in use (ours is off): the sun and moon fix for it.
+            int dw = 0, dh = 0;
+            dsfix_render_size(&dw, &dh);
+            resolution_dsfix_sun(dw, dh);
         }
         if (settings.fix_slide_contact) {
             slidecontact_install();

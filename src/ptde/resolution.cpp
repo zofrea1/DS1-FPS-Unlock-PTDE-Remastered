@@ -67,6 +67,14 @@ constexpr DWORD kCopyShader[] = {0xFFFF0300, 0x0200001F, 0x80010005, 0x90030000,
                                  0xA00F0800, 0x03000042, 0x802F0800, 0x90E40000, 0xA0E40800, 0x0000FFFF};
 constexpr UINT kOriginalWidth = 1024, kOriginalHeight = 720;
 
+using CreateTextureFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
+                                         IDirect3DTexture9**, HANDLE*);
+CreateTextureFn o_create_texture = nullptr;
+// DSfix in between (the game holds DSfix's device wrapper): its dofOverrideResolution enlarges the 512x360 and
+// 256x180 targets that keep their original sizes here. Those are made on the device under the wrapper instead, so
+// DSfix never sees them (it only wraps the device; textures pass through it as they are).
+bool g_bypass_dsfix = false;
+volatile LONG g_bypassed = 0;
 using CreatePSFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const DWORD*, IDirect3DPixelShader9**);
 using SetPSFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DPixelShader9*);
 using SetTextureFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DBaseTexture9*);
@@ -101,6 +109,34 @@ bool is_copy_shader(const DWORD* code) {
         ++k;
     }
     return false;
+}
+
+HRESULT WINAPI hk_create_texture(IDirect3DDevice9* dev, UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT f,
+                                 D3DPOOL pool, IDirect3DTexture9** out, HANDLE* shared) {
+    const bool post = (w == 512 && h == 360) || (w == 256 && h == 180);
+    if (g_bypass_dsfix && post && (usage & D3DUSAGE_RENDERTARGET) && out && !shared) {
+        // The device under the wrapper: any texture the wrapper hands out knows it.
+        IDirect3DTexture9* probe = nullptr;
+        if (SUCCEEDED(o_create_texture(dev, 4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &probe, nullptr)) && probe) {
+            IDirect3DDevice9* real = nullptr;
+            probe->GetDevice(&real);
+            probe->Release();
+            if (real && real != dev) {
+                const HRESULT hr = real->CreateTexture(w, h, levels, usage, f, pool, out, nullptr);
+                real->Release();
+                if (SUCCEEDED(hr)) {
+                    if (InterlockedIncrement(&g_bypassed) == 1) {
+                        LOG_INFO("Resolution: the %ux%u depth of field and glare targets are made beside DSfix, so its "
+                                 "dofOverrideResolution leaves them at their original sizes", w, h);
+                    }
+                    return hr;
+                }
+            } else if (real) {
+                real->Release();
+            }
+        }
+    }
+    return o_create_texture(dev, w, h, levels, usage, f, pool, out, shared);
 }
 
 HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DPixelShader9** out) {
@@ -222,6 +258,10 @@ bool g_active = false;
 
 void resolution_hook_device(IDirect3DDevice9* dev) {
     if (!g_active || !dev) return;
+    if (g_bypass_dsfix) {
+        void* t = patch_slot(dev, 23, reinterpret_cast<void*>(&hk_create_texture));
+        if (t && !o_create_texture) o_create_texture = reinterpret_cast<CreateTextureFn>(t);
+    }
     void* p = patch_slot(dev, 106, reinterpret_cast<void*>(&hk_create_ps));
     if (p && !o_create_ps) o_create_ps = reinterpret_cast<CreatePSFn>(p);
     p = patch_slot(dev, 107, reinterpret_cast<void*>(&hk_set_ps));
@@ -268,6 +308,8 @@ bool resolution_dsfix_sun(int render_width, int render_height) {
              "(they no longer stay hidden after something passes in front)", render_width, render_height, factor);
     return true;
 }
+
+void resolution_bypass_dsfix(bool on) { g_bypass_dsfix = on; }
 
 bool resolution_install(int width, int height, bool scale_post) {
     g_scale_post = scale_post;

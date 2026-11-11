@@ -92,8 +92,9 @@ DWORD WINAPI worker(void*) {
             LOG_INFO("DSfix's skipIntro is on too: it only acts while the logos show, and with SkipIntro they never do");
         }
         if (dsfix.unlock_fps && settings.fps_unlock) {
-            LOG_ERROR("DSfix has its own FPS unlock enabled. Set unlockFPS 0 in DSfix.ini while this mod drives "
-                      "the frame rate, otherwise the two fight over the same timestep.");
+            LOG_INFO("DSfix's unlockFPS is on as well. This mod drives the game's time step and frame rate; DSfix's "
+                     "FPSlimit (%d) can still hold the frame rate below MaxFPS while it is on (unlockFPS 0 avoids that)",
+                     dsfix.fps_limit);
         }
     } else {
         LOG_INFO("DSfix not detected");

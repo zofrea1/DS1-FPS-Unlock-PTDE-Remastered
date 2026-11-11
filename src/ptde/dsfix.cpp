@@ -40,6 +40,8 @@ DsfixInfo g_last;
 }  // namespace
 
 bool dsfix_filtering_override() { return g_last.dll_found && g_last.ini_found && g_last.filtering_override != 0; }
+bool dsfix_loaded() { return g_last.dll_found && g_last.ini_found; }
+
 bool dsfix_changes_resolution() {
     return g_last.dll_found && g_last.ini_found && (g_last.render_width != 1024 || g_last.render_height != 720);
 }
