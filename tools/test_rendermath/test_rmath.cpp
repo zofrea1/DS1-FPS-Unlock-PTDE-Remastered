@@ -210,6 +210,28 @@ int main(int argc, char** argv) {
         reinterpret_cast<FSplat>(0x9847C0)(o1, a[5]);
         ffx_splat(o2, a[5]);
         same(o1, o2, 16, "ffx splat", it);
+        // forwarding wrappers (args are pointers to vectors; 64-byte inputs in case a helper reads more), separate and
+        // with out = the first input
+        {
+            using W3 = void*(__cdecl*)(void*, uint32_t, uint32_t, uint32_t);
+            struct { uintptr_t orig; void* repl; const char* name; } fw[] = {
+                {0x9855C0, (void*)&ffx_fwd3<0x403B10>, "select wrapper"}, {0x985120, (void*)&ffx_fwd2<0x419490>, "419490 wrapper"},
+                {0x984F60, (void*)&ffx_fwd2<0x985020>, "985020 wrapper"}, {0x9B6C40, (void*)&ffx_fwd1<0x407720>, "407720 wrapper"},
+                {0x9B5990, (void*)&ffx_fwd2<0x4078D0>, "add wrapper"}, {0x984EA0, (void*)&ffx_fwd1<0x430AC0>, "430AC0 wrapper"},
+                {0x985500, (void*)&ffx_fwd1<0x4193E0>, "4193E0 wrapper"}, {0x983C40, (void*)&ffx_lerp, "lerp"}};
+            for (auto& t : fw) {
+                alignas(16) uint32_t p[16], q[16], r[16], i1[16], i2[16];
+                fill(p, 16); fill(q, 16); fill(r, 16);
+                fill(o1, 4); std::memcpy(o2, o1, 16);
+                reinterpret_cast<W3>(t.orig)(o1, (uint32_t)p, (uint32_t)q, (uint32_t)r);
+                reinterpret_cast<W3>(t.repl)(o2, (uint32_t)p, (uint32_t)q, (uint32_t)r);
+                same(o1, o2, 16, t.name, it);
+                std::memcpy(i1, p, 64); std::memcpy(i2, p, 64);
+                reinterpret_cast<W3>(t.orig)(i1, (uint32_t)i1, (uint32_t)q, (uint32_t)r);
+                reinterpret_cast<W3>(t.repl)(i2, (uint32_t)i2, (uint32_t)q, (uint32_t)r);
+                same(i1, i2, 64, t.name, it);
+            }
+        }
         // float-to-integer converters (and the x87 control word left as it was)
         struct { uintptr_t orig; void* repl; const char* name; } ti[] = {
             {0x9B21A0, (void*)&ffx_to_int_1, "to-int x1"}, {0x9B32A0, (void*)&ffx_to_int_65536, "to-int x65536"},

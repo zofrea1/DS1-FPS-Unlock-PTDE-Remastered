@@ -298,6 +298,42 @@ uint32_t* ffx_trunc4(uint32_t* out, const float* v, float scale) {
     return out;
 }
 
+// The effects library's forwarding wrappers: each calls one engine helper into a stack temporary, copies the result
+// through two more temporaries into out and returns out (an aligned debug frame around it). Here the helper is called
+// at the same address with the same arguments into one temporary, which is copied to out, so a call with out also an
+// input behaves as before.
+template <uintptr_t F>
+uint32_t* __cdecl ffx_fwd1(uint32_t* out, uint32_t a) {
+    alignas(16) uint32_t t[4];
+    reinterpret_cast<void*(__cdecl*)(void*, uint32_t)>(F)(t, a);
+    std::memcpy(out, t, 16);
+    return out;
+}
+template <uintptr_t F>
+uint32_t* __cdecl ffx_fwd2(uint32_t* out, uint32_t a, uint32_t b) {
+    alignas(16) uint32_t t[4];
+    reinterpret_cast<void*(__cdecl*)(void*, uint32_t, uint32_t)>(F)(t, a, b);
+    std::memcpy(out, t, 16);
+    return out;
+}
+template <uintptr_t F>
+uint32_t* __cdecl ffx_fwd3(uint32_t* out, uint32_t a, uint32_t b, uint32_t c) {
+    alignas(16) uint32_t t[4];
+    reinterpret_cast<void*(__cdecl*)(void*, uint32_t, uint32_t, uint32_t)>(F)(t, a, b, c);
+    std::memcpy(out, t, 16);
+    return out;
+}
+
+// 0x983C40 (out, a, b, c): a + (b - a) * c through the subtract wrapper (0x984B60 -> 0x417420) and the multiply-add
+// (0x553700: d*c + a).
+uint32_t* __cdecl ffx_lerp(uint32_t* out, uint32_t a, uint32_t b, uint32_t c) {
+    alignas(16) uint32_t d[4], t[4];
+    reinterpret_cast<void*(__cdecl*)(void*, uint32_t, uint32_t)>(0x417420)(d, b, a);
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, uint32_t, uint32_t)>(0x553700)(t, d, c, a);
+    std::memcpy(out, t, 16);
+    return out;
+}
+
 uint32_t* __cdecl ffx_to_int_1(uint32_t* out, const float* v) {
     return ffx_trunc4(out, v, 1.0f);
 }
@@ -363,6 +399,20 @@ const uint8_t kToInt1Body[] = {0x51, 0xD9, 0xE8, 0xD9, 0x1C, 0x24, 0x8D, 0x85, 0
 const uint8_t kToInt65536Body[] = {0x51, 0xD9, 0x05, 0x6C, 0xDA, 0x12, 0x01, 0xD9, 0x1C, 0x24, 0x8D, 0x85, 0x40, 0xFF, 0xFF, 0xFF};
 const uint8_t kToInt256Body[] = {0x51, 0xD9, 0x05, 0x10, 0x86, 0x1E, 0x01, 0xD9, 0x1C, 0x24, 0x8D, 0x85, 0x40, 0xFF, 0xFF, 0xFF};
 const uint8_t kToInt2p24Body[] = {0x51, 0xD9, 0x05, 0x70, 0xDA, 0x12, 0x01, 0xD9, 0x1C, 0x24, 0x8D, 0x85, 0x40, 0xFF, 0xFF, 0xFF};
+// Forwarding wrappers: the prologue through lea edi (0x50- and 0x70-byte frames), and the forwarded call after the fill
+// (at +0x29), including its target.
+const uint8_t kFfxHead50Lea[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B,
+                                 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x83, 0xEC, 0x50, 0x57, 0x8D, 0x7D, 0xB0};
+const uint8_t kFfxHead70Lea[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B,
+                                 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x83, 0xEC, 0x70, 0x57, 0x8D, 0x7D, 0x90};
+const uint8_t kSelectFwd[] = {0x8B, 0x43, 0x14, 0x50, 0x8B, 0x4B, 0x10, 0x51, 0x8B, 0x53, 0x0C, 0x52, 0x8D, 0x45, 0xB0, 0x50, 0xE8, 0x12, 0xE5, 0xA7};
+const uint8_t k419490Fwd[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x36, 0x43, 0xA9, 0xFF, 0x83, 0xC4, 0x0C};
+const uint8_t k985020Fwd[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x86, 0x00, 0x00, 0x00, 0x83, 0xC4, 0x0C};
+const uint8_t k407720Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0xAA, 0x0A, 0xA5, 0xFF, 0x83, 0xC4, 0x08};
+const uint8_t kAddFwd[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x06, 0x1F, 0xA5, 0xFF, 0x83, 0xC4, 0x0C};
+const uint8_t k430AC0Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0xEA, 0xBB, 0xAA, 0xFF, 0x83, 0xC4, 0x08};
+const uint8_t k4193E0Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0xAA, 0x3E, 0xA9, 0xFF, 0x83, 0xC4, 0x08};
+const uint8_t kLerpFwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8B, 0x4B, 0x10, 0x51, 0x8D, 0x55, 0xA0, 0x52, 0xE8, 0xE6, 0x0E, 0x00, 0x00, 0x83, 0xC4, 0x0C};
 
 const Site kCoreSites[] = {
     {"four-float add", 0x4078D0, kAddHead, sizeof(kAddHead), nullptr, 0, 0, reinterpret_cast<const void*>(&vec4_add)},
@@ -398,6 +448,22 @@ const Site kFfxSites[] = {
      reinterpret_cast<const void*>(&ffx_to_int_256)},
     {"to-integer x2^24", 0x9B3510, kFfxHead110, sizeof(kFfxHead110), kToInt2p24Body, 0x2F, sizeof(kToInt2p24Body),
      reinterpret_cast<const void*>(&ffx_to_int_2p24)},
+    {"select wrapper", 0x9855C0, kFfxHead50Lea, sizeof(kFfxHead50Lea), kSelectFwd, 0x29, sizeof(kSelectFwd),
+     reinterpret_cast<const void*>(&ffx_fwd3<0x403B10>)},
+    {"0x419490 wrapper", 0x985120, kFfxHead50Lea, sizeof(kFfxHead50Lea), k419490Fwd, 0x29, sizeof(k419490Fwd),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x419490>)},
+    {"0x985020 wrapper", 0x984F60, kFfxHead50Lea, sizeof(kFfxHead50Lea), k985020Fwd, 0x29, sizeof(k985020Fwd),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x985020>)},
+    {"0x407720 wrapper", 0x9B6C40, kFfxHead50Lea, sizeof(kFfxHead50Lea), k407720Fwd, 0x29, sizeof(k407720Fwd),
+     reinterpret_cast<const void*>(&ffx_fwd1<0x407720>)},
+    {"add wrapper", 0x9B5990, kFfxHead50Lea, sizeof(kFfxHead50Lea), kAddFwd, 0x29, sizeof(kAddFwd),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x4078D0>)},
+    {"0x430AC0 wrapper", 0x984EA0, kFfxHead50Lea, sizeof(kFfxHead50Lea), k430AC0Fwd, 0x29, sizeof(k430AC0Fwd),
+     reinterpret_cast<const void*>(&ffx_fwd1<0x430AC0>)},
+    {"0x4193E0 wrapper", 0x985500, kFfxHead50Lea, sizeof(kFfxHead50Lea), k4193E0Fwd, 0x29, sizeof(k4193E0Fwd),
+     reinterpret_cast<const void*>(&ffx_fwd1<0x4193E0>)},
+    {"lerp", 0x983C40, kFfxHead70Lea, sizeof(kFfxHead70Lea), kLerpFwd, 0x29, sizeof(kLerpFwd),
+     reinterpret_cast<const void*>(&ffx_lerp)},
 };
 
 bool matches(const Site& s) {
@@ -464,7 +530,7 @@ bool rendermath_install(bool core, bool effects) {
         const int n = install_table("FastEffects", kFfxSites, sizeof(kFfxSites) / sizeof(kFfxSites[0]));
         ok = ok && n == static_cast<int>(sizeof(kFfxSites) / sizeof(kFfxSites[0]));
         if (n) {
-            LOG_INFO("FastEffects: %d of the effects library's vector helpers (set, splat, subtract, float-to-integer) replaced "
+            LOG_INFO("FastEffects: %d of the effects library's vector helpers (set, splat, subtract, float-to-integer, lerp and forwarding wrappers) replaced "
                      "with direct code (same results)",
                      n);
         }
