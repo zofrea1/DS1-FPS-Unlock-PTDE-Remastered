@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <cstring>
 
 namespace {
 
@@ -73,11 +74,42 @@ struct Mm {
     void** vt;
 } g_mm{g_mm_vt};
 
+// ISteamNetworking005: records what reached Steam, in order (a send's first 4 bytes, or -1 for a channel close).
+volatile LONG g_net_log[100000];
+volatile LONG g_net_n = 0;
+void net_record(LONG v) {
+    const LONG i = InterlockedIncrement(&g_net_n) - 1;
+    if (i < 100000) g_net_log[i] = v;
+}
+bool __fastcall net_send(void*, void*, uint64_t, const void* data, uint32_t size, int, int) {
+    answer();
+    LONG v = 0;
+    if (size >= 4) std::memcpy(&v, data, 4);
+    net_record(v);
+    return true;
+}
+bool __fastcall net_peer(void*, void*, uint64_t) { answer(); return true; }
+bool __fastcall net_close_channel(void*, void*, uint64_t, int) {
+    answer();
+    net_record(-1);
+    return true;
+}
+void __fastcall net_other(void*, void*) { answer(); }
+void* g_net_vt[22];
+struct Net {
+    void** vt;
+} g_net{g_net_vt};
+
 }  // namespace
 
 extern "C" __declspec(dllexport) void* __cdecl SteamUtils() { return &g_utils; }
 extern "C" __declspec(dllexport) void* __cdecl SteamMatchmaking() { return &g_mm; }
 extern "C" __declspec(dllexport) void __cdecl SteamAPI_RunCallbacks() { answer(); }
+extern "C" __declspec(dllexport) void* __cdecl SteamNetworking() { return &g_net; }
+extern "C" __declspec(dllexport) long __cdecl FakeNetLog(const long** log) {
+    *log = const_cast<const long*>(g_net_log);
+    return g_net_n;
+}
 extern "C" __declspec(dllexport) void __cdecl FakeSteamCounts(long* distance, long* request, long* last_distance) {
     *distance = g_distance_calls;
     *request = g_request_calls;
@@ -95,6 +127,10 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         for (void*& p : g_mm_vt) p = reinterpret_cast<void*>(&mm_other);
         g_mm_vt[4] = reinterpret_cast<void*>(&mm_request);
         g_mm_vt[9] = reinterpret_cast<void*>(&mm_distance);
+        for (void*& p : g_net_vt) p = reinterpret_cast<void*>(&net_other);
+        g_net_vt[0] = reinterpret_cast<void*>(&net_send);
+        g_net_vt[3] = g_net_vt[4] = reinterpret_cast<void*>(&net_peer);
+        g_net_vt[5] = reinterpret_cast<void*>(&net_close_channel);
     }
     return TRUE;
 }

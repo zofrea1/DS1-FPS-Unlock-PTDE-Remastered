@@ -38,6 +38,13 @@ int main() {
     using DistanceFn = void(__fastcall*)(void*, void*, int);
 
     if (!no_guard) steamguard_start(true, false);
+    // The game's session traffic: a send every frame through Steam's networking object (wrapped by the guard), a
+    // channel close every 1000 frames; the fake records what reached it, in order.
+    void* net = reinterpret_cast<void*(__cdecl*)()>(GetProcAddress(api, "SteamNetworking"))();
+    if (!no_guard) steamguard_wrap_networking(net);
+    using SendFn = bool(__fastcall*)(void*, void*, uint64_t, const void*, uint32_t, int, int);
+    using CloseFn = bool(__fastcall*)(void*, void*, uint64_t, int);
+    long seq = 0, closes = 0;
     LARGE_INTEGER f, t0, a, b;
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
@@ -56,6 +63,15 @@ int main() {
             last_cb = now;
         }
         reinterpret_cast<DistanceFn>(copy[9])(mm, nullptr, 3);
+        {
+            void** nvt = *static_cast<void***>(net);
+            ++seq;
+            reinterpret_cast<SendFn>(nvt[0])(net, nullptr, 76561198000000000ull, &seq, sizeof(seq), 2, 0);
+            if (seq % 1000 == 0) {
+                ++closes;
+                reinterpret_cast<CloseFn>(nvt[5])(net, nullptr, 76561198000000000ull, 0);
+            }
+        }
         if (now >= next_search) {
             next_search += 7.0;
             ++searches;
@@ -75,13 +91,28 @@ int main() {
             QueryPerformanceCounter(&c);
         } while (double(c.QuadPart - a.QuadPart) / f.QuadPart < 1.0 / 225.0);
     }
+    Sleep(100);  // the queue's last calls
     long distance = 0, requests = 0, last_distance = 0;
     counts(&distance, &requests, &last_distance);
+    const long* log = nullptr;
+    const long logged = reinterpret_cast<long(__cdecl*)(const long**)>(GetProcAddress(api, "FakeNetLog"))(&log);
+    // In order: 1, 2, ... with a close (-1) right after every multiple of 1000.
+    bool in_order = logged == seq + closes;
+    long want = 1;
+    for (long i = 0; i < logged && in_order; ++i) {
+        if (log[i] == -1) {
+            in_order = i > 0 && log[i - 1] % 1000 == 0;
+        } else {
+            in_order = log[i] == want++;
+        }
+    }
+    std::printf("network: %ld sends and %ld closes reached Steam (%ld made), %s\n", logged - closes, closes, seq,
+                in_order ? "all in order" : "OUT OF ORDER OR MISSING");
     std::printf("%d frames: %d waited (worst %.1f ms); longest gap between callbacks %.0f ms; %d searches, the "
                 "distance filter reached Steam %ld times (last value %ld) for %ld requests\n", frames, waited, worst,
                 worst_gap * 1000.0, searches, distance, last_distance, requests);
     const bool pass = waited <= 1 && distance == requests && requests == searches && last_distance == 3 &&
-                      worst_gap < 0.2;
+                      worst_gap < 0.2 && in_order;
     std::printf("%s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }

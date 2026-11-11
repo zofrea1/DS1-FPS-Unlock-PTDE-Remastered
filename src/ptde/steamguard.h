@@ -19,8 +19,11 @@
 // is kept here and handed to Steam just before the game's next lobby search, the one call that uses it. Prepare to
 // Co-op sends and reads its packets on a thread of its own, where Steam's pause holds back packets, not frames.
 
-// From the start-up thread. hook_game_imports: put the guard on the game's own SteamAPI_RunCallbacks and
-// SteamMatchmaking imports (the FPS Unlock on its own; Prepare to Co-op hooks those imports itself and calls the
+// The every-frame gate is in force only while Steam has paused (a canary answer over 4 ms) in the last minute: where
+// Steam never pauses, every-frame calls go every frame, as before.
+//
+// From the start-up thread. hook_game_imports: put the guard on the game's own SteamAPI_RunCallbacks, SteamMatchmaking
+// and SteamNetworking imports (the FPS Unlock on its own; Prepare to Co-op hooks those imports itself and calls the
 // functions below).
 void steamguard_start(bool enabled, bool hook_game_imports);
 
@@ -37,3 +40,13 @@ void steamguard_note(double ms, int64_t end_qpc);
 void steamguard_take_distance_filter(void** vtable_copy);
 // Just before RequestLobbyList on that object: hands Steam the distance filter kept since the last search.
 void steamguard_before_lobby_request(void* matchmaking);
+
+// The networking interface (ISteamNetworking005, Steam's own object; the game and Prepare to Co-op share it). The game
+// sends its session traffic from the game thread every frame (SendP2PPacket at 0x73203C / 0x732168 / 0x7326B9 /
+// 0x732739), and in a session that was the hitch left every 5 s. Its vtable is swapped for a copy in which
+// SendP2PPacket, AcceptP2PSessionWithUser, CloseP2PSessionWithUser and CloseP2PChannelWithUser go to a queue that a
+// sender thread works through in order, and report success at once (the data is copied). Reading stays as it is.
+void steamguard_wrap_networking(void* networking);
+// An original method of the networking interface (slot 0 SendP2PPacket, 3 Accept, 4 CloseSession, 5 CloseChannel),
+// for callers already on a thread of their own; nullptr until steamguard_wrap_networking.
+void* steamguard_networking_original(int slot);
