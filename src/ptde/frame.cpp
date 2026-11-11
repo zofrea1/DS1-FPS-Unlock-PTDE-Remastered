@@ -15,6 +15,7 @@
 #include "d3dperf.h"
 #include "gamma.h"
 #include "profile.h"
+#include "remote.h"
 #include "script.h"
 #include "sfx.h"
 #include "slidecontact.h"
@@ -284,6 +285,7 @@ bool make_writable(void* address, size_t size);
 
 char hook_game_frame() {
     limiter_wait_early();
+    remote_game_frame();
     if (!profile_enabled()) {
         return g_game_frame();
     }
@@ -497,6 +499,9 @@ bool frame_install(const Settings& settings) {
     present_install(settings);
     if (settings.profile) {
         profile_start();
+    }
+    if (settings.remote_control) {
+        remote_start();
     }
     return true;
 }

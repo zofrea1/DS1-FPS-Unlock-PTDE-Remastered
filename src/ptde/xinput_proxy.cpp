@@ -1,4 +1,5 @@
 #include "xinput_proxy.h"
+#include "remote.h"
 
 #include "log.h"
 
@@ -147,7 +148,9 @@ const char* target_path() {
 
 DWORD xinput_get_state(DWORD index, void* state) {
     ensure();
-    return pGetState ? pGetState(index, state) : kNotConnected;
+    DWORD result = pGetState ? pGetState(index, state) : kNotConnected;
+    remote_pad(index, state, &result);
+    return result;
 }
 
 DWORD xinput_get_caps(DWORD index, void* caps) {

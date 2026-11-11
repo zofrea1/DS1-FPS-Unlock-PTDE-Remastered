@@ -26,6 +26,8 @@ struct Settings {
     // Diagnostic: a [perf] line every 5 s (frame, game update and render times, thread CPU use, Direct3D calls per
     // frame); F10 samples every busy thread for 10 s and logs where the time goes (see profile.h).
     bool profile = false;
+    // Development remote control (remote.h): commands from fpsu-cmd.txt beside the game. Diagnostics builds only.
+    bool remote_control = false;
     // Frame-rate independence fixes for constants tuned for 30 FPS (see fixes.h).
     bool fix_slide = true;
     bool fix_damping = true;

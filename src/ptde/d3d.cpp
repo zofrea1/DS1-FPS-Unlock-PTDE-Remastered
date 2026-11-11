@@ -8,6 +8,7 @@
 #include "extension.h"
 #include "log.h"
 #include "profile.h"
+#include "remote.h"
 #include "settings.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -236,6 +237,9 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             surfpool_hook_device(*out);
         }
         gamma_hook_device(*out, settings().gamma_ramp, g_dxvk_active);
+    }
+    if (SUCCEEDED(hr) && out && *out && remote_enabled()) {
+        remote_hook_device(*out);
     }
     // Last, so the census counts what the game calls and chains into every hook above.
     if (SUCCEEDED(hr) && out && *out && profile_enabled()) {
