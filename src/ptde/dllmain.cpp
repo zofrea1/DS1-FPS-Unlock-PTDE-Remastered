@@ -15,6 +15,7 @@
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
+#include "steamguard.h"
 #include "trace.h"
 #include "fpsu_version.h"
 #include "window.h"
@@ -111,6 +112,8 @@ DWORD WINAPI worker(void*) {
         if (settings.fix_controller) {
             controller_install(settings);
         }
+        // Prepare to Co-op hooks SteamAPI_RunCallbacks itself and asks the guard (steamguard.h).
+        steamguard_start(settings.steam_pause_guard, ptde_extension() == nullptr);
         frame_install(settings);
         // Last: it looks for the library's exact debug prologues (see ffx.h).
         if (settings.fast_effects) {

@@ -248,6 +248,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fast_render_math = parse_bool(val);
         } else if (key == "borderlessfullscreen") {
             s.borderless = parse_bool(val);
+        } else if (key == "steampauseguard") {
+            s.steam_pause_guard = parse_bool(val);
         } else if (key == "fixcontroller") {
             s.fix_controller = parse_bool(val);
         } else if (key == "fixaspect") {

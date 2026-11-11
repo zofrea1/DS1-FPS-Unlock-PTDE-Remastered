@@ -42,6 +42,7 @@ src\ptde\bullettrace.cpp
 src\ptde\sfxwatch.cpp
 src\ptde\script.cpp
 src\ptde\dxvk.cpp
+src\ptde\steamguard.cpp
 src\ptde\intro.cpp
 src\ptde\flick.cpp
 src\ptde\speffect.cpp
