@@ -157,6 +157,20 @@ uint32_t* __cdecl mat44_transpose(uint32_t* out, const uint32_t* in) {
     return out;
 }
 
+// 0x407720 saturate (cdecl: out, in): each lane clamped to [0, 1] against the engine's constant rows at 0x10D5260
+// (0s) and 0x10D5280 (1s): lo if lo > x, then hi if that > hi, compared as doubles. A NaN lane fails both compares
+// and stays; -0 is not below 0 and stays -0. The same compares as masks.
+float* __cdecl vec4_saturate(float* out, const float* in) {
+    const __m128 x = _mm_loadu_ps(in);
+    const __m128 lo = _mm_loadu_ps(reinterpret_cast<const float*>(0x10D5260));
+    const __m128 hi = _mm_loadu_ps(reinterpret_cast<const float*>(0x10D5280));
+    const __m128 below = _mm_cmplt_ps(x, lo);
+    const __m128 r = _mm_or_ps(_mm_and_ps(below, lo), _mm_andnot_ps(below, x));
+    const __m128 above = _mm_cmplt_ps(hi, r);
+    _mm_storeu_ps(out, _mm_or_ps(_mm_and_ps(above, hi), _mm_andnot_ps(above, r)));
+    return out;
+}
+
 // One row step of the engine's matrix multiplies, as the originals do it: every lane in double, rounded to float, the
 // row stored before the next step reads it (and the next B row) back from memory. Operand order (which NaN comes out
 // when both are NaN), measured on the originals: the first step multiplies b*s in every lane, the later steps b*s in
@@ -334,6 +348,33 @@ uint32_t* __cdecl ffx_lerp(uint32_t* out, uint32_t a, uint32_t b, uint32_t c) {
     return out;
 }
 
+// 0x9B4650, the effects parameter evaluator (thiscall: this = the parameter, stack out, a, b, c; pops 16 bytes): calls
+// 0x9B46E0, which calls the evaluator for the parameter's type (the table at 0x112D618, indexed by the parameter's
+// first word) as (temporary, a, this, b, c) and copies the 16 bytes it returns a pointer to, through two temporaries,
+// into out. The same table call, one copy. __fastcall with an unused edx stands in for thiscall.
+uint32_t* __fastcall ffx_param_eval(uint32_t* self, void*, uint32_t* out, uint32_t a, uint32_t b, uint32_t c) {
+    using Eval = const uint32_t*(__cdecl*)(void*, uint32_t, void*, uint32_t, uint32_t);
+    alignas(16) uint32_t t[4];
+    const Eval fn = reinterpret_cast<const Eval*>(0x112D618)[*self];
+    const uint32_t* r = fn(t, a, self, b, c);
+    std::memcpy(out, r, 16);
+    return out;
+}
+
+// 0x983A90 (out, unused, stream): reads the next float of a parameter stream (and moves the stream on by one) and
+// splats it; the float goes through the x87 stack as in the original (which only quiets a signaling NaN).
+uint32_t* __cdecl ffx_read_splat(uint32_t* out, uint32_t, const uint32_t** stream) {
+    const uint32_t* p = *stream;
+    uint32_t v = *p;
+    *stream = p + 1;
+    __asm {
+        fld dword ptr [v]
+        fstp dword ptr [v]
+    }
+    out[0] = out[1] = out[2] = out[3] = v;
+    return out;
+}
+
 uint32_t* __cdecl ffx_to_int_1(uint32_t* out, const float* v) {
     return ffx_trunc4(out, v, 1.0f);
 }
@@ -412,6 +453,14 @@ const uint8_t k407720Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0x
 const uint8_t kAddFwd[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x06, 0x1F, 0xA5, 0xFF, 0x83, 0xC4, 0x0C};
 const uint8_t k430AC0Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0xEA, 0xBB, 0xAA, 0xFF, 0x83, 0xC4, 0x08};
 const uint8_t k4193E0Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0xAA, 0x3E, 0xA9, 0xFF, 0x83, 0xC4, 0x08};
+const uint8_t kSaturateHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x45, 0x0C, 0xF3, 0x0F, 0x10,
+                                 0x00, 0xF3, 0x0F, 0x10, 0x0D, 0x60, 0x52, 0x0D, 0x01, 0x83, 0xEC, 0x10};
+const uint8_t kFfxHead30Ecx[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B,
+                                 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0x57, 0x51, 0x8D, 0x7D, 0xD0};
+const uint8_t kParamEvalBody[] = {0x59, 0x89, 0x4D, 0xFC, 0x8B, 0x43, 0x14, 0x50, 0x8B, 0x4B, 0x10, 0x51, 0x8B, 0x55, 0xFC, 0x52, 0x8B, 0x43, 0x0C, 0x50};
+const uint8_t kFfxHead30Lea[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B,
+                                 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0x57, 0x8D, 0x7D, 0xD0};
+const uint8_t kReadSplatBody[] = {0x8B, 0x43, 0x10, 0x8B, 0x08, 0x89, 0x4D, 0xFC, 0x8B, 0x55, 0xFC, 0xD9, 0x02, 0xD9, 0x5D, 0xF8, 0x8B, 0x45, 0xFC, 0x83};
 const uint8_t kLerpFwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8B, 0x4B, 0x10, 0x51, 0x8D, 0x55, 0xA0, 0x52, 0xE8, 0xE6, 0x0E, 0x00, 0x00, 0x83, 0xC4, 0x0C};
 
 const Site kCoreSites[] = {
@@ -429,6 +478,8 @@ const Site kCoreSites[] = {
      reinterpret_cast<const void*>(&mat44_mul)},
     {"3x4 matrix multiply", 0x416100, kMat34MulHead, sizeof(kMat34MulHead), nullptr, 0, 0,
      reinterpret_cast<const void*>(&mat34_mul)},
+    {"four-float saturate", 0x407720, kSaturateHead, sizeof(kSaturateHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&vec4_saturate)},
 };
 
 const Site kFfxSites[] = {
@@ -464,6 +515,10 @@ const Site kFfxSites[] = {
      reinterpret_cast<const void*>(&ffx_fwd1<0x4193E0>)},
     {"lerp", 0x983C40, kFfxHead70Lea, sizeof(kFfxHead70Lea), kLerpFwd, 0x29, sizeof(kLerpFwd),
      reinterpret_cast<const void*>(&ffx_lerp)},
+    {"parameter evaluator", 0x9B4650, kFfxHead30Ecx, sizeof(kFfxHead30Ecx), kParamEvalBody, 0x2A,
+     sizeof(kParamEvalBody), reinterpret_cast<const void*>(&ffx_param_eval)},
+    {"stream read-splat", 0x983A90, kFfxHead30Lea, sizeof(kFfxHead30Lea), kReadSplatBody, 0x29, sizeof(kReadSplatBody),
+     reinterpret_cast<const void*>(&ffx_read_splat)},
 };
 
 bool matches(const Site& s) {
@@ -521,7 +576,7 @@ bool rendermath_install(bool core, bool effects) {
         ok = ok && n == static_cast<int>(sizeof(kCoreSites) / sizeof(kCoreSites[0]));
         if (n) {
             LOG_INFO("FastRenderMath: %d of the engine's vector and matrix helpers (four-float add, subtract, multiply, "
-                     "multiply-add and not-equal, 3x4 matrix add and multiply, 4x4 multiply and transpose) run as "
+                     "multiply-add, not-equal and saturate, 3x4 matrix add and multiply, 4x4 multiply and transpose) run as "
                      "SSE with the same results",
                      n);
         }
@@ -530,7 +585,7 @@ bool rendermath_install(bool core, bool effects) {
         const int n = install_table("FastEffects", kFfxSites, sizeof(kFfxSites) / sizeof(kFfxSites[0]));
         ok = ok && n == static_cast<int>(sizeof(kFfxSites) / sizeof(kFfxSites[0]));
         if (n) {
-            LOG_INFO("FastEffects: %d of the effects library's vector helpers (set, splat, subtract, float-to-integer, lerp and forwarding wrappers) replaced "
+            LOG_INFO("FastEffects: %d of the effects library's vector helpers (set, splat, subtract, float-to-integer, lerp, parameter evaluation, stream reads and forwarding wrappers) replaced "
                      "with direct code (same results)",
                      n);
         }

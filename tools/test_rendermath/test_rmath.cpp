@@ -81,6 +81,39 @@ __declspec(naked) uint32_t __cdecl call_neq(void* fn, const void* a, const void*
 
 #include "probe_order.inc"
 
+// Fake parameter evaluators planted in the game's table (0x112D618) for 0x9B4650: one writes into the temporary it
+// gets, one returns its own buffer; both fold every argument in, so a wrong one shows.
+static uint32_t g_fake_buf[4];
+static const uint32_t* __cdecl fake_eval0(uint32_t* t, uint32_t a, uint32_t* obj, uint32_t b, uint32_t c) {
+    for (int i = 0; i < 4; ++i) t[i] = a * 3u + b * 5u + c * 7u + obj[1] * 11u + static_cast<uint32_t>(i);
+    return t;
+}
+static const uint32_t* __cdecl fake_eval1(uint32_t*, uint32_t a, uint32_t* obj, uint32_t b, uint32_t c) {
+    for (int i = 0; i < 4; ++i) g_fake_buf[i] = a ^ (b << 1) ^ (c << 2) ^ obj[2] ^ (0x1000u * static_cast<uint32_t>(i));
+    return g_fake_buf;
+}
+// thiscall: ecx = obj, push c, b, a, out; the callee pops 16 bytes.
+__declspec(naked) void* __cdecl call_param_eval(void* fn, void* obj, void* out, uint32_t a, uint32_t b, uint32_t c) {
+    __asm {
+        push ebp
+        mov ebp, esp
+        push ebx
+        push esi
+        push edi
+        mov ecx, [ebp + 12]
+        push dword ptr [ebp + 28]
+        push dword ptr [ebp + 24]
+        push dword ptr [ebp + 20]
+        push dword ptr [ebp + 16]
+        call dword ptr [ebp + 8]
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret
+    }
+}
+
 // The parent starts this program again suspended, maps the game's image at 0x400000 in it before Windows fills the low
 // addresses (code page files, heaps), and resumes it with "child".
 static uint8_t g_image[0x11C2000];
@@ -231,6 +264,47 @@ int main(int argc, char** argv) {
                 reinterpret_cast<W3>(t.repl)(i2, (uint32_t)i2, (uint32_t)q, (uint32_t)r);
                 same(i1, i2, 64, t.name, it);
             }
+        }
+        // saturate: values around 0 and 1 half the time
+        {
+            if (it & 1) for (int i = 0; i < 4; ++i) { float v = static_cast<float>(static_cast<int>(rng() % 301) - 100) / 100.0f; std::memcpy(&c[i], &v, 4); }
+            fill(o1, 4); std::memcpy(o2, o1, 16);
+            reinterpret_cast<F2>(0x407720)(o1, c);
+            vec4_saturate(reinterpret_cast<float*>(o2), reinterpret_cast<float*>(c));
+            same(o1, o2, 16, "saturate", it);
+            std::memcpy(x1, c, 16); std::memcpy(x2, c, 16);
+            reinterpret_cast<F2>(0x407720)(x1, x1);
+            vec4_saturate(reinterpret_cast<float*>(x2), reinterpret_cast<float*>(x2));
+            same(x1, x2, 16, "saturate in place", it);
+            fill(c, 4);
+        }
+        // stream read-splat: the output and the stream pointer moved on
+        {
+            const uint32_t* s1 = a + (it % 8);
+            const uint32_t* s2 = s1;
+            fill(o1, 4); std::memcpy(o2, o1, 16);
+            using RS = void*(__cdecl*)(void*, uint32_t, const uint32_t**);
+            reinterpret_cast<RS>(0x983A90)(o1, 0, &s1);
+            ffx_read_splat(o2, 0, &s2);
+            same(o1, o2, 16, "read-splat", it);
+            if (s1 != s2) { std::printf("read-splat stream pointer differs\n"); ++g_fail; }
+        }
+        // parameter evaluator, through planted fake evaluators of both kinds
+        {
+            void** table = reinterpret_cast<void**>(0x112D618);
+            void* saved0 = table[0];
+            void* saved1 = table[1];
+            table[0] = reinterpret_cast<void*>(&fake_eval0);
+            table[1] = reinterpret_cast<void*>(&fake_eval1);
+            alignas(16) uint32_t obj[4] = {it & 1u, rng(), rng(), 0};
+            fill(o1, 4); std::memcpy(o2, o1, 16);
+            const uint32_t pa = rng(), pb = rng(), pc = rng();
+            void* r1 = call_param_eval(reinterpret_cast<void*>(0x9B4650), obj, o1, pa, pb, pc);
+            void* r2 = call_param_eval(reinterpret_cast<void*>(&ffx_param_eval), obj, o2, pa, pb, pc);
+            same(o1, o2, 16, "parameter evaluator", it);
+            if (r1 != o1 || r2 != o2) { std::printf("parameter evaluator return\n"); ++g_fail; }
+            table[0] = saved0;
+            table[1] = saved1;
         }
         // float-to-integer converters (and the x87 control word left as it was)
         struct { uintptr_t orig; void* repl; const char* name; } ti[] = {
