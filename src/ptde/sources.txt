@@ -19,6 +19,7 @@ src\ptde\ffx.cpp
 src\ptde\rendermath.cpp
 src\ptde\rwlock.cpp
 src\ptde\surfpool.cpp
+src\ptde\gamma.cpp
 src\ptde\aspect.cpp
 src\ptde\profile.cpp
 src\ptde\trace.cpp

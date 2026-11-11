@@ -4,6 +4,7 @@
 #include "d3dperf.h"
 #include "surfpool.h"
 #include "dxvk.h"
+#include "gamma.h"
 #include "extension.h"
 #include "log.h"
 #include "profile.h"
@@ -30,6 +31,7 @@ using CreateDeviceFn = HRESULT(WINAPI*)(IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWO
 using ResetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
 
 CreateFn g_create = nullptr;
+bool g_dxvk_active = false;  // Direct3DCreate9 leads to DXVK
 CreateDeviceFn g_create_device = nullptr;
 ResetFn g_reset = nullptr;
 
@@ -168,6 +170,9 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     if (SUCCEEDED(hr) && aspect_is_active()) {
         aspect_hook_device(device);
     }
+    if (SUCCEEDED(hr)) {
+        gamma_after_reset(device);
+    }
     return hr;
 }
 
@@ -230,6 +235,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         if (settings().reuse_surfaces) {
             surfpool_hook_device(*out);
         }
+        gamma_hook_device(*out, settings().gamma_ramp, g_dxvk_active);
     }
     // Last, so the census counts what the game calls and chains into every hook above.
     if (SUCCEEDED(hr) && out && *out && profile_enabled()) {
@@ -256,7 +262,7 @@ void route_to_dxvk() {
     }
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s%s", dir, kDxvkFileName);
-    dxvk_route(path);
+    g_dxvk_active = dxvk_route(path);
 }
 
 IDirect3D9* WINAPI hook_direct3d_create9(UINT sdk_version) {
