@@ -9,6 +9,7 @@
 #include "log.h"
 #include "profile.h"
 #include "remote.h"
+#include "dsfix.h"
 #include "resolution.h"
 #include "settings.h"
 
@@ -233,6 +234,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         if (aspect_is_active()) {
             aspect_hook_device(*out);
         }
+        d3dperf_set_anisotropy(dsfix_filtering_override() ? 0 : settings().anisotropic_filtering);
         d3dperf_hook_device(*out, settings().async_readback, settings().filter_sampler_states,
                             settings().filter_shader_constants);
         if (settings().reuse_surfaces) {

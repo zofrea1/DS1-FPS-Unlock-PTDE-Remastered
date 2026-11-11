@@ -12,6 +12,7 @@ src\ptde\patches.cpp
 src\ptde\frame.cpp
 src\ptde\limiter.cpp
 src\ptde\window.cpp
+src\ptde\cursor.cpp
 src\ptde\present.cpp
 src\ptde\d3d.cpp
 src\ptde\d3dperf.cpp

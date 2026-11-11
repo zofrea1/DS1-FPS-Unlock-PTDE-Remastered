@@ -19,6 +19,9 @@ struct IDirect3DDevice9;
 //    repeat what the device holds are answered without reaching Direct3D, and a call that changes only some registers
 //    is cut to the changed run. Same device-level hooks and cache rules as the sampler filter.
 void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filter, bool constants);
+
+// Anisotropic filtering level for mipmapped textures (0 or 1 = off, up to 16). Before d3dperf_hook_device.
+void d3dperf_set_anisotropy(int level);
 // Once a frame on the render thread: the filter follows the device's method table if it changes.
 void d3dperf_frame();
 // Before IDirect3DDevice9::Reset: drops the readback copies and everything the filter knows.

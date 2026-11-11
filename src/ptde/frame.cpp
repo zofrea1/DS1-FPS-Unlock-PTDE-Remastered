@@ -16,6 +16,7 @@
 #include "gamma.h"
 #include "profile.h"
 #include "remote.h"
+#include "dsfix.h"
 #include "resolution.h"
 #include "script.h"
 #include "sfx.h"
@@ -469,7 +470,12 @@ bool frame_install(const Settings& settings) {
             sfx_distortion_install();
         }
         if (settings.render_width > 0 && settings.render_height > 0) {
-            resolution_install(settings.render_width, settings.render_height, settings.render_scale_post);
+            if (dsfix_changes_resolution()) {
+                LOG_INFO("Resolution: DSfix sets its own render resolution (renderWidth/renderHeight), so ours steps "
+                         "aside");
+            } else {
+                resolution_install(settings.render_width, settings.render_height, settings.render_scale_post);
+            }
         }
         if (settings.fix_slide_contact) {
             slidecontact_install();

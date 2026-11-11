@@ -289,6 +289,18 @@ void forget_samplers() {
     std::memset(g_vs_known, 0, sizeof(g_vs_known));
 }
 
+// Anisotropic filtering (d3dperf_set_anisotropy): a pixel sampler whose min filter the game sets to LINEAR and whose
+// mip filter is not NONE (a mipmapped surface texture) gets ANISOTROPIC at this level; render target reads (no mips:
+// post-processing, shadow maps) keep what the game asked for.
+int g_aniso = 0;
+DWORD g_game_min[16] = {};
+DWORD g_game_mip[16] = {};
+volatile LONG g_aniso_upgrades = 0;
+
+DWORD effective_min(int i) {
+    return (g_game_min[i] == D3DTEXF_LINEAR && g_game_mip[i] != D3DTEXF_NONE) ? D3DTEXF_ANISOTROPIC : g_game_min[i];
+}
+
 int sampler_index(DWORD sampler) {
     if (sampler < 16) {
         return static_cast<int>(sampler);
@@ -298,6 +310,8 @@ int sampler_index(DWORD sampler) {
     }
     return -1;
 }
+
+HRESULT set_sampler_cached(IDirect3DDevice9* device, DWORD sampler, int index, D3DSAMPLERSTATETYPE type, DWORD value);
 
 HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMPLERSTATETYPE type, DWORD value) {
     g_seen = g_seen + 1;
@@ -316,6 +330,30 @@ HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMP
         InterlockedIncrement(&g_recorded);
         return g_set_sampler(device, sampler, type, value);
     }
+    if (g_aniso > 1 && index >= 0 && index < 16) {
+        if (type == D3DSAMP_MINFILTER) {
+            g_game_min[index] = value;
+            value = effective_min(index);
+            if (value == D3DTEXF_ANISOTROPIC) set_sampler_cached(device, sampler, index, D3DSAMP_MAXANISOTROPY, g_aniso);
+        } else if (type == D3DSAMP_MIPFILTER) {
+            // The game sets the min filter before the mip filter: settle the min filter for this pair now.
+            g_game_mip[index] = value;
+            const HRESULT hr = set_sampler_cached(device, sampler, index, type, value);
+            const DWORD min = effective_min(index);
+            if (min == D3DTEXF_ANISOTROPIC) {
+                set_sampler_cached(device, sampler, index, D3DSAMP_MAXANISOTROPY, g_aniso);
+                InterlockedIncrement(&g_aniso_upgrades);
+            }
+            set_sampler_cached(device, sampler, index, D3DSAMP_MINFILTER, min);
+            return hr;
+        } else if (type == D3DSAMP_MAXANISOTROPY) {
+            value = static_cast<DWORD>(g_aniso);
+        }
+    }
+    return set_sampler_cached(device, sampler, index, type, value);
+}
+
+HRESULT set_sampler_cached(IDirect3DDevice9* device, DWORD sampler, int index, D3DSAMPLERSTATETYPE type, DWORD value) {
     if (!g_ss_enabled) {
         return g_set_sampler(device, sampler, type, value);
     }
@@ -605,12 +643,17 @@ void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filt
                      "instead of waiting for the GPU");
         }
     }
-    if ((filter || constants) && !g_set_sampler) {
+    if ((filter || constants || g_aniso > 1) && !g_set_sampler) {
         g_vsc_enabled = constants;
         g_ss_enabled = filter;
         install_filter(game_device);
+        if (g_aniso > 1 && g_set_sampler) {
+            LOG_INFO("AnisotropicFiltering: %dx on mipmapped textures (render target reads keep their filter)", g_aniso);
+        }
     }
 }
+
+void d3dperf_set_anisotropy(int level) { g_aniso = level > 16 ? 16 : level; }
 
 void d3dperf_frame() {
     if (!g_filter_device || !g_set_sampler) {

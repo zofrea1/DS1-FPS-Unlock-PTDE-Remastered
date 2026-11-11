@@ -35,7 +35,23 @@ bool non_system_dinput8(const wchar_t* game_dir) {
 
 }  // namespace
 
+namespace {
+DsfixInfo g_last;
+}  // namespace
+
+bool dsfix_filtering_override() { return g_last.present && g_last.filtering_override != 0; }
+bool dsfix_changes_resolution() {
+    return g_last.present && g_last.ini_found && (g_last.render_width != 1024 || g_last.render_height != 720);
+}
+
+DsfixInfo dsfix_probe_impl(const wchar_t* game_dir);
+
 DsfixInfo dsfix_probe(const wchar_t* game_dir) {
+    g_last = dsfix_probe_impl(game_dir);
+    return g_last;
+}
+
+DsfixInfo dsfix_probe_impl(const wchar_t* game_dir) {
     DsfixInfo info;
     wchar_t ini[MAX_PATH];
     _snwprintf_s(ini, _TRUNCATE, L"%sDSfix.ini", game_dir);
@@ -57,6 +73,12 @@ DsfixInfo dsfix_probe(const wchar_t* game_dir) {
                 info.fps_limit = std::atoi(value.c_str());
             } else if (key == "borderlessFullscreen") {
                 info.borderless = std::atoi(value.c_str()) != 0;
+            } else if (key == "filteringOverride") {
+                info.filtering_override = std::atoi(value.c_str());
+            } else if (key == "renderWidth") {
+                info.render_width = std::atoi(value.c_str());
+            } else if (key == "renderHeight") {
+                info.render_height = std::atoi(value.c_str());
             } else if (key == "skipIntro") {
                 info.skip_intro = std::atoi(value.c_str()) != 0;
             }

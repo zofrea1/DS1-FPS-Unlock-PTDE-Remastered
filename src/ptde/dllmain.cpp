@@ -19,6 +19,7 @@
 #include "trace.h"
 #include "fpsu_version.h"
 #include "window.h"
+#include "cursor.h"
 #include "xinput_proxy.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -132,6 +133,9 @@ DWORD WINAPI worker(void*) {
         } else {
             borderless_start();
         }
+    }
+    if (settings.hide_mouse_cursor) {
+        cursor_start();
     }
     return 0;
 }

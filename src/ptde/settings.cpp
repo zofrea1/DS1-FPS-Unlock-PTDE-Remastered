@@ -182,6 +182,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_sfx_actions = parse_bool(val);
         } else if (key == "fixsfxdistortion") {
             s.fix_sfx_distortion = parse_bool(val);
+        } else if (key == "hidemousecursor") {
+            s.hide_mouse_cursor = parse_bool(val);
+        } else if (key == "anisotropicfiltering") {
+            s.anisotropic_filtering = std::atoi(val.c_str());
         } else if (key == "renderscalepost") {
             s.render_scale_post = parse_bool(val);
         } else if (key == "renderresolution") {
