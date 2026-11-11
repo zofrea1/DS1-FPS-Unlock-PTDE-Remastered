@@ -36,12 +36,18 @@ void* patch_slot(void* object, int slot, void* replacement) {
     return original;
 }
 
+// Read on first use. Not a function-local static with an initializer: MSVC guards those with thread-local storage,
+// and a release DLL carries no TLS directory (package_release.bat checks).
+double g_ms_per_tick = 0.0;
+
 double now_ms() {
-    static const double scale = [] {
+    double scale = g_ms_per_tick;
+    if (scale == 0.0) {
         LARGE_INTEGER f;
         QueryPerformanceFrequency(&f);
-        return 1000.0 / static_cast<double>(f.QuadPart);
-    }();
+        scale = 1000.0 / static_cast<double>(f.QuadPart);
+        g_ms_per_tick = scale;
+    }
     LARGE_INTEGER t;
     QueryPerformanceCounter(&t);
     return static_cast<double>(t.QuadPart) * scale;

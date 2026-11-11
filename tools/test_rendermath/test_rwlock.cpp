@@ -271,6 +271,32 @@ int main(int argc, char** argv) {
     g_wake_all = reinterpret_cast<WakeByAddressAllFn>(GetProcAddress(kb, "WakeByAddressAll"));
     sequences();
     stress();
+    // The install as DllMain does it (the game image is at its base here): each entry jumps to its replacement, and
+    // a late load leaves the code alone.
+    {
+        uint8_t before[5];
+        std::memcpy(before, reinterpret_cast<const void*>(kReadLock), 5);
+        rwlock_install_early(false);
+        if (std::memcmp(before, reinterpret_cast<const void*>(kReadLock), 5) != 0 || g_result != kLateLoad) {
+            std::printf("INSTALL: a late load changed the code\n");
+            ++g_fail;
+        }
+        rwlock_install_early(true);
+        const uintptr_t sites[3] = {kReadLock, kTryReadLock, kReadUnlock};
+        const void* targets[3] = {reinterpret_cast<const void*>(&read_lock), reinterpret_cast<const void*>(&try_read_lock),
+                                  reinterpret_cast<const void*>(&read_unlock)};
+        for (int i = 0; i < 3; ++i) {
+            const auto* p = reinterpret_cast<const uint8_t*>(sites[i]);
+            int32_t rel = 0;
+            std::memcpy(&rel, p + 1, 4);
+            if (p[0] != 0xE9 || reinterpret_cast<const void*>(sites[i] + 5 + rel) != targets[i]) {
+                std::printf("INSTALL: site %08X does not jump to its replacement\n", static_cast<unsigned>(sites[i]));
+                ++g_fail;
+            }
+        }
+        std::printf("install: %s\n", g_result == kInstalled ? "the three entries jump to the replacements" : "FAILED");
+        if (g_result != kInstalled) ++g_fail;
+    }
     std::printf("%d failures\n", g_fail);
     return g_fail ? 1 : 0;
 }

@@ -12,6 +12,10 @@
 // marker that makes the others wait for it (WaitOnAddress), as they waited on the mutex before. The event, the writers
 // and the return values (including the original's quirks) stay as they were.
 //
-// Installed while every other thread of the game is suspended and none is inside the three functions (or below one of
-// them on its stack), so no call ever mixes the two ways of counting.
-bool rwlock_install();
+// Installed from DllMain while this DLL is loaded as one of the game's own imports (static_load: DllMain's reserved
+// argument is not null), before the game's entry point runs: no thread can be inside the three functions yet, so no
+// call ever mixes the two ways of counting, and no thread has to be paused. Loaded any later (a chain loader, an
+// injector), it is left out. Nothing is logged there; rwlock_log() says what happened once the log is open.
+void rwlock_install_early(bool static_load);
+// `wanted`: FastReadLocks was asked for (the INI), for the log line when it was not tried.
+void rwlock_log(bool wanted);

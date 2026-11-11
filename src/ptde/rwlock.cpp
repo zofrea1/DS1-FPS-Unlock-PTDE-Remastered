@@ -133,106 +133,6 @@ void make_jump(uint8_t* out, uintptr_t site, const void* target) {
     std::memcpy(out + 1, &rel, 4);
 }
 
-// Threads are listed with NtGetNextThread, which allocates nothing: while threads are suspended, one of them may hold
-// the heap lock.
-using NtGetNextThreadFn = LONG(NTAPI*)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);
-NtGetNextThreadFn g_next_thread = nullptr;
-
-constexpr int kMaxThreads = 1024;
-struct Suspended {
-    HANDLE handles[kMaxThreads];
-    DWORD ids[kMaxThreads];
-    int count = 0;
-};
-
-void resume_all(Suspended& s) {
-    for (int i = 0; i < s.count; ++i) {
-        ResumeThread(s.handles[i]);
-        CloseHandle(s.handles[i]);
-    }
-    s.count = 0;
-}
-
-// True when the thread runs in, or returns into, the three functions (its EIP, or a return address within 4 KB of its
-// stack pointer).
-bool inside_lock_code(HANDLE thread) {
-    CONTEXT ctx{};
-    ctx.ContextFlags = CONTEXT_CONTROL;
-    if (!GetThreadContext(thread, &ctx)) return true;  // unknown: treat as busy
-    if (ctx.Eip >= kCodeLo && ctx.Eip < kCodeHi) return true;
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(ctx.Esp)), &mbi, sizeof(mbi))) return true;
-    const uintptr_t top = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-    uintptr_t end = static_cast<uintptr_t>(ctx.Esp) + 4096;
-    if (end > top) end = top;
-    for (uintptr_t p = static_cast<uintptr_t>(ctx.Esp) & ~3u; p + 4 <= end; p += 4) {
-        const uint32_t v = *reinterpret_cast<const uint32_t*>(p);
-        if (v > kCodeLo && v < kCodeHi) return true;
-    }
-    return false;
-}
-
-// Suspends every other thread; false (all resumed) when one is in the lock code or the list could not be completed.
-bool suspend_others(Suspended& s) {
-    const DWORD self = GetCurrentThreadId();
-    HANDLE prev = nullptr;
-    HANDLE next = nullptr;
-    bool ok = true;
-    while (g_next_thread(GetCurrentProcess(), prev, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
-                                                        THREAD_QUERY_LIMITED_INFORMATION,
-                         0, 0, &next) >= 0) {
-        if (prev) CloseHandle(prev);
-        prev = next;
-        const DWORD id = GetThreadId(next);
-        if (id == self || id == 0) continue;
-        if (s.count >= kMaxThreads) {
-            ok = false;
-            break;
-        }
-        HANDLE dup = nullptr;
-        if (!DuplicateHandle(GetCurrentProcess(), next, GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
-            ok = false;
-            break;
-        }
-        if (SuspendThread(dup) == static_cast<DWORD>(-1)) {
-            CloseHandle(dup);  // exiting
-            continue;
-        }
-        s.handles[s.count] = dup;
-        s.ids[s.count] = id;
-        ++s.count;
-        if (inside_lock_code(dup)) {
-            ok = false;
-            break;
-        }
-    }
-    if (prev) CloseHandle(prev);
-    if (!ok) resume_all(s);
-    return ok;
-}
-
-// With the others suspended: true when no thread exists that is not among them (none started meanwhile).
-bool all_suspended(const Suspended& s) {
-    const DWORD self = GetCurrentThreadId();
-    HANDLE prev = nullptr;
-    HANDLE next = nullptr;
-    bool ok = true;
-    while (g_next_thread(GetCurrentProcess(), prev, THREAD_QUERY_LIMITED_INFORMATION, 0, 0, &next) >= 0) {
-        if (prev) CloseHandle(prev);
-        prev = next;
-        const DWORD id = GetThreadId(next);
-        if (id == self || id == 0) continue;
-        bool known = false;
-        for (int i = 0; i < s.count && !known; ++i) known = s.ids[i] == id;
-        if (!known) {
-            ok = false;
-            break;
-        }
-    }
-    if (prev) CloseHandle(prev);
-    return ok;
-}
-
 // The jump goes in with one atomic 8-byte write (the functions start 16-byte aligned), keeping bytes 5 to 7.
 void write_jump_atomic(uintptr_t site, const uint8_t* jump) {
     auto* q = reinterpret_cast<volatile LONGLONG*>(site);
@@ -242,12 +142,25 @@ void write_jump_atomic(uintptr_t site, const uint8_t* jump) {
     InterlockedCompareExchange64(q, new_value, old_value);
 }
 
+// What the install in DllMain found, for rwlock_log() once the log is open.
+enum Result { kNotTried, kInstalled, kLateLoad, kWrongBase, kNoWaitOnAddress, kMismatch, kProtectFailed };
+Result g_result = kNotTried;
+DWORD g_error = 0;
+
 }  // namespace
 
-bool rwlock_install() {
-    if (reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) != kImageBase) {
-        LOG_ERROR("FastReadLocks needs the game at its preferred base. Not patching.");
-        return false;
+void rwlock_install_early(bool static_load) {
+    if (!static_load) {
+        g_result = kLateLoad;
+        return;
+    }
+    // The game's image at its preferred base (its headers there, linked for that base).
+    MEMORY_BASIC_INFORMATION mbi{};
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(kImageBase);
+    if (!VirtualQuery(dos, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || dos->e_magic != IMAGE_DOS_SIGNATURE ||
+        reinterpret_cast<const IMAGE_NT_HEADERS32*>(kImageBase + dos->e_lfanew)->OptionalHeader.ImageBase != kImageBase) {
+        g_result = kWrongBase;
+        return;
     }
     HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
     if (kernelbase) {
@@ -255,58 +168,60 @@ bool rwlock_install() {
         g_wake_all = reinterpret_cast<WakeByAddressAllFn>(GetProcAddress(kernelbase, "WakeByAddressAll"));
     }
     if (!g_wait_on_address || !g_wake_all) {
-        LOG_ERROR("FastReadLocks: WaitOnAddress is not available here; the game's locks are left as they are");
-        return false;
+        g_result = kNoWaitOnAddress;
+        return;
     }
     if (std::memcmp(reinterpret_cast<const void*>(kReadLock), kReadLockHead, sizeof(kReadLockHead)) != 0 ||
         std::memcmp(reinterpret_cast<const void*>(kTryReadLock), kTryReadLockHead, sizeof(kTryReadLockHead)) != 0 ||
         std::memcmp(reinterpret_cast<const void*>(kReadUnlock), kReadUnlockHead, sizeof(kReadUnlockHead)) != 0 ||
         std::memcmp(reinterpret_cast<const void*>(0x60D146), kReadLockCount, sizeof(kReadLockCount)) != 0 ||
         std::memcmp(reinterpret_cast<const void*>(0x60D24C), kReadUnlockCount, sizeof(kReadUnlockCount)) != 0) {
-        LOG_ERROR("FastReadLocks: the lock functions do not match this build. Not patching.");
-        return false;
+        g_result = kMismatch;
+        return;
     }
     uint8_t jumps[3][5];
     make_jump(jumps[0], kReadLock, reinterpret_cast<const void*>(&read_lock));
     make_jump(jumps[1], kTryReadLock, reinterpret_cast<const void*>(&try_read_lock));
     make_jump(jumps[2], kReadUnlock, reinterpret_cast<const void*>(&read_unlock));
     const uintptr_t sites[3] = {kReadLock, kTryReadLock, kReadUnlock};
-
-    g_next_thread = reinterpret_cast<NtGetNextThreadFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtGetNextThread"));
-    if (!g_next_thread) {
-        LOG_ERROR("FastReadLocks: NtGetNextThread is not available here; the game's locks are left as they are");
-        return false;
-    }
     DWORD old = 0;
     auto* code = reinterpret_cast<void*>(kCodeLo);
     if (!VirtualProtect(code, kCodeHi - kCodeLo, PAGE_EXECUTE_READWRITE, &old)) {
-        LOG_ERROR("FastReadLocks: could not unprotect the lock functions (Win32=%lu)", GetLastError());
-        return false;
+        g_error = GetLastError();
+        g_result = kProtectFailed;
+        return;
     }
-    static Suspended suspended;
-    int attempts = 0;
-    int threads_seen = 0;
-    bool done = false;
-    for (; attempts < 500 && !done; ++attempts) {
-        if (suspend_others(suspended)) {
-            if (all_suspended(suspended)) {
-                for (int i = 0; i < 3; ++i) write_jump_atomic(sites[i], jumps[i]);
-                FlushInstructionCache(GetCurrentProcess(), code, kCodeHi - kCodeLo);
-                done = true;
-                threads_seen = suspended.count;
-            }
-            resume_all(suspended);
-        }
-        if (!done) Sleep(1);
-    }
+    for (int i = 0; i < 3; ++i) write_jump_atomic(sites[i], jumps[i]);
+    FlushInstructionCache(GetCurrentProcess(), code, kCodeHi - kCodeLo);
     DWORD ignored = 0;
     VirtualProtect(code, kCodeHi - kCodeLo, old, &ignored);
-    if (!done) {
-        LOG_ERROR("FastReadLocks: a thread was always inside the game's lock code (%d tries); left as it is", attempts);
-        return false;
+    g_result = kInstalled;
+}
+
+void rwlock_log(bool wanted) {
+    switch (g_result) {
+    case kInstalled:
+        LOG_INFO("FastReadLocks: the game's read locks count without kernel calls (put in place before the game started)");
+        break;
+    case kLateLoad:
+        LOG_INFO("FastReadLocks: this DLL was loaded after the game started (not as one of its own imports), when the "
+                 "game's code may already be inside its locks; they are left as they are");
+        break;
+    case kWrongBase:
+        LOG_ERROR("FastReadLocks needs the game at its preferred base. Not patching.");
+        break;
+    case kNoWaitOnAddress:
+        LOG_ERROR("FastReadLocks: WaitOnAddress is not available here; the game's locks are left as they are");
+        break;
+    case kMismatch:
+        LOG_ERROR("FastReadLocks: the lock functions do not match this build. Not patching.");
+        break;
+    case kProtectFailed:
+        LOG_ERROR("FastReadLocks: could not unprotect the lock functions (Win32=%lu)", g_error);
+        break;
+    case kNotTried:
+        if (wanted) LOG_INFO("FastReadLocks: not put in place at start-up; the game's read locks keep their kernel calls");
+        else LOG_INFO("FastReadLocks is false. The game's read locks keep their kernel calls.");
+        break;
     }
-    LOG_INFO("FastReadLocks: the game's read locks count without kernel calls (installed with %d other threads "
-             "paused, try %d)",
-             threads_seen, attempts);
-    return true;
 }

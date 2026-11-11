@@ -109,12 +109,16 @@ SlotCache g_slots[4];
 int g_empty_timed = 0;
 double g_empty_ms = 0.0;
 
+// Read on first use. Not a function-local static with an initializer: MSVC guards those with thread-local storage,
+// and a release DLL carries no TLS directory (package_release.bat checks).
+LARGE_INTEGER g_qpc_freq{};
+
 double qpc_ms() {
-    static LARGE_INTEGER freq = [] {
-        LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
-        return f;
-    }();
+    LARGE_INTEGER freq = g_qpc_freq;
+    if (!freq.QuadPart) {
+        QueryPerformanceFrequency(&freq);
+        g_qpc_freq = freq;
+    }
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     return static_cast<double>(now.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);

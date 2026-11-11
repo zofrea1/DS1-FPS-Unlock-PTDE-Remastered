@@ -121,12 +121,8 @@ DWORD WINAPI worker(void*) {
         if (settings.fast_render_math || settings.fast_effects) {
             rendermath_install(settings.fast_render_math, settings.fast_effects);
         }
-        if (settings.fast_read_locks) {
-            rwlock_install();
-        } else {
-            LOG_INFO("FastReadLocks is false. The game's read locks keep their kernel calls.");
-        }
     }
+    rwlock_log(settings.fps_unlock && settings.fast_read_locks);
     if (settings.borderless) {
         if (dsfix.borderless) {
             LOG_INFO("DSfix's own borderlessFullscreen is on; leaving the window to DSfix.");
@@ -140,14 +136,14 @@ DWORD WINAPI worker(void*) {
 }  // namespace
 
 // Kept as a literal: Prepare to Co-op's tools\make_ini.ps1 reads the version from this line.
-const char* ptde_fps_unlock_version() { return "2.1.0"; }
+const char* ptde_fps_unlock_version() { return "2.2.0"; }
 
 namespace {
 constexpr bool same_text(const char* a, const char* b) { return *a == *b && (*a == 0 || same_text(a + 1, b + 1)); }
 }  // namespace
-static_assert(same_text("2.1.0", FPSU_VERSION_STR), "ptde_fps_unlock_version() and fpsu_version.h disagree");
+static_assert(same_text("2.2.0", FPSU_VERSION_STR), "ptde_fps_unlock_version() and fpsu_version.h disagree");
 
-BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = instance;
         DisableThreadLibraryCalls(instance);
@@ -158,6 +154,18 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         }
         // Before the game calls Direct3DCreate9: wraps it to override the fullscreen refresh rate.
         d3d_install_early(instance);
+        // Before the game's entry point, while no thread can be in the game's locks (rwlock.h). Two keys of the INI,
+        // read without the log (not open yet).
+        {
+            wchar_t dll_path[MAX_PATH];
+            GetModuleFileNameW(instance, dll_path, MAX_PATH);
+            bool fps_unlock = true, fast_read_locks = true;
+            settings_read_keys(dll_path, [&](const std::string& key, const std::string& value) {
+                if (key == "fpsunlock") fps_unlock = settings_parse_bool(value);
+                if (key == "fastreadlocks") fast_read_locks = settings_parse_bool(value);
+            });
+            if (fps_unlock && fast_read_locks) rwlock_install_early(reserved != nullptr);
+        }
         if (const PtdeExtension* ext = ptde_extension()) {
             if (ext->attach) ext->attach(instance);
         }
