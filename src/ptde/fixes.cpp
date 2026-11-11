@@ -36,8 +36,8 @@ alignas(4) volatile float g_gravity = 1.0f;
 alignas(4) volatile float g_friction = 0.65f;
 // 1 / frame time, for velocities the game derives from one frame's movement (30 at 30 FPS).
 alignas(8) volatile double g_inv_dt = 30.0;
-// The ragdoll driver's pull on the root body per unit of distance from its pose: the game's 30 (per second), or
-// 1 / frame time below 30 FPS so a long frame does not overshoot the pose (see the site below).
+// The ragdoll driver's pull on the root body per unit of distance from its pose: 30 per 30 FPS frame, scaled to the
+// frame (900 * frame time), or 1 / frame time below 30 FPS so a long frame does not overshoot the pose (see below).
 alignas(8) volatile double g_ragdoll_gain = 30.0;
 // The item glow fade divisor: 60 frames at 30 FPS, so 2 / frame time.
 alignas(8) volatile double g_shine_div = 60.0;
@@ -90,16 +90,18 @@ Site g_sites[] = {
     //  * 3D sound sources (fn 0xDEB3B0, 0xDF12E0): (position - last frame's position) * 30, the velocity
     //    FMOD uses for the Doppler shift.
     //  * Ragdoll driver (fn 0xEC63B0, from 0xEC6870 in ragdoll mode 2): the root body gets an impulse of
-    //    mass * 30 * (pose - position) every update. 1.3.0 to 2.0.1 used 1 / dt here, treating the 30 as a frame
-    //    rate. It is a pull per second: toward a pose that moves smoothly it gives the pose's own speed at any
-    //    frame rate, and the original game never pulls harder than 30 * the gap. With 1 / dt a pose that jumped
-    //    (a body or an enemy loading in, a body held off its pose by the floor) was pulled at 240 * the gap at
-    //    240 FPS, and characters standing on or against those bodies take their speed as a moving floor or wall,
-    //    so enemies and bodies were flung, upward into ceilings or through the floor. The game's 30 is kept, and
-    //    only below 30 FPS, where 30 * dt passes the pose, it is 1 / dt.
+    //    mass * 30 * (pose - position) every update, through hkpMotion::applyLinearImpulse (vtable +0x4C,
+    //    0x87E7C0: velocity += impulse / mass). It ADDS 30 * the gap to the velocity once per update: at 30 FPS
+    //    that is 900 * the gap per second, a spring pulling the body to its pose. 1.3.0 to 2.0.1 used 1 / dt
+    //    (240 * the gap per update at 240 FPS) and 2.1.0 to 2.2.0 kept 30 per update (still 8 times the original
+    //    pull per second at 240 FPS): bodies loading in were pulled to their pose instead of dropping, and
+    //    characters standing on or against them took that speed as a moving floor or wall and were flung,
+    //    upward into ceilings (user report: Firelink's bodies, the Undead Burg's bandit). The per-update push is
+    //    scaled to the frame, 900 * dt (30 at 30 FPS); below 30 FPS it stays 1 / dt, so a long frame reaches the
+    //    pose without passing it.
     {0x00DEB9BF, 4, 0x011E7CD8, &g_inv_dt, 6, false},     // movsd xmm0,[30.0]  -> 1 / dt
     {0x00DF1809, 4, 0x011E7CD8, &g_inv_dt, 6, false},     // movsd xmm0,[30.0]  -> 1 / dt
-    {0x00EC6562, 2, 0x011E7CD8, &g_ragdoll_gain, 6, false},  // fmul [30.0]     -> min(30, 1 / dt)
+    {0x00EC6562, 2, 0x011E7CD8, &g_ragdoll_gain, 6, false},  // fmul [30.0]     -> min(900 dt, 1 / dt)
     // The engine's 1/30 step (0x11E7E90) is rewritten with the frame time every frame, so code that
     // copies it into a setting would store whatever the frame time was at that moment. These keep 1/30:
     // hkpWorldCinfo's expected minimum step, an ImageFilter setting, and the repeat interval of eight
@@ -324,7 +326,7 @@ void fixes_update(double dt) {
     g_gauge_k = 1.0 - std::pow(0.5, s);
     g_gauge_min = static_cast<float>(1.0 * s);
     g_inv_dt = 1.0 / dt;
-    g_ragdoll_gain = 1.0 / dt < 30.0 ? 1.0 / dt : 30.0;
+    g_ragdoll_gain = 900.0 * dt < 1.0 / dt ? 900.0 * dt : 1.0 / dt;
     g_shine_div = 2.0 / dt;
 }
 
