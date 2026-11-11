@@ -22,6 +22,7 @@ using SetGammaFn = void(WINAPI*)(IDirect3DDevice9*, UINT, DWORD, const D3DGAMMAR
 SetGammaFn g_set_gamma = nullptr;
 int g_mode = kGammaAuto;
 bool g_dxvk = false;
+double g_hdr_gamma = 0.0;  // DxvkHdrGamma: 0 off
 
 D3DGAMMARAMP g_last{};
 bool g_have_last = false;
@@ -145,59 +146,94 @@ void identity(D3DGAMMARAMP* r) {
     }
 }
 
-void WINAPI hook_set_gamma(IDirect3DDevice9* device, UINT chain, DWORD flags, const D3DGAMMARAMP* ramp) {
-    if (!ramp) {
-        g_set_gamma(device, chain, flags, ramp);
-        return;
-    }
+// Under DXVK in advanced colour: v (0..1, as the game sends it) through Windows' piecewise sRGB curve, then encoded
+// for a plain power curve of DxvkHdrGamma, so a conversion that decodes with that power shows what Windows shows.
+WORD hdr_compensate(WORD in) {
+    const double v = in / 65535.0;
+    const double linear = v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+    const double out = std::pow(linear, 1.0 / g_hdr_gamma);
+    return static_cast<WORD>(out * 65535.0 + 0.5);
+}
+
+// The ramp that reaches Direct3D for `base` (the game's ramp, or identity when we set one ourselves).
+void apply(IDirect3DDevice9* device, UINT chain, DWORD flags, const D3DGAMMARAMP* base, bool from_game) {
     bool pass = true;
     const char* why = "";
     DisplayState state;
+    if (g_dxvk) state = display_state(device);
+    const bool hdr = g_dxvk && state.advanced;
     if (g_mode == kGammaOff) {
         pass = false;
         why = " (GammaRamp = false)";
-    } else if (g_mode == kGammaAuto && g_dxvk) {
-        state = display_state(device);
-        if (state.advanced) {
-            pass = false;
-            why = " (DXVK in advanced colour: the system Direct3D 9 would have no ramp here either)";
+    } else if (g_mode == kGammaAuto && hdr) {
+        pass = false;
+        why = " (DXVK in advanced colour: the system Direct3D 9 would have no ramp here either)";
+    }
+    D3DGAMMARAMP out;
+    if (pass) {
+        out = *base;
+    } else {
+        identity(&out);
+    }
+    const bool compensate = hdr && g_hdr_gamma > 0.0;
+    if (compensate) {
+        for (int i = 0; i < 256; ++i) {
+            out.red[i] = hdr_compensate(out.red[i]);
+            out.green[i] = hdr_compensate(out.green[i]);
+            out.blue[i] = hdr_compensate(out.blue[i]);
         }
     }
     AcquireSRWLockExclusive(&g_lock);
     const bool changed =
-        !g_have_last || std::memcmp(&g_last, ramp, sizeof(*ramp)) != 0 || g_last_passed != pass;
-    g_last = *ramp;
+        !g_have_last || std::memcmp(&g_last, &out, sizeof(out)) != 0 || g_last_passed != pass;
+    g_last = out;
     g_have_last = true;
     g_last_passed = pass;
     ReleaseSRWLockExclusive(&g_lock);
     if (changed) {
         if (!state.text[0]) state = display_state(device);
         char text[256];
-        describe(*ramp, text, sizeof(text));
-        LOG_INFO("Gamma ramp from the game (swap chain %u, flags %lu): %s; %s; %s%s", chain, flags, text, state.text,
-                 pass ? "passed on" : "left out", why);
+        describe(*base, text, sizeof(text));
+        char sent[256] = "";
+        if (compensate) {
+            describe(out, sent, sizeof(sent));
+        }
+        LOG_INFO("Gamma ramp %s (swap chain %u, flags %lu): %s; %s; %s%s%s%s", from_game ? "from the game" : "set up",
+                 chain, flags, text, state.text, pass ? "passed on" : "left out", why,
+                 compensate ? "; DxvkHdrGamma sends " : "", sent);
     }
-    if (pass) {
+    g_set_gamma(device, chain, flags, &out);
+}
+
+void WINAPI hook_set_gamma(IDirect3DDevice9* device, UINT chain, DWORD flags, const D3DGAMMARAMP* ramp) {
+    if (!ramp) {
         g_set_gamma(device, chain, flags, ramp);
-    } else {
-        D3DGAMMARAMP flat;
-        identity(&flat);
-        g_set_gamma(device, chain, flags, &flat);
+        return;
     }
+    apply(device, chain, flags, ramp, true);
 }
 
 }  // namespace
 
-void gamma_hook_device(IDirect3DDevice9* game_device, int mode, bool dxvk) {
+void gamma_hook_device(IDirect3DDevice9* game_device, int mode, bool dxvk, double hdr_gamma) {
     if (!game_device || g_set_gamma) return;
     g_mode = mode;
     g_dxvk = dxvk;
+    g_hdr_gamma = hdr_gamma > 0.0 && hdr_gamma < 10.0 ? hdr_gamma : 0.0;
     void* original = patch_slot(game_device, kSetGammaSlot, reinterpret_cast<void*>(&hook_set_gamma));
-    if (original) g_set_gamma = reinterpret_cast<SetGammaFn>(original);
+    if (!original) return;
+    g_set_gamma = reinterpret_cast<SetGammaFn>(original);
     const DisplayState state = display_state(game_device);
     static const char* const kModes[] = {"auto", "true", "false"};
-    LOG_INFO("GammaRamp = %s on %s; %s", kModes[mode >= 0 && mode <= 2 ? mode : 0],
+    LOG_INFO("GammaRamp = %s, DxvkHdrGamma = %.2f on %s; %s", kModes[mode >= 0 && mode <= 2 ? mode : 0], g_hdr_gamma,
              dxvk ? "DXVK" : "the system Direct3D 9", state.text);
+    if (dxvk && state.advanced && g_hdr_gamma > 0.0) {
+        // The game sets its ramp only when the brightness changes; DXVK keeps this one until then and applies it once
+        // the game is fullscreen.
+        D3DGAMMARAMP flat;
+        identity(&flat);
+        apply(game_device, 0, 0, &flat, false);
+    }
 }
 
 void gamma_after_reset(IDirect3DDevice9* game_device) {

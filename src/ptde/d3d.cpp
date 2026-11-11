@@ -235,7 +235,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         if (settings().reuse_surfaces) {
             surfpool_hook_device(*out);
         }
-        gamma_hook_device(*out, settings().gamma_ramp, g_dxvk_active);
+        gamma_hook_device(*out, settings().gamma_ramp, g_dxvk_active, settings().dxvk_hdr_gamma);
     }
     // Last, so the census counts what the game calls and chains into every hook above.
     if (SUCCEEDED(hr) && out && *out && profile_enabled()) {

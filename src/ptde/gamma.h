@@ -16,6 +16,12 @@ enum GammaRampMode {
 };
 
 // Hooks SetGammaRamp on the device the game holds; every ramp that changes is logged (with the display's colour mode).
-void gamma_hook_device(IDirect3DDevice9* game_device, int mode, bool dxvk);
+//
+// DxvkHdrGamma (INI): with Windows HDR on, the same frames look darker in the shadows under DXVK than under the system
+// Direct3D 9 (identical in screenshots, identical with HDR off): Windows composes Direct3D 9's SDR frames through the
+// piecewise sRGB curve, while DXVK's reach the screen through a plain power curve. DXVK applies a gamma ramp in its own
+// present shader, so under DXVK in advanced colour the ramp carries sRGB -> power-curve encoding for this exponent
+// (0 = off), on top of what GammaRamp lets through.
+void gamma_hook_device(IDirect3DDevice9* game_device, int mode, bool dxvk, double hdr_gamma);
 // After a successful Reset: logs the colour mode of the game's display (it can change with fullscreen).
 void gamma_after_reset(IDirect3DDevice9* game_device);
