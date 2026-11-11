@@ -4,6 +4,8 @@
 // Half way between those, locked_update() waits ~18 ms for a critical section that another thread (holder_thread,
 // spinning in hold_lock()) holds: those [spike] lines should show the game thread in EnterCriticalSection under
 // locked_update(), and the holder as the busy other thread, in hold_lock().
+// At 1.0 s past each hitch, event_update() waits up to 1 s for an event that signal_thread sets after sleeping 15 ms:
+// those lines should say NtWaitForSingleObject on an Event with a 1000 ms timeout.
 #define FPSU_DIAGNOSTICS 1
 #include <windows.h>
 
@@ -60,7 +62,25 @@ __declspec(noinline) void locked_update() {
     LeaveCriticalSection(&g_cs);
 }
 
+HANDLE g_go2, g_done2;
+
+DWORD WINAPI signal_thread(void*) {
+    for (;;) {
+        WaitForSingleObject(g_go2, INFINITE);
+        Sleep(15);
+        SetEvent(g_done2);
+    }
+}
+
+__declspec(noinline) void event_update() {
+    SetEvent(g_go2);
+    WaitForSingleObject(g_done2, 1000);
+}
+
 int main() {
+    g_go2 = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_done2 = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    CreateThread(nullptr, 0, signal_thread, nullptr, 0, nullptr);
     InitializeCriticalSection(&g_cs);
     g_go = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     g_held = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -73,7 +93,7 @@ int main() {
     LARGE_INTEGER f, t0, a, b;
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
-    double next_hitch = 1.5, next_lock = 2.25;
+    double next_hitch = 1.5, next_lock = 2.25, next_event = 2.5;
     for (;;) {
         QueryPerformanceCounter(&a);
         const double now = static_cast<double>(a.QuadPart - t0.QuadPart) / f.QuadPart;
@@ -82,6 +102,9 @@ int main() {
         if (now >= next_hitch) {
             long_update();
             next_hitch += 1.5;
+        } else if (now >= next_event) {
+            event_update();
+            next_event += 1.5;
         } else if (now >= next_lock) {
             locked_update();
             next_lock += 1.5;

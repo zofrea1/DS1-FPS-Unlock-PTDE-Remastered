@@ -816,36 +816,41 @@ void capture() {
 
 // ---------------------------------------------------------------------------------------------------------------
 // Spike watch: a game update that runs long (a hitch) is sampled while it runs, and reported when it ends. Besides the
-// game thread, every other thread of the game is looked at during the hitch (CPU used, where it was), since a game
-// thread that waits is usually waiting for one of them.
+// game thread, the game's other threads are looked at twice during the hitch (CPU used, where they were), since a game
+// thread that waits is usually waiting for one of them. Everything slow (the thread and module lists, telling return
+// addresses from data) is done between hitches or after one, so the first look comes ~1 ms after the hitch is noticed.
 // ---------------------------------------------------------------------------------------------------------------
 volatile LONGLONG g_update_start = 0;  // qpc at the start of the update in progress, 0 between updates
 volatile LONGLONG g_last_start = 0;    // the last finished update: its start and length
 volatile double g_last_ms = 0.0;
 volatile double g_update_avg = 1.0;    // running average of the update (ms)
-#ifndef SPIKE_DETAILED
-#define SPIKE_DETAILED 80
-#endif
 constexpr double kSpikeMinMs = 4.0;
 constexpr int kSpikeSamples = 256;
 constexpr int kSpikeReports = 400;     // per session
-constexpr int kSpikeDetailed = SPIKE_DETAILED;     // reports with the other threads (hitches under kDetailMaxMs)
+#ifndef SPIKE_DETAILED
+#define SPIKE_DETAILED 80
+#endif
+constexpr int kSpikeDetailed = SPIKE_DETAILED;  // reports with the other threads (hitches under kDetailMaxMs)
 constexpr double kDetailMaxMs = 150.0;
-constexpr int kOrdered = 14;           // return addresses into any module, in stack order (innermost first)
+constexpr int kOrdered = 16;           // return addresses into any module, in stack order (innermost first)
+constexpr int kRawSamples = 6;         // game-thread looks kept whole (stack in order, wait arguments)
+constexpr int kRawDwords = 1536;       // 6 KB of stack each
 constexpr int kOtherThreads = 96;
-constexpr int kOtherRounds = 6;        // looks at the other threads: when the hitch is noticed, then every 3 ms
-constexpr int kOtherRets = 10;
-constexpr int kOtherStackDwords = 1024;
+constexpr int kOtherRounds = 2;        // looks at the other threads: when the hitch is noticed and ~5 ms later
+constexpr int kOtherRawDwords = 512;   // 2 KB of stack each
 uint32_t g_own_lo = 0, g_own_hi = 0;   // this DLL
 
 struct SpikeSample {
     uint32_t eip;
-    uint8_t nret, nord;
+    uint8_t nret;
     uint32_t ret[kMaxRets];   // into the game or this DLL (counted)
-    uint32_t ord[kOrdered];   // into any module, innermost first
 };
 SpikeSample g_spike[kSpikeSamples];
 uint32_t g_spike_stack[kStackDwords];
+uint32_t g_raw[kRawSamples][kRawDwords];
+int g_raw_words[kRawSamples];
+uint32_t g_raw_eip[kRawSamples], g_raw_esp[kRawSamples];
+double g_raw_at[kRawSamples];          // ms into the update
 
 struct OtherThread {
     DWORD tid;
@@ -853,32 +858,34 @@ struct OtherThread {
     uintptr_t start, stack_base;
     uint64_t cycles0, cycles1;
     int rounds;
+    bool seen;
     uint32_t eip[kOtherRounds];
-    uint8_t nret[kOtherRounds];
-    uint32_t ret[kOtherRounds][kOtherRets];
+    int words[kOtherRounds];
 };
 OtherThread g_other[kOtherThreads];
 int g_other_n = 0;
-uint32_t g_other_stack[kOtherStackDwords];
+uint32_t g_other_raw[kOtherThreads][kOtherRounds][kOtherRawDwords];
 
 struct ModRange {
     uint32_t lo, hi;
 };
-std::vector<ModRange> g_mods;  // loaded modules, sorted (spike thread only)
+std::vector<ModRange> g_mods;  // loaded modules, sorted (spike thread only, refreshed between hitches)
 
 void refresh_modules() {
     HMODULE mods[512];
     DWORD need = 0;
-    g_mods.clear();
     if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &need)) return;
     const DWORD count = (std::min)(need / static_cast<DWORD>(sizeof(HMODULE)), static_cast<DWORD>(512));
+    std::vector<ModRange> list;
+    list.reserve(count);
     for (DWORD i = 0; i < count; ++i) {
         MODULEINFO mi{};
         if (!K32GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof(mi))) continue;
         const uint32_t lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(mi.lpBaseOfDll));
-        g_mods.push_back({lo, lo + mi.SizeOfImage});
+        list.push_back({lo, lo + mi.SizeOfImage});
     }
-    std::sort(g_mods.begin(), g_mods.end(), [](const ModRange& a, const ModRange& b) { return a.lo < b.lo; });
+    std::sort(list.begin(), list.end(), [](const ModRange& a, const ModRange& b) { return a.lo < b.lo; });
+    g_mods.swap(list);
 }
 
 // A return address into [lo, hi): the bytes before it are a call.
@@ -914,6 +921,14 @@ bool is_return_any(uint32_t v) {
     return guarded_return_into(v, it->lo + 0x1000, it->hi);
 }
 
+int ordered_returns(const uint32_t* stack, int words, uint32_t* out, int cap) {
+    int n = 0;
+    for (int w = 0; w < words && n < cap; ++w) {
+        if (is_return_any(stack[w])) out[n++] = stack[w];
+    }
+    return n;
+}
+
 uintptr_t thread_stack_base(HANDLE h) {
     CONTEXT ctx{};
     ctx.ContextFlags = CONTEXT_CONTROL;
@@ -931,68 +946,170 @@ uintptr_t thread_stack_base(HANDLE h) {
 // NtGetNextThread walks this process's threads only (a Toolhelp snapshot lists every thread on the PC: ~120 ms).
 using NtGetNextThreadFn = LONG(NTAPI*)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);
 
-void others_open(DWORD game_tid) {
-    g_other_n = 0;
+// Between hitches: the game's other threads, kept open. New ones get their stack's top (one brief suspend each).
+void threads_refresh(DWORD game_tid) {
     static NtGetNextThreadFn next_thread = reinterpret_cast<NtGetNextThreadFn>(
         GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtGetNextThread"));
     if (!next_thread) return;
+    for (int i = 0; i < g_other_n; ++i) g_other[i].seen = false;
     const DWORD self = GetCurrentThreadId();
     HANDLE h = nullptr;
     for (;;) {
         HANDLE next = nullptr;
         const LONG status = next_thread(GetCurrentProcess(), h, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
                                         THREAD_QUERY_INFORMATION, 0, 0, &next);
-        if (h && (g_other_n == 0 || g_other[g_other_n - 1].h != h)) CloseHandle(h);
+        if (h) CloseHandle(h);
         if (status < 0 || !next) break;
         h = next;
         const DWORD tid = GetThreadId(h);
-        if (tid == self || tid == game_tid || g_other_n >= kOtherThreads) continue;
+        if (tid == self || tid == game_tid) continue;
+        int found = -1;
+        for (int i = 0; i < g_other_n && found < 0; ++i) {
+            if (g_other[i].tid == tid) found = i;
+        }
+        if (found >= 0) {
+            g_other[found].seen = true;
+            continue;
+        }
+        if (g_other_n >= kOtherThreads) continue;
+        HANDLE keep = nullptr;
+        if (!DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &keep, 0, FALSE, DUPLICATE_SAME_ACCESS))
+            continue;
         OtherThread& o = g_other[g_other_n++];
+        o = OtherThread{};
         o.tid = tid;
-        o.h = h;
-        o.start = 0;
+        o.h = keep;
+        o.seen = true;
         if (auto q = nt_query_thread()) {
             PVOID start = nullptr;
-            q(h, 9 /*ThreadQuerySetWin32StartAddress*/, &start, sizeof(start), nullptr);
+            q(keep, 9 /*ThreadQuerySetWin32StartAddress*/, &start, sizeof(start), nullptr);
             o.start = reinterpret_cast<uintptr_t>(start);
         }
-        o.stack_base = thread_stack_base(h);
-        o.cycles0 = thread_cycles(h);
-        o.cycles1 = o.cycles0;
-        o.rounds = 0;
+        o.stack_base = thread_stack_base(keep);
+    }
+    int kept = 0;
+    for (int i = 0; i < g_other_n; ++i) {
+        if (g_other[i].seen) {
+            g_other[kept++] = g_other[i];
+        } else {
+            CloseHandle(g_other[i].h);
+        }
+    }
+    g_other_n = kept;
+}
+
+// Copies the stack of a suspended-for-a-moment thread. Between Suspend and Resume nothing may allocate, log or fault
+// (the thread could hold a lock); the stack between ESP and its top is committed, so copying it cannot fault.
+bool look(HANDLE h, uintptr_t stack_base, uint32_t* out, int cap, int* words, uint32_t* eip, uint32_t* esp) {
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_CONTROL;
+    *words = 0;
+    if (SuspendThread(h) == static_cast<DWORD>(-1)) return false;
+    const bool got = GetThreadContext(h, &ctx) != 0;
+    if (got && stack_base && ctx.Esp && ctx.Esp < stack_base && stack_base - ctx.Esp < 0x1000000) {
+        int n = static_cast<int>((stack_base - ctx.Esp) / 4);
+        if (n > cap) n = cap;
+        std::memcpy(out, reinterpret_cast<const void*>(static_cast<uintptr_t>(ctx.Esp)), n * 4);
+        *words = n;
+    }
+    ResumeThread(h);
+    if (!got) return false;
+    *eip = ctx.Eip;
+    if (esp) *esp = ctx.Esp;
+    return true;
+}
+
+void others_begin() {
+    for (int i = 0; i < g_other_n; ++i) {
+        g_other[i].cycles0 = thread_cycles(g_other[i].h);
+        g_other[i].rounds = 0;
     }
 }
 
-void others_sample() {
+void others_look() {
     for (int i = 0; i < g_other_n; ++i) {
         OtherThread& o = g_other[i];
         if (o.rounds >= kOtherRounds) continue;
-        CONTEXT ctx{};
-        ctx.ContextFlags = CONTEXT_CONTROL;
-        int words = 0;
-        // Between Suspend and Resume nothing may allocate, log or fault (see capture()).
-        if (SuspendThread(o.h) == static_cast<DWORD>(-1)) continue;
-        const bool got = GetThreadContext(o.h, &ctx) != 0;
-        if (got && o.stack_base && ctx.Esp && ctx.Esp < o.stack_base && o.stack_base - ctx.Esp < 0x1000000) {
-            words = static_cast<int>((o.stack_base - ctx.Esp) / 4);
-            if (words > kOtherStackDwords) words = kOtherStackDwords;
-            std::memcpy(g_other_stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(ctx.Esp)), words * 4);
-        }
-        ResumeThread(o.h);
-        if (!got) continue;
-        const int r = o.rounds++;
-        o.eip[r] = ctx.Eip;
-        o.nret[r] = 0;
-        for (int w = 0; w < words && o.nret[r] < kOtherRets; ++w) {
-            if (is_return_any(g_other_stack[w])) o.ret[r][o.nret[r]++] = g_other_stack[w];
-        }
+        const int r = o.rounds;
+        if (look(o.h, o.stack_base, g_other_raw[i][r], kOtherRawDwords, &o.words[r], &o.eip[r], nullptr)) ++o.rounds;
     }
 }
 
-void others_close() {
-    for (int i = 0; i < g_other_n; ++i) {
-        g_other[i].cycles1 = thread_cycles(g_other[i].h);
-        CloseHandle(g_other[i].h);
+void others_end() {
+    for (int i = 0; i < g_other_n; ++i) g_other[i].cycles1 = thread_cycles(g_other[i].h);
+}
+
+// What a thread stopped in a system call waits for, from the call's arguments on its stack (32-bit stubs: the
+// thread sits on the stub's `ret`, ESP at the return address into its caller, the arguments above).
+void describe_wait(uint32_t eip, const uint32_t* stack, int words, uint32_t esp, char* out, size_t cap) {
+    out[0] = 0;
+    static HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    static HMODULE win32u = GetModuleHandleW(L"win32u.dll");
+    static const char* const kNt[] = {"NtWaitForSingleObject", "NtWaitForMultipleObjects", "NtDelayExecution",
+                                      "NtWaitForAlertByThreadId", "NtReadFile", "NtWriteFile", "NtDeviceIoControlFile",
+                                      "NtRemoveIoCompletion", "NtWaitForKeyedEvent", "NtRequestWaitReplyPort",
+                                      "NtAlpcSendWaitReceivePort", "NtFsControlFile", "NtFlushBuffersFile",
+                                      "NtQueryDirectoryFile", "NtCreateFile", "NtOpenFile"};
+    static const char* const kWin32u[] = {"NtUserMsgWaitForMultipleObjectsEx", "NtUserPeekMessage", "NtUserGetMessage",
+                                          "NtUserGetAsyncKeyState", "NtUserGetKeyState", "NtUserSetCursorPos",
+                                          "NtUserGetRawInputData", "NtUserGetRawInputBuffer", "NtGdiDdDDIGetScanLine"};
+    const char* call = nullptr;
+    for (const char* name : kNt) {
+        const uint32_t a = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(GetProcAddress(ntdll, name)));
+        if (a && eip >= a && eip < a + 0x10) call = name;
+    }
+    for (const char* name : kWin32u) {
+        const uint32_t a = win32u ? static_cast<uint32_t>(reinterpret_cast<uintptr_t>(GetProcAddress(win32u, name))) : 0;
+        if (a && eip >= a && eip < a + 0x10) call = name;
+    }
+    if (!call) return;
+    int first = 0;  // the return address into the stub's caller; the arguments follow it
+    while (first < 4 && first < words && !is_return_any(stack[first])) ++first;
+    if (first >= 4 || first >= words) first = 0;
+    auto arg = [&](int i) -> uint32_t { return first + i < words ? stack[first + i] : 0; };
+    auto stack_word = [&](uint32_t address, int k) -> int64_t {  // a value the thread keeps on its own stack
+        if (address < esp || address >= esp + static_cast<uint32_t>(words) * 4) return INT64_MIN;
+        int64_t v = 0;
+        std::memcpy(&v, reinterpret_cast<const uint8_t*>(stack) + (address - esp), sizeof(v));
+        (void)k;
+        return v;
+    };
+    auto timeout = [&](uint32_t p) -> double {
+        if (!p) return -1.0;
+        const int64_t v = stack_word(p, 0);
+        if (v == INT64_MIN) return -2.0;
+        return v < 0 ? static_cast<double>(-v) / 10000.0 : -3.0;
+    };
+    auto type_of = [](HANDLE h, char* t, size_t tcap) {
+        std::snprintf(t, tcap, "?");
+        using NtQueryObjectFn = LONG(NTAPI*)(HANDLE, int, PVOID, ULONG, PULONG);
+        static NtQueryObjectFn q = reinterpret_cast<NtQueryObjectFn>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryObject"));
+        alignas(8) uint8_t buf[512];
+        if (!q || q(h, 2 /*ObjectTypeInformation*/, buf, sizeof(buf), nullptr) < 0) return;
+        struct UStr {
+            USHORT Length, MaximumLength;
+            PWSTR Buffer;
+        };
+        const UStr* name = reinterpret_cast<const UStr*>(buf);
+        WideCharToMultiByte(CP_UTF8, 0, name->Buffer, name->Length / 2, t, static_cast<int>(tcap) - 1, nullptr, nullptr);
+        t[(std::min)(static_cast<size_t>(name->Length / 2), tcap - 1)] = 0;
+    };
+    char t[64];
+    int n = std::snprintf(out, cap, " in %s", call);
+    if (std::strcmp(call, "NtWaitForSingleObject") == 0) {
+        type_of(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(arg(1))), t, sizeof(t));
+        std::snprintf(out + n, cap - n, " (handle %X, type %s; timeout %.1f ms)", arg(1), t, timeout(arg(3)));
+    } else if (std::strcmp(call, "NtWaitForMultipleObjects") == 0) {
+        std::snprintf(out + n, cap - n, " (%u handles; timeout %.1f ms)", arg(1), timeout(arg(5)));
+    } else if (std::strcmp(call, "NtDelayExecution") == 0) {
+        std::snprintf(out + n, cap - n, " (Sleep %.1f ms)", timeout(arg(2)));
+    } else if (std::strcmp(call, "NtWaitForAlertByThreadId") == 0) {
+        std::snprintf(out + n, cap - n, " (a lock or condition at %X; timeout %.1f ms)", arg(1), timeout(arg(2)));
+    } else if (std::strncmp(call, "NtRead", 6) == 0 || std::strncmp(call, "NtWrite", 7) == 0 ||
+               std::strcmp(call, "NtDeviceIoControlFile") == 0 || std::strcmp(call, "NtFsControlFile") == 0) {
+        type_of(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(arg(1))), t, sizeof(t));
+        std::snprintf(out + n, cap - n, " (handle %X, type %s)", arg(1), t);
     }
 }
 
@@ -1007,7 +1124,7 @@ int append_stack(char* line, int len, int cap, ModuleCache& mc, uint32_t eip, co
     return (std::min)(len, cap - 1);
 }
 
-void spike_report(int n, double ms, double cpu_ms, double since_s, double at_s, int index, bool detailed) {
+void spike_report(int n, int raw_n, double ms, double cpu_ms, double since_s, double at_s, int index, bool detailed) {
     ModuleCache mc;
     std::unordered_map<uint32_t, int> self, under;
     for (int k = 0; k < n; ++k) {
@@ -1041,12 +1158,19 @@ void spike_report(int n, double ms, double cpu_ms, double since_s, double at_s, 
         len += std::snprintf(line + len, sizeof(line) - len, " %s x%d", where, e.second);
     }
     LOG_INFO("%s", line);
-    if (!detailed || n == 0) return;
-    // The game thread's stack in order (innermost first) at the middle of the hitch.
-    const SpikeSample& mid = g_spike[n / 2];
-    len = std::snprintf(line, sizeof(line), "[spike]   game thread at the middle:");
-    append_stack(line, len, sizeof(line), mc, mid.eip, mid.ord, mid.nord);
-    LOG_INFO("%s", line);
+    if (!detailed || raw_n == 0) return;
+    // The game thread in order (innermost first): its first look, and the last kept one when it was elsewhere.
+    uint32_t ord[kOrdered];
+    for (int k = 0; k < raw_n; ++k) {
+        if (k != 0 && k != raw_n - 1) continue;
+        if (k != 0 && (g_raw_eip[k] & ~0xFFu) == (g_raw_eip[0] & ~0xFFu)) continue;
+        char wait[200];
+        describe_wait(g_raw_eip[k], g_raw[k], g_raw_words[k], g_raw_esp[k], wait, sizeof(wait));
+        const int nord = ordered_returns(g_raw[k], g_raw_words[k], ord, kOrdered);
+        len = std::snprintf(line, sizeof(line), "[spike]   game thread %.1f ms into the update%s:", g_raw_at[k], wait);
+        append_stack(line, len, sizeof(line), mc, g_raw_eip[k], ord, nord);
+        LOG_INFO("%s", line);
+    }
     // The other threads that ran during the hitch, busiest first, and the render thread.
     int order[kOtherThreads];
     int count = 0;
@@ -1056,29 +1180,21 @@ void spike_report(int n, double ms, double cpu_ms, double since_s, double at_s, 
     });
     int shown = 0;
     for (int k = 0; k < count; ++k) {
-        const OtherThread& o = g_other[order[k]];
+        const int i = order[k];
+        const OtherThread& o = g_other[i];
         const double used = 1000.0 * static_cast<double>(o.cycles1 - o.cycles0) / g_cycles_per_s;
         const bool render = o.tid == g_render_thread_id;
         if (!render && (shown >= 4 || used < 0.3)) continue;
         if (!render) ++shown;
         char start[160];
         describe_address(mc, static_cast<uint32_t>(o.start), start, sizeof(start));
-        len = std::snprintf(line, sizeof(line), "[spike]   %s %lu (starts at %s): cpu %.1f ms during the hitch, %d looks;",
-                            render ? "render thread" : "thread", o.tid, start, used, o.rounds);
-        if (o.rounds > 0) {
-            const int r = o.rounds / 2;
-            len = append_stack(line, len, sizeof(line), mc, o.eip[r], o.ret[r], o.nret[r]);
-            // Where it was at the other looks, when that differs.
-            for (int q = 0; q < o.rounds && len < static_cast<int>(sizeof(line)) - 200; ++q) {
-                if (q == r || (o.eip[q] & ~0xFFu) == (o.eip[r] & ~0xFFu)) continue;
-                char where[160];
-                describe_address(mc, o.eip[q], where, sizeof(where));
-                len += std::snprintf(line + len, sizeof(line) - len, " | look %d: %s", q, where);
-                if (o.nret[q] > 0) {
-                    describe_address(mc, o.ret[q][0], where, sizeof(where));
-                    len += std::snprintf(line + len, sizeof(line) - len, " < %s", where);
-                }
-            }
+        len = std::snprintf(line, sizeof(line), "[spike]   %s %lu (starts at %s): cpu %.1f ms during the hitch;",
+                            render ? "render thread" : "thread", o.tid, start, used);
+        for (int r = 0; r < o.rounds && len < static_cast<int>(sizeof(line)) - 300; ++r) {
+            if (r > 0 && (o.eip[r] & ~0xFFu) == (o.eip[0] & ~0xFFu)) continue;
+            const int nord = ordered_returns(g_other_raw[i][r], o.words[r], ord, r == 0 ? 12 : 4);
+            len += std::snprintf(line + len, sizeof(line) - len, "%s", r == 0 ? "" : " | later:");
+            len = append_stack(line, len, sizeof(line), mc, o.eip[r], ord, nord);
         }
         LOG_INFO("%s", line);
     }
@@ -1087,8 +1203,9 @@ void spike_report(int n, double ms, double cpu_ms, double since_s, double at_s, 
 DWORD WINAPI spike_thread(void*) {
     HANDLE h = nullptr;
     uintptr_t stack_base = 0;
-    LONGLONG sampling = 0, next_other = 0;
-    int n = 0, reports = 0, detailed = 0;
+    LONGLONG sampling = 0, others_next = 0, maintain_next = 0;
+    int n = 0, raw_n = 0, reports = 0, detailed = 0;
+    bool others = false;
     uint64_t cycles0 = 0;
     LONGLONG last_spike = 0;
     const LONGLONG t_begin = qpc();
@@ -1103,8 +1220,7 @@ DWORD WINAPI spike_thread(void*) {
             stack_base = thread_stack_base(h);
             if (!stack_base) return 0;
             LOG_INFO("[spike] watching the game thread: a game update over %.0f ms (or 3x the average) is sampled "
-                     "every millisecond while it runs, and the game's other threads every 3 ms",
-                     kSpikeMinMs);
+                     "every millisecond while it runs, the game's other threads twice", kSpikeMinMs);
         }
         const LONGLONG start = g_update_start;
         const LONGLONG now = qpc();
@@ -1113,53 +1229,61 @@ DWORD WINAPI spike_thread(void*) {
             const double ms = g_last_start == sampling ? g_last_ms : ms_of(now - sampling);
             const double cpu_ms = 1000.0 * static_cast<double>(thread_cycles(h) - cycles0) / g_cycles_per_s;
             const double since = last_spike ? static_cast<double>(sampling - last_spike) / g_freq.QuadPart : 0.0;
-            others_close();
-            const bool detail = g_other_n > 0 && ms < kDetailMaxMs && detailed < kSpikeDetailed;
+            if (others) others_end();
+            const bool detail = others && ms < kDetailMaxMs;
             if (detail) ++detailed;
-            spike_report(n, ms, cpu_ms, since, static_cast<double>(sampling - t_begin) / g_freq.QuadPart, ++reports,
-                         detail);
-            g_other_n = 0;
+            spike_report(n, raw_n, ms, cpu_ms, since, static_cast<double>(sampling - t_begin) / g_freq.QuadPart,
+                         ++reports, detail);
             last_spike = sampling;
             sampling = 0;
-            n = 0;
+            n = raw_n = 0;
+            others = false;
+            maintain_next = 0;
         }
-        if (!start) continue;
+        if (!start) {
+            if (now >= maintain_next) {  // between hitches: keep the lists ready
+                refresh_modules();
+                threads_refresh(g_game_thread_id);
+                maintain_next = now + g_freq.QuadPart * 2;
+            }
+            continue;
+        }
         const double threshold = (std::max)(kSpikeMinMs, 3.0 * g_update_avg);
         if (ms_of(now - start) < threshold) continue;
         if (!sampling) {
             sampling = start;
-            n = 0;
+            n = raw_n = 0;
             cycles0 = thread_cycles(h);
-            refresh_modules();  // ~0.2 ms
-            if (detailed < kSpikeDetailed) others_open(g_game_thread_id);  // ~0.3 ms
-            next_other = 0;
+            others = detailed < kSpikeDetailed && g_other_n > 0;
+            if (others) others_begin();
+            others_next = 0;
         }
-        if (g_other_n > 0 && qpc() >= next_other) {
-            others_sample();  // ~0.2 ms
-            next_other = qpc() + g_freq.QuadPart * 3 / 1000;
+        if (n < kSpikeSamples) {
+            SpikeSample& s = g_spike[n];
+            uint32_t eip = 0, esp = 0;
+            int words = 0;
+            uint32_t* buf = raw_n < kRawSamples ? g_raw[raw_n] : g_spike_stack;
+            const int cap = raw_n < kRawSamples ? kRawDwords : kStackDwords;
+            if (look(h, stack_base, buf, cap, &words, &eip, &esp)) {
+                ++n;
+                s.eip = eip;
+                s.nret = 0;
+                for (int w = 0; w < words && s.nret < kMaxRets; ++w) {
+                    const uint32_t v = buf[w];
+                    if (is_game_return(v) || is_return_into(v, g_own_lo, g_own_hi)) s.ret[s.nret++] = v;
+                }
+                if (raw_n < kRawSamples) {
+                    g_raw_words[raw_n] = words;
+                    g_raw_eip[raw_n] = eip;
+                    g_raw_esp[raw_n] = esp;
+                    g_raw_at[raw_n] = ms_of(qpc() - start);
+                    ++raw_n;
+                }
+            }
         }
-        if (n >= kSpikeSamples) continue;
-        // Between Suspend and Resume nothing may allocate, log or fault (see capture()).
-        CONTEXT ctx{};
-        ctx.ContextFlags = CONTEXT_CONTROL;
-        int words = 0;
-        if (SuspendThread(h) == static_cast<DWORD>(-1)) continue;
-        const bool got = GetThreadContext(h, &ctx) != 0;
-        if (got && ctx.Esp && ctx.Esp < stack_base && stack_base - ctx.Esp < 0x1000000) {
-            words = static_cast<int>((stack_base - ctx.Esp) / 4);
-            if (words > kStackDwords) words = kStackDwords;
-            std::memcpy(g_spike_stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(ctx.Esp)), words * 4);
-        }
-        ResumeThread(h);
-        if (!got) continue;
-        SpikeSample& s = g_spike[n++];
-        s.eip = ctx.Eip;
-        s.nret = 0;
-        s.nord = 0;
-        for (int w = 0; w < words && (s.nret < kMaxRets || s.nord < kOrdered); ++w) {
-            const uint32_t v = g_spike_stack[w];
-            if (s.nret < kMaxRets && (is_game_return(v) || is_return_into(v, g_own_lo, g_own_hi))) s.ret[s.nret++] = v;
-            if (s.nord < kOrdered && is_return_any(v)) s.ord[s.nord++] = v;
+        if (others && qpc() >= others_next) {
+            others_look();
+            others_next = qpc() + g_freq.QuadPart * 5 / 1000;
         }
     }
 }
