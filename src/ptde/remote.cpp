@@ -1072,6 +1072,8 @@ void run_game(const std::vector<std::string>& t) {
     }
 }
 
+std::vector<uintptr_t> g_chrs_found;  // the "chrs" command's characters
+
 void run(const std::string& line) {
     std::vector<std::string> t;
     size_t i = 0;
@@ -1160,6 +1162,69 @@ void run(const std::string& line) {
             a = hi;
         }
         out("findptr %08X: %d places", v, hits);
+    } else if (c == "chrs") {
+        // Characters by class (PlayerIns, ReplayGhostIns), found once by their vtable and kept: position, the class
+        // of the manipulator the character holds (the first pointer in its first 0x200 bytes to an object with a
+        // manipulator vtable) and its chr type word at +0x70. "chrs scan" searches again.
+        std::vector<uintptr_t>& found = g_chrs_found;
+        struct Known {
+            uint32_t vt;
+            const char* name;
+        };
+        static const Known kChr[] = {{0x0118A5D4, "PlayerIns"}, {0x0118A974, "ReplayGhostIns"}};
+        static const Known kMan[] = {{0x0118DDEC, "NetworkManipulator"}, {0x0118E324, "ReplayManipulator"},
+                                     {0x0118E23C, "PadManipulator"},     {0x0118DCCC, "NetAIManipulator"},
+                                     {0x0118DB64, "ComManipulator"},     {0x0118D9EC, "ChrManipulator"}};
+        if (found.empty() || (t.size() > 1 && t[1] == "scan")) {
+            found.clear();
+            MEMORY_BASIC_INFORMATION mbi{};
+            uintptr_t a = 0x10000;
+            while (a < 0x7FFF0000 && VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof(mbi)) && found.size() < 64) {
+                const uintptr_t lo = reinterpret_cast<uintptr_t>(mbi.BaseAddress), hi = lo + mbi.RegionSize;
+                const bool rw = mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                                (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY));
+                if (rw && lo >= 0x01400000) {
+                    for (uintptr_t q = lo; q + 4 <= hi && found.size() < 64; q += 16) {
+                        uint32_t w = 0;
+                        if (!safe_read_any(q, &w, 4)) break;
+                        for (const Known& k : kChr) {
+                            if (w == k.vt) found.push_back(q);
+                        }
+                    }
+                }
+                a = hi;
+            }
+        }
+        for (uintptr_t chr : found) {
+            uint32_t vt = 0, ctrl = 0, phys = 0;
+            float p[3] = {};
+            if (!safe_read_any(chr, &vt, 4)) continue;
+            const char* cls = "?";
+            for (const Known& k : kChr) {
+                if (vt == k.vt) cls = k.name;
+            }
+            if (*cls == '?') continue;  // freed or reused
+            safe_read_any(chr + 0x28, &ctrl, 4);
+            if (ctrl) safe_read_any(ctrl + 0x1C, &phys, 4);
+            if (phys) safe_read_any(phys + 0x10, p, 12);
+            const char* man = "-";
+            uint32_t man_at = 0;
+            for (uint32_t off = 4; off < 0x200 && *man == '-'; off += 4) {
+                uint32_t ptr = 0, pvt = 0;
+                if (!safe_read_any(chr + off, &ptr, 4) || ptr < 0x10000 || !safe_read_any(ptr, &pvt, 4)) continue;
+                for (const Known& k : kMan) {
+                    if (pvt == k.vt) {
+                        man = k.name;
+                        man_at = off;
+                    }
+                }
+            }
+            int type = 0;
+            safe_read_any(chr + 0x70, &type, 4);
+            out("  chr %08X %s pos %.2f %.2f %.2f type %d man %s (+0x%X)", static_cast<unsigned>(chr), cls, p[0], p[1],
+                p[2], type, man, man_at);
+        }
+        out("chrs: %u", static_cast<unsigned>(found.size()));
     } else if (c == "peek" && t.size() > 1) {
         const uintptr_t a = std::strtoul(t[1].c_str(), nullptr, 16);
         const int n = static_cast<int>(num(2, 16));
