@@ -8,6 +8,7 @@
 #include <d3d9.h>
 #include <intrin.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -345,6 +346,76 @@ HRESULT WINAPI hook_end_block(IDirect3DDevice9* device, IDirect3DStateBlock9** o
     return hr;
 }
 
+bool write_pointer(void** where, void* value) {
+    DWORD old = 0;
+    if (!VirtualProtect(where, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+        return false;
+    }
+    *where = value;
+    DWORD ignored = 0;
+    VirtualProtect(where, sizeof(void*), old, &ignored);
+    return true;
+}
+
+// Windows' d3d9 gives each device its own copy of the method table, inside the device object, and rewrites it:
+// BeginStateBlock copies the class's table over it (from a pointer the device keeps) and EndStateBlock puts back
+// per-device "fast path" methods it also keeps in the device object, SetSamplerState among them. A hook in the copy
+// alone was gone after the first state block was recorded (the game's DSfix records some when the game loads). So
+// the class table the device points to and every other copy of the original SetSamplerState in the device object
+// are hooked too; the offsets are found by searching the object, not assumed. Returns how many were hooked.
+int hook_table_sources(IDirect3DDevice9* device, void** live) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(device, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) {
+        return 0;
+    }
+    auto* p = reinterpret_cast<void**>(device);
+    const uintptr_t region_end = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+    const size_t words = std::min<size_t>(0x6000 / sizeof(void*),
+                                          (region_end - reinterpret_cast<uintptr_t>(device)) / sizeof(void*));
+    void* const set = reinterpret_cast<void*>(g_set_sampler);
+    void* const begin = reinterpret_cast<void*>(g_begin_block);
+    void* const end = reinterpret_cast<void*>(g_end_block);
+    int hooked = 0;
+    for (size_t i = 0; i < words; ++i) {
+        void** slot = p + i;
+        if (slot >= live && slot < live + 119) {
+            continue;  // the live table, hooked already
+        }
+        if (*slot == set) {
+            // A per-device copy of the method (the fast path EndStateBlock puts back).
+            if (write_pointer(slot, reinterpret_cast<void*>(&hook_set_sampler))) {
+                ++hooked;
+                LOG_INFO("FilterSamplerStates: device+0x%X holds SetSamplerState too: hooked",
+                         static_cast<unsigned>(i * sizeof(void*)));
+            }
+            continue;
+        }
+        // A pointer to a whole table with the original methods: the class table BeginStateBlock copies.
+        void** t = reinterpret_cast<void**>(*slot);
+        if (!t || t == live) continue;
+        MEMORY_BASIC_INFORMATION tm{};
+        if (!VirtualQuery(t, &tm, sizeof(tm)) || tm.State != MEM_COMMIT ||
+            reinterpret_cast<uintptr_t>(tm.BaseAddress) + tm.RegionSize < reinterpret_cast<uintptr_t>(t + 119) ||
+            (tm.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+            continue;
+        }
+        if (t[kSetSamplerSlot] == set && t[kBeginBlockSlot] == begin && t[kEndBlockSlot] == end) {
+            const bool ok = write_pointer(&t[kBeginBlockSlot], reinterpret_cast<void*>(&hook_begin_block)) &&
+                            write_pointer(&t[kEndBlockSlot], reinterpret_cast<void*>(&hook_end_block)) &&
+                            write_pointer(&t[kSetSamplerSlot], reinterpret_cast<void*>(&hook_set_sampler));
+            if (ok) {
+                ++hooked;
+                char where[160];
+                describe(t, where, sizeof(where));
+                LOG_INFO("FilterSamplerStates: device+0x%X points to a method table (%s) the device copies from: "
+                         "hooked",
+                         static_cast<unsigned>(i * sizeof(void*)), where);
+            }
+        }
+    }
+    return hooked;
+}
+
 // The device that does the work: a resource's GetDevice answers with it even when DSfix (or another wrapper)
 // hands the game its own device object.
 IDirect3DDevice9* real_device(IDirect3DDevice9* game_device) {
@@ -393,12 +464,13 @@ bool install_filter(IDirect3DDevice9* game_device) {
     if (set && !g_set_sampler) g_set_sampler = reinterpret_cast<SetSamplerFn>(set);
     g_filter_device = real;
     g_filter_table = *reinterpret_cast<void***>(real);
+    const int sources = hook_table_sources(real, g_filter_table);
     char table[160], fn[160];
     describe(g_filter_table, table, sizeof(table));
     describe(reinterpret_cast<const void*>(g_set_sampler), fn, sizeof(fn));
     LOG_INFO("FilterSamplerStates: sampler states that repeat the value in place skip Direct3D (device %p%s; method "
-             "table %s, SetSamplerState %s)",
-             real, real == game_device ? ", under the wrapper the game holds" : "", table, fn);
+             "table %s, SetSamplerState %s; %d of the device's own copies of these methods hooked as well)",
+             real, real == game_device ? ", under the wrapper the game holds" : "", table, fn, sources);
     real->Release();
     return g_set_sampler != nullptr;
 }
