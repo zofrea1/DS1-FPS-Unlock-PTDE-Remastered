@@ -200,6 +200,25 @@ void gamma_hook_device(IDirect3DDevice9* game_device, int mode, bool dxvk) {
              dxvk ? "DXVK" : "the system Direct3D 9", state.text);
 }
 
+void gamma_frame() {
+    static ULONGLONG next = 0;
+    static bool seen = false;
+    if (seen) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now < next) return;
+    next = now + 1000;
+    if (!GetModuleHandleW(L"nvAIHDR.dll")) return;
+    seen = true;
+    if (g_dxvk) {
+        LOG_INFO("NVIDIA RTX HDR (nvAIHDR.dll) is filtering the game's picture: it applies to Dark Souls only when it "
+                 "runs on DXVK, so shadows, highlights and colors look different from Direct3D 9. For the same picture "
+                 "as Direct3D 9, turn RTX HDR off for this game in the NVIDIA app (Graphics > Dark Souls: Prepare to "
+                 "Die Edition > RTX HDR), or tune it there (Middle grey, Contrast, Saturation).");
+    } else {
+        LOG_INFO("NVIDIA RTX HDR (nvAIHDR.dll) has loaded into the game on the system Direct3D 9.");
+    }
+}
+
 void gamma_after_reset(IDirect3DDevice9* game_device) {
     if (!game_device) return;
     D3DPRESENT_PARAMETERS pp{};

@@ -13,6 +13,7 @@
 #include "log.h"
 #include "present.h"
 #include "d3dperf.h"
+#include "gamma.h"
 #include "profile.h"
 #include "script.h"
 #include "sfx.h"
@@ -263,6 +264,7 @@ int __fastcall hook_getcmd(void* self, void* edx) {
             QueryPerformanceCounter(&stamp);
             g.t_cmd2 = stamp.QuadPart;
             d3dperf_frame();
+            gamma_frame();
         }
     } else if (cmd == 4 && g.t_cmd2 != 0) {
         LARGE_INTEGER stamp{};

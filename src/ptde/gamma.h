@@ -19,3 +19,8 @@ enum GammaRampMode {
 void gamma_hook_device(IDirect3DDevice9* game_device, int mode, bool dxvk);
 // After a successful Reset: logs the colour mode of the game's display (it can change with fullscreen).
 void gamma_after_reset(IDirect3DDevice9* game_device);
+// Once a frame (render thread): notices NVIDIA RTX HDR (nvAIHDR.dll) joining the process and says so once. The NVIDIA
+// app's RTX HDR applies to the game only when it runs on Vulkan (DXVK), never to the system Direct3D 9, so with it on
+// the two look very different under Windows HDR (crushed shadows, highlights pushed to the display's peak, other
+// colours); the frames themselves are identical (tools/test_rendermath/hdrprobe, renamed DARKSOULS.exe, reproduces it).
+void gamma_frame();
