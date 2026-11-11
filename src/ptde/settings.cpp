@@ -226,6 +226,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.skip_present_repeat = parse_bool(val);
         } else if (key == "dxvk") {
             s.dxvk = parse_bool(val);
+        } else if (key == "dxvkexclusivefullscreen") {
+            s.dxvk_exclusive_fullscreen = parse_bool(val);
         } else if (key == "gammaramp") {
             const std::string v = lower(trim(val));
             s.gamma_ramp = v == "auto" || v.empty() ? 0 : parse_bool(v) ? 1 : 2;

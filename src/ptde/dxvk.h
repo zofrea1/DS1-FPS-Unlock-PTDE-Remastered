@@ -20,7 +20,13 @@
 //
 // Call once, on the game's Direct3DCreate9 call, before forwarding it. Returns true when
 // Direct3D 9 now goes to DXVK. Logs why not otherwise.
-bool dxvk_route(const wchar_t* dxvk_path);
+//
+// exclusive_fullscreen (INI DxvkExclusiveFullscreen): DXVK's dxvk.allowFse, passed in
+// DXVK_CONFIG before DXVK loads. Without it, Windows never gives the Vulkan swap chain
+// exclusive fullscreen and G-SYNC / variable refresh stays off (DXVK's dxvk.conf: "Certain
+// features, such as variable refresh rate or HDR, will not work without this setting").
+// A DXVK_CONFIG the player set that already names the option is left as it is.
+bool dxvk_route(const wchar_t* dxvk_path, bool exclusive_fullscreen);
 
 // DXVK's 32-bit d3d9.dll, renamed, in the folder of this DLL.
 inline constexpr wchar_t kDxvkFileName[] = L"dxvk_d3d9.dll";

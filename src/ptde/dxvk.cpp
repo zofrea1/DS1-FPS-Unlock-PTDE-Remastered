@@ -240,9 +240,27 @@ bool write_code(uint8_t* at, const uint8_t* bytes, size_t n) {
     return true;
 }
 
+// Adds "key = value" to DXVK_CONFIG (options separated by ';', read when DXVK creates its first object). DXVK reads
+// the variable with GetEnvironmentVariableW, so setting it in the process before DXVK loads is enough.
+void add_dxvk_option(const char* key, const char* value) {
+    char current[2048] = {};
+    const DWORD n = GetEnvironmentVariableA("DXVK_CONFIG", current, sizeof(current));
+    if (n >= sizeof(current)) {
+        LOG_INFO("DXVK: DXVK_CONFIG is too long to add %s to; left as it is", key);
+        return;
+    }
+    if (std::strstr(current, key)) {
+        LOG_INFO("DXVK: DXVK_CONFIG already sets %s (\"%s\"); left as it is", key, current);
+        return;
+    }
+    char next[2304];
+    std::snprintf(next, sizeof(next), "%s%s%s = %s", current, current[0] ? "; " : "", key, value);
+    SetEnvironmentVariableA("DXVK_CONFIG", next);
+}
+
 }  // namespace
 
-bool dxvk_route(const wchar_t* dxvk_path) {
+bool dxvk_route(const wchar_t* dxvk_path, bool exclusive_fullscreen) {
     char dxvk_name[MAX_PATH];
     narrow(dxvk_path, dxvk_name);
     if (GetFileAttributesW(dxvk_path) == INVALID_FILE_ATTRIBUTES) {
@@ -300,6 +318,9 @@ bool dxvk_route(const wchar_t* dxvk_path) {
     }
     FreeLibrary(vulkan);
 
+    if (exclusive_fullscreen) {
+        add_dxvk_option("dxvk.allowFse", "True");
+    }
     HMODULE dxvk = LoadLibraryW(dxvk_path);
     if (!dxvk) {
         LOG_ERROR("DXVK: could not load %s (Win32 error %lu). Running on the system Direct3D 9.", dxvk_name,
@@ -359,5 +380,7 @@ bool dxvk_route(const wchar_t* dxvk_path) {
     }
     LOG_INFO("DXVK: Direct3D 9 runs on Vulkan through %s on \"%s\" (system Direct3DCreate9 %s, now leads to DXVK)",
              dxvk_name, id.Description, entry_state);
+    LOG_INFO("DXVK: exclusive fullscreen %s (DxvkExclusiveFullscreen; G-SYNC / variable refresh needs it)",
+             exclusive_fullscreen ? "allowed" : "not allowed");
     return true;
 }
