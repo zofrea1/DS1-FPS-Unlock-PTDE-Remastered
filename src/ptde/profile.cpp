@@ -373,7 +373,7 @@ void report() {
     g_game_cycles_prev = gc;
     g_render_cycles_prev = rc;
 
-    char line[1400];
+    char line[2048];
     int n = std::snprintf(line, sizeof(line), "[perf] %.1fs: %.1f fps", window, frames / window);
     if (frame.count) n += std::snprintf(line + n, sizeof(line) - n, " (frame avg %.2f max %.1f ms)", frame.sum / frame.count, frame.max);
     if (game.count)
@@ -425,6 +425,11 @@ void report() {
             if (sync_count) n += std::snprintf(line + n, sizeof(line) - n, " (%.1f without discard/nooverwrite)",
                                                (now_s.extra - prev.extra) / f);
         };
+        // Resources created while the game runs (DXVK showed ~9% of the render thread under the draw plan's render
+        // target creation, 0x590920 from HGSurfaceEntity 0xBAD310).
+        n += std::snprintf(line + n, sizeof(line) - n,
+                           " | creates/frame: rt %.2f ds %.2f tex %.2f vb %.2f ib %.2f offscreen %.2f", per(28), per(29),
+                           per(23) + per(24) + per(25), per(26), per(27), per(36));
         n += std::snprintf(line + n, sizeof(line) - n, " | waits:");
         lock_part("vb-lock", vb, g_prev_vb, true);
         lock_part("ib-lock", ib, g_prev_ib, true);
