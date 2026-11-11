@@ -832,7 +832,7 @@ constexpr int kSpikeReports = 400;     // per session
 #endif
 constexpr int kSpikeDetailed = SPIKE_DETAILED;  // reports with the other threads (hitches under kDetailMaxMs)
 constexpr double kDetailMaxMs = 150.0;
-constexpr int kOrdered = 16;           // return addresses into any module, in stack order (innermost first)
+constexpr int kOrdered = 40;           // return addresses into any module, in stack order (innermost first)
 constexpr int kRawSamples = 6;         // game-thread looks kept whole (stack in order, wait arguments)
 constexpr int kRawDwords = 1536;       // 6 KB of stack each
 constexpr int kOtherThreads = 96;
