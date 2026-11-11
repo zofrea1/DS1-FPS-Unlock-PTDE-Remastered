@@ -16,12 +16,15 @@ struct IDirect3DDevice9;
 //    reaching Direct3D. The filter sits on the Direct3D device itself (below DSfix when DSfix wraps it), so every
 //    caller's changes pass through it; state blocks, a device reset and another thread clear what it knows.
 void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filter);
+// Once a frame on the render thread: the filter follows the device's method table if it changes.
+void d3dperf_frame();
 // Before IDirect3DDevice9::Reset: drops the readback copies and everything the filter knows.
 void d3dperf_reset();
 
 // For the profiler: sampler state calls answered by the filter, and readback copies that were not ready (the lock
 // waited after all), since the start.
 unsigned long d3dperf_filtered_samplers();
+unsigned long d3dperf_seen_samplers();
 unsigned long d3dperf_readback_async();
 unsigned long d3dperf_readback_waits();
 // Why the filter started over: the setting thread changed, a state block was applied; and calls recorded into a

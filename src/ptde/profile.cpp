@@ -433,7 +433,8 @@ void report() {
         lock_part("rt-readback", rtdata, g_prev_rtdata, false);
         {
             static unsigned long prev_async = 0, prev_waits = 0, prev_filtered = 0;
-            static unsigned long prev_switches = 0, prev_applies = 0, prev_recorded = 0;
+            static unsigned long prev_switches = 0, prev_applies = 0, prev_recorded = 0, prev_seen = 0;
+            const unsigned long seen = d3dperf_seen_samplers();
             const unsigned long a = d3dperf_readback_async(), w = d3dperf_readback_waits(),
                                 fs = d3dperf_filtered_samplers();
             unsigned long sw = 0, ap = 0, rec = 0;
@@ -442,10 +443,11 @@ void report() {
                 n += std::snprintf(line + n, sizeof(line) - n, " (async %.1f/frame, %.1f not ready)",
                                    (a - prev_async) / f, (w - prev_waits) / f);
             n += std::snprintf(line + n, sizeof(line) - n,
-                               " | ss filtered %.0f/frame (restarts: %.1f thread changes, %.1f state blocks applied "
-                               "a frame; %.0f recorded)",
-                               (fs - prev_filtered) / f, (sw - prev_switches) / f, (ap - prev_applies) / f,
-                               (rec - prev_recorded) / f);
+                               " | ss reaching the filter %.0f/frame, filtered %.0f/frame (restarts: %.1f thread "
+                               "changes, %.1f state blocks applied a frame; %.0f recorded)",
+                               (seen - prev_seen) / f, (fs - prev_filtered) / f, (sw - prev_switches) / f,
+                               (ap - prev_applies) / f, (rec - prev_recorded) / f);
+            prev_seen = seen;
             prev_async = a;
             prev_waits = w;
             prev_filtered = fs;

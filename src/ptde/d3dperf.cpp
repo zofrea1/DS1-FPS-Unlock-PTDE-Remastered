@@ -9,6 +9,7 @@
 #include <intrin.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #pragma intrinsic(_ReturnAddress)
@@ -235,6 +236,29 @@ volatile LONG g_switches = 0;  // the setting thread changed (the cache starts o
 volatile LONG g_applies = 0;   // state blocks applied (the cache starts over)
 volatile LONG g_recorded = 0;  // calls recorded into a state block (passed through)
 int g_switches_logged = 0;
+volatile LONG g_seen = 0;  // calls that reached the filter
+
+// The device the filter sits on, its method table when hooked and the original functions there. In the game the
+// device's table pointer was seen to change (the filter answered calls on the title screen and none once the game
+// loaded): the table is checked every frame and a new one hooked when it still holds the original functions.
+IDirect3DDevice9* g_filter_device = nullptr;
+void** g_filter_table = nullptr;
+int g_table_changes_logged = 0;
+
+void describe(const void* address, char* out, size_t size) {
+    HMODULE module = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(address), &module) &&
+        module) {
+        char path[MAX_PATH] = {};
+        GetModuleFileNameA(module, path, MAX_PATH);
+        const char* name = std::strrchr(path, '\\');
+        std::snprintf(out, size, "%s+0x%X", name ? name + 1 : path,
+                      static_cast<unsigned>(reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(module)));
+    } else {
+        std::snprintf(out, size, "%p, not in a module", address);
+    }
+}
 
 void forget_samplers() {
     for (auto& bits : g_known) {
@@ -253,6 +277,7 @@ int sampler_index(DWORD sampler) {
 }
 
 HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMPLERSTATETYPE type, DWORD value) {
+    g_seen = g_seen + 1;
     const int index = sampler_index(sampler);
     const DWORD self = GetCurrentThreadId();
     if (self != g_owner) {
@@ -273,7 +298,7 @@ HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMP
     }
     const uint32_t bit = 1u << type;
     if ((g_known[index] & bit) && g_value[index][type] == value) {
-        InterlockedIncrement(&g_filtered);
+        g_filtered = g_filtered + 1;
         return D3D_OK;
     }
     const HRESULT hr = g_set_sampler(device, sampler, type, value);
@@ -366,8 +391,14 @@ bool install_filter(IDirect3DDevice9* game_device) {
     }
     void* set = patch_slot(real, kSetSamplerSlot, reinterpret_cast<void*>(&hook_set_sampler));
     if (set && !g_set_sampler) g_set_sampler = reinterpret_cast<SetSamplerFn>(set);
-    LOG_INFO("FilterSamplerStates: sampler states that repeat the value in place skip Direct3D (device %p%s)", real,
-             real == game_device ? "" : ", under the wrapper the game holds");
+    g_filter_device = real;
+    g_filter_table = *reinterpret_cast<void***>(real);
+    char table[160], fn[160];
+    describe(g_filter_table, table, sizeof(table));
+    describe(reinterpret_cast<const void*>(g_set_sampler), fn, sizeof(fn));
+    LOG_INFO("FilterSamplerStates: sampler states that repeat the value in place skip Direct3D (device %p%s; method "
+             "table %s, SetSamplerState %s)",
+             real, real == game_device ? ", under the wrapper the game holds" : "", table, fn);
     real->Release();
     return g_set_sampler != nullptr;
 }
@@ -393,6 +424,38 @@ void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filt
     }
 }
 
+void d3dperf_frame() {
+    if (!g_filter_device || !g_set_sampler) {
+        return;
+    }
+    void** table = *reinterpret_cast<void***>(g_filter_device);
+    if (table == g_filter_table && table[kSetSamplerSlot] == reinterpret_cast<void*>(&hook_set_sampler)) {
+        return;
+    }
+    forget_samplers();
+    const bool pristine = table[kSetSamplerSlot] == reinterpret_cast<void*>(g_set_sampler) &&
+                          (table[kBeginBlockSlot] == reinterpret_cast<void*>(g_begin_block) ||
+                           table[kBeginBlockSlot] == reinterpret_cast<void*>(&hook_begin_block)) &&
+                          (table[kEndBlockSlot] == reinterpret_cast<void*>(g_end_block) ||
+                           table[kEndBlockSlot] == reinterpret_cast<void*>(&hook_end_block));
+    if (g_table_changes_logged < 8) {
+        ++g_table_changes_logged;
+        char was[160], now[160], fn[160];
+        describe(g_filter_table, was, sizeof(was));
+        describe(table, now, sizeof(now));
+        describe(table[kSetSamplerSlot], fn, sizeof(fn));
+        LOG_INFO("FilterSamplerStates: the device's method table is now %s (was %s); its SetSamplerState is %s: %s",
+                 now, was, fn,
+                 pristine ? "hooked there too" : "another hook's, left alone (sampler states are not filtered)");
+    }
+    g_filter_table = table;
+    if (pristine) {
+        patch_slot(g_filter_device, kBeginBlockSlot, reinterpret_cast<void*>(&hook_begin_block));
+        patch_slot(g_filter_device, kEndBlockSlot, reinterpret_cast<void*>(&hook_end_block));
+        patch_slot(g_filter_device, kSetSamplerSlot, reinterpret_cast<void*>(&hook_set_sampler));
+    }
+}
+
 void d3dperf_reset() {
     AcquireSRWLockExclusive(&g_readback_lock);
     for (auto& s : g_sources) {
@@ -412,6 +475,10 @@ unsigned long d3dperf_readback_async() {
 
 unsigned long d3dperf_readback_waits() {
     return static_cast<unsigned long>(g_waits);
+}
+
+unsigned long d3dperf_seen_samplers() {
+    return static_cast<unsigned long>(g_seen);
 }
 
 void d3dperf_filter_stats(unsigned long* switches, unsigned long* applies, unsigned long* recorded) {
