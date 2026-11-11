@@ -264,6 +264,13 @@ void add_dxvk_option(const char* key, const char* value) {
 bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen) {
     char dxvk_name[MAX_PATH];
     narrow(dxvk_path, dxvk_name);
+    // Proton (Steam Deck, Linux) and Wine already run Direct3D 9 on Vulkan with their own DXVK; a second one on top
+    // gains nothing and would bypass Proton's (its fixes, gamescope's frame pacing).
+    if (GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")) {
+        LOG_INFO("DXVK: this is Proton / Wine, which already runs Direct3D 9 on Vulkan through its own DXVK; "
+                 "DXVK = true is left out here");
+        return false;
+    }
     if (GetFileAttributesW(dxvk_path) == INVALID_FILE_ATTRIBUTES) {
         LOG_ERROR("DXVK: %s was not found. Running on the system Direct3D 9.", dxvk_name);
         return false;
