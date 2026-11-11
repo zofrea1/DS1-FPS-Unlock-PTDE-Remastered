@@ -1,4 +1,4 @@
-// GammaRamp against a real device: test_gamma.exe [d3d9|DXVK_DLL_PATH] [auto|true|false] [DxvkHdrGamma]
+// GammaRamp against a real device: test_gamma.exe [d3d9|DXVK_DLL_PATH] [auto|true|false]
 // Creates a windowed device on the system Direct3D 9 or on the DXVK DLL given, hooks it, sends a darkening ramp as
 // the game would and reads back what reached the device. DXVK keeps the ramp it was given (GetGammaRamp).
 #include <windows.h>
@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
-#include <cstdlib>
 #include <d3d9.h>
 
 #include "gamma.cpp"
@@ -37,12 +36,8 @@ int main(int argc, char** argv) {
     IDirect3DDevice9* dev = nullptr;
     HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, w, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev);
     if (FAILED(hr)) { std::printf("CreateDevice %08lX\n", hr); return 2; }
-    const double hdr_gamma = argc > 3 ? std::atof(argv[3]) : 0.0;
-    gamma_hook_device(dev, mode, dxvk, hdr_gamma);
+    gamma_hook_device(dev, mode, dxvk);
     D3DGAMMARAMP ramp{}, back{}, flat{};
-    dev->GetGammaRamp(0, &back);
-    std::printf("after hooking the device holds R at 0:%u 1:%u 8:%u 32:%u 128:%u 255:%u\n", back.red[0], back.red[1],
-                back.red[8], back.red[32], back.red[128], back.red[255]);
     for (int i = 0; i < 256; ++i) {
         const WORD v = static_cast<WORD>(static_cast<int>(std::pow(i / 255.0, 1.2) * 65535.0 + 0.5) & 0xFF00);
         ramp.red[i] = ramp.green[i] = ramp.blue[i] = v;
@@ -52,9 +47,7 @@ int main(int argc, char** argv) {
     dev->GetGammaRamp(0, &back);
     const bool got_game = std::memcmp(&back, &ramp, sizeof(ramp)) == 0;
     const bool got_flat = std::memcmp(&back, &flat, sizeof(flat)) == 0;
-    std::printf("device holds %s; R at 0:%u 1:%u 8:%u 32:%u 128:%u 255:%u\n",
-                got_game ? "the game's ramp" : got_flat ? "identity" : "something else", back.red[0], back.red[1],
-                back.red[8], back.red[32], back.red[128], back.red[255]);
+    std::printf("device holds %s\n", got_game ? "the game's ramp" : got_flat ? "identity" : "something else");
     dev->Release();
     d3d->Release();
     return 0;

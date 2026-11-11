@@ -102,9 +102,6 @@ struct Settings {
     // The game's brightness gamma ramp (gamma.h): 0 auto (left out under DXVK while the display is in advanced
     // colour, as Windows does for the system Direct3D 9), 1 always passed on, 2 never.
     int gamma_ramp = 0;
-    // Under DXVK with Windows HDR on: the exponent of the plain power curve DXVK's frames are decoded with, made up for
-    // through DXVK's gamma ramp (gamma.h). 0 = off.
-    double dxvk_hdr_gamma = 2.2;
     // Render thread CPU (see d3dperf.h): the render target the game reads back every frame is copied two frames late
     // instead of waiting for the GPU, and sampler state calls that repeat the value in place skip Direct3D.
     bool async_readback = true;

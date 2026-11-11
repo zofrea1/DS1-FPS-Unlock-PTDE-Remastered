@@ -229,10 +229,6 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "gammaramp") {
             const std::string v = lower(trim(val));
             s.gamma_ramp = v == "auto" || v.empty() ? 0 : parse_bool(v) ? 1 : 2;
-        } else if (key == "dxvkhdrgamma") {
-            char* end = nullptr;
-            const double g = std::strtod(val.c_str(), &end);
-            if (end != val.c_str()) s.dxvk_hdr_gamma = g > 0.0 && g < 10.0 ? g : 0.0;
         } else if (key == "asyncreadback") {
             s.async_readback = parse_bool(val);
         } else if (key == "filtersamplerstates") {
