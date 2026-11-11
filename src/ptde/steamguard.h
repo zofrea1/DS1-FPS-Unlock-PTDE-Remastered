@@ -13,11 +13,11 @@
 //
 // Learning the rhythm and predicting it did not hold up in the game (Steam also answered slowly at other moments). So
 // instead a canary thread asks Steam the time every 10 ms, and the game's every-frame Steam calls go ahead only in the
-// 1.5 ms after a quick answer (a pause would have to start inside that sliver to catch one: about 2% of pauses) or,
-// when none came for 150 ms, whenever no canary question is stuck. SteamAPI_RunCallbacks then runs about 30 times a
-// second (Steam keeps its callbacks meanwhile), Prepare to Co-op's packets go out and are read within ~10 ms. The
-// matchmaking filter is kept here and handed to Steam just before the game's next lobby search, the one call that
-// uses it.
+// 1.5 ms after a quick answer (a pause would have to start inside that sliver to catch one), 5 ms for a call that has
+// waited 50 ms; only when Steam gave no quick answer for 500 ms do they go whenever no canary question is stuck.
+// SteamAPI_RunCallbacks then runs 20-30 times a second (Steam keeps its callbacks meanwhile). The matchmaking filter
+// is kept here and handed to Steam just before the game's next lobby search, the one call that uses it. Prepare to
+// Co-op sends and reads its packets on a thread of its own, where Steam's pause holds back packets, not frames.
 
 // From the start-up thread. hook_game_imports: put the guard on the game's own SteamAPI_RunCallbacks and
 // SteamMatchmaking imports (the FPS Unlock on its own; Prepare to Co-op hooks those imports itself and calls the

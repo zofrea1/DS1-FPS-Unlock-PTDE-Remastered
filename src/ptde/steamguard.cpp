@@ -13,13 +13,16 @@ namespace {
 
 constexpr double kCanaryEveryMs = 10.0;  // the canary asks Steam this often
 constexpr double kGoWindowMs = 1.5;      // every-frame calls go ahead this long after a quick answer
-constexpr double kStarveMs = 150.0;      // ... or this long after their last call, when no question is stuck
+constexpr double kWaitedMs = 50.0;       // a call that has waited this long gets a wider window ...
+constexpr double kWideWindowMs = 5.0;    // ... (a whole frame at 200 FPS, still before the next question)
+constexpr double kNoQuickMs = 500.0;     // no quick answer this long (Steam slow everywhere, or the canary gone):
+constexpr double kStarveMs = 150.0;      // calls go ahead this often when no question is stuck
 constexpr double kStuckMs = 1.0;         // a canary question out this long: Steam is in a pause
 constexpr double kSlowMs = 4.0;          // for the log
 
 volatile LONG g_running = 0;
 LONGLONG g_freq = 0;
-volatile LONGLONG g_go_until = 0;
+volatile LONGLONG g_last_quick = 0;  // the end of the canary's latest quick answer
 volatile LONGLONG g_canary_start = 0;
 volatile LONG g_canary_out = 0;
 
@@ -160,7 +163,7 @@ DWORD WINAPI canary_thread(void*) {
         std::sort(sorted, sorted + m);
         const double usual = m ? sorted[m / 2] : 0.1;
         recent[n++ % 32] = ms;
-        if (u && ms <= (std::max)(kStuckMs, 3.0 * usual)) g_go_until = t1 + ticks_of_ms(kGoWindowMs);
+        if (u && ms <= (std::max)(kStuckMs, 3.0 * usual)) g_last_quick = t1;
         if (ms >= kSlowMs) {
             ++slow;
             worst = ms > worst ? ms : worst;
@@ -169,10 +172,10 @@ DWORD WINAPI canary_thread(void*) {
         if (t1 >= next_stats) {
             next_stats = t1 + g_freq * 60;
             LOG_INFO("SteamPauseGuard: last minute: Steam answered the canary slowly %d times (longest %.1f ms, usual "
-                     "%.3f ms); every-frame Steam calls: %ld in quick windows, %ld after waiting %.0f ms, %ld held "
-                     "back; %ld slow Steam answers to calls made elsewhere",
+                     "%.3f ms); every-frame Steam calls: %ld right after a quick answer, %ld with none for %.0f ms, "
+                     "%ld held back; %ld slow Steam answers to calls made elsewhere",
                      slow, worst, usual, InterlockedExchange(&g_calls_go, 0), InterlockedExchange(&g_calls_starved, 0),
-                     kStarveMs, InterlockedExchange(&g_calls_held, 0), InterlockedExchange(&g_slow_notes, 0));
+                     kNoQuickMs, InterlockedExchange(&g_calls_held, 0), InterlockedExchange(&g_slow_notes, 0));
             slow = 0;
             worst = 0.0;
         }
@@ -222,10 +225,12 @@ void steamguard_start(bool enabled, bool hook_game_imports) {
 bool steamguard_frame_call(int64_t* last) {
     if (!g_running) return true;
     const LONGLONG now = now_qpc();
-    bool go = now < g_go_until;
+    const LONGLONG since_quick = now - g_last_quick;
+    const bool waited = now - *last >= ticks_of_ms(kWaitedMs);
+    bool go = since_quick >= 0 && since_quick <= ticks_of_ms(waited ? kWideWindowMs : kGoWindowMs);
     if (go) {
         InterlockedIncrement(&g_calls_go);
-    } else if (!steamguard_paused() && now - *last >= ticks_of_ms(kStarveMs)) {
+    } else if (!steamguard_paused() && since_quick >= ticks_of_ms(kNoQuickMs) && now - *last >= ticks_of_ms(kStarveMs)) {
         go = true;
         InterlockedIncrement(&g_calls_starved);
     } else {
