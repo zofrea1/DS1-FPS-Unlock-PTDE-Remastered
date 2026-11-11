@@ -9,6 +9,11 @@
 //    reading back four 4-byte stores as two 8-byte loads. A double sum, difference or product of two floats rounds to
 //    the same float as the float operation (double has more than twice float's precision), so addps/subps/mulps give
 //    the same bits; the multiply-add rounds a*b+c once from double, so it stays in double, two lanes at a time.
+//    Also the 4x4 transpose (0x423220), four-float not-equal (0x407F50: A in eax, B on the stack, al = any lane
+//    differs) and the 4x4 (0x4144D0) and 3x4-affine (0x416100) multiplies, row by row in double as the originals.
+//    Arithmetic is written in assembly to keep each original's operand order (it decides which NaN comes out when two
+//    meet); tools/test_rendermath runs the game's own code against these on random input, NaN-heavy input and
+//    in-place calls, bit for bit.
 //  effects (FastEffects): the effects library's debug-build wrappers that set (0x984890), splat (0x9847C0,
 //    0x984920 through the x87 stack) and subtract (0x984B60) four floats.
 //

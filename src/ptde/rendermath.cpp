@@ -20,29 +20,77 @@ constexpr uintptr_t kImageBase = 0x400000;
 // float's precision), so addps/subps/mulps give the same bits. The multiply-add rounds a*b+c once from double, which
 // two float operations would not reproduce, so it stays in double, two lanes at a time.
 
-// cdecl, out returned in eax; clobber only eax, ecx, edx and xmm registers like the originals.
-float* __cdecl vec4_add(float* out, const float* a, const float* b) {
-    _mm_storeu_ps(out, _mm_add_ps(_mm_loadu_ps(a), _mm_loadu_ps(b)));
-    return out;
+// cdecl, out returned in eax; clobber only eax, ecx, edx and xmm registers like the originals. Written in assembly so
+// each operation keeps the original's operand order: when both operands of an operation are NaN, the first one's NaN
+// is the result, and a compiler may swap the operands of an add or multiply intrinsic. Every original puts a first
+// (a+b, a-b, a*b) and adds the product first in a*b+c.
+__declspec(naked) float* __cdecl vec4_add(float*, const float*, const float*) {
+    __asm {
+        mov eax, [esp + 4]
+        mov ecx, [esp + 8]
+        mov edx, [esp + 12]
+        movups xmm0, [ecx]
+        movups xmm1, [edx]
+        addps xmm0, xmm1
+        movups [eax], xmm0
+        ret
+    }
 }
 
-float* __cdecl vec4_sub(float* out, const float* a, const float* b) {
-    _mm_storeu_ps(out, _mm_sub_ps(_mm_loadu_ps(a), _mm_loadu_ps(b)));
-    return out;
+__declspec(naked) float* __cdecl vec4_sub(float*, const float*, const float*) {
+    __asm {
+        mov eax, [esp + 4]
+        mov ecx, [esp + 8]
+        mov edx, [esp + 12]
+        movups xmm0, [ecx]
+        movups xmm1, [edx]
+        subps xmm0, xmm1
+        movups [eax], xmm0
+        ret
+    }
 }
 
-float* __cdecl vec4_mul(float* out, const float* a, const float* b) {
-    _mm_storeu_ps(out, _mm_mul_ps(_mm_loadu_ps(a), _mm_loadu_ps(b)));
-    return out;
+__declspec(naked) float* __cdecl vec4_mul(float*, const float*, const float*) {
+    __asm {
+        mov eax, [esp + 4]
+        mov ecx, [esp + 8]
+        mov edx, [esp + 12]
+        movups xmm0, [ecx]
+        movups xmm1, [edx]
+        mulps xmm0, xmm1
+        movups [eax], xmm0
+        ret
+    }
 }
 
-float* __cdecl vec4_madd(float* out, const float* a, const float* b, const float* c) {
-    const __m128 va = _mm_loadu_ps(a), vb = _mm_loadu_ps(b), vc = _mm_loadu_ps(c);
-    const __m128d lo = _mm_add_pd(_mm_mul_pd(_mm_cvtps_pd(va), _mm_cvtps_pd(vb)), _mm_cvtps_pd(vc));
-    const __m128d hi = _mm_add_pd(_mm_mul_pd(_mm_cvtps_pd(_mm_movehl_ps(va, va)), _mm_cvtps_pd(_mm_movehl_ps(vb, vb))),
-                                  _mm_cvtps_pd(_mm_movehl_ps(vc, vc)));
-    _mm_storeu_ps(out, _mm_movelh_ps(_mm_cvtpd_ps(lo), _mm_cvtpd_ps(hi)));
-    return out;
+__declspec(naked) float* __cdecl vec4_madd(float*, const float*, const float*, const float*) {
+    __asm {
+        mov eax, [esp + 4]
+        mov ecx, [esp + 8]
+        mov edx, [esp + 12]
+        movups xmm0, [ecx]      // a
+        movups xmm1, [edx]      // b
+        mov edx, [esp + 16]
+        movups xmm4, [edx]      // c (read before anything is written, as the original)
+        cvtps2pd xmm2, xmm0
+        cvtps2pd xmm3, xmm1
+        mulpd xmm2, xmm3        // a*b, lanes 0 1
+        movhlps xmm0, xmm0
+        movhlps xmm1, xmm1
+        cvtps2pd xmm0, xmm0
+        cvtps2pd xmm1, xmm1
+        mulpd xmm0, xmm1        // a*b, lanes 2 3
+        cvtps2pd xmm3, xmm4
+        addpd xmm2, xmm3        // product + c
+        movhlps xmm4, xmm4
+        cvtps2pd xmm4, xmm4
+        addpd xmm0, xmm4
+        cvtpd2ps xmm2, xmm2
+        cvtpd2ps xmm0, xmm0
+        movlhps xmm2, xmm0
+        movups [eax], xmm2
+        ret
+    }
 }
 
 // out (ecx) = A (eax) + B ([esp+4]), three rows of four floats; returns out in eax, keeps ecx, pops B.
@@ -64,6 +112,131 @@ __declspec(naked) void mat34_add() {
         mov eax, ecx
         ret 4
     }
+}
+
+// (eax = A, [esp+4] = B, callee pops B) -> al = 1 when any of the four lanes differs. The original compares each lane
+// as doubles (ucomisd; a NaN lane counts as different, -0 equals +0), which cmpeqps does the same way. eax ends as 0 or
+// 1 like the original's; ebx, esi and edi are kept.
+__declspec(naked) void vec4_not_equal() {
+    __asm {
+        mov edx, [esp + 4]
+        movups xmm0, [eax]
+        movups xmm1, [edx]
+        cmpeqps xmm0, xmm1
+        movmskps ecx, xmm0
+        xor eax, eax
+        cmp ecx, 15
+        setne al
+        ret 4
+    }
+}
+
+// 4x4 transpose (cdecl: out, in). The original reads and writes in this exact order (through stack temporaries it
+// reloads 8 bytes at a time, which stalls), so a call with out overlapping in gives the same result as before.
+uint32_t* __cdecl mat44_transpose(uint32_t* out, const uint32_t* in) {
+    const uint32_t a8 = in[8], a0 = in[0], a12 = in[12], a9 = in[9], a1 = in[1], a5 = in[5], a13 = in[13], a4 = in[4],
+                   a15 = in[15];
+    out[0] = a0;
+    out[1] = a4;
+    out[4] = a1;
+    out[5] = a5;
+    out[6] = a9;
+    out[7] = a13;
+    const uint32_t a14 = in[14], a10 = in[10], a6 = in[6], a2 = in[2];
+    out[8] = a2;
+    out[9] = a6;
+    out[10] = a10;
+    out[11] = a14;
+    const uint32_t a3 = in[3], a7 = in[7], a11 = in[11];
+    out[12] = a3;
+    out[13] = a7;
+    out[2] = a8;
+    out[3] = a12;
+    out[14] = a11;
+    out[15] = a15;
+    return out;
+}
+
+// One row step of the engine's matrix multiplies, as the originals do it: every lane in double, rounded to float, the
+// row stored before the next step reads it (and the next B row) back from memory. Operand order (which NaN comes out
+// when both are NaN), measured on the originals: the first step multiplies b*s in every lane, the later steps b*s in
+// lane 0 and s*b in lanes 1 to 3, and every add is product + row. cdecl (row, b row, s).
+__declspec(naked) void __cdecl row_first(float*, const float*, float) {
+    __asm {
+        mov eax, [esp + 4]
+        mov ecx, [esp + 8]
+        cvtss2sd xmm2, dword ptr [esp + 12]
+        unpcklpd xmm2, xmm2
+        movups xmm0, [ecx]
+        cvtps2pd xmm1, xmm0
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0
+        mulpd xmm1, xmm2        // b*s
+        mulpd xmm0, xmm2
+        cvtpd2ps xmm1, xmm1
+        cvtpd2ps xmm0, xmm0
+        movlhps xmm1, xmm0
+        movups [eax], xmm1
+        ret
+    }
+}
+
+__declspec(naked) void __cdecl row_madd(float*, const float*, float) {
+    __asm {
+        mov eax, [esp + 4]
+        mov ecx, [esp + 8]
+        cvtss2sd xmm2, dword ptr [esp + 12]
+        unpcklpd xmm2, xmm2     // s s
+        movups xmm0, [ecx]      // b row
+        movups xmm3, [eax]      // the row so far
+        cvtps2pd xmm1, xmm0     // b0 b1
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0     // b2 b3
+        movapd xmm4, xmm1
+        mulpd xmm4, xmm2        // b*s
+        movapd xmm5, xmm2
+        mulpd xmm5, xmm1        // s*b
+        movsd xmm5, xmm4        // lane 0 b*s, lane 1 s*b
+        movapd xmm6, xmm2
+        mulpd xmm6, xmm0        // lanes 2 3: s*b
+        cvtps2pd xmm7, xmm3
+        addpd xmm5, xmm7        // product + row
+        movhlps xmm3, xmm3
+        cvtps2pd xmm3, xmm3
+        addpd xmm6, xmm3
+        cvtpd2ps xmm5, xmm5
+        cvtpd2ps xmm6, xmm6
+        movlhps xmm5, xmm6
+        movups [eax], xmm5
+        ret
+    }
+}
+
+// out (4x4) = A (4x4) x B (4x4), cdecl (out, A, B). Each row's four factors are read before the row is written.
+float* __cdecl mat44_mul(float* out, const float* a, const float* b) {
+    for (int r = 0; r < 4; ++r) {
+        const float a0 = a[r * 4 + 0], a1 = a[r * 4 + 1], a2 = a[r * 4 + 2], a3 = a[r * 4 + 3];
+        float* o = out + r * 4;
+        row_first(o, b, a0);
+        row_madd(o, b + 4, a1);
+        row_madd(o, b + 8, a2);
+        row_madd(o, b + 12, a3);
+    }
+    return out;
+}
+
+// out (3x4) = A (3x4) x [B (3x4); the engine's constant row 0 0 0 1 at 0x10D52D0], cdecl (out, B, A).
+float* __cdecl mat34_mul(float* out, const float* b, const float* a) {
+    const float* w = reinterpret_cast<const float*>(0x10D52D0);
+    for (int r = 0; r < 3; ++r) {
+        const float a0 = a[r * 4 + 0], a1 = a[r * 4 + 1], a2 = a[r * 4 + 2], a3 = a[r * 4 + 3];
+        float* o = out + r * 4;
+        row_first(o, b, a0);
+        row_madd(o, b + 4, a1);
+        row_madd(o, b + 8, a2);
+        row_madd(o, w, a3);
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -124,6 +297,14 @@ const uint8_t kMaddHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x1
                              0xC0, 0x0F, 0x5A, 0xC9, 0xF2, 0x0F, 0x59, 0xC1, 0xF3, 0x0F, 0x10, 0x0A, 0x0F, 0x5A,
                              0xC9, 0xF2, 0x0F, 0x58, 0xC1};
 const uint8_t kMat34Head[] = {0x51, 0x56, 0x50, 0x8B, 0x44, 0x24, 0x10, 0x8B, 0xF1, 0xE8, 0x62};
+const uint8_t kTransposeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x10, 0x8B, 0x4D, 0x0C,
+                                  0x8B, 0x45, 0x08, 0xF3, 0x0F, 0x10, 0x51, 0x20, 0xF3, 0x0F, 0x10, 0x19};
+const uint8_t kNotEqualHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x51, 0x53, 0x8B, 0x5D, 0x08, 0xF3,
+                                 0x0F, 0x10, 0x03, 0x56, 0x8B, 0xF0, 0xF3, 0x0F, 0x10, 0x0E, 0x0F, 0x5A};
+const uint8_t kMat44MulHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x30, 0x8B, 0x4D, 0x10,
+                                 0x8B, 0x55, 0x0C, 0xF3, 0x0F, 0x10, 0x4A, 0x08, 0xF3, 0x0F, 0x10, 0x52};
+const uint8_t kMat34MulHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x30, 0x8B, 0x4D, 0x0C,
+                                 0x8B, 0x55, 0x10, 0xF3, 0x0F, 0x10, 0x4A, 0x08, 0xF3, 0x0F, 0x10, 0x52};
 
 // The effects library's debug prologue up to the stack fill (FastEffects changes the fill's count, not these).
 const uint8_t kFfxHead30[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B,
@@ -143,6 +324,14 @@ const Site kCoreSites[] = {
     {"four-float multiply-add", 0x553700, kMaddHead, sizeof(kMaddHead), nullptr, 0, 0,
      reinterpret_cast<const void*>(&vec4_madd)},
     {"3x4 matrix add", 0x421E70, kMat34Head, sizeof(kMat34Head), nullptr, 0, 0, reinterpret_cast<const void*>(&mat34_add)},
+    {"4x4 transpose", 0x423220, kTransposeHead, sizeof(kTransposeHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&mat44_transpose)},
+    {"four-float not-equal", 0x407F50, kNotEqualHead, sizeof(kNotEqualHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&vec4_not_equal)},
+    {"4x4 matrix multiply", 0x4144D0, kMat44MulHead, sizeof(kMat44MulHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&mat44_mul)},
+    {"3x4 matrix multiply", 0x416100, kMat34MulHead, sizeof(kMat34MulHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&mat34_mul)},
 };
 
 const Site kFfxSites[] = {
@@ -210,8 +399,9 @@ bool rendermath_install(bool core, bool effects) {
         const int n = install_table("FastRenderMath", kCoreSites, sizeof(kCoreSites) / sizeof(kCoreSites[0]));
         ok = ok && n == static_cast<int>(sizeof(kCoreSites) / sizeof(kCoreSites[0]));
         if (n) {
-            LOG_INFO("FastRenderMath: %d of the engine's vector helpers (four-float add, subtract, multiply, "
-                     "multiply-add, 3x4 matrix add) run as SSE with the same results",
+            LOG_INFO("FastRenderMath: %d of the engine's vector and matrix helpers (four-float add, subtract, multiply, "
+                     "multiply-add and not-equal, 3x4 matrix add and multiply, 4x4 multiply and transpose) run as "
+                     "SSE with the same results",
                      n);
         }
     }
