@@ -99,10 +99,10 @@ struct Settings {
     bool skip_present_repeat = false;
     // Run Direct3D 9 on Vulkan through DXVK (dxvk_d3d9.dll beside this DLL). Off by default.
     bool dxvk = false;
-    // DXVK may take exclusive fullscreen (dxvk.allowFse), which G-SYNC / variable refresh needs under DXVK (dxvk.h).
-    bool dxvk_exclusive_fullscreen = true;
-    // The game's brightness gamma ramp (gamma.h): 0 auto (left out under DXVK while the display is in advanced
-    // colour, as Windows does for the system Direct3D 9), 1 always passed on, 2 never.
+    // DXVK may take exclusive fullscreen (dxvk.allowFse), which G-SYNC / variable refresh needs under DXVK (dxvk.h):
+    // 0 auto (only while Windows HDR is off for the display), 1 always, 2 never.
+    int dxvk_exclusive_fullscreen = 0;
+    // The game's brightness gamma ramp (gamma.h): 0 auto and 1 passed on (as the system Direct3D 9 does), 2 never.
     int gamma_ramp = 0;
     // Render thread CPU (see d3dperf.h): the render target the game reads back every frame is copied two frames late
     // instead of waiting for the GPU, and sampler state calls that repeat the value in place skip Direct3D.

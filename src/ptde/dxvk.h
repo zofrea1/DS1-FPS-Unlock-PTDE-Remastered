@@ -21,12 +21,26 @@
 // Call once, on the game's Direct3DCreate9 call, before forwarding it. Returns true when
 // Direct3D 9 now goes to DXVK. Logs why not otherwise.
 //
-// exclusive_fullscreen (INI DxvkExclusiveFullscreen): DXVK's dxvk.allowFse, passed in
-// DXVK_CONFIG before DXVK loads. Without it, Windows never gives the Vulkan swap chain
-// exclusive fullscreen and G-SYNC / variable refresh stays off (DXVK's dxvk.conf: "Certain
-// features, such as variable refresh rate or HDR, will not work without this setting").
+// exclusive_fullscreen (INI DxvkExclusiveFullscreen, DxvkFse below): DXVK's dxvk.allowFse,
+// passed in DXVK_CONFIG before DXVK loads. Without it, Windows never gives the Vulkan swap
+// chain exclusive fullscreen and G-SYNC / variable refresh stays off (DXVK's dxvk.conf:
+// "Certain features, such as variable refresh rate or HDR, will not work without this
+// setting"). With it, Windows switches the display out of HDR for as long as the game holds
+// exclusive fullscreen (the Vulkan swap chain is SDR), so the monitor changes mode and the
+// picture changes. Measured on an RTX 3090 and an AW3225QF at 240 Hz, HDR on, a probe at
+// 75-150 fps (tools/test_rendermath: vrrprobe, scanmon reading the scan line):
+//   system Direct3D 9, fullscreen:        refresh follows the frames, HDR stays on
+//   DXVK, dxvk.allowFse:                  refresh follows the frames, HDR off meanwhile
+//   DXVK, no allowFse, NVIDIA Vulkan present method auto: fixed 240 Hz, HDR on
+//   DXVK, no allowFse, native or layered on DXGI: ~61 Hz whatever the frame rate, HDR on
+// So auto allows it only while Windows HDR is off for the primary display.
 // A DXVK_CONFIG the player set that already names the option is left as it is.
-bool dxvk_route(const wchar_t* dxvk_path, bool exclusive_fullscreen);
+enum DxvkFse {
+    kDxvkFseAuto = 0,
+    kDxvkFseOn = 1,
+    kDxvkFseOff = 2,
+};
+bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen);
 
 // DXVK's 32-bit d3d9.dll, renamed, in the folder of this DLL.
 inline constexpr wchar_t kDxvkFileName[] = L"dxvk_d3d9.dll";

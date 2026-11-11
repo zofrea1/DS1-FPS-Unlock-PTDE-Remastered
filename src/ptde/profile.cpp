@@ -13,6 +13,7 @@
 #include <d3d9.h>
 #include <intrin.h>
 #include <tlhelp32.h>
+#include <psapi.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -814,24 +815,71 @@ void capture() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Spike watch: a game update that runs long (a hitch) is sampled while it runs, and reported when it ends.
+// Spike watch: a game update that runs long (a hitch) is sampled while it runs, and reported when it ends. Besides the
+// game thread, every other thread of the game is looked at during the hitch (CPU used, where it was), since a game
+// thread that waits is usually waiting for one of them.
 // ---------------------------------------------------------------------------------------------------------------
 volatile LONGLONG g_update_start = 0;  // qpc at the start of the update in progress, 0 between updates
 volatile LONGLONG g_last_start = 0;    // the last finished update: its start and length
 volatile double g_last_ms = 0.0;
 volatile double g_update_avg = 1.0;    // running average of the update (ms)
+#ifndef SPIKE_DETAILED
+#define SPIKE_DETAILED 80
+#endif
 constexpr double kSpikeMinMs = 4.0;
 constexpr int kSpikeSamples = 256;
 constexpr int kSpikeReports = 400;     // per session
+constexpr int kSpikeDetailed = SPIKE_DETAILED;     // reports with the other threads (hitches under kDetailMaxMs)
+constexpr double kDetailMaxMs = 150.0;
+constexpr int kOrdered = 14;           // return addresses into any module, in stack order (innermost first)
+constexpr int kOtherThreads = 96;
+constexpr int kOtherRounds = 6;        // looks at the other threads: when the hitch is noticed, then every 3 ms
+constexpr int kOtherRets = 10;
+constexpr int kOtherStackDwords = 1024;
 uint32_t g_own_lo = 0, g_own_hi = 0;   // this DLL
 
 struct SpikeSample {
     uint32_t eip;
-    uint8_t nret;
-    uint32_t ret[kMaxRets];
+    uint8_t nret, nord;
+    uint32_t ret[kMaxRets];   // into the game or this DLL (counted)
+    uint32_t ord[kOrdered];   // into any module, innermost first
 };
 SpikeSample g_spike[kSpikeSamples];
 uint32_t g_spike_stack[kStackDwords];
+
+struct OtherThread {
+    DWORD tid;
+    HANDLE h;
+    uintptr_t start, stack_base;
+    uint64_t cycles0, cycles1;
+    int rounds;
+    uint32_t eip[kOtherRounds];
+    uint8_t nret[kOtherRounds];
+    uint32_t ret[kOtherRounds][kOtherRets];
+};
+OtherThread g_other[kOtherThreads];
+int g_other_n = 0;
+uint32_t g_other_stack[kOtherStackDwords];
+
+struct ModRange {
+    uint32_t lo, hi;
+};
+std::vector<ModRange> g_mods;  // loaded modules, sorted (spike thread only)
+
+void refresh_modules() {
+    HMODULE mods[512];
+    DWORD need = 0;
+    g_mods.clear();
+    if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &need)) return;
+    const DWORD count = (std::min)(need / static_cast<DWORD>(sizeof(HMODULE)), static_cast<DWORD>(512));
+    for (DWORD i = 0; i < count; ++i) {
+        MODULEINFO mi{};
+        if (!K32GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof(mi))) continue;
+        const uint32_t lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(mi.lpBaseOfDll));
+        g_mods.push_back({lo, lo + mi.SizeOfImage});
+    }
+    std::sort(g_mods.begin(), g_mods.end(), [](const ModRange& a, const ModRange& b) { return a.lo < b.lo; });
+}
 
 // A return address into [lo, hi): the bytes before it are a call.
 bool is_return_into(uint32_t v, uint32_t lo, uint32_t hi) {
@@ -847,7 +895,119 @@ bool is_return_into(uint32_t v, uint32_t lo, uint32_t hi) {
     return false;
 }
 
-void spike_report(int n, double ms, double cpu_ms, double since_s, double at_s, int index) {
+bool guarded_return_into(uint32_t v, uint32_t lo, uint32_t hi) {
+    __try {
+        return is_return_into(v, lo, hi);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// A return address into any loaded module (the game, Windows, drivers, overlays).
+bool is_return_any(uint32_t v) {
+    if (v >= g_text_lo && v < g_text_hi) return is_game_return(v);
+    auto it = std::upper_bound(g_mods.begin(), g_mods.end(), v,
+                               [](uint32_t a, const ModRange& r) { return a < r.lo; });
+    if (it == g_mods.begin()) return false;
+    --it;
+    if (v < it->lo + 0x1000 || v >= it->hi) return false;
+    return guarded_return_into(v, it->lo + 0x1000, it->hi);
+}
+
+uintptr_t thread_stack_base(HANDLE h) {
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_CONTROL;
+    if (SuspendThread(h) == static_cast<DWORD>(-1)) return 0;
+    const bool got = GetThreadContext(h, &ctx) != 0;
+    ResumeThread(h);
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (got && ctx.Esp &&
+        VirtualQuery(reinterpret_cast<const void*>(static_cast<uintptr_t>(ctx.Esp)), &mbi, sizeof(mbi)) &&
+        mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_READWRITE))
+        return reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+    return 0;
+}
+
+// NtGetNextThread walks this process's threads only (a Toolhelp snapshot lists every thread on the PC: ~120 ms).
+using NtGetNextThreadFn = LONG(NTAPI*)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);
+
+void others_open(DWORD game_tid) {
+    g_other_n = 0;
+    static NtGetNextThreadFn next_thread = reinterpret_cast<NtGetNextThreadFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtGetNextThread"));
+    if (!next_thread) return;
+    const DWORD self = GetCurrentThreadId();
+    HANDLE h = nullptr;
+    for (;;) {
+        HANDLE next = nullptr;
+        const LONG status = next_thread(GetCurrentProcess(), h, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
+                                        THREAD_QUERY_INFORMATION, 0, 0, &next);
+        if (h && (g_other_n == 0 || g_other[g_other_n - 1].h != h)) CloseHandle(h);
+        if (status < 0 || !next) break;
+        h = next;
+        const DWORD tid = GetThreadId(h);
+        if (tid == self || tid == game_tid || g_other_n >= kOtherThreads) continue;
+        OtherThread& o = g_other[g_other_n++];
+        o.tid = tid;
+        o.h = h;
+        o.start = 0;
+        if (auto q = nt_query_thread()) {
+            PVOID start = nullptr;
+            q(h, 9 /*ThreadQuerySetWin32StartAddress*/, &start, sizeof(start), nullptr);
+            o.start = reinterpret_cast<uintptr_t>(start);
+        }
+        o.stack_base = thread_stack_base(h);
+        o.cycles0 = thread_cycles(h);
+        o.cycles1 = o.cycles0;
+        o.rounds = 0;
+    }
+}
+
+void others_sample() {
+    for (int i = 0; i < g_other_n; ++i) {
+        OtherThread& o = g_other[i];
+        if (o.rounds >= kOtherRounds) continue;
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_CONTROL;
+        int words = 0;
+        // Between Suspend and Resume nothing may allocate, log or fault (see capture()).
+        if (SuspendThread(o.h) == static_cast<DWORD>(-1)) continue;
+        const bool got = GetThreadContext(o.h, &ctx) != 0;
+        if (got && o.stack_base && ctx.Esp && ctx.Esp < o.stack_base && o.stack_base - ctx.Esp < 0x1000000) {
+            words = static_cast<int>((o.stack_base - ctx.Esp) / 4);
+            if (words > kOtherStackDwords) words = kOtherStackDwords;
+            std::memcpy(g_other_stack, reinterpret_cast<const void*>(static_cast<uintptr_t>(ctx.Esp)), words * 4);
+        }
+        ResumeThread(o.h);
+        if (!got) continue;
+        const int r = o.rounds++;
+        o.eip[r] = ctx.Eip;
+        o.nret[r] = 0;
+        for (int w = 0; w < words && o.nret[r] < kOtherRets; ++w) {
+            if (is_return_any(g_other_stack[w])) o.ret[r][o.nret[r]++] = g_other_stack[w];
+        }
+    }
+}
+
+void others_close() {
+    for (int i = 0; i < g_other_n; ++i) {
+        g_other[i].cycles1 = thread_cycles(g_other[i].h);
+        CloseHandle(g_other[i].h);
+    }
+}
+
+int append_stack(char* line, int len, int cap, ModuleCache& mc, uint32_t eip, const uint32_t* ret, int nret) {
+    char where[160];
+    describe_address(mc, eip, where, sizeof(where));
+    len += std::snprintf(line + len, cap - len, " %s", where);
+    for (int r = 0; r < nret && len < cap - 1; ++r) {
+        describe_address(mc, ret[r], where, sizeof(where));
+        len += std::snprintf(line + len, cap - len, " < %s", where);
+    }
+    return (std::min)(len, cap - 1);
+}
+
+void spike_report(int n, double ms, double cpu_ms, double since_s, double at_s, int index, bool detailed) {
     ModuleCache mc;
     std::unordered_map<uint32_t, int> self, under;
     for (int k = 0; k < n; ++k) {
@@ -865,7 +1025,7 @@ void spike_report(int n, double ms, double cpu_ms, double since_s, double at_s, 
             }
         }
     }
-    char line[1600];
+    char line[2400];
     int len = std::snprintf(line, sizeof(line),
                             "[spike] #%d at %.2f s: game update %.1f ms (cpu %.1f ms), %.2f s after the last, %d samples | self:",
                             index, at_s, ms, cpu_ms, since_s, n);
@@ -881,13 +1041,54 @@ void spike_report(int n, double ms, double cpu_ms, double since_s, double at_s, 
         len += std::snprintf(line + len, sizeof(line) - len, " %s x%d", where, e.second);
     }
     LOG_INFO("%s", line);
+    if (!detailed || n == 0) return;
+    // The game thread's stack in order (innermost first) at the middle of the hitch.
+    const SpikeSample& mid = g_spike[n / 2];
+    len = std::snprintf(line, sizeof(line), "[spike]   game thread at the middle:");
+    append_stack(line, len, sizeof(line), mc, mid.eip, mid.ord, mid.nord);
+    LOG_INFO("%s", line);
+    // The other threads that ran during the hitch, busiest first, and the render thread.
+    int order[kOtherThreads];
+    int count = 0;
+    for (int i = 0; i < g_other_n; ++i) order[count++] = i;
+    std::sort(order, order + count, [](int a, int b) {
+        return g_other[a].cycles1 - g_other[a].cycles0 > g_other[b].cycles1 - g_other[b].cycles0;
+    });
+    int shown = 0;
+    for (int k = 0; k < count; ++k) {
+        const OtherThread& o = g_other[order[k]];
+        const double used = 1000.0 * static_cast<double>(o.cycles1 - o.cycles0) / g_cycles_per_s;
+        const bool render = o.tid == g_render_thread_id;
+        if (!render && (shown >= 4 || used < 0.3)) continue;
+        if (!render) ++shown;
+        char start[160];
+        describe_address(mc, static_cast<uint32_t>(o.start), start, sizeof(start));
+        len = std::snprintf(line, sizeof(line), "[spike]   %s %lu (starts at %s): cpu %.1f ms during the hitch, %d looks;",
+                            render ? "render thread" : "thread", o.tid, start, used, o.rounds);
+        if (o.rounds > 0) {
+            const int r = o.rounds / 2;
+            len = append_stack(line, len, sizeof(line), mc, o.eip[r], o.ret[r], o.nret[r]);
+            // Where it was at the other looks, when that differs.
+            for (int q = 0; q < o.rounds && len < static_cast<int>(sizeof(line)) - 200; ++q) {
+                if (q == r || (o.eip[q] & ~0xFFu) == (o.eip[r] & ~0xFFu)) continue;
+                char where[160];
+                describe_address(mc, o.eip[q], where, sizeof(where));
+                len += std::snprintf(line + len, sizeof(line) - len, " | look %d: %s", q, where);
+                if (o.nret[q] > 0) {
+                    describe_address(mc, o.ret[q][0], where, sizeof(where));
+                    len += std::snprintf(line + len, sizeof(line) - len, " < %s", where);
+                }
+            }
+        }
+        LOG_INFO("%s", line);
+    }
 }
 
 DWORD WINAPI spike_thread(void*) {
     HANDLE h = nullptr;
     uintptr_t stack_base = 0;
-    LONGLONG sampling = 0;
-    int n = 0, reports = 0;
+    LONGLONG sampling = 0, next_other = 0;
+    int n = 0, reports = 0, detailed = 0;
     uint64_t cycles0 = 0;
     LONGLONG last_spike = 0;
     const LONGLONG t_begin = qpc();
@@ -899,20 +1100,11 @@ DWORD WINAPI spike_thread(void*) {
             h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
                            g_game_thread_id);
             if (!h) return 0;
-            CONTEXT ctx{};
-            ctx.ContextFlags = CONTEXT_CONTROL;
-            if (SuspendThread(h) != static_cast<DWORD>(-1)) {
-                const bool got = GetThreadContext(h, &ctx) != 0;
-                ResumeThread(h);
-                MEMORY_BASIC_INFORMATION mbi{};
-                if (got && ctx.Esp &&
-                    VirtualQuery(reinterpret_cast<const void*>(static_cast<uintptr_t>(ctx.Esp)), &mbi, sizeof(mbi)) &&
-                    mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_READWRITE))
-                    stack_base = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-            }
+            stack_base = thread_stack_base(h);
             if (!stack_base) return 0;
             LOG_INFO("[spike] watching the game thread: a game update over %.0f ms (or 3x the average) is sampled "
-                     "every millisecond while it runs", kSpikeMinMs);
+                     "every millisecond while it runs, and the game's other threads every 3 ms",
+                     kSpikeMinMs);
         }
         const LONGLONG start = g_update_start;
         const LONGLONG now = qpc();
@@ -921,7 +1113,12 @@ DWORD WINAPI spike_thread(void*) {
             const double ms = g_last_start == sampling ? g_last_ms : ms_of(now - sampling);
             const double cpu_ms = 1000.0 * static_cast<double>(thread_cycles(h) - cycles0) / g_cycles_per_s;
             const double since = last_spike ? static_cast<double>(sampling - last_spike) / g_freq.QuadPart : 0.0;
-            spike_report(n, ms, cpu_ms, since, static_cast<double>(sampling - t_begin) / g_freq.QuadPart, ++reports);
+            others_close();
+            const bool detail = g_other_n > 0 && ms < kDetailMaxMs && detailed < kSpikeDetailed;
+            if (detail) ++detailed;
+            spike_report(n, ms, cpu_ms, since, static_cast<double>(sampling - t_begin) / g_freq.QuadPart, ++reports,
+                         detail);
+            g_other_n = 0;
             last_spike = sampling;
             sampling = 0;
             n = 0;
@@ -933,6 +1130,13 @@ DWORD WINAPI spike_thread(void*) {
             sampling = start;
             n = 0;
             cycles0 = thread_cycles(h);
+            refresh_modules();  // ~0.2 ms
+            if (detailed < kSpikeDetailed) others_open(g_game_thread_id);  // ~0.3 ms
+            next_other = 0;
+        }
+        if (g_other_n > 0 && qpc() >= next_other) {
+            others_sample();  // ~0.2 ms
+            next_other = qpc() + g_freq.QuadPart * 3 / 1000;
         }
         if (n >= kSpikeSamples) continue;
         // Between Suspend and Resume nothing may allocate, log or fault (see capture()).
@@ -951,9 +1155,11 @@ DWORD WINAPI spike_thread(void*) {
         SpikeSample& s = g_spike[n++];
         s.eip = ctx.Eip;
         s.nret = 0;
-        for (int w = 0; w < words && s.nret < kMaxRets; ++w) {
+        s.nord = 0;
+        for (int w = 0; w < words && (s.nret < kMaxRets || s.nord < kOrdered); ++w) {
             const uint32_t v = g_spike_stack[w];
-            if (is_game_return(v) || is_return_into(v, g_own_lo, g_own_hi)) s.ret[s.nret++] = v;
+            if (s.nret < kMaxRets && (is_game_return(v) || is_return_into(v, g_own_lo, g_own_hi))) s.ret[s.nret++] = v;
+            if (s.nord < kOrdered && is_return_any(v)) s.ord[s.nord++] = v;
         }
     }
 }

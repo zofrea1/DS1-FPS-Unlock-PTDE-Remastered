@@ -51,18 +51,16 @@ constexpr DISPLAYCONFIG_DEVICE_INFO_TYPE kGetAdvancedColorInfo = static_cast<DIS
 
 struct DisplayState {
     bool known = false;
-    bool advanced = false;  // Windows runs the display in advanced colour: gamma ramps have no effect
+    bool advanced = false;  // Windows runs the display in advanced colour (HDR or Auto Color Management)
+    bool hdr = false;       // Windows HDR is on for the display
     char text[192] = {};
 };
 
-// The colour mode of the display showing the device's window.
-DisplayState display_state(IDirect3DDevice9* device) {
+// The colour mode of a display.
+DisplayState display_state_of(HMONITOR monitor) {
     DisplayState out;
-    D3DDEVICE_CREATION_PARAMETERS cp{};
-    HWND window = SUCCEEDED(device->GetCreationParameters(&cp)) ? cp.hFocusWindow : nullptr;
     MONITORINFOEXW mi{};
     mi.cbSize = sizeof(mi);
-    HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY);
     if (!monitor || !GetMonitorInfoW(monitor, &mi)) {
         std::snprintf(out.text, sizeof(out.text), "display unknown");
         return out;
@@ -112,6 +110,7 @@ DisplayState display_state(IDirect3DDevice9* device) {
                    disabled = (color.value >> 3) & 1;
         out.known = true;
         out.advanced = (enabled || wide) && !disabled;
+        out.hdr = enabled && !disabled;
         std::snprintf(out.text, sizeof(out.text), "display %s: %s (HDR %s%s%s, %u bits per channel)", name,
                       out.advanced ? "advanced colour on" : "standard colour", supported ? "supported" : "unsupported",
                       enabled ? ", on" : ", off", wide ? ", Auto Color Management" : "", color.bits_per_channel);
@@ -119,6 +118,13 @@ DisplayState display_state(IDirect3DDevice9* device) {
     }
     std::snprintf(out.text, sizeof(out.text), "display not found in the display configuration");
     return out;
+}
+
+// The colour mode of the display showing the device's window.
+DisplayState display_state(IDirect3DDevice9* device) {
+    D3DDEVICE_CREATION_PARAMETERS cp{};
+    HWND window = SUCCEEDED(device->GetCreationParameters(&cp)) ? cp.hFocusWindow : nullptr;
+    return display_state_of(MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY));
 }
 
 // The exponent a ramp channel follows, from its middle entry (ramp = (i / 255) ^ e).
@@ -156,12 +162,6 @@ void WINAPI hook_set_gamma(IDirect3DDevice9* device, UINT chain, DWORD flags, co
     if (g_mode == kGammaOff) {
         pass = false;
         why = " (GammaRamp = false)";
-    } else if (g_mode == kGammaAuto && g_dxvk) {
-        state = display_state(device);
-        if (state.advanced) {
-            pass = false;
-            why = " (DXVK in advanced colour: the system Direct3D 9 would have no ramp here either)";
-        }
     }
     AcquireSRWLockExclusive(&g_lock);
     const bool changed =
@@ -198,6 +198,12 @@ void gamma_hook_device(IDirect3DDevice9* game_device, int mode, bool dxvk) {
     static const char* const kModes[] = {"auto", "true", "false"};
     LOG_INFO("GammaRamp = %s on %s; %s", kModes[mode >= 0 && mode <= 2 ? mode : 0],
              dxvk ? "DXVK" : "the system Direct3D 9", state.text);
+}
+
+int primary_display_hdr(char* text, size_t size) {
+    const DisplayState state = display_state_of(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+    if (text && size) std::snprintf(text, size, "%s", state.text);
+    return state.known ? (state.hdr ? 1 : 0) : -1;
 }
 
 void gamma_frame() {

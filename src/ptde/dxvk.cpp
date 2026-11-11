@@ -1,5 +1,6 @@
 #include "dxvk.h"
 
+#include "gamma.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -260,7 +261,7 @@ void add_dxvk_option(const char* key, const char* value) {
 
 }  // namespace
 
-bool dxvk_route(const wchar_t* dxvk_path, bool exclusive_fullscreen) {
+bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen) {
     char dxvk_name[MAX_PATH];
     narrow(dxvk_path, dxvk_name);
     if (GetFileAttributesW(dxvk_path) == INVALID_FILE_ATTRIBUTES) {
@@ -318,7 +319,11 @@ bool dxvk_route(const wchar_t* dxvk_path, bool exclusive_fullscreen) {
     }
     FreeLibrary(vulkan);
 
-    if (exclusive_fullscreen) {
+    char display[192] = "";
+    const int hdr = primary_display_hdr(display, sizeof(display));
+    const bool allow_fse =
+        exclusive_fullscreen == kDxvkFseOn || (exclusive_fullscreen == kDxvkFseAuto && hdr == 0);
+    if (allow_fse) {
         add_dxvk_option("dxvk.allowFse", "True");
     }
     HMODULE dxvk = LoadLibraryW(dxvk_path);
@@ -380,7 +385,18 @@ bool dxvk_route(const wchar_t* dxvk_path, bool exclusive_fullscreen) {
     }
     LOG_INFO("DXVK: Direct3D 9 runs on Vulkan through %s on \"%s\" (system Direct3DCreate9 %s, now leads to DXVK)",
              dxvk_name, id.Description, entry_state);
-    LOG_INFO("DXVK: exclusive fullscreen %s (DxvkExclusiveFullscreen; G-SYNC / variable refresh needs it)",
-             exclusive_fullscreen ? "allowed" : "not allowed");
+    if (exclusive_fullscreen == kDxvkFseAuto && hdr == 1) {
+        LOG_INFO("DXVK: exclusive fullscreen left off, so no G-SYNC / variable refresh under DXVK: Windows runs the "
+                 "display in HDR, and in exclusive fullscreen DXVK would make Windows switch HDR off while the game "
+                 "runs (the monitor changes mode, the picture changes). Variable refresh with HDR on: Direct3D 9 "
+                 "(DXVK = false). Variable refresh under DXVK without HDR: DxvkExclusiveFullscreen = true. (%s)",
+                 display);
+    } else {
+        static const char* const kModes[] = {"auto", "true", "false"};
+        LOG_INFO("DXVK: exclusive fullscreen %s (DxvkExclusiveFullscreen = %s; G-SYNC / variable refresh needs it%s; "
+                 "%s)", allow_fse ? "allowed" : "not allowed",
+                 kModes[exclusive_fullscreen >= 0 && exclusive_fullscreen <= 2 ? exclusive_fullscreen : 0],
+                 allow_fse && hdr == 1 ? ", Windows switches HDR off while the game holds it" : "", display);
+    }
     return true;
 }

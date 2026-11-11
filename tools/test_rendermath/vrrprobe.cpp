@@ -15,12 +15,15 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "winmm.lib")
 
+static double g_fps = 0;
+
 LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp) { return DefWindowProcA(w, m, wp, lp); }
 
 int main(int argc, char** argv) {
     const char* which = argc > 1 ? argv[1] : "d3d9";
     const bool full = argc > 2 ? std::strcmp(argv[2], "full") == 0 : true;
     const double seconds = argc > 3 ? std::atof(argv[3]) : 5.0;
+    if (const char* e = std::getenv("VRRPROBE_FPS")) g_fps = std::atof(e);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     timeBeginPeriod(1);
     const bool dxvk = std::strcmp(which, "d3d9") != 0;
@@ -89,7 +92,16 @@ int main(int argc, char** argv) {
         dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_XRGB(g, g, g), 1.0f, 0);
         dev->Present(nullptr, nullptr, nullptr, nullptr);
         ++frame;
-        Sleep(8 + (frame % 5));  // about 100 fps, uneven
+        if (g_fps > 0) {  // VRRPROBE_FPS: paced to that rate (busy wait), even frames
+            const double due = static_cast<double>(frame) / g_fps;
+            for (;;) {
+                QueryPerformanceCounter(&t);
+                if (static_cast<double>(t.QuadPart - t0.QuadPart) / f.QuadPart >= due) break;
+                if (due - static_cast<double>(t.QuadPart - t0.QuadPart) / f.QuadPart > 0.002) Sleep(1);
+            }
+        } else {
+            Sleep(8 + (frame % 5));  // about 100 fps, uneven
+        }
     }
     std::printf("%d frames in %.1f s\n", frame, seconds);
     dev->Release();
