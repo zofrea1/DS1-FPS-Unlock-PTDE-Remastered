@@ -12,7 +12,9 @@
 
 namespace {
 
-constexpr double kCanaryEveryMs = 10.0;  // the canary asks Steam this often
+constexpr double kCanaryEveryMs = 10.0;  // the canary asks Steam this often while the gate holds
+constexpr double kCanaryIdleMs = 25.0;   // ... and this often where Steam has not paused lately (a 15 ms pause is
+                                         // still caught 3 times in 5)
 constexpr double kGoWindowMs = 1.5;      // every-frame calls go ahead this long after a quick answer
 constexpr double kWaitedMs = 50.0;       // a call that has waited this long gets a wider window ...
 constexpr double kWideWindowMs = 5.0;    // ... (a whole frame at 200 FPS, still before the next question)
@@ -271,7 +273,8 @@ DWORD WINAPI canary_thread(void*) {
 #else
         (void)next_stats;
 #endif
-        const double rest = kCanaryEveryMs - ms_of(now_qpc() - t0);
+        const bool in_force = g_last_pause && t1 - g_last_pause <= static_cast<LONGLONG>(kInForceS * g_freq);
+        const double rest = (in_force ? kCanaryEveryMs : kCanaryIdleMs) - ms_of(now_qpc() - t0);
         Sleep(rest >= 1.0 ? static_cast<DWORD>(rest) : 1);
     }
 }
