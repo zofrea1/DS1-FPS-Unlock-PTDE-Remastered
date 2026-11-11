@@ -103,8 +103,9 @@ struct Settings {
     // instead of waiting for the GPU, and sampler state calls that repeat the value in place skip Direct3D.
     bool async_readback = true;
     bool filter_sampler_states = true;
-    // Vertex shader constants that repeat what the device holds skip Direct3D (see d3dperf.h).
-    bool filter_shader_constants = true;
+    // Vertex shader constants that repeat what the device holds skip Direct3D (see d3dperf.h). Off by default: in the
+    // game under 1% of the registers repeat, so the comparison cost more than it saved.
+    bool filter_shader_constants = false;
     // Depth-stencil and offscreen surfaces made and released every frame are kept and handed out again (surfpool.h).
     bool reuse_surfaces = true;
     // The game's read locks count without kernel calls (rwlock.h).
