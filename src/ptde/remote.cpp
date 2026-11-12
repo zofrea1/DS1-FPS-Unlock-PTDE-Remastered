@@ -1117,6 +1117,66 @@ bool apply_speffect(uintptr_t chr, int id) {
     }
 }
 
+// The animation a character plays on layer 0 or 1 (0xE2C030: edi = layer, push the controller's animation
+// object [chr+0x28]+0x2C; packed as the network samples carry it), -1 none.
+int anim_on(uintptr_t chr, int layer) {
+    uintptr_t ctrl = 0, ac = 0;
+    if (!chr || !safe_read(chr + 0x28, &ctrl, 4) || !ctrl || !safe_read(ctrl + 0x2C, &ac, 4) || !ac) return -1;
+    uint32_t r = 0xFFFFFFFF;
+    __try {
+        __asm {
+            push edi
+            mov edi, layer
+            push ac
+            mov eax, 0x00E2C030
+            call eax
+            pop edi
+            mov r, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+    return static_cast<int>(r);
+}
+
+// ChrIns event animation: 0xE69590 starts one (esi = character, edi = animation, stdcall(loop)), 0xE69470 stops it
+// (edi = character).
+bool play_event_anim(uintptr_t chr, int anim, int loop) {
+    if (!chr) return false;
+    __try {
+        __asm {
+            push esi
+            push edi
+            mov esi, chr
+            mov edi, anim
+            push loop
+            mov eax, 0x00E69590
+            call eax
+            pop edi
+            pop esi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+bool stop_event_anim(uintptr_t chr) {
+    if (!chr) return false;
+    __try {
+        __asm {
+            push edi
+            mov edi, chr
+            mov eax, 0x00E69470
+            call eax
+            pop edi
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
 void run_game(const std::vector<std::string>& t) {
     auto num = [&](size_t k, long dflt) { return k < t.size() ? std::strtol(t[k].c_str(), nullptr, 0) : dflt; };
     auto fnum = [&](size_t k) { return k < t.size() ? static_cast<float>(std::atof(t[k].c_str())) : 0.0f; };
@@ -1125,6 +1185,55 @@ void run_game(const std::vector<std::string>& t) {
         // speffect ID: apply SpEffectParam row ID to the player (diagnostics: ticking effects, SpEffect timing).
         out("speffect %ld: %s", num(1, 0), apply_speffect(player_chr(), static_cast<int>(num(1, 0))) ? "applied" :
             "refused");
+    } else if (c == "anim") {
+        // anim: the player's animations on layers 0/1 (packed) and the animation id it plays (ChrCtrl+0x350);
+        // anim ID [LOOP]: play event animation ID; anim stop.
+        const uintptr_t me = player_chr();
+        if (t.size() > 1 && t[1] == "stop") {
+            out("anim stop: %s", stop_event_anim(me) ? "done" : "failed");
+        } else if (t.size() > 1 && t[1] == "scan") {
+            // anim scan LO HI: dwords in [LO, HI] in the player's character and controller, and one pointer deep.
+            const long lo = num(2, 9000), hi = num(3, 9300);
+            uintptr_t ctrl = 0;
+            safe_read(me + 0x28, &ctrl, 4);
+            const uintptr_t roots[2] = {me, ctrl};
+            const char* names[2] = {"chr", "ctrl"};
+            int hits = 0;
+            for (int r = 0; r < 2 && hits < 60; ++r) {
+                if (!roots[r]) continue;
+                for (uint32_t o = 0; o < 0x800 && hits < 60; o += 4) {
+                    uint32_t v = 0;
+                    if (!safe_read_any(roots[r] + o, &v, 4)) break;
+                    if (static_cast<long>(v) >= lo && static_cast<long>(v) <= hi) {
+                        out("  %s+%X = %u", names[r], o, v);
+                        ++hits;
+                    }
+                    if (v >= 0x01000000 && v < 0x7FFF0000 && (v & 3) == 0) {
+                        for (uint32_t o2 = 0; o2 < 0x400 && hits < 60; o2 += 4) {
+                            uint32_t w = 0;
+                            if (!safe_read_any(v + o2, &w, 4)) break;
+                            if (static_cast<long>(w) >= lo && static_cast<long>(w) <= hi) {
+                                out("  [%s+%X]+%X = %u", names[r], o, o2, w);
+                                ++hits;
+                            }
+                        }
+                    }
+                }
+            }
+            out("anim scan %ld..%ld: %d hits", lo, hi, hits);
+        } else if (t.size() > 1) {
+            out("anim %ld: %s", num(1, 0), play_event_anim(me, static_cast<int>(num(1, 0)),
+                                                       static_cast<int>(num(2, 0))) ? "started" : "failed");
+        } else {
+            uintptr_t ctrl = 0;
+            int playing = -1;
+            int gesture = -1;
+            if (me && safe_read(me + 0x28, &ctrl, 4) && ctrl) {
+                safe_read(ctrl + 0x350, &playing, 4);
+                safe_read(ctrl + 0x370, &gesture, 4);
+            }
+            out("anim %08X/%08X playing %d ctrl+370 %d", anim_on(me, 0), anim_on(me, 1), playing, gesture);
+        }
     } else if (c == "flag") {
         out("flag %ld = %d", num(1, 0), read_flag(static_cast<int>(num(1, 0))));
     } else if (c == "setflag") {
@@ -1391,7 +1500,8 @@ void run(const std::string& line) {
         } else {
             out("hp: no player");
         }
-    } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp" || c == "speffect") {
+    } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp" || c == "speffect" ||
+               c == "anim") {
         std::lock_guard<std::mutex> lock(g_game_lock);
         g_game_cmds.push_back(t);
     } else if (c == "queries") {
