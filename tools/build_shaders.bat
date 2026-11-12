@@ -11,4 +11,6 @@ if not defined FXC (
 )
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kDofCompositePs /Fh src\ptde\shaders\dof_composite_ps.h src\ptde\shaders\dof_composite.hlsl
 if errorlevel 1 exit /b 1
-echo Built src\ptde\shaders\dof_composite_ps.h
+%FXC% /nologo /T ps_3_0 /E main /O3 /Vn kHdrColAdjPs /Fh src\ptde\shaders\hdr_coladj_ps.h src\ptde\shaders\hdr_coladj.hlsl
+if errorlevel 1 exit /b 1
+echo Built src\ptde\shaders\dof_composite_ps.h and hdr_coladj_ps.h

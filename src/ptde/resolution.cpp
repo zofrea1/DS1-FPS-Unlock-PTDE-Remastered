@@ -7,6 +7,7 @@
 #include <d3d9.h>
 
 #include "shaders/dof_composite_ps.h"
+#include "shaders/hdr_coladj_ps.h"
 
 #include <cstdint>
 #include <cstring>
@@ -133,25 +134,69 @@ bool is_copy_shader(const DWORD* code) {
     return same_instructions(code, kCopyShader, sizeof(kCopyShader) / sizeof(kCopyShader[0]));
 }
 
-bool is_dof_composite(const DWORD* code) {
-    return same_instructions(code, kDofComposite, sizeof(kDofComposite) / sizeof(kDofComposite[0]));
-}
+// The final composite (FRPG_Fil_HDR_ColAdj.fx, ps_fe20dbc9): the scene (s0) with the 128x90 bloom (s1) and the
+// 256x180 light shafts (s3) added, the colour matrix and the film grain (the 256x256 noise tile, s2). Its instructions,
+// comments left out.
+constexpr DWORD kHdrColAdj[] = {
+    0xFFFF0300, 0x05000051, 0xA00F0000, 0x3F800000, 0x3F000000, 0x00000000, 0x00000000, 0x0200001F, 0x80010005,
+    0x900F0000, 0x0200001F, 0x90000000, 0xA00F0800, 0x0200001F, 0x90000000, 0xA00F0801, 0x0200001F, 0x90000000,
+    0xA00F0802, 0x0200001F, 0x90000000, 0xA00F0803, 0x03000042, 0x800F0000, 0x90EE0000, 0xA0E40802, 0x03000002,
+    0x800F0001, 0x81E40000, 0xA0000000, 0x03000002, 0x800F0001, 0x80E40001, 0x80E40001, 0x03000042, 0x800F0002,
+    0x90E40000, 0xA0E40800, 0x03000005, 0x80170002, 0x80E40002, 0xA0AA0038, 0x02000001, 0x80010003, 0xA0000038,
+    0x03000002, 0x80080002, 0x81000003, 0xA0550047, 0x03000042, 0x800F0003, 0x90E40000, 0xA0E40801, 0x04000004,
+    0x80080002, 0x80FF0003, 0x80FF0002, 0xA0000038, 0x04000004, 0x80070002, 0x80FF0002, 0x80E40003, 0x80E40002,
+    0x03000042, 0x800F0003, 0x90E40000, 0xA0E40803, 0x04000004, 0x80070002, 0xA0550038, 0x80E40003, 0x80E40002,
+    0x02000001, 0x80080002, 0xA0000000, 0x03000009, 0x80010003, 0x80E40002, 0xA0E4003E, 0x03000009, 0x80020003,
+    0x80E40002, 0xA0E4003F, 0x03000009, 0x80040003, 0x80E40002, 0xA0E40040, 0x03000009, 0x80080003, 0x80E40002,
+    0xA0E40041, 0x03000002, 0x800F0002, 0x81E40003, 0xA0000000, 0x04000004, 0x800F0001, 0x80E40001, 0x81E40002,
+    0xA0000000, 0x03000002, 0x800F0002, 0x81E40000, 0xA0550000, 0x03000005, 0x800F0000, 0x80E40000, 0x80E40003,
+    0x03000002, 0x800F0000, 0x80E40000, 0x80E40000, 0x04000058, 0x800F0000, 0x80E40002, 0xA0AA0000, 0x80E40000,
+    0x04000058, 0x800F0001, 0x80E40002, 0x80E40001, 0xA0AA0000, 0x03000002, 0x800F0000, 0x80E40000, 0x80E40001,
+    0x03000002, 0x800F0000, 0x81E40003, 0x80E40000, 0x04000004, 0x802F0800, 0xA0000044, 0x80E40000, 0x80E40003,
+    0x0000FFFF};
 
 // ---------------------------------------------------------------------------------------------------------------
-// The depth of field's blur at the render resolution. Its blur levels keep their original sizes (512x360, 256x180),
-// so the amount of blur is the game's at any resolution; the composite stretches them over the scene, 2x at the
-// original 1024x720 but 7.5x at 4K, where its single bilinear read shows the 512x360 grid (blocks and diamonds in
-// the blurred distance and around the near blur). The composite is swapped for ours (shaders/dof_composite.hlsl):
-// the same math, the low-resolution textures read with a cubic B-spline. The texture sizes reach it as c200/c201
-// (no game pixel shader uses a register above c183); its samplers are set to bilinear and clamped for the draw.
-std::unordered_set<void*> g_dof_shaders;
-IDirect3DPixelShader9* g_dof_ours = nullptr;
-IDirect3DDevice9* g_dof_device = nullptr;
-volatile bool g_dof_bound = false;
-volatile bool g_dof_enabled = true;
-volatile bool g_dof_game_bound = false;  // the game's composite (ours or its own) is the bound shader
-volatile LONG g_dof_force = 0;           // diagnostics: 1-3 shows only that blur level
-volatile LONG g_dof_draws = 0;
+// The low-resolution post-processing at the render resolution. The depth of field's blur levels (512x360, 256x180),
+// the bloom (128x90) and the light shafts (256x180) keep their original sizes, so their amount is the game's at any
+// resolution; two shaders stretch them over the scene: the depth of field's composite 2x at the original 1024x720 but
+// 7.5x at 4K, and the final composite 10x and 5x at the original 1280x720 (then once more to the screen) but 30x and
+// 15x at 4K. A single bilinear read that far shows the texture's grid: blocks and diamonds in the blurred distance,
+// around the near blur and in every glow. Those two shaders are swapped for ours (shaders/*.hlsl, compiled by
+// tools/build_shaders.bat): the same math, the low-resolution textures read with a cubic B-spline (four bilinear
+// reads). Their sizes reach ours as c200/c201 (no game pixel shader uses a register above c183); those stages are set
+// to bilinear and clamped for the draw. (Measured for the depth of field against the original at Firelink: detail and
+// kinks of a half-blurred area 0.28/0.43 with ours, 0.29/0.42 in the original, 0.38/0.54 with one bilinear read.)
+struct SwapDef {
+    const char* what;
+    const DWORD* game;
+    size_t tokens;
+    const BYTE* ours;
+    DWORD size_stage[2];  // their sizes go to c200 and c201
+    float sizes[8];       // their original sizes, until the draw reads them from the textures
+    DWORD smooth_mask;    // the stages read with the B-spline: bilinear, clamped for the draw
+};
+constexpr SwapDef kSwaps[] = {
+    {"the depth of field's blur", kDofComposite, sizeof(kDofComposite) / sizeof(kDofComposite[0]), kDofCompositePs,
+     {1, 4}, {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180}, 0x1E},
+    {"the bloom and the light shafts", kHdrColAdj, sizeof(kHdrColAdj) / sizeof(kHdrColAdj[0]), kHdrColAdjPs, {1, 3},
+     {128.0f, 90.0f, 1.0f / 128, 1.0f / 90, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180}, 0x0A},
+};
+constexpr int kSwapCount = sizeof(kSwaps) / sizeof(kSwaps[0]);
+std::unordered_set<void*> g_swap_game[kSwapCount];       // the game's shaders, as it made them
+IDirect3DPixelShader9* g_swap_ours[kSwapCount] = {};     // ours, once per device (a pixel shader outlives a reset)
+IDirect3DDevice9* g_swap_device[kSwapCount] = {};
+volatile LONG g_swap_bound = -1;     // the swap whose shader (ours) is bound
+volatile LONG g_game_bound = -1;     // the swap whose game shader the game bound (ours in its place or not)
+volatile bool g_swap_enabled = true;  // RemoteControl `dof 0/1` (both swaps)
+volatile LONG g_dof_force = 0;        // diagnostics: 1-3 shows only that blur level
+constexpr int kDofSwap = 0;
+
+int swap_of(const DWORD* code) {
+    for (int i = 0; i < kSwapCount; ++i) {
+        if (same_instructions(code, kSwaps[i].game, kSwaps[i].tokens)) return i;
+    }
+    return -1;
+}
 
 HRESULT WINAPI hk_create_texture(IDirect3DDevice9* dev, UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT f,
                                  D3DPOOL pool, IDirect3DTexture9** out, HANDLE* shared) {
@@ -186,19 +231,23 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
     if (SUCCEEDED(hr) && out && *out && is_copy_shader(code)) {
         std::lock_guard<std::mutex> lock(g_lock);
         g_copy_shaders.insert(*out);
-    } else if (SUCCEEDED(hr) && out && *out && !g_scale_post && is_dof_composite(code)) {
-        std::lock_guard<std::mutex> lock(g_lock);
-        g_dof_shaders.insert(*out);
-        if (g_dof_device != dev) {  // ours, once per device (a pixel shader outlives a reset)
-            if (g_dof_ours) g_dof_ours->Release();
-            g_dof_ours = nullptr;
-            g_dof_device = dev;
-            if (FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofCompositePs), &g_dof_ours))) {
-                g_dof_ours = nullptr;
-                LOG_ERROR("Resolution: the smooth depth of field shader could not be made; the game's is used");
-            } else {
-                LOG_INFO("Resolution: the depth of field's blur is read with a cubic filter (the game's blur levels, "
-                         "smooth at %ux%u)", static_cast<unsigned>(g_frame_w), static_cast<unsigned>(g_frame_h));
+    } else if (SUCCEEDED(hr) && out && *out && !g_scale_post) {
+        const int i = swap_of(code);
+        if (i >= 0) {
+            std::lock_guard<std::mutex> lock(g_lock);
+            g_swap_game[i].insert(*out);
+            if (g_swap_device[i] != dev) {
+                if (g_swap_ours[i]) g_swap_ours[i]->Release();
+                g_swap_ours[i] = nullptr;
+                g_swap_device[i] = dev;
+                if (FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kSwaps[i].ours), &g_swap_ours[i]))) {
+                    g_swap_ours[i] = nullptr;
+                    LOG_ERROR("Resolution: the smooth shader for %s could not be made; the game's is used",
+                              kSwaps[i].what);
+                } else {
+                    LOG_INFO("Resolution: %s is read with a cubic filter (the game's own, smooth at %dx%d)",
+                             kSwaps[i].what, g_frame_w, g_frame_h);
+                }
             }
         }
     }
@@ -207,25 +256,23 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
 
 HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     bool copy = false;
-    bool dof = false;
+    int game = -1;
+    int swap = -1;
     if (ps) {
         std::lock_guard<std::mutex> lock(g_lock);
         copy = g_copy_shaders.count(ps) != 0;
-        dof = g_dof_enabled && g_dof_ours && g_dof_device == dev && g_dof_shaders.count(ps) != 0;
+        for (int i = 0; i < kSwapCount && game < 0; ++i) {
+            if (g_swap_game[i].count(ps)) game = i;
+        }
+        if (game >= 0 && g_swap_enabled && g_swap_ours[game] && g_swap_device[game] == dev) swap = game;
     }
     g_copy_bound = copy;
-    g_dof_bound = dof;
-    if (ps) {
-        std::lock_guard<std::mutex> lock(g_lock);
-        g_dof_game_bound = g_dof_shaders.count(ps) != 0;
-    } else {
-        g_dof_game_bound = false;
-    }
-    if (dof) {
-        // The game's sizes; the draw sets them again from the textures it binds.
-        const float sizes[8] = {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180};
-        dev->SetPixelShaderConstantF(200, sizes, 2);
-        return o_set_ps(dev, g_dof_ours);
+    g_game_bound = game;
+    g_swap_bound = swap;
+    if (swap >= 0) {
+        // The original sizes; the draw sets them again from the textures it binds.
+        dev->SetPixelShaderConstantF(200, kSwaps[swap].sizes, 2);
+        return o_set_ps(dev, g_swap_ours[swap]);
     }
     return o_set_ps(dev, ps);
 }
@@ -246,30 +293,33 @@ bool stage_size(IDirect3DDevice9* dev, DWORD stage, float* out) {
     return true;
 }
 
-// Our composite's draw: the low-resolution textures' sizes and bilinear, clamped reads on stages 1-4, then the
-// game's states back.
-HRESULT dof_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
-    float sizes[8] = {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180};
-    stage_size(dev, 1, sizes);
-    stage_size(dev, 4, sizes + 4);
+// Our shader's draw: the low-resolution textures' sizes, bilinear and clamped reads on their stages, then the game's
+// states back.
+HRESULT swap_draw(IDirect3DDevice9* dev, int swap, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    const SwapDef& d = kSwaps[swap];
+    float sizes[8];
+    std::memcpy(sizes, d.sizes, sizeof(sizes));
+    stage_size(dev, d.size_stage[0], sizes);
+    stage_size(dev, d.size_stage[1], sizes + 4);
     dev->SetPixelShaderConstantF(200, sizes, 2);
     static const D3DSAMPLERSTATETYPE kStates[] = {D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
                                                   D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV};
     static const DWORD kValues[] = {D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP};
-    DWORD saved[4][5] = {};
-    for (DWORD s = 1; s <= 4; ++s) {
+    DWORD saved[8][5] = {};
+    for (DWORD s = 0; s < 8; ++s) {
+        if (!(d.smooth_mask & (1u << s))) continue;
         for (int i = 0; i < 5; ++i) {
-            dev->GetSamplerState(s, kStates[i], &saved[s - 1][i]);
-            if (saved[s - 1][i] != kValues[i]) dev->SetSamplerState(s, kStates[i], kValues[i]);
+            dev->GetSamplerState(s, kStates[i], &saved[s][i]);
+            if (saved[s][i] != kValues[i]) dev->SetSamplerState(s, kStates[i], kValues[i]);
         }
     }
     const HRESULT hr = o_draw_up(dev, type, count, data, stride);
-    for (DWORD s = 1; s <= 4; ++s) {
+    for (DWORD s = 0; s < 8; ++s) {
+        if (!(d.smooth_mask & (1u << s))) continue;
         for (int i = 0; i < 5; ++i) {
-            if (saved[s - 1][i] != kValues[i]) dev->SetSamplerState(s, kStates[i], saved[s - 1][i]);
+            if (saved[s][i] != kValues[i]) dev->SetSamplerState(s, kStates[i], saved[s][i]);
         }
     }
-    InterlockedIncrement(&g_dof_draws);
     return hr;
 }
 
@@ -325,17 +375,19 @@ IDirect3DTexture9* proxy_of(IDirect3DDevice9* dev, IDirect3DTexture9* src, UINT 
 
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
     const LONG force = g_dof_force;
-    if (force >= 1 && force <= 3 && g_dof_game_bound) {
+    const LONG swap = g_swap_bound;
+    if (force >= 1 && force <= 3 && g_game_bound == kDofSwap) {
         // blend = (0, level 1, level 2, level 3) from saturate(blurW * c66 + c67): c66 = 0, c67 = the cumulative mask.
         float saved[8] = {};
         dev->GetPixelShaderConstantF(66, saved, 2);
         float forced[8] = {0, 0, 0, 0, 0, force <= 1 ? 1.0f : 0.0f, force <= 2 ? 1.0f : 0.0f, 1.0f};
         dev->SetPixelShaderConstantF(66, forced, 2);
-        const HRESULT hr = g_dof_bound ? dof_draw(dev, type, count, data, stride) : o_draw_up(dev, type, count, data, stride);
+        const HRESULT hr = swap == kDofSwap ? swap_draw(dev, swap, type, count, data, stride)
+                                            : o_draw_up(dev, type, count, data, stride);
         dev->SetPixelShaderConstantF(66, saved, 2);
         return hr;
     }
-    if (g_dof_bound) return dof_draw(dev, type, count, data, stride);
+    if (swap >= 0) return swap_draw(dev, swap, type, count, data, stride);
     IDirect3DBaseTexture9* tex = g_tex0;
     if (g_copy_bound && tex && tex->GetType() == D3DRTYPE_TEXTURE) {
         auto* src = static_cast<IDirect3DTexture9*>(tex);
@@ -446,7 +498,7 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
     if (p && !o_set_scissor) o_set_scissor = reinterpret_cast<SetScissorFn>(p);
 }
 
-void resolution_set_smooth_dof(bool on) { g_dof_enabled = on; }
+void resolution_set_smooth_dof(bool on) { g_swap_enabled = on; }
 void resolution_force_dof_level(int level) { g_dof_force = level; }
 
 void resolution_reset() {
