@@ -233,6 +233,7 @@ volatile LONG g_dof_force = 0;        // diagnostics: 1-3 shows only that blur l
 constexpr int kDofSwap = 0;
 constexpr int kPresentSwap = 3;               // the windowed scale-down (kGammaCopy)
 volatile bool g_present_swap_enabled = true;  // RemoteControl `reduce 0/1`
+volatile LONG g_swap_off_mask = 0;            // RemoteControl `swapoff MASK` (diagnostics): bit i = swap i, bit 7 = copies
 
 int swap_of(const DWORD* code) {
     for (int i = 0; i < kSwapCount; ++i) {
@@ -323,7 +324,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
             if (g_swap_game[i].count(ps)) game = i;
         }
         if (game >= 0 && g_swap_enabled && g_swap_ours[game] && g_swap_device[game] == dev &&
-            (game != kPresentSwap || g_present_swap_enabled)) {
+            (game != kPresentSwap || g_present_swap_enabled) && !(g_swap_off_mask & (1 << game))) {
             swap = game;
         }
     }
@@ -409,7 +410,8 @@ HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseT
 }
 
 // The game's copy of a large render target into a small one, drawn with our averaging shader: the sizes to c200/c201,
-// point sampling and clamping on stage 0, then the game's shader and states back.
+// bilinear filtering (the shader reads pairs of pixels per fetch) and clamping on stage 0, then the game's shader and
+// states back.
 HRESULT area_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DVIEWPORT9& vp, D3DPRIMITIVETYPE type,
                   UINT count, const void* data, UINT stride) {
     const float sizes[8] = {static_cast<float>(src.Width), static_cast<float>(src.Height), 1.0f / src.Width,
@@ -418,7 +420,7 @@ HRESULT area_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DVI
     dev->SetPixelShaderConstantF(200, sizes, 2);
     static const D3DSAMPLERSTATETYPE kStates[] = {D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
                                                   D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV};
-    static const DWORD kValues[] = {D3DTEXF_POINT, D3DTEXF_POINT, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP};
+    static const DWORD kValues[] = {D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP};
     DWORD saved[5] = {};
     for (int i = 0; i < 5; ++i) {
         dev->GetSamplerState(0, kStates[i], &saved[i]);
@@ -464,7 +466,7 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
                                     rd.Width * 2 <= kOriginalWidth && SUCCEEDED(dev->GetViewport(&vp)) && vp.Width &&
                                     vp.Height;
             if (rt) rt->Release();
-            if (into_small && g_swap_enabled && g_area_ps && g_area_device == dev) {
+            if (into_small && g_swap_enabled && !(g_swap_off_mask & 0x80) && g_area_ps && g_area_device == dev) {
                 const HRESULT hr = area_draw(dev, sd, vp, type, count, data, stride);
                 if (!g_logged) {
                     g_logged = true;
@@ -709,6 +711,8 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
     p = patch_slot(dev, 34, reinterpret_cast<void*>(&hk_stretch));
     if (p && !o_stretch) o_stretch = reinterpret_cast<StretchRectFn>(p);
 }
+
+void resolution_set_swap_off_mask(int mask) { g_swap_off_mask = mask; }
 
 void resolution_set_present_reduce(bool on) {
     g_reduce_enabled = on;

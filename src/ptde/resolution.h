@@ -20,6 +20,8 @@ void resolution_reset();
 // The frame's last scale-down when it is larger than the screen (Supersampling): exact area average (on by default;
 // RemoteControl "reduce 0/1" for comparisons).
 void resolution_set_present_reduce(bool on);
+// Diagnostics: switch single replacements off (bit i = kSwaps[i], bit 7 = the area-average copies).
+void resolution_set_swap_off_mask(int mask);
 
 // The depth of field's smooth composite on or off (RemoteControl `dof`, for comparing with the game's own).
 void resolution_set_smooth_dof(bool on);
