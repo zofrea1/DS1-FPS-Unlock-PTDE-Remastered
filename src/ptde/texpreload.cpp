@@ -17,7 +17,9 @@ namespace {
 // the middle of a frame: as a map part appears, dozens of first draws each wait 3-8 ms in the driver, and the game
 // thread waits for the render thread (the hitches on entering an area). Here a managed texture is uploaded
 // (IDirect3DResource9::PreLoad) right after it is made, on the thread that made it, before anything draws with it.
-// The device is multithreaded (D3DCREATE_MULTITHREADED), so this is allowed there.
+// The device is multithreaded (D3DCREATE_MULTITHREADED), so this is allowed there. While the device is lost (the game
+// in exclusive fullscreen and in the background) nothing is uploaded: the texture stays as the game made it and goes
+// up at its first draw after the device is reset, as without this.
 using MemFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const void*, UINT, IDirect3DTexture9**);
 using MemExFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const void*, UINT, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
                                  DWORD, DWORD, D3DCOLOR, void*, PALETTEENTRY*, IDirect3DTexture9**);
@@ -28,10 +30,15 @@ MemExFn g_mem_ex = nullptr;
 CubeExFn g_cube_ex = nullptr;
 
 volatile LONG g_count = 0;
+volatile LONG g_skipped = 0;  // made while the device was lost
 volatile LONG64 g_ticks = 0;
 LONGLONG g_freq = 0;
 
-void preload(IDirect3DBaseTexture9* t) {
+void preload(IDirect3DDevice9* dev, IDirect3DBaseTexture9* t) {
+    if (dev && dev->TestCooperativeLevel() != D3D_OK) {
+        InterlockedIncrement(&g_skipped);
+        return;
+    }
     LARGE_INTEGER a, b;
     QueryPerformanceCounter(&a);
     t->PreLoad();
@@ -42,7 +49,7 @@ void preload(IDirect3DBaseTexture9* t) {
 
 HRESULT WINAPI hk_mem(IDirect3DDevice9* dev, const void* data, UINT size, IDirect3DTexture9** out) {
     const HRESULT hr = g_mem(dev, data, size, out);
-    if (SUCCEEDED(hr) && out && *out) preload(*out);  // D3DX's default pool: managed
+    if (SUCCEEDED(hr) && out && *out) preload(dev, *out);  // D3DX's default pool: managed
     return hr;
 }
 
@@ -50,7 +57,7 @@ HRESULT WINAPI hk_mem_ex(IDirect3DDevice9* dev, const void* data, UINT size, UIN
                          D3DFORMAT fmt, D3DPOOL pool, DWORD filter, DWORD mip_filter, D3DCOLOR key, void* info,
                          PALETTEENTRY* pal, IDirect3DTexture9** out) {
     const HRESULT hr = g_mem_ex(dev, data, size, w, h, mips, usage, fmt, pool, filter, mip_filter, key, info, pal, out);
-    if (SUCCEEDED(hr) && out && *out && pool == D3DPOOL_MANAGED) preload(*out);
+    if (SUCCEEDED(hr) && out && *out && pool == D3DPOOL_MANAGED) preload(dev, *out);
     return hr;
 }
 
@@ -58,7 +65,7 @@ HRESULT WINAPI hk_cube_ex(IDirect3DDevice9* dev, const void* data, UINT size, UI
                           D3DFORMAT fmt, D3DPOOL pool, DWORD filter, DWORD mip_filter, D3DCOLOR key, void* info,
                           PALETTEENTRY* pal, IDirect3DCubeTexture9** out) {
     const HRESULT hr = g_cube_ex(dev, data, size, edge, mips, usage, fmt, pool, filter, mip_filter, key, info, pal, out);
-    if (SUCCEEDED(hr) && out && *out && pool == D3DPOOL_MANAGED) preload(*out);
+    if (SUCCEEDED(hr) && out && *out && pool == D3DPOOL_MANAGED) preload(dev, *out);
     return hr;
 }
 
@@ -117,6 +124,8 @@ void texpreload_install() {
 void texpreload_report() {
     const LONG n = InterlockedExchange(&g_count, 0);
     const LONG64 t = InterlockedExchange64(&g_ticks, 0);
+    const LONG lost = InterlockedExchange(&g_skipped, 0);
+    if (lost) LOG_INFO("PreloadTextures: %ld textures made while the device was lost (left for their first draw)", lost);
     if (n && g_freq) {
         LOG_INFO("PreloadTextures: %ld textures uploaded as they were loaded (%.1f ms on the loading threads)", n,
                  1000.0 * static_cast<double>(t) / static_cast<double>(g_freq));
