@@ -272,7 +272,7 @@ void route_to_dxvk() {
     }
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s%s", dir, kDxvkFileName);
-    g_dxvk_active = dxvk_route(path, settings().dxvk_exclusive_fullscreen);
+    g_dxvk_active = dxvk_route(path, settings().dxvk_exclusive_fullscreen, settings().dxvk_dxgi_present);
 }
 
 IDirect3D9* WINAPI hook_direct3d_create9(UINT sdk_version) {

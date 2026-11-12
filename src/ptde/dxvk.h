@@ -33,14 +33,18 @@
 //   DXVK, dxvk.allowFse:                  refresh follows the frames, HDR off meanwhile
 //   DXVK, no allowFse, NVIDIA Vulkan present method auto: fixed 240 Hz, HDR on
 //   DXVK, no allowFse, native or layered on DXGI: ~61 Hz whatever the frame rate, HDR on
-// So auto allows it only while Windows HDR is off for the primary display.
+// So auto allows it only while Windows HDR is off for the primary display. Since 2.3.0 the default is to present
+// through DXGI instead (dxgipresent.h: DXVK draws, a DXGI flip-model swap chain shows the frames, like Direct3D 9's
+// own fullscreen), which needs no exclusive fullscreen for variable refresh and keeps HDR on.
 // A DXVK_CONFIG the player set that already names the option is left as it is.
 enum DxvkFse {
     kDxvkFseAuto = 0,
     kDxvkFseOn = 1,
     kDxvkFseOff = 2,
 };
-bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen);
+// dxgi_present (INI DxvkPresentThroughDxgi): DXVK's frames go out through DXGI (dxgipresent.h); exclusive_fullscreen
+// is then not used (no Vulkan swap chain to make exclusive).
+bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen, bool dxgi_present);
 
 // DXVK's 32-bit d3d9.dll, renamed, in the folder of this DLL.
 inline constexpr wchar_t kDxvkFileName[] = L"dxvk_d3d9.dll";

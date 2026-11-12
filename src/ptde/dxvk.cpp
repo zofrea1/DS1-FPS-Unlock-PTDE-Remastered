@@ -1,5 +1,6 @@
 #include "dxvk.h"
 
+#include "dxgipresent.h"
 #include "gamma.h"
 #include "log.h"
 
@@ -261,7 +262,7 @@ void add_dxvk_option(const char* key, const char* value) {
 
 }  // namespace
 
-bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen) {
+bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen, bool dxgi_present) {
     char dxvk_name[MAX_PATH];
     narrow(dxvk_path, dxvk_name);
     // Proton (Steam Deck, Linux) and Wine already run Direct3D 9 on Vulkan with their own DXVK; a second one on top
@@ -328,8 +329,8 @@ bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen) {
 
     char display[192] = "";
     const int hdr = primary_display_hdr(display, sizeof(display));
-    const bool allow_fse =
-        exclusive_fullscreen == kDxvkFseOn || (exclusive_fullscreen == kDxvkFseAuto && hdr == 0);
+    const bool allow_fse = !dxgi_present &&
+        (exclusive_fullscreen == kDxvkFseOn || (exclusive_fullscreen == kDxvkFseAuto && hdr == 0));
     if (allow_fse) {
         add_dxvk_option("dxvk.allowFse", "True");
     }
@@ -338,6 +339,9 @@ bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen) {
         LOG_ERROR("DXVK: could not load %s (Win32 error %lu). Running on the system Direct3D 9.", dxvk_name,
                   GetLastError());
         return false;
+    }
+    if (dxgi_present) {
+        dxgi_present = dxgipresent_install(dxvk);
     }
     g_dxvk_create = reinterpret_cast<CreateFn>(GetProcAddress(dxvk, "Direct3DCreate9"));
     if (!g_dxvk_create) {
@@ -392,7 +396,10 @@ bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen) {
     }
     LOG_INFO("DXVK: Direct3D 9 runs on Vulkan through %s on \"%s\" (system Direct3DCreate9 %s, now leads to DXVK)",
              dxvk_name, id.Description, entry_state);
-    if (exclusive_fullscreen == kDxvkFseAuto && hdr == 1) {
+    if (dxgi_present) {
+        LOG_INFO("DXVK: frames go out through DXGI (DxvkPresentThroughDxgi = true): HDR stays on, variable refresh in "
+                 "fullscreen and borderless windows alike, no exclusive fullscreen (%s)", display);
+    } else if (exclusive_fullscreen == kDxvkFseAuto && hdr == 1) {
         LOG_INFO("DXVK: exclusive fullscreen left off, so no G-SYNC / variable refresh under DXVK: Windows runs the "
                  "display in HDR, and in exclusive fullscreen DXVK would make Windows switch HDR off while the game "
                  "runs (the monitor changes mode, the picture changes). Variable refresh with HDR on: Direct3D 9 "

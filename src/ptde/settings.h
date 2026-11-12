@@ -119,6 +119,9 @@ struct Settings {
     // DXVK may take exclusive fullscreen (dxvk.allowFse), which G-SYNC / variable refresh needs under DXVK (dxvk.h):
     // 0 auto (only while Windows HDR is off for the display), 1 always, 2 never.
     int dxvk_exclusive_fullscreen = 0;
+    // DXVK's frames go out through a DXGI flip-model swap chain instead of a Vulkan one (dxgipresent.h): HDR stays on
+    // and variable refresh works without exclusive fullscreen. DxvkExclusiveFullscreen then has nothing to do.
+    bool dxvk_dxgi_present = true;
     // The game's brightness gamma ramp (gamma.h): 0 auto and 1 passed on (as the system Direct3D 9 does), 2 never.
     int gamma_ramp = 0;
     // Render thread CPU (see d3dperf.h): the render target the game reads back every frame is copied two frames late

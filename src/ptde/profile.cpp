@@ -2,6 +2,7 @@
 #include "remote.h"
 #include "streamwatch.h"
 #include "texpreload.h"
+#include "dxgipresent.h"
 
 #include "d3dperf.h"
 #include "surfpool.h"
@@ -651,6 +652,7 @@ void report() {
     if (player_position(xyz)) n += std::snprintf(line + n, sizeof(line) - n, " | pos %.1f %.1f %.1f", xyz[0], xyz[1], xyz[2]);
     if (!quiet) LOG_INFO("%s", line);
     texpreload_report();
+    if (!quiet) dxgipresent_report();
 }
 
 // ---------------------------------------------------------------------------------------------------------------

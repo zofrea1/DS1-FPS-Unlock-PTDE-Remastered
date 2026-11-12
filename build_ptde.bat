@@ -16,7 +16,7 @@ set RSP=build\ptde\sources.rsp
 > %RSP% (for /f "usebackq eol=# delims=" %%f in ("src\ptde\sources.txt") do @echo %%f)
 >> %RSP% echo src\ptde\extension_none.cpp
 
-cmd /c "call %VCVARS% x86 && rc /nologo /Isrc\common /fo build\ptde\version.res src\ptde\version.rc && cl /nologo /std:c++17 /O2 /MT /EHsc /W3 /LD %DIAG% /Isrc\common /Isrc\ptde @%RSP% build\ptde\version.res /Fobuild\ptde\ /Febuild\ptde\xinput1_3.dll /link /DEF:src\ptde\xinput1_3.def /OPT:REF /MAP:build\ptde\xinput1_3.map"
+cmd /c "call %VCVARS% x86 && rc /nologo /Isrc\common /fo build\ptde\version.res src\ptde\version.rc && cl /nologo /std:c++17 /O2 /MT /EHsc /W3 /LD %DIAG% /Isrc\common /Isrc\ptde /Ithird_party\vulkan\include @%RSP% build\ptde\version.res /Fobuild\ptde\ /Febuild\ptde\xinput1_3.dll /link /DEF:src\ptde\xinput1_3.def /OPT:REF /MAP:build\ptde\xinput1_3.map"
 if errorlevel 1 exit /b 1
 
 rem DXVK's 32-bit d3d9.dll for the optional DXVK = true (pinned release, SHA-256 checked).
