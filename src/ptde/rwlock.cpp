@@ -60,12 +60,19 @@ WakeByAddressAllFn g_wake_all = nullptr;
 volatile LONG g_waiters = 0;  // threads asleep on any lock (wakes are only made while there are some)
 
 // Sleeps until the count is no longer `seen` (or a spurious wake), unless `timeout` ms after `start` have passed.
+// Never more than kMaxSleep ms at a time (the callers look at the count again and come back): a wake that is missed
+// costs that much, not the game. One was missed on Android (GameNative: Wine under Box64 on an ARM CPU, 2026-11-12):
+// the game froze for good seconds after a character loaded. x86 keeps an interlocked change of the count ordered before
+// the plain read of g_waiters that follows it in wake(); ARM, as Box64 translates by default, does not, so the last
+// reader could read no waiter while the writer, already counted, still saw the readers and slept with no timeout.
+constexpr DWORD kMaxSleep = 5;
 bool wait_change(Lock* lock, LONG seen, DWORD timeout, ULONGLONG start) {
-    DWORD left = INFINITE;
+    DWORD left = kMaxSleep;
     if (timeout != INFINITE) {
         const ULONGLONG spent = GetTickCount64() - start;
         if (spent >= timeout) return false;
-        left = static_cast<DWORD>(timeout - spent);
+        const DWORD rest = static_cast<DWORD>(timeout - spent);
+        if (rest < left) left = rest;
     }
     InterlockedIncrement(&g_waiters);
     g_wait_on_address(&lock->count, &seen, sizeof(seen), left);
@@ -74,7 +81,8 @@ bool wait_change(Lock* lock, LONG seen, DWORD timeout, ULONGLONG start) {
 }
 
 void wake(Lock* lock) {
-    if (g_waiters) g_wake_all(const_cast<LONG*>(&lock->count));
+    // An interlocked read: ordered after the interlocked change of the count on every CPU (see wait_change).
+    if (InterlockedCompareExchange(&g_waiters, 0, 0)) g_wake_all(const_cast<LONG*>(&lock->count));
 }
 
 // thiscall (lock, timeout), pops 4: 0 = locked; 0xFFFFFFFD (-3) on a timeout, and also, like the original, for a reader
