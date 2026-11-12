@@ -26,6 +26,10 @@ struct IDirect3DDevice9;
 bool remote_start();
 bool remote_enabled();
 
+// The name a created shader was saved under (vs_/ps_<hash>), "none" or "unknown".
+#include <string>
+std::string remote_shader_name(void* shader);
+
 // From CreateDevice, after the other hooks and before the profiler's.
 void remote_hook_device(IDirect3DDevice9* device);
 

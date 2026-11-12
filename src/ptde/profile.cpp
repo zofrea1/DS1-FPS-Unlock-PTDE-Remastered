@@ -1,4 +1,5 @@
 #include "profile.h"
+#include "remote.h"
 #include "streamwatch.h"
 
 #include "d3dperf.h"
@@ -20,6 +21,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -123,16 +125,107 @@ HRESULT WINAPI hook_psc(IDirect3DDevice9* d, UINT start, const float* data, UINT
     g_psc.extra += count;
     return reinterpret_cast<ConstFn>(g_orig[kSetPsConstF])(d, start, data, count);
 }
+// Slow calls: any of these that blocks for 3 ms or more is logged with the shader pair bound and whether that pair
+// has been drawn before in this session (the area-load hitches: the render thread waits inside the driver while it
+// compiles; a warm-up can only help with pairs drawn for the first time).
+void* volatile g_cur_vs = nullptr;
+void* volatile g_cur_ps = nullptr;
+std::mutex g_pairs_lock;
+std::unordered_set<uint64_t> g_pairs_drawn;
+volatile LONG g_slow_logged = 0;
+constexpr double kSlowCallMs = 3.0;
+constexpr LONG kSlowCallLines = 400;
+
+uint64_t pair_key() {
+    return (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(g_cur_vs)) << 32) |
+           static_cast<uint64_t>(reinterpret_cast<uintptr_t>(g_cur_ps));
+}
+
+// Before a draw: whether its pair is new (and remember it).
+bool pair_first_draw() {
+    std::lock_guard<std::mutex> lock(g_pairs_lock);
+    return g_pairs_drawn.insert(pair_key()).second;
+}
+
+void note_slow_call(const char* what, int64_t ticks, int first) {
+    const double ms = 1000.0 * static_cast<double>(ticks) / static_cast<double>(g_freq.QuadPart);
+    if (ms < kSlowCallMs || InterlockedIncrement(&g_slow_logged) > kSlowCallLines) return;
+    LOG_INFO("[slowcall] %s %.1f ms on thread %lu: vs %s ps %s%s", what, ms, GetCurrentThreadId(),
+             remote_shader_name(g_cur_vs).c_str(), remote_shader_name(g_cur_ps).c_str(),
+             first < 0 ? "" : first ? " (first draw of this pair)" : " (pair drawn before)");
+}
+
 HRESULT WINAPI hook_dip(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, INT base, UINT min, UINT num, UINT start,
                         UINT prims) {
     ++g_calls[kDrawIndexed];
     g_dip.extra += prims;
-    return reinterpret_cast<DipFn>(g_orig[kDrawIndexed])(d, type, base, min, num, start, prims);
+    const bool first = pair_first_draw();
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<DipFn>(g_orig[kDrawIndexed])(d, type, base, min, num, start, prims);
+    note_slow_call("DrawIndexedPrimitive", qpc() - t0, first ? 1 : 0);
+    return hr;
 }
 HRESULT WINAPI hook_dp(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, UINT start, UINT prims) {
     ++g_calls[kDrawPrimitive];
     g_dp.extra += prims;
-    return reinterpret_cast<DpFn>(g_orig[kDrawPrimitive])(d, type, start, prims);
+    const bool first = pair_first_draw();
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<DpFn>(g_orig[kDrawPrimitive])(d, type, start, prims);
+    note_slow_call("DrawPrimitive", qpc() - t0, first ? 1 : 0);
+    return hr;
+}
+using DpUpFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, const void*, UINT);
+using DipUpFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void*, D3DFORMAT,
+                                 const void*, UINT);
+using SetShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, void*);
+using SetTextureSlowFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DBaseTexture9*);
+HRESULT WINAPI hook_dpup(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, UINT prims, const void* data, UINT stride) {
+    ++g_calls[kDrawUp];
+    const bool first = pair_first_draw();
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<DpUpFn>(g_orig[kDrawUp])(d, type, prims, data, stride);
+    note_slow_call("DrawPrimitiveUP", qpc() - t0, first ? 1 : 0);
+    return hr;
+}
+HRESULT WINAPI hook_dipup(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, UINT min, UINT num, UINT prims,
+                          const void* idx, D3DFORMAT fmt, const void* data, UINT stride) {
+    ++g_calls[kDrawIndexedUp];
+    const bool first = pair_first_draw();
+    const int64_t t0 = qpc();
+    const HRESULT hr =
+        reinterpret_cast<DipUpFn>(g_orig[kDrawIndexedUp])(d, type, min, num, prims, idx, fmt, data, stride);
+    note_slow_call("DrawIndexedPrimitiveUP", qpc() - t0, first ? 1 : 0);
+    return hr;
+}
+HRESULT WINAPI hook_set_vs(IDirect3DDevice9* d, void* sh) {
+    ++g_calls[kSetVertexShader];
+    g_cur_vs = sh;
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<SetShaderFn>(g_orig[kSetVertexShader])(d, sh);
+    note_slow_call("SetVertexShader", qpc() - t0, -1);
+    return hr;
+}
+HRESULT WINAPI hook_set_ps(IDirect3DDevice9* d, void* sh) {
+    ++g_calls[kSetPixelShader];
+    g_cur_ps = sh;
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<SetShaderFn>(g_orig[kSetPixelShader])(d, sh);
+    note_slow_call("SetPixelShader", qpc() - t0, -1);
+    return hr;
+}
+HRESULT WINAPI hook_set_decl(IDirect3DDevice9* d, void* decl) {
+    ++g_calls[kSetVertexDecl];
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<SetShaderFn>(g_orig[kSetVertexDecl])(d, decl);
+    note_slow_call("SetVertexDeclaration", qpc() - t0, -1);
+    return hr;
+}
+HRESULT WINAPI hook_set_tex_slow(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* t) {
+    ++g_calls[kSetTexture];
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<SetTextureSlowFn>(g_orig[kSetTexture])(d, stage, t);
+    note_slow_call("SetTexture", qpc() - t0, -1);
+    return hr;
 }
 
 // Resource locks and query results: one hook per distinct class vtable (the runtime uses a few classes per kind,
@@ -1359,6 +1452,12 @@ void profile_hook_device(IDirect3DDevice9* device) {
             case kSetPsConstF: own = reinterpret_cast<void*>(&hook_psc); break;
             case kDrawIndexed: own = reinterpret_cast<void*>(&hook_dip); break;
             case kDrawPrimitive: own = reinterpret_cast<void*>(&hook_dp); break;
+            case kDrawUp: own = reinterpret_cast<void*>(&hook_dpup); break;
+            case kDrawIndexedUp: own = reinterpret_cast<void*>(&hook_dipup); break;
+            case kSetVertexShader: own = reinterpret_cast<void*>(&hook_set_vs); break;
+            case kSetPixelShader: own = reinterpret_cast<void*>(&hook_set_ps); break;
+            case kSetVertexDecl: own = reinterpret_cast<void*>(&hook_set_decl); break;
+            case kSetTexture: own = reinterpret_cast<void*>(&hook_set_tex_slow); break;
             default: break;
         }
         if (!own) {

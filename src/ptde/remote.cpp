@@ -1337,6 +1337,8 @@ DWORD WINAPI poll_thread(void*) {
 
 }  // namespace
 
+std::string remote_shader_name(void* shader) { return shader_name(shader); }
+
 bool remote_start() {
     GetModuleFileNameW(nullptr, g_dir, MAX_PATH);
     wchar_t* slash = wcsrchr(g_dir, L'\\');
@@ -1431,6 +1433,7 @@ void remote_game_frame() {
 }
 
 #else  // FPSU_DIAGNOSTICS
+std::string remote_shader_name(void*) { return "none"; }
 
 void remote_game_frame() {}
 bool remote_start() { return false; }
