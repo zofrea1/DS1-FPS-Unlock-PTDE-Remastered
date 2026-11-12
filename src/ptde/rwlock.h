@@ -19,6 +19,7 @@
 // argument is not null), before the game's entry point runs: no thread can be inside the functions yet, so no
 // call ever mixes the two ways of counting, and no thread has to be paused. Loaded any later (a chain loader, an
 // injector), it is left out. Nothing is logged there; rwlock_log() says what happened once the log is open.
-void rwlock_install_early(bool static_load);
+// Under x86 translation (Box64, FEX, Windows on ARM) it is left out unless `even_translated` (FastReadLocks = always).
+void rwlock_install_early(bool static_load, bool even_translated = false);
 // `wanted`: FastReadLocks was asked for (the INI), for the log line when it was not tried.
 void rwlock_log(bool wanted);

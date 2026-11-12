@@ -174,13 +174,16 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         {
             wchar_t dll_path[MAX_PATH];
             GetModuleFileNameW(instance, dll_path, MAX_PATH);
-            bool fps_unlock = true, fast_read_locks = true, dpi_aware = true;
+            bool fps_unlock = true, fast_read_locks = true, fast_read_locks_always = false, dpi_aware = true;
             settings_read_keys(dll_path, [&](const std::string& key, const std::string& value) {
                 if (key == "fpsunlock") fps_unlock = settings_parse_bool(value);
-                if (key == "fastreadlocks") fast_read_locks = settings_parse_bool(value);
+                if (key == "fastreadlocks") {
+                    fast_read_locks_always = _stricmp(value.c_str(), "always") == 0;
+                    fast_read_locks = fast_read_locks_always || settings_parse_bool(value);
+                }
                 if (key == "dpiaware") dpi_aware = settings_parse_bool(value);
             });
-            if (fps_unlock && fast_read_locks) rwlock_install_early(reserved != nullptr);
+            if (fps_unlock && fast_read_locks) rwlock_install_early(reserved != nullptr, fast_read_locks_always);
             // Before the game makes its window (window.h).
             if (fps_unlock && dpi_aware) dpi_aware_early();
         }

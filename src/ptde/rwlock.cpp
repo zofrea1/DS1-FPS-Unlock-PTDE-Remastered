@@ -214,13 +214,16 @@ void write_jump_atomic(uintptr_t site, const uint8_t* jump) {
 // What the install in DllMain found, for rwlock_log() once the log is open.
 enum Result { kNotTried, kInstalled, kLateLoad, kWrongBase, kNoWaitOnAddress, kMismatch, kProtectFailed, kTranslated };
 Result g_result = kNotTried;
+bool g_forced_translated = false;  // installed under translation by FastReadLocks = always
 DWORD g_error = 0;
 char g_cpu[49] = {};
 
 // The game's x86 code translated for another CPU: Box64 or FEX (Android's GameNative and Winlator, Linux on ARM; their
 // CPUID names them: "Box64 ... on <cpu>", "Box64 Virtual CPU", "FEX-Emu ..."), or Windows on ARM (an ARM64 host). The
 // locks froze the game under Box64 (2026-11-12, a Snapdragon 888 phone); on the Steam Deck (Wine on an x86 CPU) and on
-// PCs they are fine. Under translation they are left alone.
+// PCs they are fine. Under translation they are left alone unless FastReadLocks = always. (A later test on that phone
+// found the freezes there to be the GPU driver losing its device, which happens without this mod too, so the locks
+// may not have been the cause; `always` is there to find out.)
 bool translated_x86() {
     int r[4] = {};
     __cpuid(r, static_cast<int>(0x80000000));
@@ -245,14 +248,17 @@ bool translated_x86() {
 
 }  // namespace
 
-void rwlock_install_early(bool static_load) {
+void rwlock_install_early(bool static_load, bool even_translated) {
     if (!static_load) {
         g_result = kLateLoad;
         return;
     }
     if (translated_x86()) {
-        g_result = kTranslated;
-        return;
+        if (!even_translated) {
+            g_result = kTranslated;
+            return;
+        }
+        g_forced_translated = true;
     }
     // The game's image at its preferred base (its headers there, linked for that base).
     MEMORY_BASIC_INFORMATION mbi{};
@@ -313,7 +319,8 @@ void rwlock_log(bool wanted) {
     switch (g_result) {
     case kInstalled:
         LOG_INFO("FastReadLocks: the game's read/write locks take and give back without kernel calls (put in place before "
-                 "the game started)");
+                 "the game started)%s%s%s", g_forced_translated ? "; the game runs translated for another CPU (" : "",
+                 g_forced_translated ? g_cpu : "", g_forced_translated ? "), on by FastReadLocks = always" : "");
         break;
     case kLateLoad:
         LOG_INFO("FastReadLocks: this DLL was loaded after the game started (not as one of its own imports), when the "
@@ -332,8 +339,8 @@ void rwlock_log(bool wanted) {
         LOG_ERROR("FastReadLocks: could not unprotect the lock functions (Win32=%lu)", g_error);
         break;
     case kTranslated:
-        LOG_INFO("FastReadLocks: off: the game runs translated for another CPU (%s), where they froze the game; its read "
-                 "locks keep their kernel calls", g_cpu);
+        LOG_INFO("FastReadLocks: off: the game runs translated for another CPU (%s); its read locks keep their kernel "
+                 "calls (FastReadLocks = always puts them in place there too)", g_cpu);
         break;
     case kNotTried:
         if (wanted) LOG_INFO("FastReadLocks: not put in place at start-up; the game's read locks keep their kernel calls");
