@@ -1253,9 +1253,6 @@ void run(const std::string& line) {
     } else if (c == "dof") {
         resolution_set_smooth_dof(num(1, 1) != 0);
         out("dof %s", num(1, 1) != 0 ? "smooth (ours)" : "the game's");
-    } else if (c == "dofmode") {
-        resolution_set_dof_mode(static_cast<int>(num(1, 0)));
-        out("dofmode %ld (%s)", num(1, 0), num(1, 0) ? "cubic B-spline" : "as the original showed it");
     } else if (c == "dofforce") {
         resolution_force_dof_level(static_cast<int>(num(1, 0)));
         out("dofforce %ld", num(1, 0));

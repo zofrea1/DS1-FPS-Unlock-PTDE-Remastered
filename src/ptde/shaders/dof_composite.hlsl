@@ -1,12 +1,13 @@
 // The depth of field's final composite (the game's FRPG_Fil_Dof composite, ps_3_0), for a scene rendered above the
 // original 1024x720 (RenderResolution). The math is the game's: a blur weight from the scene's alpha and the near
 // blur mask, four blend weights from it (c66, c67), and the sharp scene mixed with three blur levels. Only the reads
-// of the low-resolution textures differ. The game read its 512x360 (and 256x180) targets bilinearly into its
-// 1024x720 scene, which was then stretched to the screen, bilinearly again: two mild stretches, smooth on any screen.
-// At 4K one bilinear read stretches them 7.5x (15x) and shows their grid. Here the blur is read as the original
-// showed it: bilinearly at the four nearest pixel centres of the original 1024x720 grid, those four blended by where
-// the pixel lies between them (gMode.x = 0, the default). gMode.x = 1 reads with a cubic B-spline instead (smoother,
-// a little more blur; for comparison). The blur levels themselves, and so the amount of blur, are the game's.
+// of the low-resolution textures differ: the game's single bilinear read of a 512x360 (and 256x180) target is a
+// cubic B-spline here (four bilinear reads), so at 4K the blur is smooth instead of showing its 512x360 grid. The
+// blur levels themselves are the game's. Measured against the original (the same view at 1024x720, Firelink): in a
+// half-blurred area the original's detail and kinks (mean |first| and |second| differences, exposure-matched) were
+// 0.29 and 0.42, this 0.28 and 0.43, the game's own read at 4K 0.38 and 0.54. (Reading the blur as the original's two
+// bilinear stretches did, 1024x720 grid then the screen, gave 0.33 and 0.49: the sharp part mixed into a half-blurred
+// area is now full resolution, and the B-spline's slightly wider reach evens that out.)
 //
 // Built with fxc (tools/build_shaders.bat) into dof_composite_ps.h; the DLL carries the compiled bytecode.
 
@@ -20,9 +21,6 @@ float4 gWeightScale : register(c66);   // the game's DL_FREG_066
 float4 gWeightBias : register(c67);    // the game's DL_FREG_067
 float4 gBlurSize : register(c200);     // s1..s3: width, height, 1 / width, 1 / height (set by the DLL)
 float4 gNearSize : register(c201);     // s4: the same
-float4 gMode : register(c202);         // x: 0 = as the original showed it, 1 = cubic B-spline (set by the DLL)
-
-static const float2 kGrid = float2(1024.0, 720.0);  // the original scene's size
 
 // Cubic B-spline reconstruction with four bilinear reads (all weights positive, so each pair of taps folds into one
 // bilinear read between them).
@@ -44,42 +42,17 @@ float4 bspline(sampler2D s, float2 uv, float4 size) {
            g1.y * (g0.x * tex2Dlod(s, float4(t0.x, t1.y, 0, 0)) + g1.x * tex2Dlod(s, float4(t1.x, t1.y, 0, 0)));
 }
 
-// The texture as the original showed it: bilinear reads at the original 1024x720 grid's four nearest pixel centres,
-// blended bilinearly.
-float4 original(sampler2D s, float2 uv) {
-    float2 p = uv * kGrid - 0.5;
-    float2 c = floor(p);
-    float2 f = p - c;
-    float2 a = (c + 0.5) / kGrid;
-    float2 b = (c + 1.5) / kGrid;
-    float4 t00 = tex2Dlod(s, float4(a.x, a.y, 0, 0));
-    float4 t10 = tex2Dlod(s, float4(b.x, a.y, 0, 0));
-    float4 t01 = tex2Dlod(s, float4(a.x, b.y, 0, 0));
-    float4 t11 = tex2Dlod(s, float4(b.x, b.y, 0, 0));
-    return lerp(lerp(t00, t10, f.x), lerp(t01, t11, f.x), f.y);
-}
-
-float4 smooth(sampler2D s, float2 uv, float4 size) {
-    float4 r;
-    [branch] if (gMode.x > 0.5) {
-        r = bspline(s, uv, size);
-    } else {
-        r = original(s, uv);
-    }
-    return r;
-}
-
 float4 main(float2 uv : TEXCOORD1) : COLOR0 {
-    float nearBlur = smooth(gNear, uv, gNearSize).w;
+    float nearBlur = bspline(gNear, uv, gNearSize).w;
     float4 src = tex2Dlod(gScene, float4(uv, 0, 0));
     float blurW = max(src.w, nearBlur);
     float4 w = saturate(blurW * gWeightScale + gWeightBias);
     float4 blend = float4(w.x, w.y - w.x, w.z - w.y, w.w - w.z);
     float4 o = src * blend.x;
     [branch] if (blend.y != 0.0 || blend.z != 0.0 || blend.w != 0.0) {
-        o += smooth(gBlur1, uv, gBlurSize) * blend.y;
-        o += smooth(gBlur2, uv, gBlurSize) * blend.z;
-        o += smooth(gBlur3, uv, gBlurSize) * blend.w;
+        o += bspline(gBlur1, uv, gBlurSize) * blend.y;
+        o += bspline(gBlur2, uv, gBlurSize) * blend.z;
+        o += bspline(gBlur3, uv, gBlurSize) * blend.w;
     }
     return o;
 }

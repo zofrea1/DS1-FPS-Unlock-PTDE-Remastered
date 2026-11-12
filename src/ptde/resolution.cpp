@@ -151,7 +151,6 @@ volatile bool g_dof_bound = false;
 volatile bool g_dof_enabled = true;
 volatile bool g_dof_game_bound = false;  // the game's composite (ours or its own) is the bound shader
 volatile LONG g_dof_force = 0;           // diagnostics: 1-3 shows only that blur level
-volatile LONG g_dof_mode = 0;            // c202.x: 0 as the original showed the blur, 1 cubic B-spline
 volatile LONG g_dof_draws = 0;
 
 HRESULT WINAPI hk_create_texture(IDirect3DDevice9* dev, UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT f,
@@ -224,9 +223,8 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     }
     if (dof) {
         // The game's sizes; the draw sets them again from the textures it binds.
-        const float sizes[12] = {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180,
-                                 static_cast<float>(g_dof_mode), 0, 0, 0};
-        dev->SetPixelShaderConstantF(200, sizes, 3);
+        const float sizes[8] = {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180};
+        dev->SetPixelShaderConstantF(200, sizes, 2);
         return o_set_ps(dev, g_dof_ours);
     }
     return o_set_ps(dev, ps);
@@ -251,11 +249,10 @@ bool stage_size(IDirect3DDevice9* dev, DWORD stage, float* out) {
 // Our composite's draw: the low-resolution textures' sizes and bilinear, clamped reads on stages 1-4, then the
 // game's states back.
 HRESULT dof_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
-    float sizes[12] = {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180,
-                       static_cast<float>(g_dof_mode), 0, 0, 0};
+    float sizes[8] = {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180};
     stage_size(dev, 1, sizes);
     stage_size(dev, 4, sizes + 4);
-    dev->SetPixelShaderConstantF(200, sizes, 3);
+    dev->SetPixelShaderConstantF(200, sizes, 2);
     static const D3DSAMPLERSTATETYPE kStates[] = {D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
                                                   D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV};
     static const DWORD kValues[] = {D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP};
@@ -451,7 +448,6 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
 
 void resolution_set_smooth_dof(bool on) { g_dof_enabled = on; }
 void resolution_force_dof_level(int level) { g_dof_force = level; }
-void resolution_set_dof_mode(int mode) { g_dof_mode = mode; }
 
 void resolution_reset() {
     for (auto& t : g_chain) {
