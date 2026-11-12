@@ -16,6 +16,8 @@ struct IDirect3DDevice9;
 // Diagnostic only; a release build compiles these as empty stubs.
 bool profile_start();
 bool profile_enabled();
+// The F10 capture without the key (RemoteControl `capture`).
+void profile_request_capture();
 
 // Counts the game's calls on its Direct3D 9 device (the object the game holds, DSfix's wrapper when DSfix is
 // there) and times Present, buffer and texture locks, query waits and render target read-backs.

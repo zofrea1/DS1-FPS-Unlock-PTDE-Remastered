@@ -5,6 +5,7 @@
 #if FPSU_DIAGNOSTICS
 
 #include "limiter.h"
+#include "profile.h"
 #include "resolution.h"
 #include "watch.h"
 #include "log.h"
@@ -1370,6 +1371,9 @@ void run(const std::string& line) {
     } else if (c == "frame" && t.size() > 1) {
         g_frame_name = t[1];
         g_frame_requested = true;
+    } else if (c == "capture") {
+        profile_request_capture();
+        out("capture requested (the [prof] lines go to the main log in about 12 s)");
     } else if (c == "swapoff") {
         resolution_set_swap_off_mask(static_cast<int>(num(1, 0)));
         out("swapoff 0x%lX", num(1, 0));

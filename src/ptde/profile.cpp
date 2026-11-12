@@ -1440,13 +1440,16 @@ DWORD WINAPI spike_thread(void*) {
     }
 }
 
+volatile bool g_capture_requested = false;  // RemoteControl `capture`: as F10
+
 DWORD WINAPI profile_thread(void*) {
     calibrate_cycles();
     bool was_down = false;
     int64_t next_report = qpc() + g_freq.QuadPart * kReportSeconds;
     for (;;) {
         Sleep(50);
-        const bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+        const bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0 || g_capture_requested;
+        g_capture_requested = false;
         if (down && !was_down) {
             report();  // close the window before the capture so the sampling does not count in it
             capture();
@@ -1596,3 +1599,5 @@ void profile_frame_boundary() {}
 void profile_render_span(double) {}
 
 #endif  // FPSU_DIAGNOSTICS
+
+void profile_request_capture() { g_capture_requested = true; }
