@@ -1370,6 +1370,9 @@ void run(const std::string& line) {
     } else if (c == "frame" && t.size() > 1) {
         g_frame_name = t[1];
         g_frame_requested = true;
+    } else if (c == "reduce") {
+        resolution_set_present_reduce(num(1, 1) != 0);
+        out("reduce %ld", num(1, 1));
     } else if (c == "fakefocus") {
         set_fake_focus(num(1, 1) != 0);
         out("fakefocus %d", g_fake_focus ? 1 : 0);

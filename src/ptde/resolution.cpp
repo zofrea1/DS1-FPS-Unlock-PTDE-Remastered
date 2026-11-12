@@ -10,6 +10,9 @@
 #include "shaders/dof_composite_ps.h"
 #include "shaders/dof_near_rate_ps.h"
 #include "shaders/hdr_coladj_ps.h"
+#include "shaders/present_lut_ps.h"
+#include "shaders/present_reduce_ps.h"
+#include "shaders/present_reduce_vs.h"
 
 #include <cstdint>
 #include <cstring>
@@ -187,6 +190,16 @@ constexpr DWORD kHdrColAdj[] = {
 // 256x180 mask pixel became the average of the near rate over every depth pixel the mask pixel covers, so the near
 // blur no longer flickers in blocks along near edges.
 constexpr DWORD kTarget = 0xFF;  // size_stage: the render target's viewport instead of a stage
+// The last copy of the frame buffer onto the back buffer in windowed and borderless mode (ps_067116db): one read of
+// the frame buffer (s0), then the in-game Brightness through the 256x1 g_GammaTexture (s1). Its instructions.
+constexpr DWORD kGammaCopy[] = {
+    0xFFFF0300, 0x05000051, 0xA00F0000, 0x3F7F0000, 0x3B000000, 0x3F800000, 0x00000000, 0x0200001F, 0x80000005,
+    0x900F0000, 0x0200001F, 0x90000000, 0xA00F0800, 0x0200001F, 0x90000000, 0xA00F0801, 0x0300005F, 0x800F0000,
+    0x90E40000, 0xA0E40800, 0x04000004, 0x80070000, 0x80E40000, 0xA0000000, 0xA0550000, 0x0300005F, 0x800F0001,
+    0x80000000, 0xA0E40801, 0x04000004, 0x80090800, 0x80000001, 0xA0E60000, 0xA0A70000, 0x0300005F, 0x800F0001,
+    0x80550000, 0xA0E40801, 0x0300005F, 0x800F0000, 0x80AA0000, 0xA0E40801, 0x02000001, 0x80040800, 0x80AA0000,
+    0x02000001, 0x80020800, 0x80550001, 0x0000FFFF};
+
 struct SwapDef {
     const char* what;
     const DWORD* game;
@@ -205,6 +218,9 @@ constexpr SwapDef kSwaps[] = {
     {"the depth of field: its near blur mask", kDofNearRate, sizeof(kDofNearRate) / sizeof(kDofNearRate[0]),
      kDofNearRatePs, {1, kTarget}, {1024.0f, 720.0f, 1.0f / 1024, 1.0f / 720, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180},
      0, 0x02},
+    {"the frame's scale-down to the window (windowed and borderless)", kGammaCopy,
+     sizeof(kGammaCopy) / sizeof(kGammaCopy[0]), kPresentLutPs, {0, kTarget},
+     {1280.0f, 720.0f, 1.0f / 1280, 1.0f / 720, 1280.0f, 720.0f, 1.0f / 1280, 1.0f / 720}, 0, 0x01},
 };
 constexpr int kSwapCount = sizeof(kSwaps) / sizeof(kSwaps[0]);
 std::unordered_set<void*> g_swap_game[kSwapCount];       // the game's shaders, as it made them
@@ -215,6 +231,8 @@ volatile LONG g_game_bound = -1;     // the swap whose game shader the game boun
 volatile bool g_swap_enabled = true;  // RemoteControl `dof 0/1` (all our post-processing shaders)
 volatile LONG g_dof_force = 0;        // diagnostics: 1-3 shows only that blur level
 constexpr int kDofSwap = 0;
+constexpr int kPresentSwap = 3;               // the windowed scale-down (kGammaCopy)
+volatile bool g_present_swap_enabled = true;  // RemoteControl `reduce 0/1`
 
 int swap_of(const DWORD* code) {
     for (int i = 0; i < kSwapCount; ++i) {
@@ -304,7 +322,10 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
         for (int i = 0; i < kSwapCount && game < 0; ++i) {
             if (g_swap_game[i].count(ps)) game = i;
         }
-        if (game >= 0 && g_swap_enabled && g_swap_ours[game] && g_swap_device[game] == dev) swap = game;
+        if (game >= 0 && g_swap_enabled && g_swap_ours[game] && g_swap_device[game] == dev &&
+            (game != kPresentSwap || g_present_swap_enabled)) {
+            swap = game;
+        }
     }
     g_copy_bound = copy;
     g_game_bound = game;
@@ -503,6 +524,156 @@ HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
     return o_set_scissor(dev, &m);
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The frame's last scale-down (shaders/present_reduce.hlsl): when the frame buffer is larger than the screen
+// (Supersampling, or RenderResolution above the display), the game's StretchRect of it onto the back buffer is drawn
+// as an exact area average in linear light instead of the driver's bilinear filter.
+using StretchRectFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DSurface9*, const RECT*, IDirect3DSurface9*,
+                                       const RECT*, D3DTEXTUREFILTERTYPE);
+StretchRectFn o_stretch = nullptr;
+volatile bool g_reduce_enabled = true;
+
+struct Reduce {
+    IDirect3DDevice9* dev = nullptr;
+    IDirect3DVertexShader9* vs = nullptr;
+    IDirect3DPixelShader9* ps = nullptr;
+    IDirect3DVertexDeclaration9* decl = nullptr;
+    IDirect3DStateBlock9* state = nullptr;
+    bool srgb = false;
+    bool failed = false;
+    bool logged = false;
+};
+Reduce g_reduce;
+
+template <typename T>
+void release_ptr(T*& p) {
+    if (p) {
+        p->Release();
+        p = nullptr;
+    }
+}
+
+bool reduce_ready(IDirect3DDevice9* dev, D3DFORMAT src_format, D3DFORMAT dst_format) {
+    if (g_reduce.dev != dev) {
+        release_ptr(g_reduce.vs);
+        release_ptr(g_reduce.ps);
+        release_ptr(g_reduce.decl);
+        release_ptr(g_reduce.state);
+        g_reduce.dev = dev;
+        g_reduce.failed = false;
+        static const D3DVERTEXELEMENT9 kDecl[] = {
+            {0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0}, D3DDECL_END()};
+        if (FAILED(dev->CreateVertexShader(reinterpret_cast<const DWORD*>(kPresentReduceVs), &g_reduce.vs)) ||
+            FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kPresentReducePs), &g_reduce.ps)) ||
+            FAILED(dev->CreateVertexDeclaration(kDecl, &g_reduce.decl))) {
+            g_reduce.failed = true;
+            LOG_ERROR("Resolution: the shaders for the frame's scale-down could not be made; the driver's filter is "
+                      "used");
+            return false;
+        }
+        // Linear-light averaging needs sRGB reads of the frame buffer and sRGB writes to the back buffer.
+        IDirect3D9* d3d = nullptr;
+        D3DDISPLAYMODE mode{};
+        g_reduce.srgb = false;
+        if (SUCCEEDED(dev->GetDirect3D(&d3d)) && d3d && SUCCEEDED(dev->GetDisplayMode(0, &mode))) {
+            const D3DFORMAT adapter = mode.Format == D3DFMT_UNKNOWN ? D3DFMT_X8R8G8B8 : mode.Format;
+            g_reduce.srgb =
+                SUCCEEDED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, adapter, D3DUSAGE_QUERY_SRGBREAD,
+                                                 D3DRTYPE_TEXTURE, src_format)) &&
+                SUCCEEDED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, adapter,
+                                                 D3DUSAGE_QUERY_SRGBWRITE, D3DRTYPE_SURFACE, dst_format));
+        }
+        if (d3d) d3d->Release();
+    }
+    if (g_reduce.failed) return false;
+    if (!g_reduce.state && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_reduce.state))) return false;
+    return true;
+}
+
+HRESULT reduce_draw(IDirect3DDevice9* dev, IDirect3DTexture9* tex, const D3DSURFACE_DESC& sd, const RECT& s,
+                    IDirect3DSurface9* dst, const RECT& d) {
+    if (FAILED(g_reduce.state->Capture())) return E_FAIL;
+    IDirect3DSurface9* rts[4] = {};
+    for (DWORD i = 0; i < 4; ++i) dev->GetRenderTarget(i, &rts[i]);
+    IDirect3DSurface9* depth = nullptr;
+    dev->GetDepthStencilSurface(&depth);
+
+    dev->SetRenderTarget(0, dst);
+    for (DWORD i = 1; i < 4; ++i) {
+        if (rts[i]) dev->SetRenderTarget(i, nullptr);
+    }
+    dev->SetDepthStencilSurface(nullptr);
+    D3DVIEWPORT9 vp{static_cast<DWORD>(d.left), static_cast<DWORD>(d.top), static_cast<DWORD>(d.right - d.left),
+                    static_cast<DWORD>(d.bottom - d.top), 0.0f, 1.0f};
+    dev->SetViewport(&vp);
+    static const D3DRENDERSTATETYPE kRs[] = {D3DRS_ZENABLE,          D3DRS_ZWRITEENABLE,     D3DRS_ALPHABLENDENABLE,
+                                            D3DRS_ALPHATESTENABLE,  D3DRS_CULLMODE,         D3DRS_STENCILENABLE,
+                                            D3DRS_COLORWRITEENABLE, D3DRS_SCISSORTESTENABLE, D3DRS_FILLMODE,
+                                            D3DRS_CLIPPLANEENABLE,  D3DRS_SRGBWRITEENABLE};
+    const DWORD rs_values[] = {FALSE, FALSE, FALSE, FALSE, D3DCULL_NONE, FALSE, 0xF, FALSE, D3DFILL_SOLID, 0,
+                               g_reduce.srgb ? TRUE : FALSE};
+    for (size_t i = 0; i < sizeof(kRs) / sizeof(kRs[0]); ++i) dev->SetRenderState(kRs[i], rs_values[i]);
+    dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, g_reduce.srgb ? TRUE : FALSE);
+    o_set_texture(dev, 0, tex);
+    dev->SetVertexShader(g_reduce.vs);
+    o_set_ps(dev, g_reduce.ps);
+    dev->SetVertexDeclaration(g_reduce.decl);
+    const float sx = static_cast<float>(s.right - s.left) / static_cast<float>(d.right - d.left);
+    const float sy = static_cast<float>(s.bottom - s.top) / static_cast<float>(d.bottom - d.top);
+    const float consts[8] = {sx, sy, s.left - d.left * sx, s.top - d.top * sy, 1.0f / sd.Width, 1.0f / sd.Height,
+                             static_cast<float>(sd.Width), static_cast<float>(sd.Height)};
+    dev->SetPixelShaderConstantF(200, consts, 2);
+    static const float kQuad[16] = {-1, 1, 0, 1, 1, 1, 0, 1, -1, -1, 0, 1, 1, -1, 0, 1};
+    const HRESULT hr = o_draw_up(dev, D3DPT_TRIANGLESTRIP, 2, kQuad, 16);
+
+    for (DWORD i = 0; i < 4; ++i) {
+        if (i == 0 || rts[i]) dev->SetRenderTarget(i, rts[i]);
+        if (rts[i]) rts[i]->Release();
+    }
+    dev->SetDepthStencilSurface(depth);
+    if (depth) depth->Release();
+    g_reduce.state->Apply();  // after the targets: setting a target resets the viewport
+    return hr;
+}
+
+HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst,
+                          const RECT* dr, D3DTEXTUREFILTERTYPE filter) {
+    D3DSURFACE_DESC sd{}, dd{};
+    if (g_reduce_enabled && src && dst && g_frame_w > 0 && SUCCEEDED(src->GetDesc(&sd)) &&
+        static_cast<int>(sd.Width) == g_frame_w && static_cast<int>(sd.Height) == g_frame_h &&
+        SUCCEEDED(dst->GetDesc(&dd)) && (dd.Usage & D3DUSAGE_RENDERTARGET)) {
+        const RECT s = sr ? *sr : RECT{0, 0, static_cast<LONG>(sd.Width), static_cast<LONG>(sd.Height)};
+        const RECT d = dr ? *dr : RECT{0, 0, static_cast<LONG>(dd.Width), static_cast<LONG>(dd.Height)};
+        const LONG sw = s.right - s.left, sh = s.bottom - s.top, dw = d.right - d.left, dh = d.bottom - d.top;
+        // Only a scale-down (in one direction at least, in none up): a same-size copy stays the game's.
+        if (dw > 0 && dh > 0 && sw >= dw && sh >= dh && (sw > dw || sh > dh)) {
+            IDirect3DTexture9* tex = nullptr;
+            if (SUCCEEDED(src->GetContainer(__uuidof(IDirect3DTexture9), reinterpret_cast<void**>(&tex))) && tex &&
+                reduce_ready(dev, sd.Format, dd.Format)) {
+                const HRESULT hr = reduce_draw(dev, tex, sd, s, dst, d);
+                tex->Release();
+                if (SUCCEEDED(hr)) {
+                    if (!g_reduce.logged) {
+                        g_reduce.logged = true;
+                        LOG_INFO("Resolution: the frame (%ldx%ld) is scaled down to the screen (%ldx%ld) as an exact "
+                                 "average of the pixels each screen pixel covers%s", sw, sh, dw, dh,
+                                 g_reduce.srgb ? ", in linear light" : "");
+                    }
+                    return hr;
+                }
+            } else if (tex) {
+                tex->Release();
+            }
+        }
+    }
+    return o_stretch(dev, src, sr, dst, dr, filter);
+}
+
 void* patch_slot(void* object, int slot, void* replacement) {
     void** vtable = *reinterpret_cast<void***>(object);
     void* original = vtable[slot];
@@ -535,12 +706,22 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
     if (p && !o_draw_up) o_draw_up = reinterpret_cast<DrawUPFn>(p);
     p = patch_slot(dev, 75, reinterpret_cast<void*>(&hk_set_scissor));
     if (p && !o_set_scissor) o_set_scissor = reinterpret_cast<SetScissorFn>(p);
+    p = patch_slot(dev, 34, reinterpret_cast<void*>(&hk_stretch));
+    if (p && !o_stretch) o_stretch = reinterpret_cast<StretchRectFn>(p);
+}
+
+void resolution_set_present_reduce(bool on) {
+    g_reduce_enabled = on;
+    g_present_swap_enabled = on;
 }
 
 void resolution_set_smooth_dof(bool on) { g_swap_enabled = on; }
 void resolution_force_dof_level(int level) { g_dof_force = level; }
 
-void resolution_reset() { g_tex0 = nullptr; }
+void resolution_reset() {
+    g_tex0 = nullptr;
+    release_ptr(g_reduce.state);  // made again on the next use
+}
 
 namespace {
 // fld qword ptr [0x011E7DE8] (0.8) in the lens flare's visibility function; the address operand is at +2.
