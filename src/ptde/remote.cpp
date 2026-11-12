@@ -289,6 +289,10 @@ std::string shader_name(void* sh) {
     return it != g_shaders.end() ? it->second : "unknown";
 }
 
+std::unordered_map<std::string, int> g_made;  // shader creations by name (name_shader)
+int g_made_fresh = 0, g_made_again = 0;
+ULONGLONG g_made_next = 0;
+
 void name_shader(const DWORD* code, void* shader, const char* prefix) {
     if (!code || !shader) return;
     size_t n = 1;
@@ -299,8 +303,29 @@ void name_shader(const DWORD* code, void* shader, const char* prefix) {
     char name[40];
     std::snprintf(name, sizeof(name), "%s_%08x", prefix, static_cast<unsigned>(h ^ (h >> 32)));
     {
-        std::lock_guard<std::mutex> lock(g_res_lock);
-        g_shaders[shader] = name;
+        // Shader creations, new and again (the same bytecode made before), summed every 10 s: whether the game makes
+        // the same shaders again as map parts stream in (each one a driver compile).
+        char line[160] = "";
+        {
+            std::lock_guard<std::mutex> lock(g_res_lock);
+            g_shaders[shader] = name;
+            int& n = g_made[name];
+            if (n++) {
+                ++g_made_again;
+            } else {
+                ++g_made_fresh;
+            }
+            const ULONGLONG now = GetTickCount64();
+            if (!g_made_next) g_made_next = now + 10000;
+            if (now >= g_made_next) {
+                std::snprintf(line, sizeof(line), "[shaders] last 10 s: %d new, %d made again (same bytecode as one "
+                              "made before); %u distinct so far", g_made_fresh, g_made_again,
+                              static_cast<unsigned>(g_made.size()));
+                g_made_fresh = g_made_again = 0;
+                g_made_next = now + 10000;
+            }
+        }
+        if (line[0]) LOG_INFO("%s", line);
     }
     std::wstring dir = std::wstring(g_dir) + L"\\fpsu-shaders";
     CreateDirectoryW(dir.c_str(), nullptr);

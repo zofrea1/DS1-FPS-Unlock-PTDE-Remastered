@@ -23,8 +23,9 @@ namespace {
 // of its vtable) and the game's return addresses on the stack, and every 10 s a summary by class.
 constexpr uint32_t kSubmitWait = 0x00577640;
 const uint8_t kPrologue[8] = {0x53, 0x55, 0x56, 0x8B, 0x74, 0x24, 0x10, 0x57};  // push ebx/ebp/esi; mov esi,[esp+10h]; push edi
-constexpr double kSlowMs = 2.0;
-constexpr int kLogged = 80;
+constexpr double kSlowMs = 2.0;  // counted as slow
+constexpr double kLogMs = 8.0;   // logged one by one
+constexpr int kLogged = 200;
 
 using SubmitFn = void(__fastcall*)(void*, void*, void*);
 SubmitFn g_orig = nullptr;
@@ -98,7 +99,7 @@ void __fastcall hk_submit(void* self, void* edx, void* req) {
         if (ms > s.worst) s.worst = ms;
         if (ms >= kSlowMs) {
             ++s.slow;
-            if (g_logged < kLogged) {
+            if (ms >= kLogMs && g_logged < kLogged) {
                 ++g_logged;
                 char cls[128];
                 class_name(vt, cls, sizeof(cls));
@@ -155,7 +156,7 @@ void streamwatch_install() {
     VirtualProtect(site, 8, old, &old);
     FlushInstructionCache(GetCurrentProcess(), site, 8);
     LOG_INFO("[stream] watching the game thread's synchronous jobs (0x577640): waits of %.0f ms or more are logged",
-             kSlowMs);
+             kLogMs);
 }
 
 #else
