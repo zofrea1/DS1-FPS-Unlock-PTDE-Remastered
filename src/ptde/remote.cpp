@@ -1065,11 +1065,66 @@ void god_tick() {
     if (hp[0] > 0 && hp[0] < hp[1]) *reinterpret_cast<int*>(chr + 0x2D4) = hp[1];
 }
 
+// fakefocus 1: the game reads input only while GetForegroundWindow() is its window (0xF6FB54, 0xF72500 store the
+// answer at +0x4C); for runs where nothing can take the foreground (display asleep, input desktop unavailable), its
+// import answers with the game's own window. fakefocus 0 gives back the real answer.
+constexpr uint32_t kForegroundImport = 0x010CC2BC;
+volatile bool g_fake_focus = false;
+using GetForegroundFn = HWND(WINAPI*)();
+GetForegroundFn g_get_foreground = nullptr;
+HWND WINAPI fake_foreground() {
+    if (g_fake_focus) {
+        static HWND game = nullptr;
+        if (!game || !IsWindow(game)) game = FindWindowW(L"DARK SOULS", nullptr);
+        if (game) return game;
+    }
+    return g_get_foreground();
+}
+
+void set_fake_focus(bool on) {
+    auto* slot = reinterpret_cast<void**>(kForegroundImport);
+    if (!g_get_foreground) {
+        DWORD old = 0;
+        if (!VirtualProtect(slot, 4, PAGE_READWRITE, &old)) return;
+        g_get_foreground = reinterpret_cast<GetForegroundFn>(*slot);
+        *slot = reinterpret_cast<void*>(&fake_foreground);
+        VirtualProtect(slot, 4, old, &old);
+    }
+    g_fake_focus = on;
+}
+
+// The player's character (WorldChrMan +4 -> first entry), or 0.
+uintptr_t player_chr() {
+    uintptr_t wcm = 0, first = 0, chr = 0;
+    if (!safe_read(0x0137DC70, &wcm, 4) || !wcm) return 0;
+    if (!safe_read(wcm + 4, &first, 4) || !first) return 0;
+    if (!safe_read(first, &chr, 4)) return 0;
+    return chr;
+}
+
+// ChrIns::ApplySpEffect (0xE7E950, vtable slot 125; thiscall id, source, 0, 1.0, 1.0, 1.0, own), as Prepare to
+// Co-op's world.cpp calls it: the player as the source, the effect this game's own.
+using ApplySpEffectFn = char(__fastcall*)(uintptr_t chr, void*, int id, uintptr_t src, int a, float f1, float f2,
+                                          float f3, int own);
+bool apply_speffect(uintptr_t chr, int id) {
+    uintptr_t vt = 0, fn = 0;
+    if (!chr || !safe_read(chr, &vt, 4) || !safe_read(vt + 125 * 4, &fn, 4) || fn != 0x00E7E950) return false;
+    __try {
+        return reinterpret_cast<ApplySpEffectFn>(fn)(chr, nullptr, id, chr, 0, 1.0f, 1.0f, 1.0f, 1) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void run_game(const std::vector<std::string>& t) {
     auto num = [&](size_t k, long dflt) { return k < t.size() ? std::strtol(t[k].c_str(), nullptr, 0) : dflt; };
     auto fnum = [&](size_t k) { return k < t.size() ? static_cast<float>(std::atof(t[k].c_str())) : 0.0f; };
     const std::string& c = t[0];
-    if (c == "flag") {
+    if (c == "speffect") {
+        // speffect ID: apply SpEffectParam row ID to the player (diagnostics: ticking effects, SpEffect timing).
+        out("speffect %ld: %s", num(1, 0), apply_speffect(player_chr(), static_cast<int>(num(1, 0))) ? "applied" :
+            "refused");
+    } else if (c == "flag") {
         out("flag %ld = %d", num(1, 0), read_flag(static_cast<int>(num(1, 0))));
     } else if (c == "setflag") {
         write_flag(static_cast<int>(num(1, 0)), static_cast<int>(num(2, 1)));
@@ -1315,7 +1370,18 @@ void run(const std::string& line) {
     } else if (c == "frame" && t.size() > 1) {
         g_frame_name = t[1];
         g_frame_requested = true;
-    } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp") {
+    } else if (c == "fakefocus") {
+        set_fake_focus(num(1, 1) != 0);
+        out("fakefocus %d", g_fake_focus ? 1 : 0);
+    } else if (c == "hp") {
+        int hp[2] = {};
+        const uintptr_t chr = player_chr();
+        if (chr && safe_read(chr + 0x2D4, hp, 8)) {
+            out("hp %d / %d", hp[0], hp[1]);
+        } else {
+            out("hp: no player");
+        }
+    } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp" || c == "speffect") {
         std::lock_guard<std::mutex> lock(g_game_lock);
         g_game_cmds.push_back(t);
     } else if (c == "queries") {

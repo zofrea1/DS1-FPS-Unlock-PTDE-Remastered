@@ -47,6 +47,27 @@ inline float effectlife_adjust(float life, double dt, double rate) {
     return static_cast<float>(t);
 }
 
+// SpEffect ticks on the native frame grid (INI FixSpEffectTiming).
+//
+// An effect with a tick interval (SpEffectParam motionInterval > 0: lava's 125 points every 0.1 s (row 4000), the
+// heals over time 5044 / 5050-5052 / 5083, the percentage heals and drains 5102, 5440, 5540-5542 every 0.1 s, rows
+// 64, 5444, 5447 every 0.2 s, and the many 1 s and 3 s ones) applies its change on the update that finds its tick
+// timer (node +8) at or below zero, then sets the timer back to the interval, not adding it, and counts it down by
+// the frame time in the same update (PTDE fn 0xDBE7B0). So each tick waits whole frames: float steps of 1/30 in the
+// original game, where 0.1 s needs 3 frames (10 ticks a second), float(0.2) needs 7 (4.3 a second) and 0.5 s 16.
+// At other rates the rounding differs (simulated: tools/ticksim.py): 0.1 s ticks
+// 14% less often at 60 FPS, 8% at 120, 4% at 144; 0.2 s 8% (60) to 17% (75, 120, 360) more often; 0.5 s 4-7% more;
+// 1 s up to 1.6% less, 3 s 1% more.
+//
+// The fix sets the timer at a tick to n / rate minus how late this tick came (the timer's value at or below zero,
+// at most one frame): with n the frames the game counts the interval down at the native rate, the ticks keep the
+// native period n / rate on average, each on the first frame at or after its native time. Simulated against the
+// original at 30 FPS: within 0.2% at 60 to 1000 FPS, also with frame times varying +-25%. It applies at the native
+// rate too: the original stepped exactly 1/30 s a frame, which the fix reproduces (within 0.06%), while this mod at
+// 30 FPS steps the real frame time, a little more or less than 1/30 s, and the game's own reset then waits a fourth
+// frame for about half of the 0.1 s ticks (15% fewer, measured in game: 49 instead of 60 HP/s for row 4017).
+inline float effecttick_next(float timer, float interval, double dt, double rate);
+
 // Bullet hit records on the native frame grid (INI FixBulletHitTiming).
 //
 // A bullet that can hit the same target more than once (BulletParam dmgHitRecordLifeTime > 0: the clouds of
@@ -69,4 +90,13 @@ inline float hitrecord_adjust(float life, double dt, double rate) {
     const double t = n / rate - 0.5 * dt;
     if (!(t > 0.5 * dt)) return life;
     return static_cast<float>(t);
+}
+
+inline float effecttick_next(float timer, float interval, double dt, double rate) {
+    if (!(interval > 0.0f) || !(dt > 0.0) || !(rate > 0.0)) return interval;
+    const double period = effectlife_native_frames(interval, rate) / rate;
+    double late = -static_cast<double>(timer);
+    if (!(late > 0.0)) late = 0.0;
+    if (late > dt) late = dt;
+    return static_cast<float>(period - late);
 }

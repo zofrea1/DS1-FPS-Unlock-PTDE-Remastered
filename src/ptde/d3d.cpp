@@ -212,6 +212,14 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
              (flags & D3DCREATE_MULTITHREADED) ? " multithreaded" : "",
              (flags & D3DCREATE_FPU_PRESERVE) ? " fpu-preserve" : "", (flags & D3DCREATE_PUREDEVICE) ? " pure" : "",
              static_cast<unsigned long>(hr));
+    if (FAILED(hr) && pp) {
+        RECT client{};
+        GetClientRect(pp->hDeviceWindow ? pp->hDeviceWindow : window, &client);
+        LOG_ERROR("CreateDevice failed with %ux%u format %d, %s, %u back buffers, swap effect %d, window client %ldx%ld",
+                  pp->BackBufferWidth, pp->BackBufferHeight, static_cast<int>(pp->BackBufferFormat),
+                  pp->Windowed ? "windowed" : "fullscreen", pp->BackBufferCount, static_cast<int>(pp->SwapEffect),
+                  client.right - client.left, client.bottom - client.top);
+    }
     if (SUCCEEDED(hr) && out && *out) {
         const PtdeExtension* ext = ptde_extension();
         if (ext && ext->device_created) ext->device_created(*out);

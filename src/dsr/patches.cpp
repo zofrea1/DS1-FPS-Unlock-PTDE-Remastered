@@ -4091,6 +4091,16 @@ void store_effect_life(float* slot, float life) {
     *slot = effectlife_adjust(life, static_cast<double>(current_step()), rate);
 }
 
+// SpEffect ticks (src/common/effectlife.h effecttick_next): fn 0x408C00 resets the tick timer (+8) to the row's
+// motionInterval (+0xC) at 0x408C4A (movss xmm0, [rax+0Ch] ; movss [rcx+8], xmm0 ; jmp), rcx = the node, rax = the
+// row, xmm3 = the frame step, xmm2 = 0 (used after). A cave stores the timer for the native period instead.
+constexpr uint32_t kEffectTickRva = 0x408C4A;
+
+void store_effect_tick(float* slot, float interval, float dt) {
+    const double rate = g_speffect_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+    *slot = effecttick_next(*slot, interval, static_cast<double>(dt), rate);
+}
+
 bool patch_speffect_timing() {
     static const uint8_t kNewExpect[9] = {0x0F, 0x2F, 0xC8, 0xF3, 0x0F, 0x11, 0x03, 0x72, 0x0D};
     static const uint8_t kRefreshExpect[9] = {0x0F, 0x2F, 0xC1, 0xF3, 0x0F, 0x11, 0x0B, 0x72, 0x0D};
@@ -4131,6 +4141,37 @@ bool patch_speffect_timing() {
              g_speffect_ptde_speed.load(std::memory_order_relaxed) != 0 ? "the original game's 30 FPS"
                                                                          : "Remastered's 60 FPS",
              kEffectNewRva, kEffectRefreshRva);
+
+    static const uint8_t kTickExpect[12] = {0xF3, 0x0F, 0x10, 0x40, 0x0C, 0xF3, 0x0F, 0x11, 0x41, 0x08, 0xEB, 0x0E};
+    uint8_t* tick = image_rva(kEffectTickRva);
+    if (std::memcmp(tick, kTickExpect, sizeof(kTickExpect)) != 0) {
+        LOG_ERROR("SpEffect ticks at 0x%08X do not match this build. Not patching them.", kEffectTickRva);
+        return true;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(tick));
+    if (!page) {
+        LOG_ERROR("Could not allocate the SpEffect tick stub (Win32=%lu)", GetLastError());
+        return true;
+    }
+    CaveEmitter e{page};
+    emit_guarded_call(
+        e, reinterpret_cast<const void*>(&store_effect_tick),
+        [](CaveEmitter& c) {
+            for (uint8_t b : {0x48, 0x8D, 0x49, 0x08}) c.b(b);              // lea rcx, [rcx+8] (the timer)
+            for (uint8_t b : {0xF3, 0x0F, 0x10, 0x48, 0x0C}) c.b(b);        // movss xmm1, [rax+0Ch] (the interval)
+            for (uint8_t b : {0x0F, 0x28, 0xD3}) c.b(b);                    // movaps xmm2, xmm3 (the frame step)
+        },
+        [](CaveEmitter&) {});
+    e.b(0xE9);  // jmp back to the game's jmp
+    const size_t back = e.imm32();
+    e.fix32(back, tick + 10);
+    // The jump takes the first 8 of the 10 bytes; the cave comes back after them.
+    if (finish_cave(tick, 8, page, "SpEffect ticks")) {
+        LOG_INFO("SpEffect ticks (heals and damage over time, lava) come on %s frames (site 0x%08X)",
+                 g_speffect_ptde_speed.load(std::memory_order_relaxed) != 0 ? "the original game's 30 FPS"
+                                                                             : "Remastered's 60 FPS",
+                 kEffectTickRva);
+    }
     return true;
 }
 
