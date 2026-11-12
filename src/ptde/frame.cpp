@@ -497,7 +497,8 @@ bool frame_install(const Settings& settings) {
                 LOG_INFO("Resolution: DSfix's renderWidth/renderHeight are set; this mod's resolution takes precedence");
             }
             resolution_set_dof_strength(settings.dof_strength);
-            resolution_set_effects(settings.full_res_effects ? 2 : 0);
+            resolution_set_dof_resolution(settings.dof_half_resolution ? 100 : 0);
+            resolution_set_effects(settings.effects_resolution);
             // DSfix's own post-processing expects the game's 8-bit scene.
             resolution_set_high_precision_color(settings.high_precision_color && !dsfix_loaded());
             if (settings.high_precision_color && dsfix_loaded()) {

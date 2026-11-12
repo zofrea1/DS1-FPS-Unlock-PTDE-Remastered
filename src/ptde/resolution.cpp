@@ -9,6 +9,10 @@
 #include "shaders/area_reduce_ps.h"
 #include "shaders/dof_composite_ps.h"
 #include "shaders/dof_near_rate_ps.h"
+#include "shaders/dof_hr_blur_ps.h"
+#include "shaders/dof_hr_composite_ps.h"
+#include "shaders/dof_hr_down_ps.h"
+#include "shaders/dof_hr_vs.h"
 #include "shaders/effects_composite_ps.h"
 #include "shaders/hdr_coladj_ps.h"
 #include "shaders/present_lut_ps.h"
@@ -16,6 +20,7 @@
 #include "shaders/present_reduce_vs.h"
 
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <unordered_set>
@@ -261,7 +266,12 @@ int swap_of(const DWORD* code) {
 // With this on, at 3 the effects go into our target of the scene's size over the scene's own depth (T52), with T51
 // read in place of T63 and the viewport and clipping rectangle the whole target; at 4 our shader lays it over the
 // scene pixel for pixel. The same in the game's multisampled mode (T50, T51 and T52 are then the resolved copies).
-// RemoteControl `effects 0/1/2`: the game's, ours with an 8-bit target, ours with a float target and dither.
+// RemoteControl `effects 0/1/2/3`: the game's, ours with an 8-bit target, ours with a float target and dither, ours
+// at half the scene's size (EffectsResolution = half, the default: a quarter of the fill of 2 in heavy smoke and
+// fog). Half: right after the game's depth copy (1) the same draw is made again into a half-size depth texture of
+// ours; at 3 the effects go into our half-size float target over that depth; at 4 the game's own FRPG_Fil_Bilateral
+// lays it over the scene, reading our target and our depth with its size (c12) set to theirs: its upsample at the 2x
+// it was made for (the game's own ratio at 1024x720), not 7.5x6.
 
 // FRPG_Fil_Bilateral (ps_5bedc424). Its instructions, comments left out.
 constexpr DWORD kBilateral[] = {
@@ -291,15 +301,18 @@ constexpr DWORD kBilateral[] = {
     0x80FF0002, 0x80E40001, 0x0000FFFF};
 
 constexpr UINT kSmallW = 512, kSmallH = 360;  // the game's effects target and depth copy (kept at their size)
-volatile LONG g_fx_mode = 0;                  // 0 the game's, 1 ours (8-bit target), 2 ours (float target, dither)
+volatile LONG g_fx_mode = 0;  // 0 the game's, 1 ours (8-bit), 2 ours (float, dither), 3 ours at half size (float)
 std::unordered_set<void*> g_bilateral_shaders;
 volatile bool g_bilateral_bound = false;
 int g_render_w = 0, g_render_h = 0;  // the scene's size
 
 struct Fx {
     IDirect3DDevice9* dev = nullptr;
-    IDirect3DTexture9* tex = nullptr;  // ours, the scene's size
+    IDirect3DTexture9* tex = nullptr;  // ours, the scene's size (half of it in mode 3)
     IDirect3DSurface9* surf = nullptr;
+    IDirect3DTexture9* hdepth = nullptr;  // mode 3: our half-size depth (D24S8 texture, as the game's 512x360 one)
+    IDirect3DSurface9* hdepth_surf = nullptr;
+    bool hdepth_filled = false;           // the depth copy was made into it this frame
     UINT w = 0, h = 0;
     D3DFORMAT format = D3DFMT_UNKNOWN;
     int float_ok = -1;  // a 16-bit float target can be blended into (-1 not asked yet)
@@ -329,6 +342,8 @@ SetRTFn o_set_rt = nullptr;
 SetDSFn o_set_ds = nullptr;
 ClearFn o_clear = nullptr;
 SetViewportFn o_set_viewport = nullptr;
+using SetScissorFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*);
+SetScissorFn o_set_scissor = nullptr;
 
 bool surface_is(IDirect3DSurface9* s, UINT w, UINT h, D3DFORMAT f) {
     D3DSURFACE_DESC d{};
@@ -359,8 +374,13 @@ IDirect3DBaseTexture9* container_of(IDirect3DSurface9* s) {
 void fx_release_target() {
     if (g_fx.surf) g_fx.surf->Release();
     if (g_fx.tex) g_fx.tex->Release();
+    if (g_fx.hdepth_surf) g_fx.hdepth_surf->Release();
+    if (g_fx.hdepth) g_fx.hdepth->Release();
     g_fx.surf = nullptr;
     g_fx.tex = nullptr;
+    g_fx.hdepth_surf = nullptr;
+    g_fx.hdepth = nullptr;
+    g_fx.hdepth_filled = false;
 }
 
 void fx_forget_sequence() {
@@ -370,10 +390,12 @@ void fx_forget_sequence() {
     g_fx.small_fx = nullptr;
     g_fx.phase = g_fx.pending = false;
     g_fx.swapped = 0;
+    g_fx.hdepth_filled = false;
 }
 
-// Our shader and our target (the size of the scene's depth; float when mode 2 and the card can blend into one).
-bool fx_ready(IDirect3DDevice9* dev, IDirect3DSurface9* scene_ds) {
+// Our shader and our target (the scene's size, half of it in mode 3; float in modes 2 and 3 when the card can blend
+// into one), and in mode 3 our half-size depth.
+bool fx_ready(IDirect3DDevice9* dev) {
     if (g_fx.dev != dev) {
         fx_release_target();
         if (g_fx.ps) g_fx.ps->Release();
@@ -405,27 +427,31 @@ bool fx_ready(IDirect3DDevice9* dev, IDirect3DSurface9* scene_ds) {
             d3d->Release();
         }
     }
-    D3DSURFACE_DESC dd{};
-    if (FAILED(scene_ds->GetDesc(&dd))) return false;
-    const D3DFORMAT want = (g_fx_mode == 2 && g_fx.float_ok == 1) ? D3DFMT_A16B16G16R16F : D3DFMT_A8R8G8B8;
-    if (g_fx.tex && (g_fx.w != dd.Width || g_fx.h != dd.Height || g_fx.format != want)) fx_release_target();
+    const bool half = g_fx_mode == 3;
+    const UINT w = half ? (g_render_w + 1) / 2 : g_render_w, h = half ? (g_render_h + 1) / 2 : g_render_h;
+    const D3DFORMAT want = (g_fx_mode >= 2 && g_fx.float_ok == 1) ? D3DFMT_A16B16G16R16F : D3DFMT_A8R8G8B8;
+    if (g_fx.tex && (g_fx.w != w || g_fx.h != h || g_fx.format != want || half != (g_fx.hdepth != nullptr))) {
+        fx_release_target();
+    }
     if (!g_fx.tex) {
-        if (FAILED(dev->CreateTexture(dd.Width, dd.Height, 1, D3DUSAGE_RENDERTARGET, want, D3DPOOL_DEFAULT, &g_fx.tex,
-                                      nullptr)) ||
-            !g_fx.tex || FAILED(g_fx.tex->GetSurfaceLevel(0, &g_fx.surf)) || !g_fx.surf) {
+        if (FAILED(dev->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, want, D3DPOOL_DEFAULT, &g_fx.tex, nullptr)) ||
+            !g_fx.tex || FAILED(g_fx.tex->GetSurfaceLevel(0, &g_fx.surf)) || !g_fx.surf ||
+            (half && (FAILED(dev->CreateTexture(w, h, 1, D3DUSAGE_DEPTHSTENCIL, D3DFMT_D24S8, D3DPOOL_DEFAULT,
+                                                &g_fx.hdepth, nullptr)) ||
+                      !g_fx.hdepth || FAILED(g_fx.hdepth->GetSurfaceLevel(0, &g_fx.hdepth_surf)) ||
+                      !g_fx.hdepth_surf))) {
             fx_release_target();
-            LOG_ERROR("Resolution: no %ux%u target for the full-resolution effects; the game's are used", dd.Width,
-                      dd.Height);
+            LOG_ERROR("Resolution: no %ux%u targets for the effects; the game's are used", w, h);
             g_fx_mode = 0;
             return false;
         }
-        g_fx.w = dd.Width;
-        g_fx.h = dd.Height;
+        g_fx.w = w;
+        g_fx.h = h;
         g_fx.format = want;
         LOG_INFO("Resolution: the game's low-resolution effects (glows, mist, fog, smoke; 512x360) are drawn at "
-                 "%ux%u against the scene's own depth%s", dd.Width, dd.Height,
-                 want == D3DFMT_A16B16G16R16F ? ", in 16-bit float, laid over the scene with a fine dither"
-                                              : " (8-bit)");
+                 "%ux%u%s%s", w, h, half ? " over a half-size copy of the depth, laid over the scene by the game's "
+                                           "own upsample at 2x" : " against the scene's own depth",
+                 want == D3DFMT_A16B16G16R16F ? ", in 16-bit float" : " (8-bit)");
     }
     return true;
 }
@@ -433,10 +459,12 @@ bool fx_ready(IDirect3DDevice9* dev, IDirect3DSurface9* scene_ds) {
 // 3: the game cleared its 512x360 effects target; its effects go into ours from here.
 void fx_begin(IDirect3DDevice9* dev) {
     IDirect3DBaseTexture9* low = container_of(g_fx.rt0);
-    if (!low || !fx_ready(dev, g_fx.scene_ds)) return;
+    if (!low || !fx_ready(dev)) return;
+    const bool half = g_fx_mode == 3;
+    if (half && !g_fx.hdepth_filled) return;  // no half-size depth this frame: the game's effects
     g_fx.small_fx = low;
     o_set_rt(dev, 0, g_fx.surf);
-    o_set_ds(dev, g_fx.scene_ds);
+    o_set_ds(dev, half ? g_fx.hdepth_surf : g_fx.scene_ds);
     o_clear(dev, 0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
     g_fx.phase = true;
     g_fx.swapped = 0;
@@ -461,8 +489,31 @@ void fx_end(IDirect3DDevice9* dev) {
     g_fx.pending = true;
 }
 
+// 4, half size: the game's own bilateral upsample with our target (s0), our depth (s1) and their size (c12).
+HRESULT fx_composite_half(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    g_fx.pending = false;
+    g_fx.hdepth_filled = false;
+    IDirect3DBaseTexture9* game_depth = container_of(g_fx.depth_small_ds);
+    float saved_c12[4] = {};
+    dev->GetPixelShaderConstantF(12, saved_c12, 1);
+    const float c12[4] = {static_cast<float>(g_fx.w), static_cast<float>(g_fx.h), 1.0f / g_fx.w, 1.0f / g_fx.h};
+    dev->SetPixelShaderConstantF(12, c12, 1);
+    o_set_texture(dev, 0, g_fx.tex);
+    o_set_texture(dev, 1, g_fx.hdepth);
+    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    o_set_texture(dev, 0, g_fx.small_fx);
+    o_set_texture(dev, 1, game_depth);
+    dev->SetPixelShaderConstantF(12, saved_c12, 1);
+    if (!g_fx.logged) {
+        g_fx.logged = true;
+        LOG_INFO("Resolution: the half-size effects are laid over the scene (first frame)");
+    }
+    return hr;
+}
+
 // 4: our target over the scene with the game's blend (ONE, SRCALPHA), pixel for pixel.
 HRESULT fx_composite(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    if (g_fx.hdepth) return fx_composite_half(dev, type, count, data, stride);
     g_fx.pending = false;
     IDirect3DPixelShader9* game = nullptr;
     dev->GetPixelShader(&game);
@@ -503,7 +554,7 @@ HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* 
 
 HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
     g_fx.ds = ds;
-    if (g_fx.phase && ds && ds == g_fx.depth_small_ds) return o_set_ds(dev, g_fx.scene_ds);
+    if (g_fx.phase && ds && ds == g_fx.depth_small_ds) return o_set_ds(dev, g_fx.hdepth ? g_fx.hdepth_surf : g_fx.scene_ds);
     // 2: the scene's colour and depth bound together, both the scene's size and not multisampled.
     if (!g_fx.phase && g_fx_mode && ds && render_size(ds) && render_size(g_fx.rt0)) g_fx.scene_ds = ds;
     return o_set_ds(dev, ds);
@@ -755,6 +806,235 @@ HRESULT area_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DVI
     return hr;
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------
+// DepthOfFieldResolution = half (shaders/dof_hr.hlsl says why): at the depth of field's composite (kDofSwap's draw)
+// its three blur levels are made again from the scene at half the render size (level 3 at a quarter) and the
+// composite reads those in place of the game's 512x360 and 256x180 ones. The widths are the game's, in its original
+// 1024x720 pixels (kDofSigma), times g_dofhr_scale (RemoteControl `dofhr PCT`, for comparisons; 0 = the game's levels).
+// Measured 2026-11-12 (Firelink, 4K, RemoteControl dofforce 1-3 against the game's levels; detail of 4x4 blocks, which
+// leaves out the pixel grain): the estimates from the game's kernels (1.0, 1.68, 3.7) times 1.30, 1.15 and 1.10.
+constexpr float kDofSigma[3] = {1.3f, 1.93f, 4.07f};
+volatile LONG g_dofhr_pct = 100;  // 0: the game's levels (smoothly read), else ours with the widths at this percent
+
+struct DofHr {
+    IDirect3DDevice9* dev = nullptr;
+    IDirect3DVertexShader9* vs = nullptr;
+    IDirect3DPixelShader9* down = nullptr;
+    IDirect3DPixelShader9* blur = nullptr;
+    IDirect3DPixelShader9* comp = nullptr;
+    IDirect3DVertexDeclaration9* decl = nullptr;
+    IDirect3DStateBlock9* state = nullptr;
+    // A, B, level 1, level 2 at half size; Q, Q2, level 3 at a quarter.
+    IDirect3DTexture9* tex[7] = {};
+    IDirect3DSurface9* surf[7] = {};
+    UINT hw = 0, hh = 0, qw = 0, qh = 0;
+    bool failed = false;
+    bool logged = false;
+};
+DofHr g_dofhr;
+enum { kHrA, kHrB, kHrL1, kHrL2, kHrQ, kHrQ2, kHrL3, kHrCount };
+
+void dofhr_release_targets() {
+    for (int i = 0; i < kHrCount; ++i) {
+        if (g_dofhr.surf[i]) g_dofhr.surf[i]->Release();
+        if (g_dofhr.tex[i]) g_dofhr.tex[i]->Release();
+        g_dofhr.surf[i] = nullptr;
+        g_dofhr.tex[i] = nullptr;
+    }
+    if (g_dofhr.state) g_dofhr.state->Release();
+    g_dofhr.state = nullptr;
+}
+
+bool dofhr_ready(IDirect3DDevice9* dev, UINT scene_w, UINT scene_h) {
+    if (g_dofhr.dev != dev) {
+        dofhr_release_targets();
+        IUnknown* objs[] = {g_dofhr.vs, g_dofhr.down, g_dofhr.blur, g_dofhr.comp, g_dofhr.decl};
+        for (IUnknown* o : objs) {
+            if (o) o->Release();
+        }
+        g_dofhr.vs = nullptr;
+        g_dofhr.down = g_dofhr.blur = g_dofhr.comp = nullptr;
+        g_dofhr.decl = nullptr;
+        g_dofhr.failed = false;
+        g_dofhr.dev = dev;
+        static const D3DVERTEXELEMENT9 kDecl[] = {
+            {0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0}, D3DDECL_END()};
+        if (FAILED(dev->CreateVertexShader(reinterpret_cast<const DWORD*>(kDofHrVs), &g_dofhr.vs)) ||
+            FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofHrDownPs), &g_dofhr.down)) ||
+            FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofHrBlurPs), &g_dofhr.blur)) ||
+            FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofHrCompositePs), &g_dofhr.comp)) ||
+            FAILED(dev->CreateVertexDeclaration(kDecl, &g_dofhr.decl))) {
+            g_dofhr.failed = true;
+            LOG_ERROR("Resolution: the shaders for the half-size depth of field could not be made; the game's levels "
+                      "are used");
+        }
+    }
+    if (g_dofhr.failed) return false;
+    const UINT hw = (scene_w + 1) / 2, hh = (scene_h + 1) / 2, qw = (hw + 1) / 2, qh = (hh + 1) / 2;
+    if (g_dofhr.tex[0] && (g_dofhr.hw != hw || g_dofhr.hh != hh)) dofhr_release_targets();
+    if (!g_dofhr.tex[0]) {
+        const D3DFORMAT f = g_fx.float_ok == 0 ? D3DFMT_A8R8G8B8 : D3DFMT_A16B16G16R16F;
+        for (int i = 0; i < kHrCount; ++i) {
+            const bool quarter = i >= kHrQ;
+            if (FAILED(dev->CreateTexture(quarter ? qw : hw, quarter ? qh : hh, 1, D3DUSAGE_RENDERTARGET, f,
+                                          D3DPOOL_DEFAULT, &g_dofhr.tex[i], nullptr)) ||
+                !g_dofhr.tex[i] || FAILED(g_dofhr.tex[i]->GetSurfaceLevel(0, &g_dofhr.surf[i]))) {
+                dofhr_release_targets();
+                g_dofhr.failed = true;
+                LOG_ERROR("Resolution: no %ux%u targets for the half-size depth of field; the game's levels are used",
+                          hw, hh);
+                return false;
+            }
+        }
+        g_dofhr.hw = hw;
+        g_dofhr.hh = hh;
+        g_dofhr.qw = qw;
+        g_dofhr.qh = qh;
+    }
+    if (!g_dofhr.state && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_dofhr.state))) return false;
+    return true;
+}
+
+// One full-target pass of ours: dst from src with ps, c1-c3 as given.
+void dofhr_pass(IDirect3DDevice9* dev, int dst, IDirect3DBaseTexture9* src, UINT src_w, UINT src_h,
+                IDirect3DPixelShader9* ps, const float* step, const float* kernel) {
+    const UINT w = dst >= kHrQ ? g_dofhr.qw : g_dofhr.hw, h = dst >= kHrQ ? g_dofhr.qh : g_dofhr.hh;
+    dev->SetRenderTarget(0, g_dofhr.surf[dst]);
+    const float c[16] = {-1.0f / w, 1.0f / h, 0, 0, 1.0f / src_w, 1.0f / src_h, 0, 0,
+                         step ? step[0] : 0, step ? step[1] : 0, 0, 0,
+                         kernel ? kernel[0] : 0, kernel ? kernel[1] : 0, kernel ? kernel[2] : 0, 0};
+    dev->SetVertexShaderConstantF(0, c, 1);
+    dev->SetPixelShaderConstantF(1, c + 4, 3);
+    o_set_texture(dev, 0, src);
+    o_set_ps(dev, ps);
+    static const float kQuad[16] = {-1, 1, 0, 1, 1, 1, 0, 1, -1, -1, 0, 1, 1, -1, 0, 1};
+    o_draw_up(dev, D3DPT_TRIANGLESTRIP, 2, kQuad, 16);
+}
+
+// A separable Gaussian of sigma (sx, sy) texels: src -> tmp along x, tmp -> dst along y.
+void dofhr_blur(IDirect3DDevice9* dev, int src, int tmp, int dst, float sx, float sy) {
+    const bool quarter = src >= kHrQ;
+    const UINT w = quarter ? g_dofhr.qw : g_dofhr.hw, h = quarter ? g_dofhr.qh : g_dofhr.hh;
+    // 2.5 sigma (over 99% of the weight); the shader reads two texels a fetch.
+    const float kx[3] = {sx, static_cast<float>(static_cast<int>(sx * 2.5f + 0.999f)), 1.0f / (2.0f * sx * sx)};
+    const float ky[3] = {sy, static_cast<float>(static_cast<int>(sy * 2.5f + 0.999f)), 1.0f / (2.0f * sy * sy)};
+    const float stepx[2] = {1.0f / w, 0}, stepy[2] = {0, 1.0f / h};
+    dofhr_pass(dev, tmp, g_dofhr.tex[src], w, h, g_dofhr.blur, stepx, kx);
+    dofhr_pass(dev, dst, g_dofhr.tex[tmp], w, h, g_dofhr.blur, stepy, ky);
+}
+
+float inc_sigma(float total, float have_var) {
+    const float v = total * total - have_var;
+    return std::sqrt(v > 0.09f ? v : 0.09f);
+}
+
+HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    IDirect3DBaseTexture9* scene = nullptr;
+    D3DSURFACE_DESC sd{};
+    if (FAILED(dev->GetTexture(0, &scene)) || !scene) return swap_draw(dev, kDofSwap, type, count, data, stride);
+    const bool ok = scene->GetType() == D3DRTYPE_TEXTURE &&
+                    SUCCEEDED(static_cast<IDirect3DTexture9*>(scene)->GetLevelDesc(0, &sd)) && sd.Width > 1024 &&
+                    dofhr_ready(dev, sd.Width, sd.Height);
+    if (!ok) {
+        scene->Release();
+        return swap_draw(dev, kDofSwap, type, count, data, stride);
+    }
+    // The game's state, targets and depth, back after our passes (Apply after the targets: they reset the viewport).
+    g_dofhr.state->Capture();
+    IDirect3DSurface9* rts[4] = {};
+    for (DWORD i = 0; i < 4; ++i) dev->GetRenderTarget(i, &rts[i]);
+    IDirect3DSurface9* depth = nullptr;
+    dev->GetDepthStencilSurface(&depth);
+    for (DWORD i = 1; i < 4; ++i) {
+        if (rts[i]) dev->SetRenderTarget(i, nullptr);
+    }
+    dev->SetDepthStencilSurface(nullptr);
+    static const D3DRENDERSTATETYPE kRs[] = {D3DRS_ZENABLE,          D3DRS_ZWRITEENABLE,     D3DRS_ALPHABLENDENABLE,
+                                            D3DRS_ALPHATESTENABLE,  D3DRS_CULLMODE,         D3DRS_STENCILENABLE,
+                                            D3DRS_COLORWRITEENABLE, D3DRS_SCISSORTESTENABLE, D3DRS_FILLMODE,
+                                            D3DRS_CLIPPLANEENABLE,  D3DRS_SRGBWRITEENABLE};
+    const DWORD rs_values[] = {FALSE, FALSE, FALSE, FALSE, D3DCULL_NONE, FALSE, 0xF, FALSE, D3DFILL_SOLID, 0, FALSE};
+    for (size_t i = 0; i < sizeof(kRs) / sizeof(kRs[0]); ++i) dev->SetRenderState(kRs[i], rs_values[i]);
+    dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+    dev->SetVertexShader(g_dofhr.vs);
+    dev->SetVertexDeclaration(g_dofhr.decl);
+
+    // The widths in our texels: the original 1024x720 pixel is hw/1024 half texels wide and hh/720 high.
+    const float scale = static_cast<float>(g_dofhr_pct) / 100.0f;
+    const float hx = g_dofhr.hw / 1024.0f, hy = g_dofhr.hh / 720.0f, qx = g_dofhr.qw / 1024.0f, qy = g_dofhr.qh / 720.0f;
+    const float s1x = kDofSigma[0] * scale * hx, s1y = kDofSigma[0] * scale * hy;
+    const float s2x = kDofSigma[1] * scale * hx, s2y = kDofSigma[1] * scale * hy;
+    const float s3x = kDofSigma[2] * scale * qx, s3y = kDofSigma[2] * scale * qy;
+    const float s2qx = kDofSigma[1] * scale * qx, s2qy = kDofSigma[1] * scale * qy;
+    // A: the scene's 2x2 average (a half texel box, 1/12) and the composite's bilinear read (1/6) are part of level 1.
+    dofhr_pass(dev, kHrA, scene, sd.Width, sd.Height, g_dofhr.down, nullptr, nullptr);
+    dofhr_blur(dev, kHrA, kHrB, kHrL1, inc_sigma(s1x, 0.25f), inc_sigma(s1y, 0.25f));
+    dofhr_blur(dev, kHrL1, kHrB, kHrL2, inc_sigma(s2x, s1x * s1x), inc_sigma(s2y, s1y * s1y));
+    // Level 3 at a quarter: level 2 averaged down (1/12), then read with a B-spline (1/3 instead of 1/6).
+    dofhr_pass(dev, kHrQ, g_dofhr.tex[kHrL2], g_dofhr.hw, g_dofhr.hh, g_dofhr.down, nullptr, nullptr);
+    dofhr_blur(dev, kHrQ, kHrQ2, kHrL3, inc_sigma(s3x, s2qx * s2qx + 0.25f), inc_sigma(s3y, s2qy * s2qy + 0.25f));
+
+    for (DWORD i = 0; i < 4; ++i) {
+        if (i == 0 || rts[i]) dev->SetRenderTarget(i, rts[i]);
+        if (rts[i]) rts[i]->Release();
+    }
+    dev->SetDepthStencilSurface(depth);
+    if (depth) depth->Release();
+    g_dofhr.state->Apply();
+
+    // The composite with our levels (s1-s3); the game's textures, shader and states back after it.
+    IDirect3DBaseTexture9* game_tex[4] = {};
+    for (DWORD s = 1; s <= 3; ++s) dev->GetTexture(s, &game_tex[s]);
+    IDirect3DPixelShader9* bound = nullptr;
+    dev->GetPixelShader(&bound);
+    o_set_texture(dev, 1, g_dofhr.tex[kHrL1]);
+    o_set_texture(dev, 2, g_dofhr.tex[kHrL2]);
+    o_set_texture(dev, 3, g_dofhr.tex[kHrL3]);
+    o_set_ps(dev, g_dofhr.comp);
+    float sizes[8] = {static_cast<float>(g_dofhr.qw), static_cast<float>(g_dofhr.qh), 1.0f / g_dofhr.qw,
+                      1.0f / g_dofhr.qh, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180};
+    stage_size(dev, 4, sizes + 4);
+    dev->SetPixelShaderConstantF(200, sizes, 2);
+    dev->SetPixelShaderConstantF(202, g_dof_strength, 1);
+    static const D3DSAMPLERSTATETYPE kStates[] = {D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
+                                                  D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_SRGBTEXTURE};
+    static const DWORD kValues[] = {D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP,
+                                    FALSE};
+    DWORD saved[5][6] = {};
+    for (DWORD s = 0; s < 5; ++s) {
+        for (int i = 0; i < 6; ++i) {
+            dev->GetSamplerState(s, kStates[i], &saved[s][i]);
+            if (saved[s][i] != kValues[i]) dev->SetSamplerState(s, kStates[i], kValues[i]);
+        }
+    }
+    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    for (DWORD s = 0; s < 5; ++s) {
+        for (int i = 0; i < 6; ++i) {
+            if (saved[s][i] != kValues[i]) dev->SetSamplerState(s, kStates[i], saved[s][i]);
+        }
+    }
+    for (DWORD s = 1; s <= 3; ++s) {
+        o_set_texture(dev, s, game_tex[s]);
+        if (game_tex[s]) game_tex[s]->Release();
+    }
+    o_set_ps(dev, bound);
+    if (bound) bound->Release();
+    scene->Release();
+    if (!g_dofhr.logged) {
+        g_dofhr.logged = true;
+        LOG_INFO("Resolution: the depth of field's blur levels are made at %ux%u and %ux%u from the %ux%u scene, with "
+                 "the game's widths (in place of its 512x360 and 256x180)", g_dofhr.hw, g_dofhr.hh, g_dofhr.qw,
+                 g_dofhr.qh, sd.Width, sd.Height);
+    }
+    return hr;
+}
+
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
     const LONG force = g_dof_force;
     const LONG swap = g_swap_bound;
@@ -764,11 +1044,13 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
         dev->GetPixelShaderConstantF(66, saved, 2);
         float forced[8] = {0, 0, 0, 0, 0, force <= 1 ? 1.0f : 0.0f, force <= 2 ? 1.0f : 0.0f, 1.0f};
         dev->SetPixelShaderConstantF(66, forced, 2);
-        const HRESULT hr = swap == kDofSwap ? swap_draw(dev, swap, type, count, data, stride)
+        const HRESULT hr = swap == kDofSwap ? (g_dofhr_pct > 0 ? dofhr_draw(dev, type, count, data, stride)
+                                                              : swap_draw(dev, swap, type, count, data, stride))
                                             : o_draw_up(dev, type, count, data, stride);
         dev->SetPixelShaderConstantF(66, saved, 2);
         return hr;
     }
+    if (swap == kDofSwap && g_dofhr_pct > 0) return dofhr_draw(dev, type, count, data, stride);
     if (swap >= 0) return swap_draw(dev, swap, type, count, data, stride);
     IDirect3DBaseTexture9* tex = g_tex0;
     if (g_fx.pending && g_bilateral_bound && tex && tex == g_fx.small_fx) {
@@ -782,6 +1064,23 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
             g_fx.depth_full = tex;
             g_fx.depth_small = low;
             g_fx.depth_small_ds = g_fx.ds;
+            if (g_fx_mode == 3 && fx_ready(dev)) {
+                // The same copy into our half-size depth (our effects target as its colour target: cleared at 3).
+                const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+                IDirect3DSurface9* rt = g_fx.rt0;
+                IDirect3DSurface9* ds = g_fx.ds;
+                RECT scissor{};
+                dev->GetScissorRect(&scissor);
+                o_set_rt(dev, 0, g_fx.surf);
+                o_set_ds(dev, g_fx.hdepth_surf);
+                const RECT full{0, 0, static_cast<LONG>(g_fx.w), static_cast<LONG>(g_fx.h)};
+                o_set_scissor(dev, &full);
+                g_fx.hdepth_filled = SUCCEEDED(o_draw_up(dev, type, count, data, stride));
+                o_set_rt(dev, 0, rt);
+                o_set_ds(dev, ds);
+                o_set_scissor(dev, &scissor);
+                return hr;
+            }
         }
     }
     if (g_copy_bound && tex && tex->GetType() == D3DRTYPE_TEXTURE) {
@@ -818,8 +1117,6 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
 // from its text, which was never drawn. A rectangle set while the frame buffer (the scaled 1280x720 target) is the
 // render target and that lies within 1280x720 is mapped onto the viewport as the menu's vertices are. The game's own
 // full-target rectangles (0,0 to the target size) are larger and stay as they are.
-using SetScissorFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*);
-SetScissorFn o_set_scissor = nullptr;
 
 HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
     if (g_fx.phase && r) {
@@ -1056,7 +1353,7 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
 }
 
 void resolution_set_effects(int mode) {
-    g_fx_mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+    g_fx_mode = mode < 0 ? 0 : (mode > 3 ? 3 : mode);
 }
 
 void resolution_set_swap_off_mask(int mask) { g_swap_off_mask = mask; }
@@ -1069,11 +1366,13 @@ void resolution_set_present_reduce(bool on) {
 void resolution_set_smooth_dof(bool on) { g_swap_enabled = on; }
 void resolution_force_dof_level(int level) { g_dof_force = level; }
 void resolution_set_dof_strength(float strength) { g_dof_strength[0] = strength; }
+void resolution_set_dof_resolution(int percent) { g_dofhr_pct = percent < 0 ? 0 : (percent > 400 ? 400 : percent); }
 
 void resolution_reset() {
     g_tex0 = nullptr;
     release_ptr(g_reduce.state);  // made again on the next use
     fx_release_target();          // the default pool goes before a Reset; made again on the next use
+    dofhr_release_targets();
     fx_forget_sequence();
 }
 

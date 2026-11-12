@@ -62,9 +62,11 @@ struct Settings {
     float supersampling = 1.0f;
     // Depth of field: the blur weight times this (1 = the game's, 0 = none, up to 2), with RenderResolution.
     float dof_strength = 1.0f;
-    // The game's low-resolution effects (glows, mist, fog, smoke) drawn at the scene's size against its own depth, in a
-    // float target laid over the scene with a fine dither (resolution.h), with RenderResolution.
-    bool full_res_effects = true;
+    // The depth of field's blur levels at half the render size with the game's widths (true) or the game's 512x360.
+    bool dof_half_resolution = true;
+    // The game's low-resolution effects (glows, mist, fog, smoke) at half the scene's size (3), its full size (2) or
+    // the game's 512x360 (0) (resolution.h), with RenderResolution.
+    int effects_resolution = 3;
     // The scene's colour targets in 16-bit float, dithered into the 8-bit picture (resolution.h), with RenderResolution.
     bool high_precision_color = true;
     // With the game's own anti-aliasing (multisampling) on: alpha-tested surfaces write coverage (atoc.h).

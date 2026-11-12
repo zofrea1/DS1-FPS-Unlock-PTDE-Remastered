@@ -1470,10 +1470,15 @@ void run(const std::string& line) {
         // dofstrength PCT: DepthOfFieldStrength for this session (100 = the game's).
         resolution_set_dof_strength(static_cast<float>(num(1, 100)) / 100.0f);
         out("dofstrength %ld%%", num(1, 100));
+    } else if (c == "dofhr") {
+        // dofhr PCT: the half-size depth of field with its widths at PCT percent of the game's (0: the game's levels).
+        resolution_set_dof_resolution(static_cast<int>(num(1, 100)));
+        out("dofhr %ld", num(1, 100));
     } else if (c == "effects") {
-        // effects 0/1/2: the game's low-resolution effects, ours at full resolution (8-bit), ours in float + dither.
-        resolution_set_effects(static_cast<int>(num(1, 2)));
-        out("effects %ld", num(1, 2));
+        // effects 0/1/2/3: the game's low-resolution effects, ours at full resolution (8-bit), ours in float + dither,
+        // ours at half resolution.
+        resolution_set_effects(static_cast<int>(num(1, 3)));
+        out("effects %ld", num(1, 3));
     } else if (c == "atoc") {
         // atoc 0/1/2: AlphaToCoverage off, plain coverage, sharpened coverage (the default) for this session.
         atoc_set_mode(static_cast<int>(num(1, 2)));

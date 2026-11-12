@@ -27,13 +27,18 @@ void resolution_set_swap_off_mask(int mask);
 void resolution_set_smooth_dof(bool on);
 // DepthOfFieldStrength: the depth of field's blur weight times this (1 = the game's).
 void resolution_set_dof_strength(float strength);
+// DepthOfFieldResolution: 100 = the depth of field's blur levels made at half (and a quarter of) the render size
+// with the game's widths; other values scale those widths in percent (RemoteControl `dofhr`); 0 = the game's 512x360
+// and 256x180 levels (read smoothly).
+void resolution_set_dof_resolution(int percent);
 // Diagnostics: the composite shows only blur level 1-3 everywhere (0: the game's weights).
 void resolution_force_dof_level(int level);
 
-// FullResolutionEffects: the game's low-resolution effects (glows, mist, fog, smoke, drawn into a 512x360 target and
-// stretched over the scene) drawn at the scene's size against its own depth instead. 0 the game's; 1 ours in an 8-bit
-// target; 2 ours in a 16-bit float target laid over the scene with a fine dither (falls back to 1 without float
-// blending). Before resolution_install (which turns it off with RenderScalePost); RemoteControl `effects` any time.
+// EffectsResolution: the game's low-resolution effects (glows, mist, fog, smoke, drawn into a 512x360 target and
+// stretched over the scene) drawn larger. 0 the game's; 1 at the scene's size against its own depth, 8-bit target; 2
+// the same in a 16-bit float target laid over the scene with a fine dither (8-bit without float blending); 3 at half
+// the scene's size in float, over a half-size depth, laid over by the game's own upsample (the default). Before
+// resolution_install (which turns it off with RenderScalePost); RemoteControl `effects` any time.
 void resolution_set_effects(int mode);
 
 // HighPrecisionColor: the scene's colour targets in 16-bit float and the final picture dithered into 8 bits (smooth

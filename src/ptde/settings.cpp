@@ -209,8 +209,12 @@ Settings settings_load(const wchar_t* dll_path) {
             // Percent, 0 to 200.
             const double pct = std::atof(val.c_str());
             s.dof_strength = static_cast<float>(pct <= 0 ? 0.0 : (pct >= 200 ? 2.0 : pct / 100.0));
-        } else if (key == "fullresolutioneffects") {
-            s.full_res_effects = parse_bool(val);
+        } else if (key == "depthoffieldresolution") {
+            const std::string v = lower(trim(val));
+            s.dof_half_resolution = !(v == "game" || v == "off" || v == "false" || v == "0");
+        } else if (key == "effectsresolution") {
+            const std::string v = lower(trim(val));
+            s.effects_resolution = (v == "full") ? 2 : (v == "game" || v == "off" || v == "false" || v == "0") ? 0 : 3;
         } else if (key == "highprecisioncolor") {
             s.high_precision_color = parse_bool(val);
         } else if (key == "antialiasingsamples") {
