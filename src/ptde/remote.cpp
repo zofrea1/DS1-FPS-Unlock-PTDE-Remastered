@@ -308,10 +308,16 @@ void name_shader(const DWORD* code, void* shader, const char* prefix) {
     if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return;
     {
         // The bytecode too (fpsu-shaders\NAME.bin), for matching a shader in release code.
+        // Its whole length: comment blocks skipped (a debug comment can hold the end token's value). The name keeps
+        // the first count above, so names stay as they were.
+        size_t full = 1;
+        while (full < 65536 && code[full] != 0x0000FFFF) {
+            full += (code[full] & 0xFFFF) == 0xFFFE ? 1 + ((code[full] >> 16) & 0x7FFF) : 1;
+        }
         const std::wstring bin = dir + L"\\" + widen(name) + L".bin";
         FILE* fb = _wfopen(bin.c_str(), L"wb");
         if (fb) {
-            std::fwrite(code, 4, n + 1, fb);
+            std::fwrite(code, 4, full + 1, fb);
             std::fclose(fb);
         }
     }
