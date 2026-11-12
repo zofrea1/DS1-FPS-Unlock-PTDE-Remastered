@@ -20,6 +20,8 @@ void resolution_reset();
 
 // The depth of field's smooth composite on or off (RemoteControl `dof`, for comparing with the game's own).
 void resolution_set_smooth_dof(bool on);
+// How the smooth composite reads the blur: 0 as the original showed it (default), 1 cubic B-spline (RemoteControl).
+void resolution_set_dof_mode(int mode);
 // Diagnostics: the composite shows only blur level 1-3 everywhere (0: the game's weights).
 void resolution_force_dof_level(int level);
 
