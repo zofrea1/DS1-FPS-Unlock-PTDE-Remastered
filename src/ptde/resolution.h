@@ -30,6 +30,16 @@ void resolution_set_dof_strength(float strength);
 // Diagnostics: the composite shows only blur level 1-3 everywhere (0: the game's weights).
 void resolution_force_dof_level(int level);
 
+// FullResolutionEffects: the game's low-resolution effects (glows, mist, fog, smoke, drawn into a 512x360 target and
+// stretched over the scene) drawn at the scene's size against its own depth instead. 0 the game's; 1 ours in an 8-bit
+// target; 2 ours in a 16-bit float target laid over the scene with a fine dither (falls back to 1 without float
+// blending). Before resolution_install (which turns it off with RenderScalePost); RemoteControl `effects` any time.
+void resolution_set_effects(int mode);
+
+// HighPrecisionColor: the scene's colour targets in 16-bit float and the final picture dithered into 8 bits (smooth
+// fog, smoke and glows). Before resolution_install; not with RenderScalePost or DSfix.
+void resolution_set_high_precision_color(bool on);
+
 // Sun and moon with DSfix's render resolution. The lens flare (sun, moon) measures how much of a 24x24 pixel probe at the
 // sun is visible with an occlusion query, and takes a new count only while it is below 1.5 x the probe's expected
 // area (w x h x 0.8; 0.8 = the 1024 wide scene in the 1280 wide frame buffer; 0xFD3A20). DSfix enlarges the scene and

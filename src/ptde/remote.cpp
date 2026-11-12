@@ -6,6 +6,7 @@
 
 #include "limiter.h"
 #include "profile.h"
+#include "atoc.h"
 #include "resolution.h"
 #include "watch.h"
 #include "log.h"
@@ -1469,6 +1470,14 @@ void run(const std::string& line) {
         // dofstrength PCT: DepthOfFieldStrength for this session (100 = the game's).
         resolution_set_dof_strength(static_cast<float>(num(1, 100)) / 100.0f);
         out("dofstrength %ld%%", num(1, 100));
+    } else if (c == "effects") {
+        // effects 0/1/2: the game's low-resolution effects, ours at full resolution (8-bit), ours in float + dither.
+        resolution_set_effects(static_cast<int>(num(1, 2)));
+        out("effects %ld", num(1, 2));
+    } else if (c == "atoc") {
+        // atoc 0/1/2: AlphaToCoverage off, plain coverage, sharpened coverage (the default) for this session.
+        atoc_set_mode(static_cast<int>(num(1, 2)));
+        out("atoc %ld", num(1, 2));
     } else if (c == "dofforce") {
         resolution_force_dof_level(static_cast<int>(num(1, 0)));
         out("dofforce %ld", num(1, 0));

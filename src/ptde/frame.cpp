@@ -16,6 +16,7 @@
 #include "gamma.h"
 #include "profile.h"
 #include "remote.h"
+#include "atoc.h"
 #include "dsfix.h"
 #include "resolution.h"
 #include "script.h"
@@ -469,6 +470,8 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_sfx_distortion) {
             sfx_distortion_install();
         }
+        // Before the game makes its render targets: its anti-aliasing's sample count (it multisamples only when on).
+        atoc_set_msaa_samples(settings.antialiasing_samples);
         int rw = settings.render_width, rh = settings.render_height;
         if (rw < 0 || rh < 0) {
             // auto: the primary monitor (the game's window or full screen covers it) in the game's own coordinates:
@@ -494,6 +497,12 @@ bool frame_install(const Settings& settings) {
                 LOG_INFO("Resolution: DSfix's renderWidth/renderHeight are set; this mod's resolution takes precedence");
             }
             resolution_set_dof_strength(settings.dof_strength);
+            resolution_set_effects(settings.full_res_effects ? 2 : 0);
+            // DSfix's own post-processing expects the game's 8-bit scene.
+            resolution_set_high_precision_color(settings.high_precision_color && !dsfix_loaded());
+            if (settings.high_precision_color && dsfix_loaded()) {
+                LOG_INFO("HighPrecisionColor: off while DSfix is loaded (its post-processing expects the 8-bit scene)");
+            }
             if (resolution_install(rw, rh, settings.render_scale_post) && dsfix_loaded()) {
                 resolution_bypass_dsfix(!settings.render_scale_post);
             }

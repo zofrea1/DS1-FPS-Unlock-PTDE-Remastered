@@ -209,6 +209,14 @@ Settings settings_load(const wchar_t* dll_path) {
             // Percent, 0 to 200.
             const double pct = std::atof(val.c_str());
             s.dof_strength = static_cast<float>(pct <= 0 ? 0.0 : (pct >= 200 ? 2.0 : pct / 100.0));
+        } else if (key == "fullresolutioneffects") {
+            s.full_res_effects = parse_bool(val);
+        } else if (key == "highprecisioncolor") {
+            s.high_precision_color = parse_bool(val);
+        } else if (key == "antialiasingsamples") {
+            s.antialiasing_samples = std::atoi(val.c_str());
+        } else if (key == "alphatocoverage") {
+            s.alpha_to_coverage = parse_bool(val);
         } else if (key == "fixstaminatick") {
             s.fix_stamina_tick = parse_bool(val);
         } else if (key == "fixslidecontact") {

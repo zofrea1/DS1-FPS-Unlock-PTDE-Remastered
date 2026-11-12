@@ -7,6 +7,9 @@
 // bilinear reads), as the depth of field's blur is (dof_composite.hlsl). At the original 1280x720 they were stretched
 // 10x and 5x, and again to the screen.
 //
+// With HighPrecisionColor (the scene in 16-bit float) the result gets a fine ordered dither (c203.x), so the smooth
+// float gradients do not band in the 8-bit frame.
+//
 // Built with fxc (tools/build_shaders.bat) into hdr_coladj_ps.h; the DLL carries the compiled bytecode.
 
 sampler2D gScene : register(s0);   // the scene at the render resolution
@@ -25,6 +28,14 @@ float4 gC68 : register(c68);       // the game's DL_FREG_068: x the film grain's
 float4 gC71 : register(c71);       // the game's DL_FREG_071: y the bloom rate's top
 float4 gBloomSize : register(c200);  // s1: width, height, 1 / width, 1 / height (set by the DLL)
 float4 gShaftSize : register(c201);  // s3: the same
+float4 gDither : register(c203);     // x: the dither's size (1/255 with HighPrecisionColor's float scene, else 0)
+
+// The 4x4 ordered (Bayer) dither index of a pixel, 0 to 15.
+float bayer4(float2 p) {
+    float2 a = fmod(p, 2.0);
+    float2 b = fmod(floor(p * 0.5), 2.0);
+    return 4.0 * (abs(a.x - a.y) * 2.0 + a.y) + (abs(b.x - b.y) * 2.0 + b.y);
+}
 
 float4 bspline(sampler2D s, float2 uv, float4 size) {
     float2 p = uv * size.xy - 0.5;
@@ -44,7 +55,7 @@ float4 bspline(sampler2D s, float2 uv, float4 size) {
            g1.y * (g0.x * tex2Dlod(s, float4(t0.x, t1.y, 0, 0)) + g1.x * tex2Dlod(s, float4(t1.x, t1.y, 0, 0)));
 }
 
-float4 main(float4 uv : TEXCOORD1) : COLOR0 {
+float4 main(float4 uv : TEXCOORD1, float2 pos : VPOS) : COLOR0 {
     float4 noise = tex2D(gNoise, uv.zw);
     float3 col = saturate(tex2D(gScene, uv.xy).rgb * gC56.z);
     float4 bloom = bspline(gBloom, uv.xy, gBloomSize);
@@ -57,5 +68,10 @@ float4 main(float4 uv : TEXCOORD1) : COLOR0 {
     float4 a = 2.0 * noise * graded;
     float4 b = 1.0 - 2.0 * (1.0 - noise) * (1.0 - graded);
     float4 overlay = (0.5 - noise >= 0.0) ? b : a;
-    return gC68.x * (overlay - graded) + graded;
+    float4 result = gC68.x * (overlay - graded) + graded;
+    // HighPrecisionColor: the float scene's smooth gradients reach the 8-bit frame through an ordered dither of less
+    // than half a step instead of rounding into bands (the scene times c56.z and the colour matrix widen every step of
+    // an 8-bit scene, the reason fog and dark skies band).
+    result.rgb += ((bayer4(floor(pos)) + 0.5) / 16.0 - 0.5) * gDither.x;
+    return result;
 }

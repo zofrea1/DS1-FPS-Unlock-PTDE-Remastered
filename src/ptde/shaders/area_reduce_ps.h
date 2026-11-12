@@ -75,6 +75,7 @@
         add r7.xw, r5.xyzy, c0.x
         mul r2.xy, r7.xwzw, c200.zwzw
         texldl r8, r2, s0
+        mov_sat r8, r8
         mad r6, r7.z, r8, r6
         add r5.z, r5.z, r7.z
         mov r5.w, r7.y
@@ -88,7 +89,7 @@
     cmp r0.x, r0.y, r0.x, c1.z
     mul oC0, r0.x, r3
 
-// approximately 74 instruction slots used (2 texture, 72 arithmetic)
+// approximately 75 instruction slots used (2 texture, 73 arithmetic)
 #endif
 
 const BYTE kAreaReducePs[] =
@@ -270,7 +271,9 @@ const BYTE kAreaReducePs[] =
     200,   0, 238, 160,  95,   0, 
       0,   3,   8,   0,  15, 128, 
       2,   0, 228, 128,   0,   8, 
-    228, 160,   4,   0,   0,   4, 
+    228, 160,   1,   0,   0,   2, 
+      8,   0,  31, 128,   8,   0, 
+    228, 128,   4,   0,   0,   4, 
       6,   0,  15, 128,   7,   0, 
     170, 128,   8,   0, 228, 128, 
       6,   0, 228, 128,   2,   0, 

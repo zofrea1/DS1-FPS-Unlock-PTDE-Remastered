@@ -86,6 +86,7 @@
     mad r0.y, r2.y, r0.y, r0.z
     mul r1, c2.yyxx, v0.xyxx
     texldl r1, r1, s0
+    mov_sat r1, r1
     max r2.x, r1.w, r0.y
     mul r0.y, r2.x, c202.x
     mov r2, c66
@@ -165,7 +166,7 @@
       mov oC0, r1
     endif
 
-// approximately 141 instruction slots used (34 texture, 107 arithmetic)
+// approximately 142 instruction slots used (34 texture, 108 arithmetic)
 #endif
 
 const BYTE kDofCompositePs[] =
@@ -396,6 +397,8 @@ const BYTE kDofCompositePs[] =
       4, 144,  95,   0,   0,   3, 
       1,   0,  15, 128,   1,   0, 
     228, 128,   0,   8, 228, 160, 
+      1,   0,   0,   2,   1,   0, 
+     31, 128,   1,   0, 228, 128, 
      11,   0,   0,   3,   2,   0, 
       1, 128,   1,   0, 255, 128, 
       0,   0,  85, 128,   5,   0, 

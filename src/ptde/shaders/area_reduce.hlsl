@@ -12,6 +12,9 @@
 // the same average with a quarter of the reads (at 4K, 4x4 or 5x4 fetches instead of 8x7 point reads; the bilinear
 // weights the hardware uses are within 1/512 of the exact ones).
 //
+// With HighPrecisionColor the scene is 16-bit float and can hold values above 1; each read is clamped to 0..1 as the
+// game's 8-bit scene clamped them, so the blur and the glare see what they saw.
+//
 // Built with fxc (tools/build_shaders.bat) into area_reduce_ps.h; the DLL carries the compiled bytecode. The DLL sets
 // stage 0 to bilinear filtering and clamping for the draw.
 
@@ -43,7 +46,8 @@ float4 main(float2 uv : TEXCOORD1) : COLOR0 {
             float wx = wx0 + wx1;
             float tx = wx1 / max(wx, 1e-6);
             float w = wx * wy;
-            sum += w * tex2Dlod(gScene, float4((float2(x + tx, y + ty) + 0.5) * gSrcSize.zw, 0, 0));
+            // Clamped as an 8-bit scene was (HighPrecisionColor's float scene can go above 1).
+            sum += w * saturate(tex2Dlod(gScene, float4((float2(x + tx, y + ty) + 0.5) * gSrcSize.zw, 0, 0)));
             total += w;
         }
     }

@@ -19,6 +19,8 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kPresentLutPs /Fh src\ptde\shaders\present_lut_ps.h src\ptde\shaders\present_lut.hlsl
 if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main /O3 /Vn kEffectsCompositePs /Fh src\ptde\shaders\effects_composite_ps.h src\ptde\shaders\effects_composite.hlsl
+if errorlevel 1 exit /b 1
 %FXC% /nologo /T vs_3_0 /E main_vs /O3 /Vn kPresentReduceVs /Fh src\ptde\shaders\present_reduce_vs.h src\ptde\shaders\present_reduce.hlsl
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main_ps /O3 /Vn kPresentReducePs /Fh src\ptde\shaders\present_reduce_ps.h src\ptde\shaders\present_reduce.hlsl

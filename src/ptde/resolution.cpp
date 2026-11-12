@@ -9,6 +9,7 @@
 #include "shaders/area_reduce_ps.h"
 #include "shaders/dof_composite_ps.h"
 #include "shaders/dof_near_rate_ps.h"
+#include "shaders/effects_composite_ps.h"
 #include "shaders/hdr_coladj_ps.h"
 #include "shaders/present_lut_ps.h"
 #include "shaders/present_reduce_ps.h"
@@ -233,6 +234,10 @@ volatile LONG g_dof_force = 0;        // diagnostics: 1-3 shows only that blur l
 float g_dof_strength[4] = {1.0f, 0, 0, 0};  // DepthOfFieldStrength, to our composite's c202
 constexpr int kDofSwap = 0;
 constexpr int kPresentSwap = 3;               // the windowed scale-down (kGammaCopy)
+constexpr int kHdrSwap = 1;                   // the final composite (kHdrColAdj)
+bool g_float_scene = false;                   // HighPrecisionColor: the scene's colour targets are 16-bit float
+const float kDither[4] = {1.0f / 255.0f, 0, 0, 0};
+const float kNoDither[4] = {0, 0, 0, 0};
 volatile bool g_present_swap_enabled = true;  // RemoteControl `reduce 0/1`
 volatile LONG g_swap_off_mask = 0;            // RemoteControl `swapoff MASK` (diagnostics): bit i = swap i, bit 7 = copies
 
@@ -241,6 +246,300 @@ int swap_of(const DWORD* code) {
         if (same_instructions(code, kSwaps[i].game, kSwaps[i].tokens)) return i;
     }
     return -1;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The game's low-resolution effects at the render resolution (FullResolutionEffects; shaders/effects_composite.hlsl
+// says why). The game's sequence each frame (Firelink at 4K, the targets as RemoteControl's frame log names them):
+//  1. the scene's packed depth (T51, the render size) copied point by point into a 512x360 colour target (T63) and a
+//     512x360 depth texture (T64) (FRPG_Fil_DepthCopy, a DrawUP);
+//  2. the scene's colour target (T50) bound with the scene's depth (T52), for its occlusion queries;
+//  3. the 512x360 effects target (T60) bound with T64 and cleared to black with alpha 1, then the effects drawn into
+//     it (blended SRCALPHA / INVSRCALPHA; their soft edges read T63);
+//  4. FRPG_Fil_Bilateral (a DrawUP) lays T60 over the scene: four reads weighted by T64 against T51, blend ONE +
+//     SRCALPHA (the scene times what shows through, plus the effects).
+// With this on, at 3 the effects go into our target of the scene's size over the scene's own depth (T52), with T51
+// read in place of T63 and the viewport and clipping rectangle the whole target; at 4 our shader lays it over the
+// scene pixel for pixel. The same in the game's multisampled mode (T50, T51 and T52 are then the resolved copies).
+// RemoteControl `effects 0/1/2`: the game's, ours with an 8-bit target, ours with a float target and dither.
+
+// FRPG_Fil_Bilateral (ps_5bedc424). Its instructions, comments left out.
+constexpr DWORD kBilateral[] = {
+    0xFFFF0300, 0x05000051, 0xA00F0000, 0x3F7F0000, 0x3B7F0000, 0x377F0000, 0x3F000000, 0x05000051, 0xA00F0001,
+    0x3F100000, 0x3E400000, 0x3D800000, 0x00000000, 0x05000051, 0xA00F0002, 0xBF800000, 0x3F800000, 0x00000000,
+    0x38D1B717, 0x0200001F, 0x80010005, 0x90030000, 0x0200001F, 0x90000000, 0xA00F0800, 0x0200001F, 0x90000000,
+    0xA00F0801, 0x0200001F, 0x90000000, 0xA00F0802, 0x03000005, 0x80030000, 0xA0E4000C, 0x90E40000, 0x02000013,
+    0x80030000, 0x80E40000, 0x03000002, 0x80030000, 0x81E40000, 0xA0FF0000, 0x04000058, 0x80030000, 0x80E40000,
+    0xA0000002, 0xA0550002, 0x04000004, 0x800C0000, 0x80440000, 0xA0E4000C, 0x90440000, 0x03000005, 0x80030001,
+    0x80E40000, 0xA0EE000C, 0x03000042, 0x800F0002, 0x80EE0000, 0xA0E40801, 0x03000042, 0x800F0000, 0x80EE0000,
+    0xA0E40800, 0x03000008, 0x80080001, 0x80E40002, 0xA0E40000, 0x03000042, 0x800F0002, 0x90E40000, 0xA0E40802,
+    0x03000008, 0x80010002, 0x80E40002, 0xA0E40000, 0x03000002, 0x80080001, 0x81FF0001, 0x80000002, 0x03000002,
+    0x80080001, 0x8BFF0001, 0xA0FF0002, 0x02000006, 0x80080001, 0x80FF0001, 0x03000005, 0x80080003, 0x80FF0001,
+    0xA0AA0001, 0x03000042, 0x800F0004, 0x90E40000, 0xA0E40801, 0x03000008, 0x80080001, 0x80E40004, 0xA0E40000,
+    0x03000002, 0x80080001, 0x81FF0001, 0x80000002, 0x03000002, 0x80080001, 0x8BFF0001, 0xA0FF0002, 0x02000006,
+    0x80080001, 0x80FF0001, 0x03000005, 0x80010003, 0x80FF0001, 0xA0000001, 0x02000001, 0x80040001, 0xA0AA0002,
+    0x03000002, 0x800F0001, 0x80680001, 0x90440000, 0x03000042, 0x800F0004, 0x80E40001, 0xA0E40801, 0x03000008,
+    0x80020002, 0x80E40004, 0xA0E40000, 0x03000002, 0x80020002, 0x81550002, 0x80000002, 0x03000002, 0x80020002,
+    0x8B550002, 0xA0FF0002, 0x02000006, 0x80020002, 0x80550002, 0x03000005, 0x80020003, 0x80550002, 0xA0550001,
+    0x03000042, 0x800F0004, 0x80EE0001, 0xA0E40801, 0x03000008, 0x80020002, 0x80E40004, 0xA0E40000, 0x03000002,
+    0x80010002, 0x81550002, 0x80000002, 0x03000002, 0x80010002, 0x8B000002, 0xA0FF0002, 0x02000006, 0x80010002,
+    0x80000002, 0x03000005, 0x80040003, 0x80000002, 0xA0550001, 0x03000009, 0x80010002, 0x80E40003, 0xA0550002,
+    0x02000006, 0x80010002, 0x80000002, 0x03000005, 0x800F0002, 0x80000002, 0x80E40003, 0x03000042, 0x800F0003,
+    0x80E40001, 0xA0E40800, 0x03000042, 0x800F0001, 0x80EE0001, 0xA0E40800, 0x03000005, 0x800F0003, 0x80550002,
+    0x80E40003, 0x03000042, 0x800F0004, 0x90E40000, 0xA0E40800, 0x04000004, 0x802F0003, 0x80E40004, 0x80000002,
+    0x80E40003, 0x04000004, 0x802F0001, 0x80E40001, 0x80AA0002, 0x80E40003, 0x04000004, 0x802F0800, 0x80E40000,
+    0x80FF0002, 0x80E40001, 0x0000FFFF};
+
+constexpr UINT kSmallW = 512, kSmallH = 360;  // the game's effects target and depth copy (kept at their size)
+volatile LONG g_fx_mode = 0;                  // 0 the game's, 1 ours (8-bit target), 2 ours (float target, dither)
+std::unordered_set<void*> g_bilateral_shaders;
+volatile bool g_bilateral_bound = false;
+int g_render_w = 0, g_render_h = 0;  // the scene's size
+
+struct Fx {
+    IDirect3DDevice9* dev = nullptr;
+    IDirect3DTexture9* tex = nullptr;  // ours, the scene's size
+    IDirect3DSurface9* surf = nullptr;
+    UINT w = 0, h = 0;
+    D3DFORMAT format = D3DFMT_UNKNOWN;
+    int float_ok = -1;  // a 16-bit float target can be blended into (-1 not asked yet)
+    IDirect3DPixelShader9* ps = nullptr;
+    bool ps_failed = false;
+    // The game's objects in this frame's sequence: compared, and bound only within the sequence that found them.
+    IDirect3DSurface9* rt0 = nullptr;                // render target 0 as the game last set it
+    IDirect3DSurface9* ds = nullptr;                 // the depth-stencil as the game last set it
+    IDirect3DBaseTexture9* depth_full = nullptr;     // 1: the scene's packed depth (T51)
+    IDirect3DBaseTexture9* depth_small = nullptr;    // 1: its 512x360 copy (T63)
+    IDirect3DSurface9* depth_small_ds = nullptr;     // 1: the 512x360 depth (T64)
+    IDirect3DSurface9* scene_ds = nullptr;           // 2: the scene's depth (T52)
+    IDirect3DBaseTexture9* small_fx = nullptr;       // 3: the game's effects target (T60)
+    bool phase = false;     // between 3 and the game's next render target
+    bool pending = false;   // our target holds this frame's effects, for 4
+    DWORD swapped = 0;      // stages where T51 stands in for T63
+    bool logged = false;
+    bool logged_missing = false;
+};
+Fx g_fx;
+
+using SetRTFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
+using SetDSFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DSurface9*);
+using ClearFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, const D3DRECT*, DWORD, D3DCOLOR, float, DWORD);
+using SetViewportFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const D3DVIEWPORT9*);
+SetRTFn o_set_rt = nullptr;
+SetDSFn o_set_ds = nullptr;
+ClearFn o_clear = nullptr;
+SetViewportFn o_set_viewport = nullptr;
+
+bool surface_is(IDirect3DSurface9* s, UINT w, UINT h, D3DFORMAT f) {
+    D3DSURFACE_DESC d{};
+    return s && SUCCEEDED(s->GetDesc(&d)) && d.Width == w && d.Height == h && d.Format == f &&
+           d.MultiSampleType == D3DMULTISAMPLE_NONE;
+}
+
+bool render_size(IDirect3DSurface9* s) {
+    D3DSURFACE_DESC d{};
+    return s && SUCCEEDED(s->GetDesc(&d)) && static_cast<int>(d.Width) == g_render_w &&
+           static_cast<int>(d.Height) == g_render_h && d.MultiSampleType == D3DMULTISAMPLE_NONE;
+}
+
+bool texture_render_size(IDirect3DBaseTexture9* t) {
+    D3DSURFACE_DESC d{};
+    return t && t->GetType() == D3DRTYPE_TEXTURE &&
+           SUCCEEDED(static_cast<IDirect3DTexture9*>(t)->GetLevelDesc(0, &d)) &&
+           static_cast<int>(d.Width) == g_render_w && static_cast<int>(d.Height) == g_render_h;
+}
+
+IDirect3DBaseTexture9* container_of(IDirect3DSurface9* s) {
+    IDirect3DTexture9* t = nullptr;
+    if (!s || FAILED(s->GetContainer(__uuidof(IDirect3DTexture9), reinterpret_cast<void**>(&t))) || !t) return nullptr;
+    t->Release();  // identity only: the game holds it
+    return t;
+}
+
+void fx_release_target() {
+    if (g_fx.surf) g_fx.surf->Release();
+    if (g_fx.tex) g_fx.tex->Release();
+    g_fx.surf = nullptr;
+    g_fx.tex = nullptr;
+}
+
+void fx_forget_sequence() {
+    g_fx.rt0 = g_fx.ds = nullptr;
+    g_fx.depth_full = g_fx.depth_small = nullptr;
+    g_fx.depth_small_ds = g_fx.scene_ds = nullptr;
+    g_fx.small_fx = nullptr;
+    g_fx.phase = g_fx.pending = false;
+    g_fx.swapped = 0;
+}
+
+// Our shader and our target (the size of the scene's depth; float when mode 2 and the card can blend into one).
+bool fx_ready(IDirect3DDevice9* dev, IDirect3DSurface9* scene_ds) {
+    if (g_fx.dev != dev) {
+        fx_release_target();
+        if (g_fx.ps) g_fx.ps->Release();
+        g_fx.ps = nullptr;
+        g_fx.ps_failed = false;
+        g_fx.float_ok = -1;
+        g_fx.dev = dev;
+    }
+    if (!g_fx.ps && !g_fx.ps_failed &&
+        FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kEffectsCompositePs), &g_fx.ps))) {
+        g_fx.ps = nullptr;
+        g_fx.ps_failed = true;
+        LOG_ERROR("Resolution: the shader for the full-resolution effects could not be made; the game's are used");
+    }
+    if (!g_fx.ps) return false;
+    if (g_fx.float_ok < 0) {
+        IDirect3D9* d3d = nullptr;
+        D3DDEVICE_CREATION_PARAMETERS cp{};
+        D3DDISPLAYMODE mode{};
+        g_fx.float_ok = 0;
+        if (SUCCEEDED(dev->GetDirect3D(&d3d)) && d3d) {
+            dev->GetCreationParameters(&cp);
+            const D3DFORMAT adapter = SUCCEEDED(dev->GetDisplayMode(0, &mode)) && mode.Format != D3DFMT_UNKNOWN
+                                          ? mode.Format
+                                          : D3DFMT_X8R8G8B8;
+            g_fx.float_ok = d3d->CheckDeviceFormat(cp.AdapterOrdinal, D3DDEVTYPE_HAL, adapter,
+                                                   D3DUSAGE_RENDERTARGET | D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING,
+                                                   D3DRTYPE_TEXTURE, D3DFMT_A16B16G16R16F) == D3D_OK;
+            d3d->Release();
+        }
+    }
+    D3DSURFACE_DESC dd{};
+    if (FAILED(scene_ds->GetDesc(&dd))) return false;
+    const D3DFORMAT want = (g_fx_mode == 2 && g_fx.float_ok == 1) ? D3DFMT_A16B16G16R16F : D3DFMT_A8R8G8B8;
+    if (g_fx.tex && (g_fx.w != dd.Width || g_fx.h != dd.Height || g_fx.format != want)) fx_release_target();
+    if (!g_fx.tex) {
+        if (FAILED(dev->CreateTexture(dd.Width, dd.Height, 1, D3DUSAGE_RENDERTARGET, want, D3DPOOL_DEFAULT, &g_fx.tex,
+                                      nullptr)) ||
+            !g_fx.tex || FAILED(g_fx.tex->GetSurfaceLevel(0, &g_fx.surf)) || !g_fx.surf) {
+            fx_release_target();
+            LOG_ERROR("Resolution: no %ux%u target for the full-resolution effects; the game's are used", dd.Width,
+                      dd.Height);
+            g_fx_mode = 0;
+            return false;
+        }
+        g_fx.w = dd.Width;
+        g_fx.h = dd.Height;
+        g_fx.format = want;
+        LOG_INFO("Resolution: the game's low-resolution effects (glows, mist, fog, smoke; 512x360) are drawn at "
+                 "%ux%u against the scene's own depth%s", dd.Width, dd.Height,
+                 want == D3DFMT_A16B16G16R16F ? ", in 16-bit float, laid over the scene with a fine dither"
+                                              : " (8-bit)");
+    }
+    return true;
+}
+
+// 3: the game cleared its 512x360 effects target; its effects go into ours from here.
+void fx_begin(IDirect3DDevice9* dev) {
+    IDirect3DBaseTexture9* low = container_of(g_fx.rt0);
+    if (!low || !fx_ready(dev, g_fx.scene_ds)) return;
+    g_fx.small_fx = low;
+    o_set_rt(dev, 0, g_fx.surf);
+    o_set_ds(dev, g_fx.scene_ds);
+    o_clear(dev, 0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+    g_fx.phase = true;
+    g_fx.swapped = 0;
+    for (DWORD s = 0; s < 16; ++s) {
+        IDirect3DBaseTexture9* t = nullptr;
+        if (SUCCEEDED(dev->GetTexture(s, &t)) && t) {
+            if (t == g_fx.depth_small && o_set_texture && SUCCEEDED(o_set_texture(dev, s, g_fx.depth_full))) {
+                g_fx.swapped |= 1u << s;
+            }
+            t->Release();
+        }
+    }
+}
+
+// The game moves on to another target: what it bound stays as it believes.
+void fx_end(IDirect3DDevice9* dev) {
+    for (DWORD s = 0; s < 16; ++s) {
+        if (g_fx.swapped & (1u << s)) o_set_texture(dev, s, g_fx.depth_small);
+    }
+    g_fx.swapped = 0;
+    g_fx.phase = false;
+    g_fx.pending = true;
+}
+
+// 4: our target over the scene with the game's blend (ONE, SRCALPHA), pixel for pixel.
+HRESULT fx_composite(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    g_fx.pending = false;
+    IDirect3DPixelShader9* game = nullptr;
+    dev->GetPixelShader(&game);
+    o_set_ps(dev, g_fx.ps);
+    o_set_texture(dev, 0, g_fx.tex);
+    const float dither[4] = {g_fx.format == D3DFMT_A16B16G16R16F && !g_float_scene ? 1.0f / 255.0f : 0.0f, 0, 0, 0};
+    dev->SetPixelShaderConstantF(200, dither, 1);
+    static const D3DSAMPLERSTATETYPE kStates[] = {D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
+                                                  D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_SRGBTEXTURE};
+    static const DWORD kValues[] = {D3DTEXF_POINT, D3DTEXF_POINT, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP,
+                                    FALSE};
+    DWORD saved[6] = {};
+    for (int i = 0; i < 6; ++i) {
+        dev->GetSamplerState(0, kStates[i], &saved[i]);
+        if (saved[i] != kValues[i]) dev->SetSamplerState(0, kStates[i], kValues[i]);
+    }
+    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    for (int i = 0; i < 6; ++i) {
+        if (saved[i] != kValues[i]) dev->SetSamplerState(0, kStates[i], saved[i]);
+    }
+    o_set_texture(dev, 0, g_fx.small_fx);
+    o_set_ps(dev, game);
+    if (game) game->Release();
+    if (!g_fx.logged) {
+        g_fx.logged = true;
+        LOG_INFO("Resolution: the full-resolution effects are laid over the scene (first frame)");
+    }
+    return hr;
+}
+
+HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt) {
+    if (index == 0) {
+        if (g_fx.phase) fx_end(dev);
+        g_fx.rt0 = rt;
+    }
+    return o_set_rt(dev, index, rt);
+}
+
+HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
+    g_fx.ds = ds;
+    if (g_fx.phase && ds && ds == g_fx.depth_small_ds) return o_set_ds(dev, g_fx.scene_ds);
+    // 2: the scene's colour and depth bound together, both the scene's size and not multisampled.
+    if (!g_fx.phase && g_fx_mode && ds && render_size(ds) && render_size(g_fx.rt0)) g_fx.scene_ds = ds;
+    return o_set_ds(dev, ds);
+}
+
+HRESULT WINAPI hk_clear(IDirect3DDevice9* dev, DWORD count, const D3DRECT* rects, DWORD flags, D3DCOLOR color, float z,
+                        DWORD stencil) {
+    const HRESULT hr = o_clear(dev, count, rects, flags, color, z, stencil);
+    // 3: the effects target cleared to black with alpha 1, over the 512x360 depth from 1.
+    if (g_fx_mode && !g_fx.phase && count == 0 && flags == D3DCLEAR_TARGET && color == 0xFF000000 && g_fx.ds &&
+        g_fx.ds == g_fx.depth_small_ds && surface_is(g_fx.rt0, kSmallW, kSmallH, D3DFMT_A8R8G8B8)) {
+        if (g_fx.scene_ds && g_fx.depth_full && g_fx.depth_small) {
+            if (g_fx.pending && !g_fx.logged_missing) {
+                g_fx.logged_missing = true;
+                LOG_ERROR("Resolution: the full-resolution effects of the last frame were never laid over the scene");
+            }
+            fx_begin(dev);
+        } else if (!g_fx.logged_missing) {
+            g_fx.logged_missing = true;
+            LOG_ERROR("Resolution: the game's effects pass came without the depth it is drawn against (scene depth %s, "
+                      "depth copy %s); the game's low-resolution effects are kept", g_fx.scene_ds ? "found" : "missing",
+                      g_fx.depth_full ? "found" : "missing");
+        }
+    }
+    return hr;
+}
+
+HRESULT WINAPI hk_set_viewport(IDirect3DDevice9* dev, const D3DVIEWPORT9* vp) {
+    if (g_fx.phase && vp) {
+        D3DVIEWPORT9 full = *vp;
+        full.X = full.Y = 0;
+        full.Width = g_fx.w;
+        full.Height = g_fx.h;
+        return o_set_viewport(dev, &full);
+    }
+    return o_set_viewport(dev, vp);
 }
 
 HRESULT WINAPI hk_create_texture(IDirect3DDevice9* dev, UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT f,
@@ -273,6 +572,10 @@ HRESULT WINAPI hk_create_texture(IDirect3DDevice9* dev, UINT w, UINT h, UINT lev
 
 HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DPixelShader9** out) {
     const HRESULT hr = o_create_ps(dev, code, out);
+    if (SUCCEEDED(hr) && out && *out && same_instructions(code, kBilateral, sizeof(kBilateral) / sizeof(kBilateral[0]))) {
+        std::lock_guard<std::mutex> lock(g_lock);
+        g_bilateral_shaders.insert(*out);
+    }
     if (SUCCEEDED(hr) && out && *out && is_copy_shader(code)) {
         std::lock_guard<std::mutex> lock(g_lock);
         g_copy_shaders.insert(*out);
@@ -316,11 +619,13 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
 
 HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     bool copy = false;
+    bool bilateral = false;
     int game = -1;
     int swap = -1;
     if (ps) {
         std::lock_guard<std::mutex> lock(g_lock);
         copy = g_copy_shaders.count(ps) != 0;
+        bilateral = g_bilateral_shaders.count(ps) != 0;
         for (int i = 0; i < kSwapCount && game < 0; ++i) {
             if (g_swap_game[i].count(ps)) game = i;
         }
@@ -330,12 +635,14 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
         }
     }
     g_copy_bound = copy;
+    g_bilateral_bound = bilateral;
     g_game_bound = game;
     g_swap_bound = swap;
     if (swap >= 0) {
         // The original sizes; the draw sets them again from the textures it binds.
         dev->SetPixelShaderConstantF(200, kSwaps[swap].sizes, 2);
         if (swap == kDofSwap) dev->SetPixelShaderConstantF(202, g_dof_strength, 1);
+        if (swap == kHdrSwap) dev->SetPixelShaderConstantF(203, g_float_scene ? kDither : kNoDither, 1);
         return o_set_ps(dev, g_swap_ours[swap]);
     }
     return o_set_ps(dev, ps);
@@ -408,6 +715,14 @@ HRESULT swap_draw(IDirect3DDevice9* dev, int swap, D3DPRIMITIVETYPE type, UINT c
 
 HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex) {
     if (stage == 0) g_tex0 = tex;
+    if (g_fx.phase && stage < 16) {
+        // The effects' soft edges read the scene's own depth in place of its 512x360 copy.
+        if (tex && tex == g_fx.depth_small) {
+            g_fx.swapped |= 1u << stage;
+            return o_set_texture(dev, stage, g_fx.depth_full);
+        }
+        g_fx.swapped &= ~(1u << stage);
+    }
     return o_set_texture(dev, stage, tex);
 }
 
@@ -456,11 +771,24 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
     }
     if (swap >= 0) return swap_draw(dev, swap, type, count, data, stride);
     IDirect3DBaseTexture9* tex = g_tex0;
+    if (g_fx.pending && g_bilateral_bound && tex && tex == g_fx.small_fx) {
+        return fx_composite(dev, type, count, data, stride);
+    }
+    // 1: the scene's packed depth copied into the 512x360 colour target and depth (FRPG_Fil_DepthCopy).
+    if (g_fx_mode && !g_fx.phase && tex && g_fx.ds && surface_is(g_fx.rt0, kSmallW, kSmallH, D3DFMT_A8R8G8B8) &&
+        surface_is(g_fx.ds, kSmallW, kSmallH, D3DFMT_D24S8) && texture_render_size(tex)) {
+        IDirect3DBaseTexture9* low = container_of(g_fx.rt0);
+        if (low) {
+            g_fx.depth_full = tex;
+            g_fx.depth_small = low;
+            g_fx.depth_small_ds = g_fx.ds;
+        }
+    }
     if (g_copy_bound && tex && tex->GetType() == D3DRTYPE_TEXTURE) {
         auto* src = static_cast<IDirect3DTexture9*>(tex);
         D3DSURFACE_DESC sd{};
         if (SUCCEEDED(src->GetLevelDesc(0, &sd)) && (sd.Usage & D3DUSAGE_RENDERTARGET) && sd.Width > kOriginalWidth &&
-            sd.Format == D3DFMT_A8R8G8B8) {
+            (sd.Format == D3DFMT_A8R8G8B8 || sd.Format == D3DFMT_A16B16G16R16F)) {
             IDirect3DSurface9* rt = nullptr;
             D3DSURFACE_DESC rd{};
             D3DVIEWPORT9 vp{};
@@ -494,6 +822,10 @@ using SetScissorFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*);
 SetScissorFn o_set_scissor = nullptr;
 
 HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
+    if (g_fx.phase && r) {
+        const RECT full{0, 0, static_cast<LONG>(g_fx.w), static_cast<LONG>(g_fx.h)};
+        return o_set_scissor(dev, &full);
+    }
     if (!r || r->left < 0 || r->top < 0 || r->right > 1280 || r->bottom > 720 ||
         (g_frame_w == 1280 && g_frame_h == 720)) {
         return o_set_scissor(dev, r);
@@ -712,6 +1044,19 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
     if (p && !o_set_scissor) o_set_scissor = reinterpret_cast<SetScissorFn>(p);
     p = patch_slot(dev, 34, reinterpret_cast<void*>(&hk_stretch));
     if (p && !o_stretch) o_stretch = reinterpret_cast<StretchRectFn>(p);
+    // The full-resolution effects (the hooks pass everything through while it is off).
+    p = patch_slot(dev, 37, reinterpret_cast<void*>(&hk_set_rt));
+    if (p && !o_set_rt) o_set_rt = reinterpret_cast<SetRTFn>(p);
+    p = patch_slot(dev, 39, reinterpret_cast<void*>(&hk_set_ds));
+    if (p && !o_set_ds) o_set_ds = reinterpret_cast<SetDSFn>(p);
+    p = patch_slot(dev, 43, reinterpret_cast<void*>(&hk_clear));
+    if (p && !o_clear) o_clear = reinterpret_cast<ClearFn>(p);
+    p = patch_slot(dev, 47, reinterpret_cast<void*>(&hk_set_viewport));
+    if (p && !o_set_viewport) o_set_viewport = reinterpret_cast<SetViewportFn>(p);
+}
+
+void resolution_set_effects(int mode) {
+    g_fx_mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
 }
 
 void resolution_set_swap_off_mask(int mask) { g_swap_off_mask = mask; }
@@ -728,6 +1073,8 @@ void resolution_set_dof_strength(float strength) { g_dof_strength[0] = strength;
 void resolution_reset() {
     g_tex0 = nullptr;
     release_ptr(g_reduce.state);  // made again on the next use
+    fx_release_target();          // the default pool goes before a Reset; made again on the next use
+    fx_forget_sequence();
 }
 
 namespace {
@@ -761,6 +1108,50 @@ bool resolution_dsfix_sun(int render_width, int render_height) {
 
 void resolution_bypass_dsfix(bool on) { g_bypass_dsfix = on; }
 
+// HighPrecisionColor. The scene's colour targets are 8-bit (A8R8G8B8): every layer of fog, smoke or glow blended into
+// them is rounded to 1/255, and the final composite then scales the scene (c56.z, 1.3 at Firelink) and grades it, so
+// thin fog and dark gradients show bands, and a pulsing glow's halo shows rings that crawl as it pulses. These
+// targets are made 16-bit float instead (A16B16G16R16F, by their format index in RenderTargetManImp's constructor:
+// index 6 -> 15 of the game's format table at 0x10D3670), and the final composite dithers the result into the 8-bit
+// frame. Found 2026-11-12 (texture creation follows the constructor's order; frame logs at Firelink, both with and
+// without the game's multisampling): the scene's colour (descriptor at 0x100A999, the frame log's T11/T50), its copy
+// for refraction (0x100AD38, T14/T53), the depth of field's output (0x100AE0A, T15/T54), the target the multisampled
+// scene is resolved into (0x100A69D, T9/T48) and the multisampled scene itself (pushed at 0x100A5A7, R41). The packed
+// depth (0x100AAF1, T12/T51, and its multisampled R42) stays 8-bit: its encoding relies on the 8-bit rounding.
+// Our shaders that read the scene clamp it to 0..1 as the 8-bit targets did (area_reduce, dof_composite, hdr_coladj).
+struct FormatSite {
+    uint32_t at;     // the format index (imm32 of a mov, or imm8 of a push)
+    uint32_t bytes;  // 4 or 1
+};
+constexpr FormatSite kSceneFormats[] = {
+    {0x0100A9A7, 4}, {0x0100AD46, 4}, {0x0100AE18, 4}, {0x0100A6AB, 4}, {0x0100A5A8, 1},
+};
+constexpr uint32_t kFormatA8R8G8B8 = 6, kFormatA16B16G16R16F = 15;
+static bool g_want_float_scene = false;
+
+static bool patch_scene_formats() {
+    for (const FormatSite& f : kSceneFormats) {
+        uint32_t v = 0;
+        std::memcpy(&v, reinterpret_cast<const void*>(f.at), f.bytes);
+        if (v != kFormatA8R8G8B8) {
+            LOG_ERROR("HighPrecisionColor: the scene format at %08X is %u, not %u in this build. Not changing it.", f.at,
+                      v, kFormatA8R8G8B8);
+            return false;
+        }
+    }
+    for (const FormatSite& f : kSceneFormats) {
+        auto* p = reinterpret_cast<uint8_t*>(f.at);
+        DWORD old = 0;
+        if (!VirtualProtect(p, f.bytes, PAGE_EXECUTE_READWRITE, &old)) return false;
+        std::memcpy(p, &kFormatA16B16G16R16F, f.bytes);
+        DWORD ignored = 0;
+        VirtualProtect(p, f.bytes, old, &ignored);
+    }
+    return true;
+}
+
+void resolution_set_high_precision_color(bool on) { g_want_float_scene = on; }
+
 bool resolution_install(int width, int height, bool scale_post) {
     g_scale_post = scale_post;
     if (width < 64 || height < 64 || width > 8192 || height > 8192) return false;
@@ -786,6 +1177,14 @@ bool resolution_install(int width, int height, bool scale_post) {
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(0x00F90D60), 0x20);
     g_frame_w = static_cast<int>(scaled(1280, width, height));
     g_frame_h = static_cast<int>(scaled(720, width, height));
+    g_render_w = static_cast<int>(scaled(1024, width, height));
+    g_render_h = static_cast<int>(scaled(720, width, height));
+    if (scale_post) g_fx_mode = 0;  // its effects target is already the scene's half size
+    if (g_want_float_scene && !scale_post && !g_bypass_dsfix && patch_scene_formats()) {
+        g_float_scene = true;
+        LOG_INFO("HighPrecisionColor: the scene's colour targets are 16-bit float (were 8-bit); the final picture is "
+                 "dithered into the screen's 8 bits, so fog, smoke, glows and dark gradients fade without bands");
+    }
     g_active = true;
     if (scale_post) {
         LOG_INFO("Resolution: the 3D scene renders at %dx%d (was 1024x720); depth of field and glare at %dx%d and "

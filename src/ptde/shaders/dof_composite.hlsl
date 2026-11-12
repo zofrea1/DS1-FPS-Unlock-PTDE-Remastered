@@ -47,7 +47,8 @@ float4 bspline(sampler2D s, float2 uv, float4 size) {
 
 float4 main(float2 uv : TEXCOORD1) : COLOR0 {
     float nearBlur = bspline(gNear, uv, gNearSize).w;
-    float4 src = tex2Dlod(gScene, float4(uv, 0, 0));
+    // Clamped as the game's 8-bit scene was (HighPrecisionColor's float scene can go above 1).
+    float4 src = saturate(tex2Dlod(gScene, float4(uv, 0, 0)));
     // DepthOfFieldStrength scales the blur weight before the game's own mapping to its blur levels: 0.5 gives a far
     // area the level the game gives half its blur, 0 the in-focus weights everywhere; 1 is the game's exactly.
     float blurW = max(src.w, nearBlur) * gStrength.x;

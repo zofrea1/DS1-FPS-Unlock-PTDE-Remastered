@@ -1,6 +1,7 @@
 #include "d3d.h"
 
 #include "aspect.h"
+#include "atoc.h"
 #include "d3dperf.h"
 #include "surfpool.h"
 #include "dxvk.h"
@@ -251,6 +252,9 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         }
         gamma_hook_device(*out, settings().gamma_ramp, g_dxvk_active);
         resolution_hook_device(*out);
+        if (settings().alpha_to_coverage) {
+            atoc_hook_device(*out);
+        }
     }
     if (SUCCEEDED(hr) && out && *out && remote_enabled()) {
         remote_hook_device(*out);
