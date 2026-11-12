@@ -130,8 +130,11 @@ HRESULT WINAPI hook_psc(IDirect3DDevice9* d, UINT start, const float* data, UINT
 // compiles; a warm-up can only help with pairs drawn for the first time).
 void* volatile g_cur_vs = nullptr;
 void* volatile g_cur_ps = nullptr;
+void* volatile g_cur_decl = nullptr;
 std::mutex g_pairs_lock;
 std::unordered_set<uint64_t> g_pairs_drawn;
+std::unordered_set<uint64_t> g_combos_drawn;  // pair + vertex declaration
+volatile LONG g_draw_kind = 0;               // the last draw's: 0 pair before, 1 pair new, 2 pair before but combo new
 volatile LONG g_slow_logged = 0;
 constexpr double kSlowCallMs = 3.0;
 constexpr LONG kSlowCallLines = 400;
@@ -141,18 +144,26 @@ uint64_t pair_key() {
            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(g_cur_ps));
 }
 
-// Before a draw: whether its pair is new (and remember it).
+// Before a draw: whether its pair is new, or its pair with this vertex declaration (and remember both). 1 new pair,
+// 2 known pair with a new declaration, 0 both seen.
 bool pair_first_draw() {
     std::lock_guard<std::mutex> lock(g_pairs_lock);
-    return g_pairs_drawn.insert(pair_key()).second;
+    const uint64_t p = pair_key();
+    const bool new_pair = g_pairs_drawn.insert(p).second;
+    const uint64_t c = p * 1099511628211ULL ^ static_cast<uint64_t>(reinterpret_cast<uintptr_t>(g_cur_decl));
+    const bool new_combo = g_combos_drawn.insert(c).second;
+    g_draw_kind = new_pair ? 1 : new_combo ? 2 : 0;
+    return new_pair;
 }
 
 void note_slow_call(const char* what, int64_t ticks, int first) {
     const double ms = 1000.0 * static_cast<double>(ticks) / static_cast<double>(g_freq.QuadPart);
     if (ms < kSlowCallMs || InterlockedIncrement(&g_slow_logged) > kSlowCallLines) return;
-    LOG_INFO("[slowcall] %s %.1f ms on thread %lu: vs %s ps %s%s", what, ms, GetCurrentThreadId(),
-             remote_shader_name(g_cur_vs).c_str(), remote_shader_name(g_cur_ps).c_str(),
-             first < 0 ? "" : first ? " (first draw of this pair)" : " (pair drawn before)");
+    const LONG kind = g_draw_kind;
+    LOG_INFO("[slowcall] %s %.1f ms on thread %lu: vs %s ps %s decl %p%s", what, ms, GetCurrentThreadId(),
+             remote_shader_name(g_cur_vs).c_str(), remote_shader_name(g_cur_ps).c_str(), g_cur_decl,
+             first < 0 ? "" : kind == 1 ? " (NEW pair)" : kind == 2 ? " (pair drawn before, NEW declaration)" :
+                                          " (pair and declaration drawn before)");
 }
 
 HRESULT WINAPI hook_dip(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, INT base, UINT min, UINT num, UINT start,
@@ -215,6 +226,7 @@ HRESULT WINAPI hook_set_ps(IDirect3DDevice9* d, void* sh) {
 }
 HRESULT WINAPI hook_set_decl(IDirect3DDevice9* d, void* decl) {
     ++g_calls[kSetVertexDecl];
+    g_cur_decl = decl;
     const int64_t t0 = qpc();
     const HRESULT hr = reinterpret_cast<SetShaderFn>(g_orig[kSetVertexDecl])(d, decl);
     note_slow_call("SetVertexDeclaration", qpc() - t0, -1);
