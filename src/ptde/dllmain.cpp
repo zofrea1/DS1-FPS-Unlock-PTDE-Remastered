@@ -9,6 +9,7 @@
 #include "ffx.h"
 #include "rendermath.h"
 #include "rwlock.h"
+#include "texpreload.h"
 #include "frame.h"
 #include "gauge.h"
 #include "intro.h"
@@ -128,6 +129,11 @@ DWORD WINAPI worker(void*) {
         }
     }
     rwlock_log(settings.fps_unlock && settings.fast_read_locks);
+    if (settings.preload_textures) {
+        texpreload_install();
+    } else {
+        LOG_INFO("PreloadTextures is false. Textures reach the graphics card at their first draw.");
+    }
     if (settings.borderless) {
         if (dsfix.borderless) {
             LOG_INFO("DSfix's own borderlessFullscreen is on; leaving the window to DSfix.");

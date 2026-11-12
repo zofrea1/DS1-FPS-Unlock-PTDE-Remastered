@@ -269,6 +269,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.reuse_surfaces = parse_bool(val);
         } else if (key == "fastreadlocks") {
             s.fast_read_locks = parse_bool(val);
+        } else if (key == "preloadtextures") {
+            s.preload_textures = parse_bool(val);
         } else if (key == "fasteffects") {
             s.fast_effects = parse_bool(val);
         } else if (key == "fastrendermath") {

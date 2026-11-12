@@ -132,6 +132,8 @@ struct Settings {
     bool reuse_surfaces = true;
     // The game's read locks count without kernel calls (rwlock.h).
     bool fast_read_locks = true;
+    // Textures go to the graphics card on the loading thread as they are made, not at their first draw (texpreload.h).
+    bool preload_textures = true;
     // The effects library's debug checks (stack fills and guard checks, see ffx.h) are skipped.
     bool fast_effects = true;
     // Two hot render-thread math helpers run as SSE with identical results (see rendermath.h).
