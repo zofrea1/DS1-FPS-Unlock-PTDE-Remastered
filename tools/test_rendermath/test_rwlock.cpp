@@ -1,9 +1,10 @@
 // FastReadLocks against the game's own reader/writer lock (DLKR::DLPlainReadWriteLock), with the game's image mapped
 // at 0x400000 in a suspended child (as test_rmath):
-//  1. the same random single-thread sequences of lock calls on an original lock and on one driven by the
-//     replacements: every return value and the reader count must match;
-//  2. a stress run: reader threads on the replacements, writer threads on the game's own WriteLock/WriteUnlock, with
-//     a shared check that a writer never overlaps a reader, and that nothing deadlocks.
+//  1. the same random single-thread sequences of lock calls (reads, writes, tries, timeouts) on an original lock and
+//     on one driven by the replacements: every return value and the reader count (as the original keeps it: -1 while
+//     a writer holds it) must match;
+//  2. a stress run: reader and writer threads on the replacements (infinite and finite locks, tries), with a shared
+//     check that a writer never overlaps a reader or another writer, and that nothing deadlocks.
 #include <windows.h>
 
 #include <cstdint>
@@ -56,9 +57,18 @@ static int o_read_unlock(GameLock* l) { return this0(reinterpret_cast<void*>(0x6
 static int r_read(GameLock* l, uint32_t t) { return this1(reinterpret_cast<void*>(&read_lock), l, t); }
 static int r_try_read(GameLock* l) { return this0(reinterpret_cast<void*>(&try_read_lock), l); }
 static int r_read_unlock(GameLock* l) { return this0(reinterpret_cast<void*>(&read_unlock), l); }
-static int write_lock(GameLock* l, uint32_t t) { return this1(reinterpret_cast<void*>(0x60D300), l, t); }
-static int try_write_lock(GameLock* l) { return this0(reinterpret_cast<void*>(0x60D310), l); }
-static int write_unlock(GameLock* l) { return this0(reinterpret_cast<void*>(0x60D320), l); }
+static int o_write(GameLock* l, uint32_t t) { return this1(reinterpret_cast<void*>(0x60D300), l, t); }
+static int o_try_write(GameLock* l) { return this0(reinterpret_cast<void*>(0x60D310), l); }
+static int o_write_unlock(GameLock* l) { return this0(reinterpret_cast<void*>(0x60D320), l); }
+static int r_write(GameLock* l, uint32_t t) { return this1(reinterpret_cast<void*>(&write_lock), l, t); }
+static int r_try_write(GameLock* l) { return this0(reinterpret_cast<void*>(&try_write_lock), l); }
+static int r_write_unlock(GameLock* l) { return this0(reinterpret_cast<void*>(&write_unlock), l); }
+// The replacement's count as the original keeps it: -1 while a writer holds the lock.
+static LONG seen_count(const GameLock* l) {
+    const LONG c = l->count;
+    if (c == kWriter || c == kReserved) return -1;
+    return is_readers(c) ? (c & ~kWaiting) : c;
+}
 
 static volatile int g_run = -1, g_step = -1, g_op = -1, g_side = -1;
 static DWORD WINAPI watchdog(void*) {
@@ -114,30 +124,30 @@ static void sequences() {
             case 4:  // write lock, finite (against readers it times out)
                 if (writer) continue;
                 name = "write lock (finite)";
-                ra = write_lock(&a, 1);
-                rb = write_lock(&b, 1);
+                ra = o_write(&a, 1);
+                rb = r_write(&b, 1);
                 if (ra == 0 && rb == 0) writer = 1;
                 break;
             case 5:
                 if (writer) continue;
                 name = "try write lock";
-                ra = try_write_lock(&a);
-                rb = try_write_lock(&b);
+                ra = o_try_write(&a);
+                rb = r_try_write(&b);
                 if (ra == 0 && rb == 0) writer = 1;
                 break;
             case 6:
                 if (!writer) continue;
                 name = "write unlock";
-                ra = write_unlock(&a);
-                rb = write_unlock(&b);
+                ra = o_write_unlock(&a);
+                rb = r_write_unlock(&b);
                 writer = 0;
                 break;
             }
             ++ops;
-            if (ra != rb || a.count != b.count) {
+            if (ra != rb || a.count != seen_count(&b)) {
                 if (g_fail < 20)
                     std::printf("MISMATCH run %d step %d %s: original %d (count %ld), replacement %d (count %ld)\n", run,
-                                step, name, ra, a.count, rb, b.count);
+                                step, name, ra, a.count, rb, seen_count(&b));
                 ++g_fail;
                 break;
             }
@@ -169,15 +179,24 @@ static DWORD WINAPI reader(void* arg) {
     return 0;
 }
 
-static DWORD WINAPI writer(void*) {
+static DWORD WINAPI writer(void* arg) {
+    std::mt19937 rng(static_cast<unsigned>(reinterpret_cast<uintptr_t>(arg)));
     while (!g_stop) {
-        write_lock(&g_shared, INFINITE);
-        InterlockedExchange(&g_writer_in, 1);
+        // Infinite, finite (2 ms) and try locks: only a successful one enters.
+        const unsigned kind = rng() % 3;
+        const int r = kind == 0 ? r_write(&g_shared, INFINITE) : kind == 1 ? r_write(&g_shared, 2) : r_try_write(&g_shared);
+        if (r != 0) {
+            if (kind == 0) InterlockedIncrement(&g_violations);  // an infinite lock must succeed
+            InterlockedIncrement(&g_tries);
+            Sleep(0);
+            continue;
+        }
+        if (InterlockedExchange(&g_writer_in, 1) != 0) InterlockedIncrement(&g_violations);  // two writers
         if (g_readers_in) InterlockedIncrement(&g_violations);
         Sleep(0);
         if (g_readers_in) InterlockedIncrement(&g_violations);
         InterlockedExchange(&g_writer_in, 0);
-        write_unlock(&g_shared);
+        r_write_unlock(&g_shared);
         InterlockedIncrement(&g_writes);
         Sleep(0);
     }
@@ -188,7 +207,7 @@ static void stress() {
     make_lock(&g_shared);
     HANDLE t[8];
     for (int i = 0; i < 6; ++i) t[i] = CreateThread(nullptr, 0, reader, reinterpret_cast<void*>(static_cast<uintptr_t>(i + 1)), 0, nullptr);
-    for (int i = 6; i < 8; ++i) t[i] = CreateThread(nullptr, 0, writer, nullptr, 0, nullptr);
+    for (int i = 6; i < 8; ++i) t[i] = CreateThread(nullptr, 0, writer, reinterpret_cast<void*>(static_cast<uintptr_t>(i + 100)), 0, nullptr);
     Sleep(4000);
     g_stop = 1;
     const DWORD w = WaitForMultipleObjects(8, t, TRUE, 10000);
@@ -205,8 +224,8 @@ static void stress() {
         std::printf("STRESS: reader count %ld at the end (expected -1)\n", g_shared.count);
         ++g_fail;
     }
-    std::printf("stress: %ld read sections (%ld try), %ld write sections, count %ld, %ld overlaps\n", g_reads, g_tries,
-                g_writes, g_shared.count, g_violations);
+    std::printf("stress: %ld read sections, %ld write sections (%ld write attempts that did not get it), count %ld, "
+                "%ld violations\n", g_reads, g_writes, g_tries, g_shared.count, g_violations);
 }
 
 static uint8_t g_image[0x11C2000];
@@ -282,10 +301,13 @@ int main(int argc, char** argv) {
             ++g_fail;
         }
         rwlock_install_early(true);
-        const uintptr_t sites[3] = {kReadLock, kTryReadLock, kReadUnlock};
-        const void* targets[3] = {reinterpret_cast<const void*>(&read_lock), reinterpret_cast<const void*>(&try_read_lock),
-                                  reinterpret_cast<const void*>(&read_unlock)};
-        for (int i = 0; i < 3; ++i) {
+        const uintptr_t sites[7] = {kReadLock, kTryReadLock, kReadUnlock, kWriteLock, kTryWriteLock, kWriteUnlock,
+                                    kWriteUnlock2};
+        const void* targets[7] = {reinterpret_cast<const void*>(&read_lock), reinterpret_cast<const void*>(&try_read_lock),
+                                  reinterpret_cast<const void*>(&read_unlock), reinterpret_cast<const void*>(&write_lock),
+                                  reinterpret_cast<const void*>(&try_write_lock), reinterpret_cast<const void*>(&write_unlock),
+                                  reinterpret_cast<const void*>(&write_unlock)};
+        for (int i = 0; i < 7; ++i) {
             const auto* p = reinterpret_cast<const uint8_t*>(sites[i]);
             int32_t rel = 0;
             std::memcpy(&rel, p + 1, 4);
@@ -294,7 +316,7 @@ int main(int argc, char** argv) {
                 ++g_fail;
             }
         }
-        std::printf("install: %s\n", g_result == kInstalled ? "the three entries jump to the replacements" : "FAILED");
+        std::printf("install: %s\n", g_result == kInstalled ? "the seven entries jump to the replacements" : "FAILED");
         if (g_result != kInstalled) ++g_fail;
     }
     std::printf("%d failures\n", g_fail);
