@@ -58,7 +58,7 @@ uint32_t g_text_lo = 0, g_text_hi = 0;  // the game's code (.text), fixed base 0
 // ---------------------------------------------------------------------------------------------------------------
 constexpr int kDeviceSlots = 119;  // IDirect3DDevice9: QueryInterface (0) .. CreateQuery (118)
 enum Slot : int {
-    kPresent = 17, kGetRtData = 32, kStretchRect = 34, kSetRenderTarget = 37, kSetDepthStencil = 39, kClear = 43,
+    kPresent = 17, kCreateTexture = 23, kGetRtData = 32, kStretchRect = 34, kSetRenderTarget = 37, kSetDepthStencil = 39, kClear = 43,
     kSetTransform = 44, kSetViewport = 47, kSetRenderState = 57, kGetTexture = 64, kSetTexture = 65,
     kSetSamplerState = 69, kSetScissor = 75, kDrawPrimitive = 81, kDrawIndexed = 82, kDrawUp = 83,
     kDrawIndexedUp = 84, kSetVertexDecl = 87, kSetFvf = 89, kSetVertexShader = 92, kSetVsConstF = 94,
@@ -135,6 +135,9 @@ std::mutex g_pairs_lock;
 std::unordered_set<uint64_t> g_pairs_drawn;
 std::unordered_set<uint64_t> g_combos_drawn;  // pair + vertex declaration
 volatile LONG g_draw_kind = 0;               // the last draw's: 0 pair before, 1 pair new, 2 pair before but combo new
+void* volatile g_stage_tex[8] = {};
+std::unordered_set<void*> g_tex_drawn;       // textures drawn with at least once
+volatile LONG g_draw_new_tex = 0;            // the last draw's textures used for the first time
 volatile LONG g_slow_logged = 0;
 constexpr double kSlowCallMs = 3.0;
 constexpr LONG kSlowCallLines = 400;
@@ -153,6 +156,12 @@ bool pair_first_draw() {
     const uint64_t c = p * 1099511628211ULL ^ static_cast<uint64_t>(reinterpret_cast<uintptr_t>(g_cur_decl));
     const bool new_combo = g_combos_drawn.insert(c).second;
     g_draw_kind = new_pair ? 1 : new_combo ? 2 : 0;
+    LONG fresh = 0;
+    for (int i = 0; i < 8; ++i) {
+        void* t = g_stage_tex[i];
+        if (t && g_tex_drawn.insert(t).second) ++fresh;
+    }
+    g_draw_new_tex = fresh;
     return new_pair;
 }
 
@@ -160,10 +169,10 @@ void note_slow_call(const char* what, int64_t ticks, int first) {
     const double ms = 1000.0 * static_cast<double>(ticks) / static_cast<double>(g_freq.QuadPart);
     if (ms < kSlowCallMs || InterlockedIncrement(&g_slow_logged) > kSlowCallLines) return;
     const LONG kind = g_draw_kind;
-    LOG_INFO("[slowcall] %s %.1f ms on thread %lu: vs %s ps %s decl %p%s", what, ms, GetCurrentThreadId(),
-             remote_shader_name(g_cur_vs).c_str(), remote_shader_name(g_cur_ps).c_str(), g_cur_decl,
-             first < 0 ? "" : kind == 1 ? " (NEW pair)" : kind == 2 ? " (pair drawn before, NEW declaration)" :
-                                          " (pair and declaration drawn before)");
+    LOG_INFO("[slowcall] %s %.1f ms on thread %lu: vs %s ps %s decl %p%s, %ld texture(s) used for the first time", what,
+             ms, GetCurrentThreadId(), remote_shader_name(g_cur_vs).c_str(), remote_shader_name(g_cur_ps).c_str(),
+             g_cur_decl, first < 0 ? "" : kind == 1 ? " (NEW pair)" : kind == 2 ? " (pair drawn before, NEW declaration)" :
+                                          " (pair and declaration drawn before)", first < 0 ? 0L : static_cast<long>(g_draw_new_tex));
 }
 
 HRESULT WINAPI hook_dip(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, INT base, UINT min, UINT num, UINT start,
@@ -232,8 +241,41 @@ HRESULT WINAPI hook_set_decl(IDirect3DDevice9* d, void* decl) {
     note_slow_call("SetVertexDeclaration", qpc() - t0, -1);
     return hr;
 }
+// Texture creation by thread and pool, summed every 5 s while textures are being made.
+using CreateTexFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL, IDirect3DTexture9**,
+                                     HANDLE*);
+std::mutex g_ctex_lock;
+std::unordered_map<uint64_t, int> g_ctex;  // (thread << 8 | pool) -> count
+int64_t g_ctex_next = 0;
+HRESULT WINAPI hook_create_tex(IDirect3DDevice9* d, UINT w, UINT h, UINT levels, DWORD usage, D3DFORMAT f, D3DPOOL pool,
+                               IDirect3DTexture9** out, HANDLE* shared) {
+    ++g_calls[kCreateTexture];
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<CreateTexFn>(g_orig[kCreateTexture])(d, w, h, levels, usage, f, pool, out, shared);
+    const int64_t t1 = qpc();
+    char line[512] = "";
+    {
+        std::lock_guard<std::mutex> lock(g_ctex_lock);
+        ++g_ctex[(static_cast<uint64_t>(GetCurrentThreadId()) << 8) | static_cast<uint64_t>(pool)];
+        if (!g_ctex_next) g_ctex_next = t1 + g_freq.QuadPart * 5;
+        if (t1 >= g_ctex_next) {
+            int o = std::snprintf(line, sizeof(line), "[textures] made in the last 5 s, by thread and pool:");
+            for (const auto& kv : g_ctex) {
+                o += std::snprintf(line + o, sizeof(line) - o, " thread %lu pool %d: %d;",
+                                   static_cast<unsigned long>(kv.first >> 8), static_cast<int>(kv.first & 0xFF), kv.second);
+                if (o >= static_cast<int>(sizeof(line)) - 1) break;
+            }
+            g_ctex.clear();
+            g_ctex_next = t1 + g_freq.QuadPart * 5;
+        }
+    }
+    if (line[0]) LOG_INFO("%s", line);
+    note_slow_call("CreateTexture", t1 - t0, -1);
+    return hr;
+}
 HRESULT WINAPI hook_set_tex_slow(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* t) {
     ++g_calls[kSetTexture];
+    if (stage < 8) g_stage_tex[stage] = t;
     const int64_t t0 = qpc();
     const HRESULT hr = reinterpret_cast<SetTextureSlowFn>(g_orig[kSetTexture])(d, stage, t);
     note_slow_call("SetTexture", qpc() - t0, -1);
@@ -1470,6 +1512,7 @@ void profile_hook_device(IDirect3DDevice9* device) {
             case kSetPixelShader: own = reinterpret_cast<void*>(&hook_set_ps); break;
             case kSetVertexDecl: own = reinterpret_cast<void*>(&hook_set_decl); break;
             case kSetTexture: own = reinterpret_cast<void*>(&hook_set_tex_slow); break;
+            case kCreateTexture: own = reinterpret_cast<void*>(&hook_create_tex); break;
             default: break;
         }
         if (!own) {
