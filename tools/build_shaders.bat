@@ -13,4 +13,8 @@ if not defined FXC (
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kHdrColAdjPs /Fh src\ptde\shaders\hdr_coladj_ps.h src\ptde\shaders\hdr_coladj.hlsl
 if errorlevel 1 exit /b 1
-echo Built src\ptde\shaders\dof_composite_ps.h and hdr_coladj_ps.h
+%FXC% /nologo /T ps_3_0 /E main /O3 /Vn kAreaReducePs /Fh src\ptde\shaders\area_reduce_ps.h src\ptde\shaders\area_reduce.hlsl
+if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main /O3 /Vn kDofNearRatePs /Fh src\ptde\shaders\dof_near_rate_ps.h src\ptde\shaders\dof_near_rate.hlsl
+if errorlevel 1 exit /b 1
+echo Built src\ptde\shaders\dof_composite_ps.h, hdr_coladj_ps.h, area_reduce_ps.h and dof_near_rate_ps.h

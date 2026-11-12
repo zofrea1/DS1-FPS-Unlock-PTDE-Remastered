@@ -6,7 +6,9 @@
 #include <windows.h>
 #include <d3d9.h>
 
+#include "shaders/area_reduce_ps.h"
 #include "shaders/dof_composite_ps.h"
+#include "shaders/dof_near_rate_ps.h"
 #include "shaders/hdr_coladj_ps.h"
 
 #include <cstdint>
@@ -61,15 +63,18 @@ uint32_t scaled(uint32_t original, int width, int height) {
 // ---------------------------------------------------------------------------------------------------------------
 // The post-processing targets keep their original sizes, so the passes that copy the full scene into one of them
 // (FRPG_Fil_Dof_DownSample: a single bilinear read, an exact 2x2 average from 1024x720 into 512x360) would read one
-// 2x2 spot out of every 7.5x7.5 at 4K and let highlights flicker in the blur and glare. Such a copy reads a 1024x720
-// version of the scene instead, made just before it by halving the scene with filtered blits.
+// 2x2 spot out of every 7.5x6 at 4K and let detail and highlights shimmer and flicker in the blur and the glare. Such
+// a copy is drawn with our shader instead (shaders/area_reduce.hlsl): each target pixel the exact average of all the
+// scene pixels it covers. (The driver's filtered StretchRect is no help here: it is bilinear too. Shrinking 3840 to
+// 1024 lines one pixel wide every fourth column, a flat 25% grey, it gave 0-87% across a row; halved to 1920 first,
+// 3-47%.)
 namespace {
 
 // The copy shader's instructions (comments left out): ps_3_0; dcl_texcoord1 v0.xy; dcl_2d s0;
 // texld_pp oC0, v0, s0; end.
 constexpr DWORD kCopyShader[] = {0xFFFF0300, 0x0200001F, 0x80010005, 0x90030000, 0x0200001F, 0x90000000,
                                  0xA00F0800, 0x03000042, 0x802F0800, 0x90E40000, 0xA0E40800, 0x0000FFFF};
-constexpr UINT kOriginalWidth = 1024, kOriginalHeight = 720;
+constexpr UINT kOriginalWidth = 1024;
 
 using CreateTextureFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
                                          IDirect3DTexture9**, HANDLE*);
@@ -92,11 +97,9 @@ std::mutex g_lock;
 std::unordered_set<void*> g_copy_shaders;
 volatile bool g_copy_bound = false;
 IDirect3DBaseTexture9* volatile g_tex0 = nullptr;
-// The halving chain, made on first use and released before a device reset: [0] is the final 1024x720.
-constexpr int kChain = 5;
-IDirect3DTexture9* g_chain[kChain] = {};
-UINT g_chain_w[kChain] = {}, g_chain_h[kChain] = {};
-volatile LONG g_proxied = 0;
+// Our averaging shader, once per device (a pixel shader outlives a reset).
+IDirect3DPixelShader9* g_area_ps = nullptr;
+IDirect3DDevice9* g_area_device = nullptr;
 bool g_logged = false;
 
 // The depth of field's composite (FRPG_Fil_Dof.fx, ps_7a60a0da): the sharp scene (s0) mixed with three 512x360 blur
@@ -112,6 +115,19 @@ constexpr DWORD kDofComposite[] = {
     0x80000000, 0x80E40002, 0x03000042, 0x802F0002, 0x90E40000, 0xA0E40802, 0x04000004, 0x802F0001, 0x80E40002,
     0x80AA0000, 0x80E40001, 0x03000042, 0x802F0002, 0x90E40000, 0xA0E40803, 0x04000004, 0x802F0800, 0x80E40002,
     0x80FF0000, 0x80E40001, 0x0000FFFF};
+
+// The depth of field's near blur mask (FRPG_Fil_Dof_NearRate.fx, ps_d7491115): one read of the packed depth (s1) at
+// the centre of each 256x180 mask pixel, turned into a near blur rate by c8 and c10, with the colour of s0. Its
+// instructions, comments left out.
+constexpr DWORD kDofNearRate[] = {
+    0xFFFF0300, 0x05000051, 0xA00F0000, 0x3F7F0000, 0x3B7F0000, 0x377F0000, 0x00000000, 0x0200001F, 0x80000005,
+    0x90030000, 0x0200001F, 0x90000000, 0xA00F0800, 0x0200001F, 0x90000000, 0xA00F0801, 0x03000042, 0x800F0000,
+    0x90E40000, 0xA0E40801, 0x03000008, 0x80010000, 0x80E40000, 0xA0E40000, 0x04000012, 0x80010001, 0x80000000,
+    0xA0000008, 0xA0550008, 0x02000006, 0x80010000, 0x80000001, 0x02000006, 0x80020000, 0xA0550008, 0x03000005,
+    0x80040000, 0x80550000, 0xA000000A, 0x04000004, 0x80020000, 0xA055000A, 0x80550000, 0x81AA0000, 0x04000004,
+    0x80010000, 0xA0000008, 0x80000000, 0x81AA0000, 0x02000006, 0x80020000, 0x80550000, 0x03000005, 0x80110000,
+    0x80550000, 0x80000000, 0x03000005, 0x80280800, 0x80000000, 0xA0AA000A, 0x03000042, 0x802F0000, 0x90E40000,
+    0xA0E40800, 0x02000001, 0x80270800, 0x80E40000, 0x0000FFFF};
 
 // True when the shader's instructions (its comment blocks left out) are exactly `want`.
 bool same_instructions(const DWORD* code, const DWORD* want, size_t n) {
@@ -166,6 +182,11 @@ constexpr DWORD kHdrColAdj[] = {
 // reads). Their sizes reach ours as c200/c201 (no game pixel shader uses a register above c183); those stages are set
 // to bilinear and clamped for the draw. (Measured for the depth of field against the original at Firelink: detail and
 // kinks of a half-blurred area 0.28/0.43 with ours, 0.29/0.42 in the original, 0.38/0.54 with one bilinear read.)
+//
+// The depth of field's near blur mask is swapped too (shaders/dof_near_rate.hlsl): the game's one depth read per
+// 256x180 mask pixel became the average of the near rate over every depth pixel the mask pixel covers, so the near
+// blur no longer flickers in blocks along near edges.
+constexpr DWORD kTarget = 0xFF;  // size_stage: the render target's viewport instead of a stage
 struct SwapDef {
     const char* what;
     const DWORD* game;
@@ -174,12 +195,16 @@ struct SwapDef {
     DWORD size_stage[2];  // their sizes go to c200 and c201
     float sizes[8];       // their original sizes, until the draw reads them from the textures
     DWORD smooth_mask;    // the stages read with the B-spline: bilinear, clamped for the draw
+    DWORD point_mask;     // the stages read pixel by pixel: point sampled, clamped for the draw
 };
 constexpr SwapDef kSwaps[] = {
     {"the depth of field: its blur", kDofComposite, sizeof(kDofComposite) / sizeof(kDofComposite[0]), kDofCompositePs,
-     {1, 4}, {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180}, 0x1E},
+     {1, 4}, {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180}, 0x1E, 0},
     {"the final composite: the bloom and the light shafts", kHdrColAdj, sizeof(kHdrColAdj) / sizeof(kHdrColAdj[0]), kHdrColAdjPs, {1, 3},
-     {128.0f, 90.0f, 1.0f / 128, 1.0f / 90, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180}, 0x0A},
+     {128.0f, 90.0f, 1.0f / 128, 1.0f / 90, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180}, 0x0A, 0},
+    {"the depth of field: its near blur mask", kDofNearRate, sizeof(kDofNearRate) / sizeof(kDofNearRate[0]),
+     kDofNearRatePs, {1, kTarget}, {1024.0f, 720.0f, 1.0f / 1024, 1.0f / 720, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180},
+     0, 0x02},
 };
 constexpr int kSwapCount = sizeof(kSwaps) / sizeof(kSwaps[0]);
 std::unordered_set<void*> g_swap_game[kSwapCount];       // the game's shaders, as it made them
@@ -187,7 +212,7 @@ IDirect3DPixelShader9* g_swap_ours[kSwapCount] = {};     // ours, once per devic
 IDirect3DDevice9* g_swap_device[kSwapCount] = {};
 volatile LONG g_swap_bound = -1;     // the swap whose shader (ours) is bound
 volatile LONG g_game_bound = -1;     // the swap whose game shader the game bound (ours in its place or not)
-volatile bool g_swap_enabled = true;  // RemoteControl `dof 0/1` (both swaps)
+volatile bool g_swap_enabled = true;  // RemoteControl `dof 0/1` (all our post-processing shaders)
 volatile LONG g_dof_force = 0;        // diagnostics: 1-3 shows only that blur level
 constexpr int kDofSwap = 0;
 
@@ -231,6 +256,16 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
     if (SUCCEEDED(hr) && out && *out && is_copy_shader(code)) {
         std::lock_guard<std::mutex> lock(g_lock);
         g_copy_shaders.insert(*out);
+        if (g_area_device != dev) {
+            if (g_area_ps) g_area_ps->Release();
+            g_area_ps = nullptr;
+            g_area_device = dev;
+            if (FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kAreaReducePs), &g_area_ps))) {
+                g_area_ps = nullptr;
+                LOG_ERROR("Resolution: the averaging shader for the blur and glare copies could not be made; the "
+                          "game's copy is used");
+            }
+        }
     } else if (SUCCEEDED(hr) && out && *out && !g_scale_post) {
         const int i = swap_of(code);
         if (i >= 0) {
@@ -245,8 +280,13 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
                     LOG_ERROR("Resolution: the smooth shader for %s could not be made; the game's is used",
                               kSwaps[i].what);
                 } else {
-                    LOG_INFO("Resolution: %s read with a cubic filter (the game's own, smooth at %dx%d)",
-                             kSwaps[i].what, g_frame_w, g_frame_h);
+                    if (kSwaps[i].point_mask) {
+                        LOG_INFO("Resolution: %s averaged over every pixel it covers (steady at %dx%d)",
+                                 kSwaps[i].what, g_frame_w, g_frame_h);
+                    } else {
+                        LOG_INFO("Resolution: %s read with a cubic filter (the game's own, smooth at %dx%d)",
+                                 kSwaps[i].what, g_frame_w, g_frame_h);
+                    }
                 }
             }
         }
@@ -293,31 +333,50 @@ bool stage_size(IDirect3DDevice9* dev, DWORD stage, float* out) {
     return true;
 }
 
-// Our shader's draw: the low-resolution textures' sizes, bilinear and clamped reads on their stages, then the game's
-// states back.
+// The viewport's width and height into out[0..3] (w, h, 1/w, 1/h). False for none.
+bool viewport_size(IDirect3DDevice9* dev, float* out) {
+    D3DVIEWPORT9 vp{};
+    if (FAILED(dev->GetViewport(&vp)) || !vp.Width || !vp.Height) return false;
+    out[0] = static_cast<float>(vp.Width);
+    out[1] = static_cast<float>(vp.Height);
+    out[2] = 1.0f / vp.Width;
+    out[3] = 1.0f / vp.Height;
+    return true;
+}
+
+// Our shader's draw: the sizes, bilinear (or point) and clamped reads on its stages, then the game's states back.
 HRESULT swap_draw(IDirect3DDevice9* dev, int swap, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
     const SwapDef& d = kSwaps[swap];
     float sizes[8];
     std::memcpy(sizes, d.sizes, sizeof(sizes));
-    stage_size(dev, d.size_stage[0], sizes);
-    stage_size(dev, d.size_stage[1], sizes + 4);
+    for (int k = 0; k < 2; ++k) {
+        if (d.size_stage[k] == kTarget) {
+            viewport_size(dev, sizes + 4 * k);
+        } else {
+            stage_size(dev, d.size_stage[k], sizes + 4 * k);
+        }
+    }
     dev->SetPixelShaderConstantF(200, sizes, 2);
     static const D3DSAMPLERSTATETYPE kStates[] = {D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
                                                   D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV};
-    static const DWORD kValues[] = {D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP};
+    static const DWORD kSmooth[] = {D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP};
+    static const DWORD kPoint[] = {D3DTEXF_POINT, D3DTEXF_POINT, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP};
+    const DWORD mask = d.smooth_mask | d.point_mask;
     DWORD saved[8][5] = {};
     for (DWORD s = 0; s < 8; ++s) {
-        if (!(d.smooth_mask & (1u << s))) continue;
+        if (!(mask & (1u << s))) continue;
+        const DWORD* want = (d.point_mask & (1u << s)) ? kPoint : kSmooth;
         for (int i = 0; i < 5; ++i) {
             dev->GetSamplerState(s, kStates[i], &saved[s][i]);
-            if (saved[s][i] != kValues[i]) dev->SetSamplerState(s, kStates[i], kValues[i]);
+            if (saved[s][i] != want[i]) dev->SetSamplerState(s, kStates[i], want[i]);
         }
     }
     const HRESULT hr = o_draw_up(dev, type, count, data, stride);
     for (DWORD s = 0; s < 8; ++s) {
-        if (!(d.smooth_mask & (1u << s))) continue;
+        if (!(mask & (1u << s))) continue;
+        const DWORD* want = (d.point_mask & (1u << s)) ? kPoint : kSmooth;
         for (int i = 0; i < 5; ++i) {
-            if (saved[s][i] != kValues[i]) dev->SetSamplerState(s, kStates[i], saved[s][i]);
+            if (saved[s][i] != want[i]) dev->SetSamplerState(s, kStates[i], saved[s][i]);
         }
     }
     return hr;
@@ -328,49 +387,32 @@ HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseT
     return o_set_texture(dev, stage, tex);
 }
 
-// A render target texture of this size, kept in the chain slot (remade when the size changes).
-IDirect3DTexture9* chain_target(IDirect3DDevice9* dev, int slot, UINT w, UINT h) {
-    if (g_chain[slot] && (g_chain_w[slot] != w || g_chain_h[slot] != h)) {
-        g_chain[slot]->Release();
-        g_chain[slot] = nullptr;
+// The game's copy of a large render target into a small one, drawn with our averaging shader: the sizes to c200/c201,
+// point sampling and clamping on stage 0, then the game's shader and states back.
+HRESULT area_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DVIEWPORT9& vp, D3DPRIMITIVETYPE type,
+                  UINT count, const void* data, UINT stride) {
+    const float sizes[8] = {static_cast<float>(src.Width), static_cast<float>(src.Height), 1.0f / src.Width,
+                            1.0f / src.Height, static_cast<float>(vp.Width), static_cast<float>(vp.Height),
+                            1.0f / vp.Width, 1.0f / vp.Height};
+    dev->SetPixelShaderConstantF(200, sizes, 2);
+    static const D3DSAMPLERSTATETYPE kStates[] = {D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
+                                                  D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV};
+    static const DWORD kValues[] = {D3DTEXF_POINT, D3DTEXF_POINT, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP};
+    DWORD saved[5] = {};
+    for (int i = 0; i < 5; ++i) {
+        dev->GetSamplerState(0, kStates[i], &saved[i]);
+        if (saved[i] != kValues[i]) dev->SetSamplerState(0, kStates[i], kValues[i]);
     }
-    if (!g_chain[slot]) {
-        if (FAILED(dev->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_chain[slot],
-                                      nullptr))) {
-            g_chain[slot] = nullptr;
-            return nullptr;
-        }
-        g_chain_w[slot] = w;
-        g_chain_h[slot] = h;
+    IDirect3DPixelShader9* game = nullptr;
+    dev->GetPixelShader(&game);
+    o_set_ps(dev, g_area_ps);
+    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    o_set_ps(dev, game);
+    if (game) game->Release();
+    for (int i = 0; i < 5; ++i) {
+        if (saved[i] != kValues[i]) dev->SetSamplerState(0, kStates[i], saved[i]);
     }
-    return g_chain[slot];
-}
-
-bool blit(IDirect3DDevice9* dev, IDirect3DTexture9* from, IDirect3DTexture9* to) {
-    IDirect3DSurface9* a = nullptr;
-    IDirect3DSurface9* b = nullptr;
-    bool ok = SUCCEEDED(from->GetSurfaceLevel(0, &a)) && SUCCEEDED(to->GetSurfaceLevel(0, &b)) &&
-              SUCCEEDED(dev->StretchRect(a, nullptr, b, nullptr, D3DTEXF_LINEAR));
-    if (a) a->Release();
-    if (b) b->Release();
-    return ok;
-}
-
-// The scene halved (filtered) down to about twice 1024x720, then to exactly 1024x720.
-IDirect3DTexture9* proxy_of(IDirect3DDevice9* dev, IDirect3DTexture9* src, UINT w, UINT h) {
-    IDirect3DTexture9* cur = src;
-    int slot = kChain - 1;
-    while (w >= kOriginalWidth * 4 && h >= kOriginalHeight * 3 && slot > 0) {
-        w /= 2;
-        h /= 2;
-        IDirect3DTexture9* next = chain_target(dev, slot, w, h);
-        if (!next || !blit(dev, cur, next)) return nullptr;
-        cur = next;
-        --slot;
-    }
-    IDirect3DTexture9* last = chain_target(dev, 0, kOriginalWidth, kOriginalHeight);
-    if (!last || !blit(dev, cur, last)) return nullptr;
-    return last;
+    return hr;
 }
 
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
@@ -396,23 +438,20 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
             sd.Format == D3DFMT_A8R8G8B8) {
             IDirect3DSurface9* rt = nullptr;
             D3DSURFACE_DESC rd{};
+            D3DVIEWPORT9 vp{};
             const bool into_small = SUCCEEDED(dev->GetRenderTarget(0, &rt)) && rt && SUCCEEDED(rt->GetDesc(&rd)) &&
-                               rd.Width * 2 <= kOriginalWidth;
+                                    rd.Width * 2 <= kOriginalWidth && SUCCEEDED(dev->GetViewport(&vp)) && vp.Width &&
+                                    vp.Height;
             if (rt) rt->Release();
-            if (into_small) {
-                IDirect3DTexture9* proxy = proxy_of(dev, src, sd.Width, sd.Height);
-                if (proxy) {
-                    o_set_texture(dev, 0, proxy);
-                    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
-                    o_set_texture(dev, 0, src);
-                    InterlockedIncrement(&g_proxied);
-                    if (!g_logged) {
-                        g_logged = true;
-                        LOG_INFO("Resolution: the scene (%ux%u) is reduced to 1024x720 before the game copies it into "
-                                 "its %ux%u blur and glare targets", sd.Width, sd.Height, rd.Width, rd.Height);
-                    }
-                    return hr;
+            if (into_small && g_swap_enabled && g_area_ps && g_area_device == dev) {
+                const HRESULT hr = area_draw(dev, sd, vp, type, count, data, stride);
+                if (!g_logged) {
+                    g_logged = true;
+                    LOG_INFO("Resolution: the scene (%ux%u) is averaged into the game's %ux%u blur and glare targets "
+                             "(each pixel from all the scene pixels it covers)", sd.Width, sd.Height, vp.Width,
+                             vp.Height);
                 }
+                return hr;
             }
         }
     }
@@ -501,13 +540,7 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
 void resolution_set_smooth_dof(bool on) { g_swap_enabled = on; }
 void resolution_force_dof_level(int level) { g_dof_force = level; }
 
-void resolution_reset() {
-    for (auto& t : g_chain) {
-        if (t) t->Release();
-        t = nullptr;
-    }
-    g_tex0 = nullptr;
-}
+void resolution_reset() { g_tex0 = nullptr; }
 
 namespace {
 // fld qword ptr [0x011E7DE8] (0.8) in the lens flare's visibility function; the address operand is at +2.
