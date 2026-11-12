@@ -1547,8 +1547,10 @@ void profile_hook_device(IDirect3DDevice9* device) {
              kDeviceSlots - 3, static_cast<void*>(vt), g_res_count);
 }
 
-bool profile_start() {
-    QueryPerformanceFrequency(&g_freq);
+namespace {
+
+// The game's code (.text) and this DLL's image, for telling return addresses on a stack apart.
+void find_code_ranges() {
     const auto* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
@@ -1559,6 +1561,106 @@ bool profile_start() {
             g_text_hi = g_text_lo + sec[i].Misc.VirtualSize;
         }
     }
+    HMODULE own = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&find_code_ranges), &own) && own) {
+        const auto* odos = reinterpret_cast<const IMAGE_DOS_HEADER*>(own);
+        const auto* ont = reinterpret_cast<const IMAGE_NT_HEADERS32*>(reinterpret_cast<const uint8_t*>(own) + odos->e_lfanew);
+        g_own_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(own)) + 0x1000;
+        g_own_hi = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(own)) + ont->OptionalHeader.SizeOfImage;
+    }
+}
+
+// Copies the stack between `esp` and `top` (at most `max` dwords); 0 when it cannot be read.
+int copy_stack(uint32_t esp, uint32_t top, uint32_t* out, int max) {
+    if (!esp || esp >= top || top - esp > 0x1000000) return 0;
+    int words = static_cast<int>((top - esp) / 4);
+    if (words > max) words = max;
+    __try {
+        std::memcpy(out, reinterpret_cast<const void*>(static_cast<uintptr_t>(esp)), words * 4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return words;
+}
+
+uint32_t g_stall_stack[kStackDwords];
+
+}  // namespace
+
+void profile_stall_report(int seconds) {
+    if (!g_text_lo || !g_own_lo) find_code_ranges();
+    refresh_modules();
+    ModuleCache mc;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return;
+    LOG_INFO("[stall] no frame for %d s: where each thread of the game is (innermost call first)", seconds);
+    THREADENTRY32 te{};
+    te.dwSize = sizeof(te);
+    const DWORD pid = GetCurrentProcessId(), self = GetCurrentThreadId();
+    int listed = 0;
+    for (BOOL ok = Thread32First(snapshot, &te); ok && listed < 96; ok = Thread32Next(snapshot, &te)) {
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+                              te.th32ThreadID);
+        if (!h) continue;
+        ++listed;
+        uintptr_t start = 0;
+        if (auto q = nt_query_thread()) {
+            PVOID s = nullptr;
+            q(h, 9 /*ThreadQuerySetWin32StartAddress*/, &s, sizeof(s), nullptr);
+            start = reinterpret_cast<uintptr_t>(s);
+        }
+        // Stopped only for its registers: the stack is read with the thread running again (a stuck thread leaves it
+        // as it is), so this cannot hold up a thread that owns a lock the report needs.
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        bool got = false;
+        if (SuspendThread(h) != static_cast<DWORD>(-1)) {
+            got = GetThreadContext(h, &ctx) != 0;
+            ResumeThread(h);
+        }
+        CloseHandle(h);
+        char line[1400];
+        char where[160], from[160];
+        describe_address(mc, static_cast<uint32_t>(start), from, sizeof(from));
+        const char* role = te.th32ThreadID == g_game_thread_id     ? " (game thread)"
+                           : te.th32ThreadID == g_render_thread_id ? " (render thread)"
+                                                                    : "";
+        if (!got) {
+            LOG_INFO("[stall] thread %lu%s starts at %s: no context", te.th32ThreadID, role, from);
+            continue;
+        }
+        describe_address(mc, ctx.Eip, where, sizeof(where));
+        MEMORY_BASIC_INFORMATION mbi{};
+        uint32_t top = 0;
+        if (ctx.Esp && VirtualQuery(reinterpret_cast<const void*>(static_cast<uintptr_t>(ctx.Esp)), &mbi, sizeof(mbi)) &&
+            mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_READWRITE))
+            top = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize);
+        const int words = copy_stack(ctx.Esp, top, g_stall_stack, kStackDwords);
+        int o = std::snprintf(line, sizeof(line), "[stall] thread %lu%s starts at %s: at %s (eax %08lX ecx %08lX "
+                              "edx %08lX esi %08lX edi %08lX); calls:", te.th32ThreadID, role, from, where, ctx.Eax,
+                              ctx.Ecx, ctx.Edx, ctx.Esi, ctx.Edi);
+        int rets = 0;
+        uint32_t prev = 0;
+        for (int w = 0; w < words && rets < 24 && o < static_cast<int>(sizeof(line)) - 64; ++w) {
+            const uint32_t v = g_stall_stack[w];
+            if (v == prev || !is_return_any(v)) continue;
+            prev = v;
+            char a[160];
+            describe_address(mc, v, a, sizeof(a));
+            o += std::snprintf(line + o, sizeof(line) - o, " %s", a);
+            ++rets;
+        }
+        if (!words) std::snprintf(line + o, sizeof(line) - o, " (stack not readable)");
+        LOG_INFO("%s", line);
+    }
+    CloseHandle(snapshot);
+}
+
+bool profile_start() {
+    QueryPerformanceFrequency(&g_freq);
+    find_code_ranges();
     g_enabled = true;
     streamwatch_install();
     HANDLE thread = CreateThread(nullptr, 0, profile_thread, nullptr, 0, nullptr);
@@ -1568,14 +1670,6 @@ bool profile_start() {
     }
     SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
     CloseHandle(thread);
-    HMODULE own = nullptr;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(&profile_start), &own) && own) {
-        const auto* odos = reinterpret_cast<const IMAGE_DOS_HEADER*>(own);
-        const auto* ont = reinterpret_cast<const IMAGE_NT_HEADERS32*>(reinterpret_cast<const uint8_t*>(own) + odos->e_lfanew);
-        g_own_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(own)) + 0x1000;
-        g_own_hi = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(own)) + ont->OptionalHeader.SizeOfImage;
-    }
     HANDLE spikes = CreateThread(nullptr, 0, spike_thread, nullptr, 0, nullptr);
     if (spikes) {
         SetThreadPriority(spikes, THREAD_PRIORITY_TIME_CRITICAL);
@@ -1592,6 +1686,7 @@ volatile DWORD g_render_thread_id = 0;
 volatile DWORD g_game_thread_id = 0;
 bool profile_start() { return false; }
 bool profile_enabled() { return false; }
+void profile_stall_report(int) {}
 void profile_hook_device(IDirect3DDevice9*) {}
 void profile_game_frame_begin() {}
 void profile_game_frame(double) {}

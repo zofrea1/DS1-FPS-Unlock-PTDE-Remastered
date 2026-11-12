@@ -20,3 +20,6 @@ void diag_install(const wchar_t* dll_path, const wchar_t* dump_name);
 // `tick` (optional) runs once a second on the watchdog thread.
 void diag_watchdog_start(uint64_t (*steps)(), float (*frame_ms)(), void (*extra)(char* out, unsigned size) = nullptr,
                          void (*tick)() = nullptr);
+// `report` runs on the watchdog thread when the counter has not moved for 20 s and again at 60 s (a frozen game,
+// longer than a loading screen), at most four times per run.
+void diag_set_stall_report(void (*report)(int seconds));

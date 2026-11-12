@@ -432,6 +432,7 @@ bool frame_install(const Settings& settings) {
              settings.survey_seconds);
     diag_watchdog_start([] { return static_cast<uint64_t>(g_cmd_totals[2]); },
                         [] { return static_cast<float>(g.last_dt_ms); }, script_describe);
+    diag_set_stall_report(profile_stall_report);
     watch_set_spec(settings.watch);
     if (settings.driver) {
         FixFlags flags;

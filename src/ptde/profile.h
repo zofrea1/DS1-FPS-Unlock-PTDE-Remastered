@@ -18,6 +18,9 @@ bool profile_start();
 bool profile_enabled();
 // The F10 capture without the key (RemoteControl `capture`).
 void profile_request_capture();
+// A frozen game (the watchdog saw no frame for `seconds`): one [stall] line per thread with where it is, its
+// registers and the return addresses on its stack. Works without Profile; a release build leaves it out.
+void profile_stall_report(int seconds);
 
 // Counts the game's calls on its Direct3D 9 device (the object the game holds, DSfix's wrapper when DSfix is
 // there) and times Present, buffer and texture locks, query waits and render target read-backs.

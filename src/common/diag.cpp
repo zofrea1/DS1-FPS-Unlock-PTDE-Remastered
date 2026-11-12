@@ -23,6 +23,7 @@ uint64_t (*g_steps)() = nullptr;
 float (*g_frame_ms)() = nullptr;
 void (*g_extra)(char*, unsigned) = nullptr;
 void (*g_tick)() = nullptr;
+void (*volatile g_stall_report)(int) = nullptr;
 
 // "module.dll+0x1234" for an address, or "unbacked memory" for code we or the game allocated.
 void describe_address(const void* address, char* out, size_t size) {
@@ -181,6 +182,7 @@ DWORD WINAPI watchdog(void*) {
     uint64_t heartbeat_base = last;
     int quiet_seconds = 0;
     int stall_lines = 0;
+    int stall_reports = 0;
     bool stalled = false;
     int since_heartbeat = 0;
     for (;;) {
@@ -204,6 +206,10 @@ DWORD WINAPI watchdog(void*) {
                 stalled = true;
                 LOG_ERROR("STALL: no simulation step for %d s (counter stuck at %llu; loading screens also cause this)", quiet_seconds,
                           static_cast<unsigned long long>(now));
+            }
+            if ((quiet_seconds == 20 || quiet_seconds == 60) && stall_reports < 4 && g_stall_report) {
+                ++stall_reports;
+                g_stall_report(quiet_seconds);
             }
         } else {
             if (stalled) {
@@ -247,6 +253,8 @@ void diag_install(const wchar_t* dll_path, const wchar_t* dump_name) {
     AddVectoredExceptionHandler(0, vectored_handler);
     g_previous_filter = SetUnhandledExceptionFilter(unhandled_filter);
 }
+
+void diag_set_stall_report(void (*report)(int seconds)) { g_stall_report = report; }
 
 void diag_watchdog_start(uint64_t (*steps)(), float (*frame_ms)(), void (*extra)(char* out, unsigned size),
                          void (*tick)()) {
