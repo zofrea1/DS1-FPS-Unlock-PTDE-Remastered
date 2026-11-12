@@ -1,4 +1,5 @@
 #include "profile.h"
+#include "streamwatch.h"
 
 #include "d3dperf.h"
 #include "surfpool.h"
@@ -1398,6 +1399,7 @@ bool profile_start() {
         }
     }
     g_enabled = true;
+    streamwatch_install();
     HANDLE thread = CreateThread(nullptr, 0, profile_thread, nullptr, 0, nullptr);
     if (!thread) {
         g_enabled = false;

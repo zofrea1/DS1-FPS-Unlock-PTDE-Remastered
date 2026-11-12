@@ -55,3 +55,4 @@ src\common\rollhistory.cpp
 src\ptde\switchback.cpp
 src\common\turnhistory.cpp
 src\common\stickflick.cpp
+src\ptde\streamwatch.cpp
