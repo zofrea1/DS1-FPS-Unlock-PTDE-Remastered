@@ -205,6 +205,10 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "supersampling") {
             const float f = static_cast<float>(std::atof(val.c_str()));
             s.supersampling = f < 1.0f ? 1.0f : (f > 2.0f ? 2.0f : f);
+        } else if (key == "depthoffieldstrength") {
+            // Percent, 0 to 200.
+            const double pct = std::atof(val.c_str());
+            s.dof_strength = static_cast<float>(pct <= 0 ? 0.0 : (pct >= 200 ? 2.0 : pct / 100.0));
         } else if (key == "fixstaminatick") {
             s.fix_stamina_tick = parse_bool(val);
         } else if (key == "fixslidecontact") {

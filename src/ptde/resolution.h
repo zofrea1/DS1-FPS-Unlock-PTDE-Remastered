@@ -25,6 +25,8 @@ void resolution_set_swap_off_mask(int mask);
 
 // The depth of field's smooth composite on or off (RemoteControl `dof`, for comparing with the game's own).
 void resolution_set_smooth_dof(bool on);
+// DepthOfFieldStrength: the depth of field's blur weight times this (1 = the game's).
+void resolution_set_dof_strength(float strength);
 // Diagnostics: the composite shows only blur level 1-3 everywhere (0: the game's weights).
 void resolution_force_dof_level(int level);
 

@@ -9,6 +9,8 @@
 // bilinear stretches did, 1024x720 grid then the screen, gave 0.33 and 0.49: the sharp part mixed into a half-blurred
 // area is now full resolution, and the B-spline's slightly wider reach evens that out.)
 //
+// DepthOfFieldStrength (c202.x) scales the blur weight (1 = the game's).
+//
 // Built with fxc (tools/build_shaders.bat) into dof_composite_ps.h; the DLL carries the compiled bytecode.
 
 sampler2D gScene : register(s0);   // the scene at the render resolution; alpha = far blur weight
@@ -21,6 +23,7 @@ float4 gWeightScale : register(c66);   // the game's DL_FREG_066
 float4 gWeightBias : register(c67);    // the game's DL_FREG_067
 float4 gBlurSize : register(c200);     // s1..s3: width, height, 1 / width, 1 / height (set by the DLL)
 float4 gNearSize : register(c201);     // s4: the same
+float4 gStrength : register(c202);     // x: DepthOfFieldStrength (1 = the game's; set by the DLL)
 
 // Cubic B-spline reconstruction with four bilinear reads (all weights positive, so each pair of taps folds into one
 // bilinear read between them).
@@ -45,7 +48,9 @@ float4 bspline(sampler2D s, float2 uv, float4 size) {
 float4 main(float2 uv : TEXCOORD1) : COLOR0 {
     float nearBlur = bspline(gNear, uv, gNearSize).w;
     float4 src = tex2Dlod(gScene, float4(uv, 0, 0));
-    float blurW = max(src.w, nearBlur);
+    // DepthOfFieldStrength scales the blur weight before the game's own mapping to its blur levels: 0.5 gives a far
+    // area the level the game gives half its blur, 0 the in-focus weights everywhere; 1 is the game's exactly.
+    float blurW = max(src.w, nearBlur) * gStrength.x;
     float4 w = saturate(blurW * gWeightScale + gWeightBias);
     float4 blend = float4(w.x, w.y - w.x, w.z - w.y, w.w - w.z);
     float4 o = src * blend.x;

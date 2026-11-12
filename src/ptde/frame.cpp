@@ -493,6 +493,7 @@ bool frame_install(const Settings& settings) {
             if (dsfix_changes_resolution()) {
                 LOG_INFO("Resolution: DSfix's renderWidth/renderHeight are set; this mod's resolution takes precedence");
             }
+            resolution_set_dof_strength(settings.dof_strength);
             if (resolution_install(rw, rh, settings.render_scale_post) && dsfix_loaded()) {
                 resolution_bypass_dsfix(!settings.render_scale_post);
             }

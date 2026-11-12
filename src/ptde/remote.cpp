@@ -1465,6 +1465,10 @@ void run(const std::string& line) {
     } else if (c == "dof") {
         resolution_set_smooth_dof(num(1, 1) != 0);
         out("dof %s", num(1, 1) != 0 ? "smooth (ours)" : "the game's");
+    } else if (c == "dofstrength") {
+        // dofstrength PCT: DepthOfFieldStrength for this session (100 = the game's).
+        resolution_set_dof_strength(static_cast<float>(num(1, 100)) / 100.0f);
+        out("dofstrength %ld%%", num(1, 100));
     } else if (c == "dofforce") {
         resolution_force_dof_level(static_cast<int>(num(1, 0)));
         out("dofforce %ld", num(1, 0));

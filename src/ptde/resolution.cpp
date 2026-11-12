@@ -230,6 +230,7 @@ volatile LONG g_swap_bound = -1;     // the swap whose shader (ours) is bound
 volatile LONG g_game_bound = -1;     // the swap whose game shader the game bound (ours in its place or not)
 volatile bool g_swap_enabled = true;  // RemoteControl `dof 0/1` (all our post-processing shaders)
 volatile LONG g_dof_force = 0;        // diagnostics: 1-3 shows only that blur level
+float g_dof_strength[4] = {1.0f, 0, 0, 0};  // DepthOfFieldStrength, to our composite's c202
 constexpr int kDofSwap = 0;
 constexpr int kPresentSwap = 3;               // the windowed scale-down (kGammaCopy)
 volatile bool g_present_swap_enabled = true;  // RemoteControl `reduce 0/1`
@@ -334,6 +335,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     if (swap >= 0) {
         // The original sizes; the draw sets them again from the textures it binds.
         dev->SetPixelShaderConstantF(200, kSwaps[swap].sizes, 2);
+        if (swap == kDofSwap) dev->SetPixelShaderConstantF(202, g_dof_strength, 1);
         return o_set_ps(dev, g_swap_ours[swap]);
     }
     return o_set_ps(dev, ps);
@@ -721,6 +723,7 @@ void resolution_set_present_reduce(bool on) {
 
 void resolution_set_smooth_dof(bool on) { g_swap_enabled = on; }
 void resolution_force_dof_level(int level) { g_dof_force = level; }
+void resolution_set_dof_strength(float strength) { g_dof_strength[0] = strength; }
 
 void resolution_reset() {
     g_tex0 = nullptr;

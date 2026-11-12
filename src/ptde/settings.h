@@ -60,6 +60,8 @@ struct Settings {
     int render_height = -1;
     // Renders this many times the resolution above in each direction and scales the picture down (anti-aliasing).
     float supersampling = 1.0f;
+    // Depth of field: the blur weight times this (1 = the game's, 0 = none, up to 2), with RenderResolution.
+    float dof_strength = 1.0f;
     bool render_scale_post = false;
     // Anisotropic filtering level for surface textures (0/1 = the game's own filtering).
     int anisotropic_filtering = 16;
