@@ -137,11 +137,14 @@ struct Swap {
     Image images[kMaxImages];
 };
 
+// An acquire DXVK has not submitted a wait for yet. The copy-done value to wait for is read when that submission comes
+// (our_submit2), not at the acquire: DXVK acquires on its CS thread and submits and presents on its submission thread,
+// in order, so at the submission the image's last present has run and set it; at the acquire a CS thread a whole swap
+// chain ahead could still see the value of the present before, and draw into the image before its copy.
 struct Pending {
     VkSemaphore sem = VK_NULL_HANDLE;
     Swap* swap = nullptr;
     uint32_t index = 0;
-    uint64_t wait = 0;
 };
 
 std::mutex g_lock;  // registries and pending acquires
@@ -1086,7 +1089,6 @@ VKAPI_ATTR VkResult VKAPI_CALL our_acquire(VkDevice device, VkSwapchainKHR sc, u
             slot->sem = sem;
             slot->swap = s;
             slot->index = i;
-            slot->wait = s->images[i].released.load();
         }
     }
     *index = i;
@@ -1127,7 +1129,7 @@ VKAPI_ATTR VkResult VKAPI_CALL our_submit2(VkQueue queue, uint32_t count, const 
                     }
                     VkSemaphoreSubmitInfo& w = waits[k][j];
                     w.semaphore = d->release_sem;
-                    w.value = p.wait;
+                    w.value = p.swap->images[p.index].released.load();
                     w.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
                     VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
                     cbi.commandBuffer = p.swap->images[p.index].acquire_cb;
