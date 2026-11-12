@@ -471,13 +471,14 @@ bool frame_install(const Settings& settings) {
         }
         int rw = settings.render_width, rh = settings.render_height;
         if (rw < 0 || rh < 0) {
-            // auto: the primary monitor's current mode (the game's window or full screen covers it).
-            DEVMODEW mode{};
-            mode.dmSize = sizeof(mode);
-            if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmPelsWidth >= 640 &&
-                mode.dmPelsHeight >= 360) {
-                rw = static_cast<int>(mode.dmPelsWidth);
-                rh = static_cast<int>(mode.dmPelsHeight);
+            // auto: the primary monitor (the game's window or full screen covers it) in the game's own coordinates:
+            // its real pixels when DPI aware (DpiAware, set in DllMain), else the scaled-down size Windows gives a
+            // DPI-unaware game on a scaled display, which is all the game's window shows.
+            MONITORINFO mi{sizeof(mi)};
+            if (GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi) &&
+                mi.rcMonitor.right - mi.rcMonitor.left >= 640 && mi.rcMonitor.bottom - mi.rcMonitor.top >= 360) {
+                rw = static_cast<int>(mi.rcMonitor.right - mi.rcMonitor.left);
+                rh = static_cast<int>(mi.rcMonitor.bottom - mi.rcMonitor.top);
             } else {
                 rw = rh = 0;
             }

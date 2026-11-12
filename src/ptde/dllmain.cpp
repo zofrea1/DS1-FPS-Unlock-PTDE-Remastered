@@ -74,6 +74,7 @@ DWORD WINAPI worker(void*) {
     LOG_INFO("FPSLimitPoint: %s", settings.fps_limit_early ? "early" : "present");
     LOG_INFO("DXVK: %s", settings.dxvk ? "true" : "false");
     LOG_INFO("FixAspect: %s", settings.fix_aspect ? "true" : "false");
+    dpi_aware_log(settings.fps_unlock && settings.dpi_aware);
 
     // A mod built into this DLL (see extension.h) and the start-up logos do not depend on the FPS unlock.
     if (ext && ext->start) ext->start(g_self);
@@ -173,12 +174,15 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         {
             wchar_t dll_path[MAX_PATH];
             GetModuleFileNameW(instance, dll_path, MAX_PATH);
-            bool fps_unlock = true, fast_read_locks = true;
+            bool fps_unlock = true, fast_read_locks = true, dpi_aware = true;
             settings_read_keys(dll_path, [&](const std::string& key, const std::string& value) {
                 if (key == "fpsunlock") fps_unlock = settings_parse_bool(value);
                 if (key == "fastreadlocks") fast_read_locks = settings_parse_bool(value);
+                if (key == "dpiaware") dpi_aware = settings_parse_bool(value);
             });
             if (fps_unlock && fast_read_locks) rwlock_install_early(reserved != nullptr);
+            // Before the game makes its window (window.h).
+            if (fps_unlock && dpi_aware) dpi_aware_early();
         }
         if (const PtdeExtension* ext = ptde_extension()) {
             if (ext->attach) ext->attach(instance);

@@ -144,6 +144,8 @@ struct Settings {
     // Make the game window borderless and cover its monitor. Needs the game set to
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
     bool borderless = false;
+    // Per-monitor DPI aware (set in DllMain before the game makes its window): real pixels on scaled displays.
+    bool dpi_aware = true;
     // Keep a real XInput gamepad when the game's four Windows 7 device ids do not match.
     bool fix_controller = true;
     // Keep the game thread's Steam calls out of the Steam client's regular pause (steamguard.h).

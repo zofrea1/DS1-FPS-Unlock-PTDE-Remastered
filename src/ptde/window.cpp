@@ -102,3 +102,45 @@ bool borderless_start() {
     LOG_INFO("Borderless fullscreen enabled (needs the game in windowed mode)");
     return true;
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// DPI awareness
+
+namespace {
+const char* g_dpi_result = nullptr;  // what dpi_aware_early did, for the log
+}  // namespace
+
+void dpi_aware_early() {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    using ContextFn = BOOL(WINAPI*)(HANDLE);
+    auto set_context = user32 ? reinterpret_cast<ContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"))
+                              : nullptr;
+    // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4, PER_MONITOR_AWARE = -3 (Windows 10 1703 / 1607).
+    if (set_context && set_context(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-4)))) {
+        g_dpi_result = "per-monitor DPI aware (v2)";
+    } else if (set_context && set_context(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-3)))) {
+        g_dpi_result = "per-monitor DPI aware";
+    } else if (GetLastError() == ERROR_ACCESS_DENIED) {
+        g_dpi_result = "already set elsewhere (a compatibility setting on DARKSOULS.exe or the game's manifest)";
+    } else if (SetProcessDPIAware()) {
+        g_dpi_result = "system DPI aware (this Windows has no per-monitor awareness)";
+    } else {
+        g_dpi_result = "could not be set";
+    }
+}
+
+void dpi_aware_log(bool wanted) {
+    if (!wanted) {
+        LOG_INFO("DpiAware is false: on a display scaled above 100%%, Windows stretches the game's picture");
+        return;
+    }
+    HMONITOR monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(monitor, &mi);
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode);
+    LOG_INFO("DpiAware: %s; primary monitor %ldx%ld as the game sees it, %lux%lu pixels", g_dpi_result ? g_dpi_result :
+             "not set", mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+             mode.dmPelsWidth, mode.dmPelsHeight);
+}

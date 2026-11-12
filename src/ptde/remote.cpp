@@ -1268,6 +1268,22 @@ void run(const std::string& line) {
             out("  %08X: %08X %08X %08X %08X | %g %g %g %g", static_cast<unsigned>(a + i * 4), w[0], w[1], w[2], w[3],
                 f[0], f[1], f[2], f[3]);
         }
+    } else if (c == "poke" && t.size() > 2) {
+        // poke ADDR VALUE [BYTES]: write 1 (default), 2 or 4 bytes (hex address, value as written: 0x.. or decimal).
+        // E.g. the game's debug switches: 13784D2 PlayerNoDead, 13784EA AllNoDamage, 13784E9 AllNoDead.
+        const uintptr_t a = std::strtoul(t[1].c_str(), nullptr, 16);
+        const uint32_t v = static_cast<uint32_t>(std::strtoul(t[2].c_str(), nullptr, 0));
+        const int n = static_cast<int>(num(3, 1));
+        uint32_t before = 0;
+        DWORD old = 0;
+        if ((n == 1 || n == 2 || n == 4) && safe_read_any(a, &before, n) &&
+            VirtualProtect(reinterpret_cast<void*>(a), n, PAGE_EXECUTE_READWRITE, &old)) {
+            std::memcpy(reinterpret_cast<void*>(a), &v, n);
+            VirtualProtect(reinterpret_cast<void*>(a), n, old, &old);
+            out("poke %08X: %X -> %X (%d bytes)", static_cast<unsigned>(a), before, v, n);
+        } else {
+            out("poke %08X: not writable", static_cast<unsigned>(a));
+        }
     } else if (c == "watch" && t.size() > 1) {
         const uint32_t addr = static_cast<uint32_t>(std::strtoul(t[1].c_str(), nullptr, 16));
         watch_arm_addresses(&addr, 1);
