@@ -63,16 +63,16 @@ struct Settings {
     // Depth of field: the blur weight times this (1 = the game's, 0 = none, up to 2), with RenderResolution.
     float dof_strength = 1.0f;
     // The depth of field's blur levels at half the render size with the game's widths (true) or the game's 512x360.
-    bool dof_half_resolution = true;
+    bool dof_half_resolution = false;
     // The game's low-resolution effects (glows, mist, fog, smoke) at half the scene's size (3), its full size (2) or
     // the game's 512x360 (0) (resolution.h), with RenderResolution.
-    int effects_resolution = 3;
+    int effects_resolution = 0;
     // The scene's colour targets in 16-bit float, dithered into the 8-bit picture (resolution.h), with RenderResolution.
-    bool high_precision_color = true;
+    bool high_precision_color = false;
     // With the game's own anti-aliasing (multisampling) on: alpha-tested surfaces write coverage (atoc.h).
     bool alpha_to_coverage = true;
     // The samples of the game's own anti-aliasing when it is on: 2 (the game's), 4 or 8 (atoc.h).
-    int antialiasing_samples = 4;
+    int antialiasing_samples = 2;
     bool render_scale_post = false;
     // Anisotropic filtering level for surface textures (0/1 = the game's own filtering).
     int anisotropic_filtering = 16;
