@@ -176,9 +176,9 @@ struct SwapDef {
     DWORD smooth_mask;    // the stages read with the B-spline: bilinear, clamped for the draw
 };
 constexpr SwapDef kSwaps[] = {
-    {"the depth of field's blur", kDofComposite, sizeof(kDofComposite) / sizeof(kDofComposite[0]), kDofCompositePs,
+    {"the depth of field: its blur", kDofComposite, sizeof(kDofComposite) / sizeof(kDofComposite[0]), kDofCompositePs,
      {1, 4}, {512.0f, 360.0f, 1.0f / 512, 1.0f / 360, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180}, 0x1E},
-    {"the bloom and the light shafts", kHdrColAdj, sizeof(kHdrColAdj) / sizeof(kHdrColAdj[0]), kHdrColAdjPs, {1, 3},
+    {"the final composite: the bloom and the light shafts", kHdrColAdj, sizeof(kHdrColAdj) / sizeof(kHdrColAdj[0]), kHdrColAdjPs, {1, 3},
      {128.0f, 90.0f, 1.0f / 128, 1.0f / 90, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180}, 0x0A},
 };
 constexpr int kSwapCount = sizeof(kSwaps) / sizeof(kSwaps[0]);
@@ -245,7 +245,7 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
                     LOG_ERROR("Resolution: the smooth shader for %s could not be made; the game's is used",
                               kSwaps[i].what);
                 } else {
-                    LOG_INFO("Resolution: %s is read with a cubic filter (the game's own, smooth at %dx%d)",
+                    LOG_INFO("Resolution: %s read with a cubic filter (the game's own, smooth at %dx%d)",
                              kSwaps[i].what, g_frame_w, g_frame_h);
                 }
             }

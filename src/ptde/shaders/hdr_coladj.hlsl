@@ -15,7 +15,12 @@ sampler2D gNoise : register(s2);   // 256x256 tile: the film grain
 sampler2D gShaft : register(s3);   // 256x180: the light shafts
 
 float4 gC56 : register(c56);       // the game's DL_FREG_056: x bloom rate base, y light shaft rate, z scene scale
-float4x4 gColor : register(c62);   // the game's DL_FREG_062 (rows c62-c65): the colour matrix
+// The game's DL_FREG_062: the colour matrix, one row a register (dp4 with each, as the game does; a float4x4 here
+// would be packed by columns).
+float4 gColor0 : register(c62);
+float4 gColor1 : register(c63);
+float4 gColor2 : register(c64);
+float4 gColor3 : register(c65);
 float4 gC68 : register(c68);       // the game's DL_FREG_068: x the film grain's strength
 float4 gC71 : register(c71);       // the game's DL_FREG_071: y the bloom rate's top
 float4 gBloomSize : register(c200);  // s1: width, height, 1 / width, 1 / height (set by the DLL)
@@ -47,7 +52,7 @@ float4 main(float4 uv : TEXCOORD1) : COLOR0 {
     col += bloomRate * bloom.rgb;
     col += gC56.y * bspline(gShaft, uv.xy, gShaftSize).rgb;
     float4 c4 = float4(col, 1.0);
-    float4 graded = float4(dot(c4, gColor[0]), dot(c4, gColor[1]), dot(c4, gColor[2]), dot(c4, gColor[3]));
+    float4 graded = float4(dot(c4, gColor0), dot(c4, gColor1), dot(c4, gColor2), dot(c4, gColor3));
     // The game's overlay with the noise, as its cmp pair picks it: noise <= 0.5 takes b, above it a.
     float4 a = 2.0 * noise * graded;
     float4 b = 1.0 - 2.0 * (1.0 - noise) * (1.0 - graded);
