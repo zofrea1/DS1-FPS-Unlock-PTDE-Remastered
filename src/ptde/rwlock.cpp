@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <intrin.h>
 
 namespace {
 
@@ -211,15 +212,46 @@ void write_jump_atomic(uintptr_t site, const uint8_t* jump) {
 }
 
 // What the install in DllMain found, for rwlock_log() once the log is open.
-enum Result { kNotTried, kInstalled, kLateLoad, kWrongBase, kNoWaitOnAddress, kMismatch, kProtectFailed };
+enum Result { kNotTried, kInstalled, kLateLoad, kWrongBase, kNoWaitOnAddress, kMismatch, kProtectFailed, kTranslated };
 Result g_result = kNotTried;
 DWORD g_error = 0;
+char g_cpu[49] = {};
+
+// The game's x86 code translated for another CPU: Box64 or FEX (Android's GameNative and Winlator, Linux on ARM; their
+// CPUID names them: "Box64 ... on <cpu>", "Box64 Virtual CPU", "FEX-Emu ..."), or Windows on ARM (an ARM64 host). The
+// locks froze the game under Box64 (2026-11-12, a Snapdragon 888 phone); on the Steam Deck (Wine on an x86 CPU) and on
+// PCs they are fine. Under translation they are left alone.
+bool translated_x86() {
+    int r[4] = {};
+    __cpuid(r, static_cast<int>(0x80000000));
+    if (static_cast<unsigned>(r[0]) >= 0x80000004u) {
+        for (int i = 0; i < 3; ++i) {
+            __cpuid(r, static_cast<int>(0x80000002u + i));
+            std::memcpy(g_cpu + 16 * i, r, 16);
+        }
+        g_cpu[48] = 0;
+        if (std::strstr(g_cpu, "Box64") || std::strstr(g_cpu, "FEX") || std::strstr(g_cpu, "Virtual CPU")) return true;
+    }
+    using IsWow64Process2Fn = BOOL(WINAPI*)(HANDLE, USHORT*, USHORT*);
+    auto* is_wow64_2 = reinterpret_cast<IsWow64Process2Fn>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2"));
+    USHORT process = 0, native = 0;
+    if (is_wow64_2 && is_wow64_2(GetCurrentProcess(), &process, &native) && native == 0xAA64 /* ARM64 */) {
+        if (!g_cpu[0]) std::memcpy(g_cpu, "an ARM64 host", sizeof("an ARM64 host"));
+        return true;
+    }
+    return false;
+}
 
 }  // namespace
 
 void rwlock_install_early(bool static_load) {
     if (!static_load) {
         g_result = kLateLoad;
+        return;
+    }
+    if (translated_x86()) {
+        g_result = kTranslated;
         return;
     }
     // The game's image at its preferred base (its headers there, linked for that base).
@@ -298,6 +330,10 @@ void rwlock_log(bool wanted) {
         break;
     case kProtectFailed:
         LOG_ERROR("FastReadLocks: could not unprotect the lock functions (Win32=%lu)", g_error);
+        break;
+    case kTranslated:
+        LOG_INFO("FastReadLocks: off: the game runs translated for another CPU (%s), where they froze the game; its read "
+                 "locks keep their kernel calls", g_cpu);
         break;
     case kNotTried:
         if (wanted) LOG_INFO("FastReadLocks: not put in place at start-up; the game's read locks keep their kernel calls");
