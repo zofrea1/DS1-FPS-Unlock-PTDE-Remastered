@@ -622,6 +622,53 @@ void calibrate_cycles() {
 // What common calls cost here, once at start ([bench] lines): under Wine on another CPU (FEX) a call that leaves
 // the emulator for native code costs far more than on a PC, which decides what is cheap enough to do per draw.
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, void*);
+// Two multiply-adds per round on floats in memory, x87 (as the game's x87 code does them) and SSE in double.
+__declspec(noinline) void bench_x87(float* v, int n) {
+    __asm {
+        mov ecx, n
+        mov eax, v
+    lp:
+        fld dword ptr [eax]
+        fmul dword ptr [eax + 4]
+        fadd dword ptr [eax + 8]
+        fstp dword ptr [eax + 12]
+        fld dword ptr [eax + 4]
+        fmul dword ptr [eax + 8]
+        fsub dword ptr [eax + 12]
+        fstp dword ptr [eax + 16]
+        dec ecx
+        jnz lp
+    }
+}
+__declspec(noinline) void bench_sse(float* v, int n) {
+    __asm {
+        mov ecx, n
+        mov eax, v
+    lp:
+        movss xmm0, dword ptr [eax]
+        movss xmm1, dword ptr [eax + 4]
+        movss xmm2, dword ptr [eax + 8]
+        cvtss2sd xmm0, xmm0
+        cvtss2sd xmm1, xmm1
+        cvtss2sd xmm2, xmm2
+        mulsd xmm0, xmm1
+        addsd xmm0, xmm2
+        cvtsd2ss xmm0, xmm0
+        movss dword ptr [eax + 12], xmm0
+        movss xmm3, dword ptr [eax + 4]
+        movss xmm4, dword ptr [eax + 8]
+        movss xmm5, dword ptr [eax + 12]
+        cvtss2sd xmm3, xmm3
+        cvtss2sd xmm4, xmm4
+        cvtss2sd xmm5, xmm5
+        mulsd xmm3, xmm4
+        subsd xmm3, xmm5
+        cvtsd2ss xmm3, xmm3
+        movss dword ptr [eax + 16], xmm3
+        dec ecx
+        jnz lp
+    }
+}
 double bench_ns(uint64_t c0, uint64_t c1, int n) { return 1e9 * static_cast<double>(c1 - c0) / g_cycles_per_s / n; }
 void bench_calls() {
     if (g_cycles_per_s <= 0.0) return;
@@ -665,6 +712,17 @@ void bench_calls() {
     if (xgs) run("XInputGetState(slot 3, empty)", 500, [&] { sink += xgs(3, state); });
     if (o > 0 && line[o - 1] == ',') line[o - 1] = 0;
     LOG_INFO("%s (TSC %.1f MHz)", line, g_cycles_per_s / 1e6);
+    // The game thread's busiest code is x87 floating point (two thirds of the instructions in its hottest functions),
+    // the render thread's mostly SSE. The same multiply-add from memory to memory both ways, ns per multiply-add.
+    alignas(16) float v[8] = {1.5f, 0.5f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    constexpr int kRounds = 20000;
+    const uint64_t a0 = __rdtsc();
+    bench_x87(v, kRounds);
+    const uint64_t a1 = __rdtsc();
+    bench_sse(v, kRounds);
+    const uint64_t a2 = __rdtsc();
+    LOG_INFO("[bench] ns per float multiply-add (load, multiply, add, store): x87 %.1f, SSE in double %.1f",
+             bench_ns(a0, a1, 2 * kRounds), bench_ns(a1, a2, 2 * kRounds));
 }
 
 // ---------------------------------------------------------------------------------------------------------------
