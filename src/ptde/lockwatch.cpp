@@ -62,6 +62,12 @@ LARGE_INTEGER g_freq{};
 volatile LONG g_logged = 0;
 LONGLONG g_min_ticks = 0;
 
+// The loader's current outermost hold of one of its locks (for the sampler thread).
+volatile LONG g_hold_tid = 0;
+volatile LONG g_hold_seq = 0;
+volatile LONGLONG g_hold_since = 0;
+volatile uint32_t g_hold_site = 0;
+
 LONGLONG ticks() {
     LARGE_INTEGER t;
     QueryPerformanceCounter(&t);
@@ -86,7 +92,20 @@ void took(void* m, uint32_t site, LONGLONG now) {
             return;
         }
     }
-    if (t.n < kHeldMax) t.held[t.n++] = Held{m, now, site, 1, cpu_site(site) ? thread_cpu() : 0};
+    const bool watched = cpu_site(site);
+    if (watched) {
+        bool outer = true;
+        for (int i = 0; i < t.n; ++i) {
+            if (t.held[i].cpu) outer = false;
+        }
+        if (outer) {
+            g_hold_since = now;
+            g_hold_site = site;
+            InterlockedIncrement(&g_hold_seq);
+            InterlockedExchange(&g_hold_tid, static_cast<LONG>(GetCurrentThreadId()));
+        }
+    }
+    if (t.n < kHeldMax) t.held[t.n++] = Held{m, now, site, 1, watched ? thread_cpu() : 0};
 }
 
 int __fastcall hk_lock(void* self, void*, int timeout) {
@@ -129,6 +148,13 @@ int __fastcall hk_unlock(void* self, void*) {
         const uint32_t site = t.held[i].site;
         const ULONGLONG cpu0 = t.held[i].cpu;
         t.held[i] = t.held[--t.n];
+        if (cpu0) {
+            bool any = false;
+            for (int j = 0; j < t.n; ++j) {
+                if (t.held[j].cpu) any = true;
+            }
+            if (!any) InterlockedCompareExchange(&g_hold_tid, 0, static_cast<LONG>(GetCurrentThreadId()));
+        }
         if (held >= g_min_ticks && InterlockedIncrement(&g_logged) <= kMaxLogged) {
             char who[32];
             label(GetCurrentThreadId(), who, sizeof(who));
@@ -268,6 +294,108 @@ bool wrap(const char* fn, Fn hook, Fn* original) {
     return true;
 }
 
+// Sampler: a hold of the loader's locks that has run 25 ms gets the holder's stack (thread suspended only while its
+// registers and stack are copied; names are looked up after it runs again), every 40 ms while it lasts.
+constexpr int kStackWords = 3072;
+constexpr LONG kMaxSamples = 400;
+uint32_t g_copy[kStackWords];
+
+bool code_return(uint32_t v) {
+    __try {
+        const auto* c = reinterpret_cast<const uint8_t*>(v);
+        return c[-5] == 0xE8 || (c[-2] == 0xFF && (c[-1] & 0x38) == 0x10) || (c[-3] == 0xFF && (c[-2] & 0x38) == 0x10) ||
+               (c[-6] == 0xFF && (c[-5] & 0x38) == 0x10) || (c[-7] == 0xFF && (c[-6] & 0x38) == 0x10);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void where(uint32_t v, char* out, size_t n) {
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(static_cast<uintptr_t>(v)), &mod) || !mod) {
+        std::snprintf(out, n, "%08X", v);
+        return;
+    }
+    if (mod == GetModuleHandleW(nullptr)) {
+        std::snprintf(out, n, "%08X", v);
+        return;
+    }
+    wchar_t path[MAX_PATH];
+    const DWORD len = GetModuleFileNameW(mod, path, MAX_PATH);
+    const wchar_t* b = path;
+    for (DWORD i = 0; i < len; ++i) {
+        if (path[i] == L'\\' || path[i] == L'/') b = path + i + 1;
+    }
+    std::snprintf(out, n, "%ls+%X", b, v - static_cast<uint32_t>(reinterpret_cast<uintptr_t>(mod)));
+}
+
+bool in_module(uint32_t v) {
+    HMODULE mod = nullptr;
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCWSTR>(static_cast<uintptr_t>(v)), &mod) &&
+           mod != nullptr;
+}
+
+DWORD WINAPI sampler(void*) {
+    LONG samples = 0;
+    LONG last_seq = 0;
+    LONGLONG last_at = 0;
+    DWORD cached_tid = 0;
+    HANDLE th = nullptr;
+    while (samples < kMaxSamples) {
+        Sleep(5);
+        const LONG tid = g_hold_tid;
+        if (!tid) continue;
+        const LONG seq = g_hold_seq;
+        const LONGLONG since = g_hold_since;
+        const LONGLONG now = ticks();
+        const double held_ms = 1000.0 * static_cast<double>(now - since) / g_freq.QuadPart;
+        if (held_ms < 25.0) continue;
+        if (seq == last_seq && 1000.0 * static_cast<double>(now - last_at) / g_freq.QuadPart < 40.0) continue;
+        if (static_cast<DWORD>(tid) != cached_tid) {
+            if (th) CloseHandle(th);
+            th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+                            static_cast<DWORD>(tid));
+            cached_tid = static_cast<DWORD>(tid);
+        }
+        if (!th) continue;
+        if (SuspendThread(th) == static_cast<DWORD>(-1)) continue;
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        int words = 0;
+        const bool still = g_hold_tid == tid && g_hold_seq == seq;
+        if (still && GetThreadContext(th, &ctx)) {
+            __try {
+                const auto* sp = reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(ctx.Esp));
+                for (; words < kStackWords; ++words) g_copy[words] = sp[words];
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+        ResumeThread(th);
+        if (!still || !words) continue;
+        last_seq = seq;
+        last_at = now;
+        ++samples;
+        char line[1400];
+        char w[64];
+        where(ctx.Eip, w, sizeof(w));
+        int o = std::snprintf(line, sizeof(line), "[lock] loader thread %ld %.0f ms into a hold (taken at %08X): eip %s; stack",
+                              tid, held_ms, g_hold_site, w);
+        int shown = 0;
+        for (int i = 0; i < words && shown < 22 && o < static_cast<int>(sizeof(line)) - 48; ++i) {
+            const uint32_t v = g_copy[i];
+            if (v < 0x00401000 || !in_module(v) || !code_return(v)) continue;
+            where(v, w, sizeof(w));
+            o += std::snprintf(line + o, sizeof(line) - o, " %s", w);
+            ++shown;
+        }
+        LOG_INFO("%s", line);
+    }
+    if (th) CloseHandle(th);
+    return 0;
+}
+
 bool jump(uint32_t site, const uint8_t* head, const void* to) {
     auto* p = reinterpret_cast<uint8_t*>(site);
     if (std::memcmp(p, head, 5) != 0) return false;
@@ -296,6 +424,7 @@ void lockwatch_install() {
         const int waits = wrap("WaitForSingleObject", &hk_wait_one, &g_wait_one) +
                           wrap("WaitForMultipleObjects", &hk_wait_many, &g_wait_many) + wrap("Sleep", &hk_sleep, &g_sleep) +
                           wrap("EnterCriticalSection", &hk_enter_cs, &g_enter_cs);
+        if (HANDLE t = CreateThread(nullptr, 0, sampler, nullptr, 0, nullptr)) CloseHandle(t);
         LOG_INFO("[lock] timing the engine's light mutexes (0x567E70): holds and waits of %.0f ms or more are logged; "
                  "the loader's waits while it holds its locks too (%d of 4 imports)",
                  kLogMs, waits);
