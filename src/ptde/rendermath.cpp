@@ -945,6 +945,310 @@ uint64_t __cdecl ffx_rows_transposed(uint8_t* base, int offset, int stride, cons
     return reinterpret_cast<uintptr_t>(base) | static_cast<uint64_t>(reinterpret_cast<uintptr_t>(base)) << 32;
 }
 
+// 0x446D30 (thiscall: this = a box, min at +0 and max at +0x10; out, m; pops 8): the box through the 4x4 matrix m
+// (rows of four) as a box again, the engine's port of a vector routine, in scalar SSE through double. With P = the min
+// corner (lanes by the mask at 0x10D54F0, the rest from 0x10D5280: x y z 1), e = max - min, and the zero vector Z at
+// 0x10D5260: the products R0 = e.x * row 0 (lane 0 as row * e, the others e * row: which NaN wins), R1 = row 1 * e.y,
+// R2 = row 2 * e.z; the corner Pt = row 0 * P.x + (row 1 * P.y + (row 2 * P.z + row 3 * P.w)), each step a
+// multiply-add rounded once from double; per product a sign mask N = (R < Z, or unordered), min = ((LO0 + LO1) + LO2)
+// + Pt and max = ((HI0 + HI1) + HI2) + Pt with LO = N ? R : Z and HI = N ? Z : R; then min is clamped to Q = Pt with
+// the lanes of the mask at 0x10D5420 from 0x10D5280 where it lies above Q, max where it lies below (ordered compares:
+// a NaN sum stays), and both written through that mask again. The original also writes Q to both halves first; every
+// read is done by then and both halves are written again, so only the final values are stored here. Every operation
+// as the original's (products and sums rounded to float each, operand order kept); eax = out as before.
+__declspec(naked) void aabb_transform() {
+    __asm {
+        push ebp
+        mov ebp, esp
+        and esp, -16
+        sub esp, 0x40
+        mov eax, [ebp + 12]
+        movups xmm7, [ecx]
+        movups xmm6, [ecx + 16]
+        subps xmm6, xmm7
+        mov edx, 0x10D54F0
+        movups xmm5, [edx]
+        andps xmm7, xmm5
+        mov edx, 0x10D5280
+        movups xmm4, [edx]
+        andnps xmm5, xmm4
+        orps xmm7, xmm5
+        // products: row 0 lane 0 M first, lanes 1-3 e0 first; rows 1 and 2 M first
+        movaps xmm0, xmm6
+        shufps xmm0, xmm0, 0x00
+        movups xmm1, [eax]
+        movaps xmm2, xmm1
+        mulps xmm2, xmm0
+        mulps xmm0, xmm1
+        movss xmm0, xmm2
+        movaps [esp + 16], xmm0
+        movaps xmm0, xmm6
+        shufps xmm0, xmm0, 0x55
+        movups xmm1, [eax + 16]
+        mulps xmm1, xmm0
+        movaps [esp + 32], xmm1
+        movaps xmm0, xmm6
+        shufps xmm0, xmm0, 0xAA
+        movups xmm1, [eax + 32]
+        mulps xmm1, xmm0
+        movaps [esp + 48], xmm1
+        // the corner: M row 3 * p3, then rows 2, 1, 0 multiply-added
+        movaps xmm0, xmm7
+        shufps xmm0, xmm0, 0xFF
+        movups xmm2, [eax + 48]
+        mulps xmm2, xmm0
+        movups xmm0, [eax + 32]
+        movaps xmm1, xmm7
+        shufps xmm1, xmm1, 0xAA
+        movaps xmm4, xmm2
+        cvtps2pd xmm2, xmm0
+        cvtps2pd xmm3, xmm1
+        mulpd xmm2, xmm3
+        movhlps xmm0, xmm0
+        movhlps xmm1, xmm1
+        cvtps2pd xmm0, xmm0
+        cvtps2pd xmm1, xmm1
+        mulpd xmm0, xmm1
+        cvtps2pd xmm3, xmm4
+        addpd xmm2, xmm3
+        movhlps xmm4, xmm4
+        cvtps2pd xmm4, xmm4
+        addpd xmm0, xmm4
+        cvtpd2ps xmm2, xmm2
+        cvtpd2ps xmm0, xmm0
+        movlhps xmm2, xmm0
+        movups xmm0, [eax + 16]
+        movaps xmm1, xmm7
+        shufps xmm1, xmm1, 0x55
+        movaps xmm4, xmm2
+        cvtps2pd xmm2, xmm0
+        cvtps2pd xmm3, xmm1
+        mulpd xmm2, xmm3
+        movhlps xmm0, xmm0
+        movhlps xmm1, xmm1
+        cvtps2pd xmm0, xmm0
+        cvtps2pd xmm1, xmm1
+        mulpd xmm0, xmm1
+        cvtps2pd xmm3, xmm4
+        addpd xmm2, xmm3
+        movhlps xmm4, xmm4
+        cvtps2pd xmm4, xmm4
+        addpd xmm0, xmm4
+        cvtpd2ps xmm2, xmm2
+        cvtpd2ps xmm0, xmm0
+        movlhps xmm2, xmm0
+        movups xmm0, [eax]
+        movaps xmm1, xmm7
+        shufps xmm1, xmm1, 0x00
+        movaps xmm4, xmm2
+        cvtps2pd xmm2, xmm0
+        cvtps2pd xmm3, xmm1
+        mulpd xmm2, xmm3
+        movhlps xmm0, xmm0
+        movhlps xmm1, xmm1
+        cvtps2pd xmm0, xmm0
+        cvtps2pd xmm1, xmm1
+        mulpd xmm0, xmm1
+        cvtps2pd xmm3, xmm4
+        addpd xmm2, xmm3
+        movhlps xmm4, xmm4
+        cvtps2pd xmm4, xmm4
+        addpd xmm0, xmm4
+        cvtpd2ps xmm2, xmm2
+        cvtpd2ps xmm0, xmm0
+        movlhps xmm2, xmm0
+        movaps [esp], xmm2
+        mov edx, 0x10D5260
+        movups xmm7, [edx]
+        movaps xmm0, [esp + 16]
+        movaps xmm4, xmm7
+        cmpnleps xmm4, xmm0
+        movaps xmm1, xmm4
+        andps xmm1, xmm0
+        movaps xmm3, xmm4
+        andnps xmm3, xmm7
+        orps xmm1, xmm3
+        movaps xmm3, xmm4
+        andps xmm3, xmm7
+        andnps xmm4, xmm0
+        orps xmm3, xmm4
+        movaps xmm5, xmm1
+        movaps xmm6, xmm3
+        movaps xmm0, [esp + 32]
+        movaps xmm4, xmm7
+        cmpnleps xmm4, xmm0
+        movaps xmm1, xmm4
+        andps xmm1, xmm0
+        movaps xmm3, xmm4
+        andnps xmm3, xmm7
+        orps xmm1, xmm3
+        movaps xmm3, xmm4
+        andps xmm3, xmm7
+        andnps xmm4, xmm0
+        orps xmm3, xmm4
+        addps xmm5, xmm1
+        addps xmm6, xmm3
+        movaps xmm0, [esp + 48]
+        movaps xmm4, xmm7
+        cmpnleps xmm4, xmm0
+        movaps xmm1, xmm4
+        andps xmm1, xmm0
+        movaps xmm3, xmm4
+        andnps xmm3, xmm7
+        orps xmm1, xmm3
+        movaps xmm3, xmm4
+        andps xmm3, xmm7
+        andnps xmm4, xmm0
+        orps xmm3, xmm4
+        addps xmm5, xmm1
+        addps xmm6, xmm3
+        movaps xmm0, [esp]
+        addps xmm5, xmm0
+        addps xmm6, xmm0
+        // Q = (Pt & ~S) | (ONE & S)
+        mov edx, 0x10D5420
+        movups xmm1, [edx]
+        mov edx, 0x10D5280
+        movups xmm2, [edx]
+        andps xmm2, xmm1
+        movaps xmm3, xmm1
+        andnps xmm3, xmm0
+        orps xmm3, xmm2
+        // min: Q where the sum is above it (ordered); max: Q where the sum is below it
+        movaps xmm4, xmm3
+        cmpltps xmm4, xmm5
+        movaps xmm0, xmm4
+        andps xmm0, xmm3
+        andnps xmm4, xmm5
+        orps xmm4, xmm0
+        movaps xmm7, xmm6
+        cmpltps xmm7, xmm3
+        movaps xmm0, xmm7
+        andps xmm0, xmm3
+        andnps xmm7, xmm6
+        orps xmm7, xmm0
+        movaps xmm0, xmm1
+        andnps xmm0, xmm4
+        orps xmm0, xmm2
+        movaps xmm5, xmm1
+        andnps xmm5, xmm7
+        orps xmm5, xmm2
+        mov eax, [ebp + 8]
+        movups [eax], xmm0
+        movups [eax + 16], xmm5
+        mov esp, ebp
+        pop ebp
+        ret 8
+    }
+}
+
+// 0x994AE0 (n, a, b, c): up to three arrays of vectors (16 bytes each) passed through 0x44C6A0 in place (through its
+// effects-library wrapper 0x9B6D00), four floats' worth of n at a time ((n + 3) / 4 vectors), from the last to the
+// first; a missing array (null) is a zero vector on the stack, not moved on. Nothing when n is 0 or all three are
+// null. Each step reads the three vectors, passes the three through 0x44C6A0 in order and writes the three back in
+// order, as the original; only the debug frame, the copy helpers 0x5538B0 / 0x553880 and the wrapper's copies are
+// gone. The callers do not use the return value (eax = the last array written, as the original leaves it).
+uint32_t __cdecl ffx_arrays_44c6a0(uint32_t n, uint8_t* a, uint8_t* b, uint8_t* c) {
+    if ((!a && !b && !c) || !n) return 0;
+    const uint32_t sa = a ? 16 : 0, sb = b ? 16 : 0, sc = c ? 16 : 0;
+    alignas(16) uint32_t zero[4] = {0, 0, 0, 0};
+    if (!a) a = reinterpret_cast<uint8_t*>(zero);
+    if (!b) b = reinterpret_cast<uint8_t*>(zero);
+    if (!c) c = reinterpret_cast<uint8_t*>(zero);
+    uint32_t off = ((n + 3) >> 2) << 4;
+    uint32_t oa = sa ? off : 0, ob = sb ? off : 0, oc = sc ? off : 0;
+    const auto f = reinterpret_cast<void*(__cdecl*)(void*, const void*)>(0x44C6A0);
+    do {
+        off -= 16;
+        oa -= sa;
+        ob -= sb;
+        oc -= sc;
+        alignas(16) uint32_t va[4], vb[4], vc[4], ra[4], rb[4], rc[4];
+        std::memcpy(va, a + oa, 16);
+        std::memcpy(vb, b + ob, 16);
+        std::memcpy(vc, c + oc, 16);
+        f(ra, va);
+        f(rb, vb);
+        f(rc, vc);
+        std::memcpy(a + oa, ra, 16);
+        std::memcpy(b + ob, rb, 16);
+        std::memcpy(c + oc, rc, 16);
+    } while (off != 0);
+    return reinterpret_cast<uintptr_t>(c);
+}
+
+// 0x995C60 (min, max, n, x, y, z): the bounds of n points given as three float arrays. Running minimum and maximum
+// per axis start at the floats at 0x11E7ECC / 0x11E822C; the points past the last whole four go first, one at a
+// time through 0x440400 (b > a ? a : b) and 0x410D90 (a > b ? a : b), each result through the x87 stack (a signaling
+// NaN comes out quiet); with no whole four the outputs are (min x, y, z, 1) and (max x, y, z, 1). Otherwise the
+// running values are splatted (through the x87 stack) and the fours taken from the last to the first through the
+// four-float 0x407580 / 0x4074F0 (the same compares per lane), then each set of three with the vector at 0x10D5280
+// transposed and reduced pairwise ((0, 1), (2, 3), then the two). The same compares in the same order (as SSE
+// compares, the same results on float values); the debug frame, the exception frame and the copies are gone. The
+// callers do not use the return value.
+namespace {
+// 0x407580 per lane: b > a ? a : b
+inline __m128 vmin_407580(__m128 a, __m128 b) {
+    const __m128 m = _mm_cmplt_ps(a, b);
+    return _mm_or_ps(_mm_and_ps(m, a), _mm_andnot_ps(m, b));
+}
+// 0x4074F0 per lane: a > b ? a : b
+inline __m128 vmax_4074f0(__m128 a, __m128 b) {
+    const __m128 m = _mm_cmplt_ps(b, a);
+    return _mm_or_ps(_mm_and_ps(m, a), _mm_andnot_ps(m, b));
+}
+inline __m128 reduce4(__m128 x, __m128 y, __m128 z, __m128 w, bool max) {
+    _MM_TRANSPOSE4_PS(x, y, z, w);
+    if (max) return vmax_4074f0(vmax_4074f0(x, y), vmax_4074f0(z, w));
+    return vmin_407580(vmin_407580(x, y), vmin_407580(z, w));
+}
+}  // namespace
+
+uint32_t __cdecl ffx_bounds3(uint32_t* out_min, uint32_t* out_max, uint32_t n, const uint32_t* xs, const uint32_t* ys,
+                             const uint32_t* zs) {
+    const uint32_t groups = n >> 2;
+    const uint32_t* arr[3] = {xs, ys, zs};
+    uint32_t mn[3], mx[3];
+    for (int k = 0; k < 3; ++k) {
+        mn[k] = x87_pass(*reinterpret_cast<const uint32_t*>(0x11E7ECC));
+        mx[k] = x87_pass(*reinterpret_cast<const uint32_t*>(0x11E822C));
+    }
+    for (uint32_t i = groups * 4; i < n; ++i) {
+        for (int k = 0; k < 3; ++k) {
+            const uint32_t v = arr[k][i];
+            mn[k] = x87_pass(bits_f(v) > bits_f(mn[k]) ? mn[k] : v);
+        }
+        for (int k = 0; k < 3; ++k) {
+            const uint32_t v = arr[k][i];
+            mx[k] = x87_pass(bits_f(mx[k]) > bits_f(v) ? mx[k] : v);
+        }
+    }
+    if (!groups) {
+        const uint32_t lo[4] = {mn[0], mn[1], mn[2], 0x3F800000u};
+        const uint32_t hi[4] = {mx[0], mx[1], mx[2], 0x3F800000u};
+        std::memcpy(out_min, lo, 16);
+        std::memcpy(out_max, hi, 16);
+        return 0;
+    }
+    __m128 bmin[3], bmax[3];
+    for (int k = 0; k < 3; ++k) {
+        bmin[k] = _mm_set1_ps(bits_f(mn[k]));
+        bmax[k] = _mm_set1_ps(bits_f(mx[k]));
+    }
+    uint32_t off = groups * 16;
+    do {
+        off -= 16;
+        __m128 v[3];
+        for (int k = 0; k < 3; ++k) v[k] = _mm_loadu_ps(reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(arr[k]) + off));
+        for (int k = 0; k < 3; ++k) bmin[k] = vmin_407580(bmin[k], v[k]);
+        for (int k = 0; k < 3; ++k) bmax[k] = vmax_4074f0(bmax[k], v[k]);
+    } while (off != 0);
+    const __m128 one = _mm_loadu_ps(reinterpret_cast<const float*>(0x10D5280));
+    _mm_storeu_ps(reinterpret_cast<float*>(out_min), reduce4(bmin[0], bmin[1], bmin[2], one, false));
+    _mm_storeu_ps(reinterpret_cast<float*>(out_max), reduce4(bmax[0], bmax[1], bmax[2], one, true));
+    return 0;
+}
+
 struct Site {
     const char* name;
     uintptr_t address;
@@ -1040,6 +1344,12 @@ const uint8_t kMatMaddHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 
 const uint8_t kSinCosHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0x10, 0x04, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xF0, 0xFB, 0xFF, 0xFF, 0xB9};
 const uint8_t kPackHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0x90, 0x05, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0x70, 0xFA, 0xFF, 0xFF, 0xB9};
 const uint8_t kRowsHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0x36, 0x2B, 0x04, 0x01, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x50, 0x53, 0x81, 0xEC, 0x30, 0x01, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xC0, 0xFE, 0xFF, 0xFF, 0xB9};
+// 0x446D30's first 16 bytes; the rest by hash
+const uint8_t kAabbHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x81, 0xEC, 0x04, 0x01, 0x00, 0x00, 0x8B, 0x45, 0x0C, 0x8B};
+// 0x994AE0 up to its debug fill's count; the rest by hash
+const uint8_t kArraysHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0x30, 0x02, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xD0, 0xFD, 0xFF, 0xFF, 0xB9};
+// 0x995C60 up to its debug fill's count; the rest by hash
+const uint8_t kBoundsHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0xFC, 0x2A, 0x04, 0x01, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x50, 0x53, 0x81, 0xEC, 0x40, 0x07, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xB0, 0xF8, 0xFF, 0xFF, 0xB9};
 // 0x419890 through its constants (-0.0f at 0x11E7FF0, 1.0 at 0x11E7C90) to the loop's first load
 const uint8_t kRsqrtHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x55, 0x0C, 0x0F, 0x57, 0xC9, 0xF3, 0x0F, 0x10,
                               0x15, 0xF0, 0x7F, 0x1E, 0x01, 0xF2, 0x0F, 0x10, 0x1D, 0x90, 0x7C, 0x1E, 0x01, 0x8D, 0x44,
@@ -1071,6 +1381,8 @@ const Site kCoreSites[] = {
      reinterpret_cast<const void*>(&vec4_saturate)},
     {"four-float reciprocal square root", 0x419890, kRsqrtHead, sizeof(kRsqrtHead), nullptr, 0, 0,
      reinterpret_cast<const void*>(&vec4_rsqrt)},
+    {"box transform", 0x446D30, kAabbHead, sizeof(kAabbHead), nullptr, 0, 0, reinterpret_cast<const void*>(&aabb_transform),
+     0x7ECAA53Cu, 16, 3495},
 };
 
 // Bone palettes (table 3, installed with the core sites; RemoteControl `fastmath bone 0|1`): 0x41FB20 and its two
@@ -1288,6 +1600,10 @@ const Site kFfxSites[] = {
      0x94FB03DFu, 40, 1911},
     {"transposed rows", 0x9B4C60, kRowsHead, sizeof(kRowsHead), nullptr, 0, 0, reinterpret_cast<const void*>(&ffx_rows_transposed),
      0xAC6ECBD8u, 55, 449},
+    {"vector arrays through 0x44C6A0", 0x994AE0, kArraysHead, sizeof(kArraysHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&ffx_arrays_44c6a0), 0x073CE9FAu, 40, 1007},
+    {"bounds of three arrays", 0x995C60, kBoundsHead, sizeof(kBoundsHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&ffx_bounds3), 0x15FD9D02u, 55, 3225},
 };
 
 bool matches(const Site& s) {
@@ -1471,7 +1787,7 @@ bool rendermath_install(bool core, bool effects) {
         if (n) {
             LOG_INFO("FastRenderMath: %d of the engine's vector and matrix helpers (four-float add, subtract, multiply, "
                      "multiply-add, not-equal, saturate and reciprocal square root, 3x4 matrix add and multiply, 4x4 "
-                     "multiply and transpose) run as SSE with the same results",
+                     "multiply and transpose, box transform) run as SSE with the same results",
                      n);
         }
         const int nb = install_table("FastRenderMath", kBoneSites, sizeof(kBoneSites) / sizeof(kBoneSites[0]), 3);

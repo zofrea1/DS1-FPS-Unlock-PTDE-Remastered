@@ -25,8 +25,11 @@
 //    0x984920 through the x87 stack) and subtract (0x984B60) four floats.
 //    Also its debug-build glue where the particle updates spend their time: the keyframe curves (0x982C30 four
 //    lanes, 0x9817B0 one float, x87 steps kept as x87), the three-row multiply-add (0x9AF7F0), the sine/cosine
-//    polynomial (0x9B5DC0), colour packing (0x9B18A0) and transposed rows (0x9B4C60): the same helper operations in
-//    the same order without the debug frames and stack copies (tools/test_rendermath, x87 precision 24/53/64).
+//    polynomial (0x9B5DC0), colour packing (0x9B18A0), transposed rows (0x9B4C60), vector arrays through 0x44C6A0
+//    (0x994AE0) and the bounds of three arrays (0x995C60): the same helper operations in the same order without the
+//    debug frames and stack copies (tools/test_rendermath, x87 precision 24/53/64).
+//  core also has the box transform 0x446D30 (a box through a 4x4 matrix as a box) in packed SSE, every operation
+//    rounded and ordered as the original's.
 //
 // Each table is checked in full before any of it is written.
 bool rendermath_install(bool core, bool effects);

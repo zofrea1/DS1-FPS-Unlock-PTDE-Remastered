@@ -680,6 +680,123 @@ static void test_glue() {
     std::printf("effects glue: 200000 iterations, %d mismatches so far\n", g_fail);
 }
 
+// 0x446D30 box transform vs aabb_transform (thiscall: ecx = box, out, matrix): random boxes and matrices (also with
+// NaN, infinities, zeros, denormals; min above max), out apart from or the same as the box; the 32 bytes out and eax
+// compared, ebx/esi/edi/ebp kept.
+static uint32_t g_box_fn, g_bregs[5];
+__declspec(naked) static void call_box(void* /*box*/, void* /*out*/, void* /*m*/) {
+    __asm {
+        push ebp
+        push ebx
+        push esi
+        push edi
+        mov ecx, [esp + 20]
+        push dword ptr [esp + 28]
+        push dword ptr [esp + 28]
+        mov ebx, 0x22222222
+        mov esi, 0x33333333
+        mov edi, 0x44444444
+        mov ebp, 0x55555555
+        call dword ptr [g_box_fn]
+        mov [g_bregs], eax
+        mov [g_bregs + 4], ebx
+        mov [g_bregs + 8], esi
+        mov [g_bregs + 12], edi
+        mov [g_bregs + 16], ebp
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret
+    }
+}
+static void test_box() {
+    alignas(16) static uint32_t box1[8], box2[8], out1[8], out2[8], m[16];
+    for (int it = 0; it < 400000; ++it) {
+        fill(m, 16);
+        fill(box1, 8);
+        if (rng() & 1) {  // a plain box and an affine matrix
+            for (int i = 0; i < 3; ++i) {
+                const float a = static_cast<float>(static_cast<int>(rng() % 2000) - 1000) / 10.0f;
+                const float b = a + static_cast<float>(rng() % 500) / 10.0f;
+                std::memcpy(box1 + i, &a, 4);
+                std::memcpy(box1 + 4 + i, &b, 4);
+            }
+            const float one = 1.0f, zero = 0.0f;
+            std::memcpy(box1 + 3, &one, 4);
+            std::memcpy(box1 + 7, &one, 4);
+            for (int i = 0; i < 12; ++i) { float f = static_cast<float>(static_cast<int>(rng() % 2000) - 1000) / 500.0f; std::memcpy(m + i, &f, 4); }
+            std::memcpy(m + 3, &zero, 4); std::memcpy(m + 7, &zero, 4); std::memcpy(m + 11, &zero, 4); std::memcpy(m + 15, &one, 4);
+        }
+        std::memcpy(box2, box1, 32);
+        const bool inplace = (rng() % 4) == 0;
+        fill(out1, 8);
+        std::memcpy(out2, out1, 32);
+        g_box_fn = 0x446D30;
+        call_box(box1, inplace ? box1 : out1, m);
+        uint32_t r1[5];
+        std::memcpy(r1, g_bregs, 20);
+        g_box_fn = reinterpret_cast<uint32_t>(&aabb_transform);
+        call_box(box2, inplace ? box2 : out2, m);
+        if (inplace) {
+            same(box1, box2, 32, "box transform (in place)", it);
+            if (r1[0] == reinterpret_cast<uint32_t>(box1)) r1[0] = reinterpret_cast<uint32_t>(box2);
+        } else {
+            same(out1, out2, 32, "box transform", it);
+            same(box1, box2, 32, "box transform input", it);
+            if (r1[0] == reinterpret_cast<uint32_t>(out1)) r1[0] = reinterpret_cast<uint32_t>(out2);
+        }
+        if (std::memcmp(r1, g_bregs, 20) != 0) {
+            if (g_fail < 20) std::printf("box transform registers differ at %d: %08X vs %08X\n", it, r1[0], g_bregs[0]);
+            ++g_fail;
+        }
+    }
+    std::printf("box transform: 400000 iterations, %d mismatches so far\n", g_fail);
+}
+
+// 0x994AE0 (arrays through 0x44C6A0) and 0x995C60 (bounds of three arrays) vs ffx_arrays_44c6a0 / ffx_bounds3:
+// n 0..23, arrays missing (null) or present, every array byte and output compared.
+static void test_arrays() {
+    alignas(16) static uint32_t a1[3][28], a2[3][28], o1[8], o2[8];
+    for (int it = 0; it < 200000; ++it) {
+        const uint32_t n = rng() % 24;
+        for (int k = 0; k < 3; ++k) fill(a1[k], 28);
+        if (rng() & 1) {
+            for (int k = 0; k < 3; ++k) for (int i = 0; i < 28; ++i) { float f = static_cast<float>(static_cast<int>(rng() % 2000) - 1000) / 37.0f; std::memcpy(&a1[k][i], &f, 4); }
+        }
+        std::memcpy(a2, a1, sizeof(a1));
+        if (it & 1) {
+            const unsigned present = rng() % 8;
+            g_gn = 4;
+            for (int pass = 0; pass < 2; ++pass) {
+                uint32_t (*a)[28] = pass ? a2 : a1;
+                g_gargs[0] = n;
+                for (int k = 0; k < 3; ++k) g_gargs[1 + k] = (present >> k) & 1 ? reinterpret_cast<uint32_t>(a[k]) : 0;
+                g_gfn = pass ? reinterpret_cast<uint32_t>(&ffx_arrays_44c6a0) : 0x994AE0;
+                call_glue();
+            }
+            same(a1, a2, sizeof(a1), "arrays 0x994AE0", it);
+        } else {
+            fill(o1, 8);
+            std::memcpy(o2, o1, sizeof(o1));
+            g_gn = 6;
+            for (int pass = 0; pass < 2; ++pass) {
+                uint32_t (*a)[28] = pass ? a2 : a1;
+                uint32_t* o = pass ? o2 : o1;
+                g_gargs[0] = reinterpret_cast<uint32_t>(o);
+                g_gargs[1] = reinterpret_cast<uint32_t>(o + 4);
+                g_gargs[2] = n;
+                for (int k = 0; k < 3; ++k) g_gargs[3 + k] = reinterpret_cast<uint32_t>(a[k]);
+                g_gfn = pass ? reinterpret_cast<uint32_t>(&ffx_bounds3) : 0x995C60;
+                call_glue();
+            }
+            same(o1, o2, sizeof(o1), "bounds 0x995C60", it);
+            same(a1, a2, sizeof(a1), "bounds 0x995C60 input", it);
+        }
+    }
+    std::printf("arrays and bounds: 200000 iterations, %d mismatches so far\n", g_fail);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "child") != 0) return run_parent(argv[0]);
     std::printf("image mapped (child)\n");
@@ -888,6 +1005,8 @@ int main(int argc, char** argv) {
         g_nan_heavy = pass == 1;
         test_curves();
         test_glue();
+        test_box();
+        test_arrays();
     }
     return g_fail ? 1 : 0;
 }
