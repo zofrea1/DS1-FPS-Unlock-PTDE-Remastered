@@ -2,6 +2,7 @@
 #include "remote.h"
 #include "streamwatch.h"
 #include "iowatch.h"
+#include "lockwatch.h"
 #include "texpreload.h"
 #include "dxgipresent.h"
 
@@ -2109,6 +2110,7 @@ bool profile_start() {
     if (g_streams_on) {
         streamwatch_install();
         iowatch_install();
+        lockwatch_install();
     }
     if (g_imports_on) imports_install();
     HANDLE thread = CreateThread(nullptr, 0, profile_thread, nullptr, 0, nullptr);
