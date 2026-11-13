@@ -1292,6 +1292,9 @@ void run(const std::string& line) {
     } else if (c == "fps") {
         limiter_set_fps(static_cast<int>(num(1, 0)));
         out("fps %ld", num(1, 0));
+    } else if (c == "limitpoint" && t.size() > 1) {
+        limiter_set_point(t[1] == "present" ? kLimitPresent : kLimitEarly);
+        out("limitpoint %s", limiter_point() == kLimitPresent ? "present" : "early");
     } else if (c == "pad") {
         std::lock_guard<std::mutex> lock(g_pad_lock);
         g_pad_buttons = t.size() > 1 && t[1] != "none" ? parse_buttons(t[1]) : 0;

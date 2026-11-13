@@ -624,6 +624,15 @@ void report() {
             if (slow > 0.0) n += std::snprintf(line + n, sizeof(line) - n, ", %d over %.1f ms", over, slow);
             n += std::snprintf(line + n, sizeof(line) - n, ")");
         }
+        // AsyncReadback: reads answered from a copy, and copies that were not ready (the lock waited for the GPU).
+        static unsigned long async_prev = 0, waits_prev = 0;
+        const unsigned long async = d3dperf_readback_async(), waits = d3dperf_readback_waits();
+        if (!quiet && frames > 0 && (async != async_prev || waits != waits_prev))
+            n += std::snprintf(line + n, sizeof(line) - n, " (readback async %.2f/frame, waited %.2f/frame)",
+                               static_cast<double>(async - async_prev) / frames,
+                               static_cast<double>(waits - waits_prev) / frames);
+        async_prev = async;
+        waits_prev = waits;
     }
     if (game.count)
         n += std::snprintf(line + n, sizeof(line) - n, " | game update avg %.2f max %.1f ms", game.sum / game.count, game.max);
