@@ -143,6 +143,131 @@ int __fastcall hk_unlock(void* self, void*) {
     return 0;
 }
 
+// While a thread holds one of the loader's locks (a watched site), its waits are timed: what the loader waits for
+// with the game thread queued behind it.
+uint32_t loader_site_held() {
+    const PerThread& t = t_held;
+    for (int i = 0; i < t.n; ++i) {
+        if (t.held[i].cpu) return t.held[i].site;
+    }
+    return 0;
+}
+
+int game_stack(const uint32_t* sp, uint32_t* out, int max) {
+    int k = 0;
+    __try {
+        for (int i = 0; i < 300 && k < max; ++i) {
+            const uint32_t v = sp[i];
+            if (v < 0x00401000 || v > 0x01100000) continue;
+            const auto* c = reinterpret_cast<const uint8_t*>(v);
+            if (c[-5] == 0xE8 || (c[-2] == 0xFF && (c[-1] & 0x38) == 0x10) || (c[-3] == 0xFF && (c[-2] & 0x38) == 0x10) ||
+                (c[-6] == 0xFF && (c[-5] & 0x38) == 0x10)) {
+                out[k++] = v;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return k;
+}
+
+void log_wait(const char* what, uint32_t held_site, double ms, const void* frame) {
+    if (InterlockedIncrement(&g_logged) > kMaxLogged) return;
+    char who[32];
+    label(GetCurrentThreadId(), who, sizeof(who));
+    uint32_t st[10];
+    const int n = game_stack(static_cast<const uint32_t*>(frame), st, 10);
+    char line[400];
+    int o = std::snprintf(line, sizeof(line), "[lock] %s waited %.1f ms in %s while holding the loader lock taken at %08X; stack",
+                          who, ms, what, held_site);
+    for (int i = 0; i < n && o > 0 && o < static_cast<int>(sizeof(line)) - 12; ++i) {
+        o += std::snprintf(line + o, sizeof(line) - o, " %08X", st[i]);
+    }
+    LOG_INFO("%s", line);
+}
+
+constexpr double kWaitLogMs = 8.0;
+using WaitOneFn = DWORD(WINAPI*)(HANDLE, DWORD);
+using WaitManyFn = DWORD(WINAPI*)(DWORD, const HANDLE*, BOOL, DWORD);
+using SleepFn = void(WINAPI*)(DWORD);
+WaitOneFn g_wait_one = nullptr;
+WaitManyFn g_wait_many = nullptr;
+SleepFn g_sleep = nullptr;
+using EnterCsFn = void(WINAPI*)(LPCRITICAL_SECTION);
+EnterCsFn g_enter_cs = nullptr;
+
+void WINAPI hk_enter_cs(LPCRITICAL_SECTION cs) {
+    const uint32_t held = loader_site_held();
+    if (!held || TryEnterCriticalSection(cs)) {
+        if (!held) g_enter_cs(cs);
+        return;
+    }
+    const LONGLONG a = ticks();
+    g_enter_cs(cs);
+    const double ms = 1000.0 * static_cast<double>(ticks() - a) / g_freq.QuadPart;
+    if (ms >= kWaitLogMs) log_wait("EnterCriticalSection", held, ms, _AddressOfReturnAddress());
+}
+
+DWORD WINAPI hk_wait_one(HANDLE h, DWORD timeout) {
+    const uint32_t held = loader_site_held();
+    if (!held) return g_wait_one(h, timeout);
+    const LONGLONG a = ticks();
+    const DWORD r = g_wait_one(h, timeout);
+    const double ms = 1000.0 * static_cast<double>(ticks() - a) / g_freq.QuadPart;
+    if (ms >= kWaitLogMs) log_wait("WaitForSingleObject", held, ms, _AddressOfReturnAddress());
+    return r;
+}
+
+DWORD WINAPI hk_wait_many(DWORD n, const HANDLE* hs, BOOL all, DWORD timeout) {
+    const uint32_t held = loader_site_held();
+    if (!held) return g_wait_many(n, hs, all, timeout);
+    const LONGLONG a = ticks();
+    const DWORD r = g_wait_many(n, hs, all, timeout);
+    const double ms = 1000.0 * static_cast<double>(ticks() - a) / g_freq.QuadPart;
+    if (ms >= kWaitLogMs) log_wait("WaitForMultipleObjects", held, ms, _AddressOfReturnAddress());
+    return r;
+}
+
+void WINAPI hk_sleep(DWORD ms_in) {
+    const uint32_t held = loader_site_held();
+    if (!held) return g_sleep(ms_in);
+    const LONGLONG a = ticks();
+    g_sleep(ms_in);
+    const double ms = 1000.0 * static_cast<double>(ticks() - a) / g_freq.QuadPart;
+    if (ms >= kWaitLogMs) log_wait("Sleep", held, ms, _AddressOfReturnAddress());
+}
+
+void** import_slot(const char* dll, const char* fn) {
+    auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) return nullptr;
+    for (const auto* d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); d->Name; ++d) {
+        if (_stricmp(reinterpret_cast<const char*>(base + d->Name), dll) != 0) continue;
+        const auto* names = reinterpret_cast<const IMAGE_THUNK_DATA32*>(
+            base + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
+        auto* slots = reinterpret_cast<void**>(base + d->FirstThunk);
+        for (int i = 0; names[i].u1.AddressOfData; ++i) {
+            if (names[i].u1.Ordinal & IMAGE_ORDINAL_FLAG32) continue;
+            const auto* by_name = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names[i].u1.AddressOfData);
+            if (std::strcmp(reinterpret_cast<const char*>(by_name->Name), fn) == 0) return &slots[i];
+        }
+    }
+    return nullptr;
+}
+
+template <typename Fn>
+bool wrap(const char* fn, Fn hook, Fn* original) {
+    void** slot = import_slot("KERNEL32.dll", fn);
+    if (!slot) return false;
+    DWORD old = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
+    *original = reinterpret_cast<Fn>(*slot);
+    InterlockedExchangePointer(slot, reinterpret_cast<void*>(hook));
+    VirtualProtect(slot, sizeof(void*), old, &old);
+    return true;
+}
+
 bool jump(uint32_t site, const uint8_t* head, const void* to) {
     auto* p = reinterpret_cast<uint8_t*>(site);
     if (std::memcmp(p, head, 5) != 0) return false;
@@ -168,8 +293,12 @@ void lockwatch_install() {
                     jump(kTryLock, kTryHead, reinterpret_cast<const void*>(&hk_trylock)) &&
                     jump(kLock, kLockHead, reinterpret_cast<const void*>(&hk_lock));
     if (ok) {
-        LOG_INFO("[lock] timing the engine's light mutexes (0x567E70): holds and waits of %.0f ms or more are logged",
-                 kLogMs);
+        const int waits = wrap("WaitForSingleObject", &hk_wait_one, &g_wait_one) +
+                          wrap("WaitForMultipleObjects", &hk_wait_many, &g_wait_many) + wrap("Sleep", &hk_sleep, &g_sleep) +
+                          wrap("EnterCriticalSection", &hk_enter_cs, &g_enter_cs);
+        LOG_INFO("[lock] timing the engine's light mutexes (0x567E70): holds and waits of %.0f ms or more are logged; "
+                 "the loader's waits while it holds its locks too (%d of 4 imports)",
+                 kLogMs, waits);
     } else {
         LOG_ERROR("[lock] the light mutex functions did not match this build (or were partly patched)");
     }
