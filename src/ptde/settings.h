@@ -10,6 +10,10 @@ constexpr int kMaxMaxFps = 1000;
 struct Settings {
     // Master switch: false leaves the game unchanged (every fix and diagnostic off), except skip_intro.
     bool fps_unlock = true;
+    // [Phones]: PhoneProfile = auto (the Phone* keys replace the plain ones when the game runs translated for an ARM
+    // CPU), true (always), false (never). phone_applied: they were applied.
+    int phone_profile = 0;  // 0 auto, 1 on, 2 off
+    bool phone_applied = false;
     // Frames per second the game should aim for (a cap), kMinMaxFps..kMaxMaxFps. PTDE runs at
     // 30 FPS natively.
     int target_fps = 120;

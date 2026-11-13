@@ -2,6 +2,7 @@
 
 #include "extension.h"
 #include "log.h"
+#include "rwlock.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -10,7 +11,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -136,7 +140,19 @@ Settings settings_load(const wchar_t* dll_path) {
     WideCharToMultiByte(CP_UTF8, 0, full, -1, narrow, MAX_PATH, nullptr, nullptr);
     LOG_INFO("Settings::read - reading INI from %s", narrow);
 
-    const bool read = settings_read_keys(dll_path, [&s](const std::string& key, const std::string& val) {
+    // Phone* keys (any setting with "Phone" in front) are kept and applied after the rest when the phone profile is on.
+    std::vector<std::pair<std::string, std::string>> phone_keys;
+    std::function<void(const std::string&, const std::string&)> apply;
+    apply = [&s, &phone_keys](const std::string& key, const std::string& val) {
+        if (key == "phoneprofile") {
+            const std::string v = lower(trim(val));
+            s.phone_profile = (v == "true" || v == "on" || v == "1") ? 1 : (v == "false" || v == "off" || v == "0") ? 2 : 0;
+            return;
+        }
+        if (key.size() > 5 && key.compare(0, 5, "phone") == 0) {
+            phone_keys.emplace_back(key.substr(5), val);
+            return;
+        }
         if (key == "fpsunlock") {
             s.fps_unlock = parse_bool(val);
         } else if (key == "maxfps" || key == "targetfps") {
@@ -318,7 +334,24 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "survey") {
             s.survey_seconds = std::atoi(val.c_str());
         }
-    });
+    };
+    const bool read = settings_read_keys(dll_path, apply);
     if (!read) LOG_ERROR("Settings::read - INI read failed, using defaults");
+    const char* cpu = nullptr;
+    const bool translated = cpu_translated(&cpu);
+    if (!phone_keys.empty() && (s.phone_profile == 1 || (s.phone_profile == 0 && translated))) {
+        std::string list;
+        for (const auto& kv : phone_keys) {
+            apply(kv.first, kv.second);
+            list += (list.empty() ? "" : ", ") + kv.first + " = " + trim(kv.second);
+        }
+        s.phone_applied = true;
+        static bool logged = false;
+        if (!logged) LOG_INFO("Phone profile (%s): %s", s.phone_profile == 1 ? "PhoneProfile = true" : cpu, list.c_str());
+        logged = true;
+    } else if (translated) {
+        static int logged_off = 0;
+        if (!logged_off++) LOG_INFO("Phone profile: off (PhoneProfile = false); the game runs translated for %s", cpu);
+    }
     return s;
 }

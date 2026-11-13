@@ -248,6 +248,13 @@ bool translated_x86() {
 
 }  // namespace
 
+bool cpu_translated(const char** name) {
+    static int cached = -1;
+    if (cached < 0) cached = translated_x86() ? 1 : 0;
+    if (name) *name = g_cpu;
+    return cached == 1;
+}
+
 void rwlock_install_early(bool static_load, bool even_translated) {
     if (!static_load) {
         g_result = kLateLoad;

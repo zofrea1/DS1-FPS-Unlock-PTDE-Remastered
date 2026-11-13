@@ -23,3 +23,6 @@
 void rwlock_install_early(bool static_load, bool even_translated = false);
 // `wanted`: FastReadLocks was asked for (the INI), for the log line when it was not tried.
 void rwlock_log(bool wanted);
+// The game's x86 code runs translated for another CPU (Box64 or FEX: Android with GameNative or Winlator, Linux on
+// ARM; or Windows on ARM). `name` (optional) gets the CPU's name as reported ("Cortex-A78", "an ARM64 host").
+bool cpu_translated(const char** name = nullptr);
