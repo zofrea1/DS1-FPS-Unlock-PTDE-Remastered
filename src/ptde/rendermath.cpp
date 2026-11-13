@@ -684,6 +684,267 @@ uint32_t* __cdecl ffx_to_int_2p24(uint32_t* out, const float* v) {
     return ffx_trunc4(out, v, *reinterpret_cast<const float*>(0x112DA70));
 }
 
+// The effects library's keyframe curves: 0x982C30 (four lanes) and 0x9817B0 (one float), cdecl (out, t, stream). The
+// stream holds a count n, n key times and n values; it is moved past them first. For each lane, the time (through the
+// x87 stack: a signaling NaN comes out quiet) is looked up from the last key down: the first key at or below it (a NaN
+// compare goes on looking), key 0 at the latest (with n below 2 the search does not run: key n - 1). The segment's
+// times and values are read through the x87 stack too; past the last key the end is the time itself and the same
+// value. Then out = lerp(v0, v1, (t - t0) * r) with r = 1 / (t1 - t0), 0 where that is infinite. The four-lane one
+// takes t - t0 from the time as given (not through the x87 stack) and works through the engine's helpers: subtract
+// (0x417420), its reciprocal 0x430AC0 (in double; an infinite input gives a zero of its sign, a zero gives -infinity),
+// the infinity mask 0x4193E0, and-not, multiply (0x5537E0) and the lerp 0x983C40 (subtract, then multiply-add
+// 0x553700). The one-float one subtracts in double (0x4AD4E0) and does the reciprocal, multiply and multiply-add on the
+// x87 stack (0x9846C0, 0x984500, 0x984560), so at the thread's x87 precision. Debug builds: every step was a call with
+// a debug frame and its result copied through two or three stack temporaries; the particle updates call these for
+// most of their parameters. Here the same operations in the same order, the four-lane ones through this file's
+// replacements of those helpers, the one-float ones as the same x87 instructions. Returned: eax = out, edx = lane 2 of
+// the result (four lanes) or out (one float), as the originals leave them.
+namespace {
+inline uint32_t x87_pass(uint32_t v) {
+    // a signaling NaN (exponent all ones, quiet bit clear, the rest not all zero) gets its quiet bit
+    return (v & 0x7FC00000u) == 0x7F800000u && (v & 0x003FFFFFu) ? (v | 0x00400000u) : v;
+}
+inline float bits_f(uint32_t v) {
+    float f;
+    std::memcpy(&f, &v, 4);
+    return f;
+}
+
+struct CurveKeys {
+    const uint32_t* keys;
+    const uint32_t* vals;
+    int n;
+};
+
+inline CurveKeys curve_open(uintptr_t* stream) {
+    const uintptr_t base = *stream;
+    const int n = *reinterpret_cast<const int*>(base);
+    const uintptr_t keys = base + 4;
+    const uintptr_t vals = keys + 4u * static_cast<uint32_t>(n);
+    *stream = vals + 4u * static_cast<uint32_t>(n);
+    return {reinterpret_cast<const uint32_t*>(keys), reinterpret_cast<const uint32_t*>(vals), n};
+}
+
+// One lane's segment: t0, t1, v0, v1 (each through the x87 stack) for the time t as given.
+inline void curve_segment(const CurveKeys& c, uint32_t t, uint32_t& t0, uint32_t& t1, uint32_t& v0, uint32_t& v1) {
+    const uint32_t tq = x87_pass(t);
+    const float tf = bits_f(tq);
+    int j = c.n - 1;
+    while (j > 0 && !(bits_f(c.keys[j]) <= tf)) --j;
+    v0 = x87_pass(c.vals[j]);
+    t0 = x87_pass(c.keys[j]);
+    if (j + 1 < c.n) {
+        v1 = x87_pass(c.vals[j + 1]);
+        t1 = x87_pass(c.keys[j + 1]);
+    } else {
+        v1 = x87_pass(c.vals[j]);
+        t1 = tq;
+    }
+}
+
+// 0x430AC0 for one lane
+inline uint32_t recip_430ac0(uint32_t v) {
+    const float x = bits_f(v);
+    if ((v & 0x7FFFFFFFu) == 0x7F800000u) return 0.0f > x ? 0x80000000u : 0u;
+    if (x == 0.0f) return 0xFF800000u;  // +0 and -0 both (compared with -0)
+    const __m128 r = _mm_cvtsd_ss(_mm_setzero_ps(), _mm_div_sd(_mm_set_sd(1.0), _mm_cvtss_sd(_mm_setzero_pd(), _mm_set_ss(x))));
+    uint32_t out;
+    _mm_store_ss(reinterpret_cast<float*>(&out), r);
+    return out;
+}
+
+inline uint32_t inf_mask(uint32_t v) {
+    return (v & 0x7FFFFFFFu) == 0x7F800000u ? 0xFFFFFFFFu : 0u;
+}
+
+// 0x4AD4E0: a - b in double, rounded to float
+inline uint32_t sub_dbl(uint32_t a, uint32_t b) {
+    const __m128d d = _mm_sub_sd(_mm_cvtss_sd(_mm_setzero_pd(), _mm_set_ss(bits_f(a))),
+                                 _mm_cvtss_sd(_mm_setzero_pd(), _mm_set_ss(bits_f(b))));
+    uint32_t out;
+    _mm_store_ss(reinterpret_cast<float*>(&out), _mm_cvtsd_ss(_mm_setzero_ps(), d));
+    return out;
+}
+}  // namespace
+
+uint64_t __cdecl ffx_curve4(uint32_t* out, const uint32_t* t, uintptr_t* stream) {
+    const CurveKeys c = curve_open(stream);
+    alignas(16) uint32_t tl[4], t0[4], t1[4], v0[4], v1[4];
+    std::memcpy(tl, t, 16);
+    for (int i = 0; i < 4; ++i) curve_segment(c, tl[i], t0[i], t1[i], v0[i], v1[i]);
+    alignas(16) uint32_t tr[4], d[4], dt[4], z[4], w[4], s[4], res[4];
+    std::memcpy(tr, t, 16);
+    vec4_sub(reinterpret_cast<float*>(d), reinterpret_cast<const float*>(tr), reinterpret_cast<const float*>(t0));
+    vec4_sub(reinterpret_cast<float*>(dt), reinterpret_cast<const float*>(t1), reinterpret_cast<const float*>(t0));
+    for (int i = 0; i < 4; ++i) {
+        const uint32_t r = recip_430ac0(dt[i]);
+        z[i] = r & ~inf_mask(r);
+    }
+    vec4_mul(reinterpret_cast<float*>(w), reinterpret_cast<const float*>(d), reinterpret_cast<const float*>(z));
+    vec4_sub(reinterpret_cast<float*>(s), reinterpret_cast<const float*>(v1), reinterpret_cast<const float*>(v0));
+    vec4_madd(reinterpret_cast<float*>(res), reinterpret_cast<const float*>(s), reinterpret_cast<const float*>(w),
+              reinterpret_cast<const float*>(v0));
+    std::memcpy(out, res, 16);
+    return reinterpret_cast<uintptr_t>(out) | static_cast<uint64_t>(res[2]) << 32;
+}
+
+uint64_t __cdecl ffx_curve1(uint32_t* out, const uint32_t* t, uintptr_t* stream) {
+    const CurveKeys c = curve_open(stream);
+    uint32_t t0, t1, v0, v1;
+    curve_segment(c, *t, t0, t1, v0, v1);
+    const uint32_t d = sub_dbl(*t, t0);
+    const uint32_t dt = sub_dbl(t1, t0);
+    uint32_t r, tmp, w, s, res;
+    __asm {
+        fld dword ptr [dt]   // 0x984650: through the x87 stack onto the stack, 0x9846C0: 1 / x, stored as a float
+        fstp dword ptr [tmp]
+        fld dword ptr [tmp]
+        fld1
+        _emit 0xDE           // fdivrp st(1), st: st(1) = 1 / x
+        _emit 0xF1
+        fstp dword ptr [r]
+    }
+    const uint32_t z = r & ~inf_mask(r);
+    s = sub_dbl(v1, v0);
+    __asm {
+        fld dword ptr [d]    // 0x984500: d * z
+        fmul dword ptr [z]
+        fstp dword ptr [w]
+        fld dword ptr [s]    // 0x984560: s * w + v0
+        fmul dword ptr [w]
+        fadd dword ptr [v0]
+        fstp dword ptr [res]
+    }
+    *out = res;
+    return reinterpret_cast<uintptr_t>(out) | static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out)) << 32;
+}
+
+// More of the effects library's debug-build glue, each the same helper calls in the same order with the same inputs,
+// without the debug frame and the two or three stack copies of every intermediate result:
+//  0x9AF7F0 (out0, out1, out2, a, b, c, m): three rows of a*m[k] + b*m[k+3] + c*m[k+6] + m[k+9] (rows of 16 bytes),
+//    each a chain of three multiply-adds (0x553700); outputs written at the end in order; eax = out2[3], edx = out2[2].
+//  0x9B5DC0 (s, c, x): the sine and cosine polynomials, powers through the four-float multiply 0x407840 (as 0x5537E0),
+//    terms through the multiply-add 0x4157C0 (as 0x553700) with the coefficients splatted from 0x10D5C50/0x10D5C60
+//    lanes 1-3, the cosine starting from 0x10D5280; eax = c[2], edx = c.
+//  0x9B18A0 (out, r, g, b, a): four vectors saturated (0x407720), times the constant at 0x11E7E60 (splatted through
+//    the x87 stack), to integers at x1, x256, x65536 and x2^24, merged by the bit select 0x403B10 under 0xFF, 0xFFFFFF
+//    and 0xFFFF; eax = out, edx = out[3].
+//  0x9B4C60 (base, offset, stride, r0, r1, r2, r3): the four rows read, transposed (moves only) and written to
+//    base + offset + k * stride in order; eax = base (edx was a pointer into its own frame).
+namespace {
+using Fn2 = void*(__cdecl*)(void*, const void*);
+using Fn4 = void*(__cdecl*)(void*, const void*, const void*, const void*);
+inline void splat_u32(uint32_t* out, uint32_t v) {
+    out[0] = out[1] = out[2] = out[3] = v;
+}
+inline uint32_t u32_at(const void* p) {
+    uint32_t v;
+    std::memcpy(&v, p, 4);
+    return v;
+}
+}  // namespace
+
+uint64_t __cdecl ffx_mat3_madd(uint32_t* out0, uint32_t* out1, uint32_t* out2, const float* a, const float* b,
+                               const float* c, const float* m) {
+    alignas(16) float r0[4], r1[4], r2[4];
+    vec4_madd(r0, a, m, m + 36);
+    vec4_madd(r0, b, m + 12, r0);
+    vec4_madd(r0, c, m + 24, r0);
+    vec4_madd(r1, a, m + 4, m + 40);
+    vec4_madd(r1, b, m + 16, r1);
+    vec4_madd(r1, c, m + 28, r1);
+    vec4_madd(r2, a, m + 8, m + 44);
+    vec4_madd(r2, b, m + 20, r2);
+    vec4_madd(r2, c, m + 32, r2);
+    std::memcpy(out0, r0, 16);
+    std::memcpy(out1, r1, 16);
+    std::memcpy(out2, r2, 16);
+    return u32_at(r2 + 3) | static_cast<uint64_t>(u32_at(r2 + 2)) << 32;
+}
+
+uint64_t __cdecl ffx_sincos_poly(uint32_t* out_s, uint32_t* out_c, const float* x) {
+    alignas(16) float x2[4], x3[4], x4[4], x5[4], x6[4], x7[4], k[4], sn[4], cs[4];
+    vec4_mul(x2, x, x);
+    vec4_mul(x3, x2, x);
+    vec4_mul(x4, x2, x2);
+    vec4_mul(x5, x3, x2);
+    vec4_mul(x6, x3, x3);
+    vec4_mul(x7, x4, x3);
+    const auto* kc = reinterpret_cast<const uint32_t*>(0x10D5C50);
+    const auto* kd = reinterpret_cast<const uint32_t*>(0x10D5C60);
+    const auto* one = reinterpret_cast<const float*>(0x10D5280);
+    auto* ku = reinterpret_cast<uint32_t*>(k);
+    splat_u32(ku, kc[1]);
+    vec4_madd(sn, k, x3, x);
+    splat_u32(ku, kc[2]);
+    vec4_madd(sn, k, x5, sn);
+    splat_u32(ku, kc[3]);
+    vec4_madd(sn, k, x7, sn);
+    splat_u32(ku, kd[1]);
+    vec4_madd(cs, k, x2, one);
+    splat_u32(ku, kd[2]);
+    vec4_madd(cs, k, x4, cs);
+    splat_u32(ku, kd[3]);
+    vec4_madd(cs, k, x6, cs);
+    std::memcpy(out_s, sn, 16);
+    std::memcpy(out_c, cs, 16);
+    return u32_at(cs + 2) | static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out_c)) << 32;
+}
+
+uint64_t __cdecl ffx_pack_colors(uint32_t* out, const uint32_t* p2, const uint32_t* p3, const uint32_t* p4,
+                                 const uint32_t* p5) {
+    alignas(16) uint32_t a[4], b[4], c[4], d[4];
+    std::memcpy(a, p4, 16);
+    std::memcpy(b, p3, 16);
+    std::memcpy(c, p2, 16);
+    std::memcpy(d, p5, 16);
+    alignas(16) uint32_t scale[4], m8[4], m24[4], m16[4];
+    float sv;
+    std::memcpy(&sv, reinterpret_cast<const void*>(0x11E7E60), 4);
+    ffx_splat_x87(reinterpret_cast<float*>(scale), sv);
+    splat_u32(m8, 0xFF);
+    splat_u32(m24, 0xFFFFFF);
+    splat_u32(m16, 0xFFFF);
+    const auto sat = reinterpret_cast<Fn2>(0x407720);
+    alignas(16) uint32_t sa[4], sb[4], sc[4], sd[4];
+    sat(sa, a);
+    sat(sb, b);
+    sat(sc, c);
+    sat(sd, d);
+    alignas(16) float ma[4], mb[4], mc[4], md[4];
+    vec4_mul(ma, reinterpret_cast<const float*>(sa), reinterpret_cast<const float*>(scale));
+    vec4_mul(mb, reinterpret_cast<const float*>(sb), reinterpret_cast<const float*>(scale));
+    vec4_mul(mc, reinterpret_cast<const float*>(sc), reinterpret_cast<const float*>(scale));
+    vec4_mul(md, reinterpret_cast<const float*>(sd), reinterpret_cast<const float*>(scale));
+    alignas(16) uint32_t ia[4], ib[4], ic[4], id[4];
+    ffx_to_int_1(ia, ma);
+    ffx_to_int_256(ib, mb);
+    ffx_to_int_65536(ic, mc);
+    ffx_to_int_2p24(id, md);
+    const auto sel = reinterpret_cast<Fn4>(0x403B10);
+    alignas(16) uint32_t q1[4], q2[4], r[4];
+    sel(q1, ib, ia, m8);
+    sel(q2, id, ic, m24);
+    sel(r, q2, q1, m16);
+    std::memcpy(out, r, 16);
+    return reinterpret_cast<uintptr_t>(out) | static_cast<uint64_t>(r[3]) << 32;
+}
+
+uint64_t __cdecl ffx_rows_transposed(uint8_t* base, int offset, int stride, const uint32_t* r0, const uint32_t* r1,
+                                     const uint32_t* r2, const uint32_t* r3) {
+    uint32_t m[4][4];
+    std::memcpy(m[0], r0, 16);
+    std::memcpy(m[1], r1, 16);
+    std::memcpy(m[2], r2, 16);
+    std::memcpy(m[3], r3, 16);
+    const int at[4] = {offset, offset + stride, offset + stride * 2, stride * 3 + offset};
+    for (int k = 0; k < 4; ++k) {
+        const uint32_t row[4] = {m[0][k], m[1][k], m[2][k], m[3][k]};
+        std::memcpy(base + at[k], row, 16);
+    }
+    return reinterpret_cast<uintptr_t>(base) | static_cast<uint64_t>(reinterpret_cast<uintptr_t>(base)) << 32;
+}
+
 struct Site {
     const char* name;
     uintptr_t address;
@@ -693,6 +954,10 @@ struct Site {
     size_t expect2_at;
     size_t expect2_size;
     const void* replacement;
+    // optional: FNV-1a of hash_size bytes at address + hash_at (long debug-build bodies)
+    uint32_t hash = 0;
+    size_t hash_at = 0;
+    size_t hash_size = 0;
 };
 
 const uint8_t kAddHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x4D, 0x0C, 0x8B, 0x55, 0x10, 0x8B, 0x45, 0x08,
@@ -767,6 +1032,14 @@ const uint8_t kBoneSetter128Tail[] = {0x8D, 0x44, 0x7F, 0x78, 0xC1, 0xE0, 0x04, 
 // 0x431C30 and 0x431D40 whole (no calls but through the device's vtable; they differ in its offset)
 const uint8_t kFlushVs[] = {0x83, 0xEC, 0x14, 0x53, 0x55, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x28, 0x33, 0xD2, 0x8D, 0x47, 0x20, 0x33, 0xDB, 0x8B, 0xCF, 0x2B, 0xC7, 0x89, 0x54, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x89, 0x44, 0x24, 0x18, 0xEB, 0x04, 0x8B, 0x44, 0x24, 0x18, 0x8B, 0x31, 0x8B, 0x04, 0x08, 0x8B, 0xEE, 0x23, 0xE8, 0x89, 0x6C, 0x24, 0x1C, 0x74, 0x6A, 0x8B, 0x7C, 0x24, 0x10, 0xF7, 0xD0, 0x23, 0xC6, 0xC1, 0xE7, 0x05, 0x8B, 0xF3, 0x89, 0x7C, 0x24, 0x20, 0x33, 0xED, 0xC1, 0xE6, 0x04, 0x89, 0x01, 0xC1, 0xE7, 0x04, 0x8B, 0xCD, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xD3, 0xE8, 0x8B, 0x4C, 0x24, 0x1C, 0x85, 0xC1, 0x74, 0x10, 0x85, 0xD2, 0x75, 0x09, 0x8B, 0x44, 0x24, 0x20, 0x8D, 0x1C, 0x28, 0x8B, 0xF7, 0x42, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x1F, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8B, 0x54, 0x24, 0x2C, 0x8D, 0x54, 0x16, 0x40, 0x52, 0x53, 0x50, 0x8B, 0x81, 0x78, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x45, 0x83, 0xC7, 0x10, 0x83, 0xFD, 0x20, 0x7C, 0xB3, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x27, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0x78, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x8B, 0x7C, 0x24, 0x28, 0x8B, 0x4C, 0x24, 0x14, 0x8B, 0x44, 0x24, 0x10, 0x40, 0x83, 0xC1, 0x04, 0x83, 0xF8, 0x08, 0x89, 0x44, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x0F, 0x8C, 0x3F, 0xFF, 0xFF, 0xFF, 0x85, 0xD2, 0x74, 0x1D, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0x78, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x5F, 0x5E, 0x5D, 0x5B, 0x83, 0xC4, 0x14, 0xC2, 0x08, 0x00};
 const uint8_t kFlushPs[] = {0x83, 0xEC, 0x14, 0x53, 0x55, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x28, 0x33, 0xD2, 0x8D, 0x47, 0x20, 0x33, 0xDB, 0x8B, 0xCF, 0x2B, 0xC7, 0x89, 0x54, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x89, 0x44, 0x24, 0x18, 0xEB, 0x04, 0x8B, 0x44, 0x24, 0x18, 0x8B, 0x31, 0x8B, 0x04, 0x08, 0x8B, 0xEE, 0x23, 0xE8, 0x89, 0x6C, 0x24, 0x1C, 0x74, 0x6A, 0x8B, 0x7C, 0x24, 0x10, 0xF7, 0xD0, 0x23, 0xC6, 0xC1, 0xE7, 0x05, 0x8B, 0xF3, 0x89, 0x7C, 0x24, 0x20, 0x33, 0xED, 0xC1, 0xE6, 0x04, 0x89, 0x01, 0xC1, 0xE7, 0x04, 0x8B, 0xCD, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xD3, 0xE8, 0x8B, 0x4C, 0x24, 0x1C, 0x85, 0xC1, 0x74, 0x10, 0x85, 0xD2, 0x75, 0x09, 0x8B, 0x44, 0x24, 0x20, 0x8D, 0x1C, 0x28, 0x8B, 0xF7, 0x42, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x1F, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8B, 0x54, 0x24, 0x2C, 0x8D, 0x54, 0x16, 0x40, 0x52, 0x53, 0x50, 0x8B, 0x81, 0xB4, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x45, 0x83, 0xC7, 0x10, 0x83, 0xFD, 0x20, 0x7C, 0xB3, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x27, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0xB4, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x8B, 0x7C, 0x24, 0x28, 0x8B, 0x4C, 0x24, 0x14, 0x8B, 0x44, 0x24, 0x10, 0x40, 0x83, 0xC1, 0x04, 0x83, 0xF8, 0x08, 0x89, 0x44, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x0F, 0x8C, 0x3F, 0xFF, 0xFF, 0xFF, 0x85, 0xD2, 0x74, 0x1D, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0xB4, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x5F, 0x5E, 0x5D, 0x5B, 0x83, 0xC4, 0x14, 0xC2, 0x08, 0x00};
+// 0x982C30 and 0x9817B0 up to their debug fill's count (FastEffects zeroes it); the rest by hash
+const uint8_t kCurve4Head[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0xC0, 0x03, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0x40, 0xFC, 0xFF, 0xFF, 0xB9};
+const uint8_t kCurve1Head[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x04, 0x01, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xFC, 0xFE, 0xFF, 0xFF, 0xB9};
+// 0x9AF7F0, 0x9B5DC0, 0x9B18A0 and 0x9B4C60 up to their debug fill's count; the rest by hash
+const uint8_t kMatMaddHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0x90, 0x01, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0x70, 0xFE, 0xFF, 0xFF, 0xB9};
+const uint8_t kSinCosHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0x10, 0x04, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xF0, 0xFB, 0xFF, 0xFF, 0xB9};
+const uint8_t kPackHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0x90, 0x05, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0x70, 0xFA, 0xFF, 0xFF, 0xB9};
+const uint8_t kRowsHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0x36, 0x2B, 0x04, 0x01, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x50, 0x53, 0x81, 0xEC, 0x30, 0x01, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xC0, 0xFE, 0xFF, 0xFF, 0xB9};
 // 0x419890 through its constants (-0.0f at 0x11E7FF0, 1.0 at 0x11E7C90) to the loop's first load
 const uint8_t kRsqrtHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x55, 0x0C, 0x0F, 0x57, 0xC9, 0xF3, 0x0F, 0x10,
                               0x15, 0xF0, 0x7F, 0x1E, 0x01, 0xF2, 0x0F, 0x10, 0x1D, 0x90, 0x7C, 0x1E, 0x01, 0x8D, 0x44,
@@ -1003,10 +1276,28 @@ const Site kFfxSites[] = {
      reinterpret_cast<const void*>(&ffx_fwd2<0x416B80>)},
     {"0x4129B0 wrapper", 0xA520C0, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwdA520C0, 0x29, sizeof(kFwdA520C0),
      reinterpret_cast<const void*>(&ffx_fwd1<0x4129B0>)},
+    {"keyframe curve (four lanes)", 0x982C30, kCurve4Head, sizeof(kCurve4Head), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&ffx_curve4), 0x266987A4u, 40, 1627},
+    {"keyframe curve (one float)", 0x9817B0, kCurve1Head, sizeof(kCurve1Head), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&ffx_curve1), 0x4C113B3Fu, 21, 779},
+    {"three-row multiply-add", 0x9AF7F0, kMatMaddHead, sizeof(kMatMaddHead), nullptr, 0, 0, reinterpret_cast<const void*>(&ffx_mat3_madd),
+     0x0CC0CF07u, 40, 1011},
+    {"sine and cosine polynomials", 0x9B5DC0, kSinCosHead, sizeof(kSinCosHead), nullptr, 0, 0, reinterpret_cast<const void*>(&ffx_sincos_poly),
+     0x305BC54Eu, 40, 2011},
+    {"colour packing", 0x9B18A0, kPackHead, sizeof(kPackHead), nullptr, 0, 0, reinterpret_cast<const void*>(&ffx_pack_colors),
+     0x94FB03DFu, 40, 1911},
+    {"transposed rows", 0x9B4C60, kRowsHead, sizeof(kRowsHead), nullptr, 0, 0, reinterpret_cast<const void*>(&ffx_rows_transposed),
+     0xAC6ECBD8u, 55, 449},
 };
 
 bool matches(const Site& s) {
     if (std::memcmp(reinterpret_cast<const void*>(s.address), s.expect, s.expect_size) != 0) return false;
+    if (s.hash_size) {
+        uint32_t h = 0x811C9DC5u;
+        const auto* p = reinterpret_cast<const uint8_t*>(s.address + s.hash_at);
+        for (size_t i = 0; i < s.hash_size; ++i) h = (h ^ p[i]) * 0x01000193u;
+        if (h != s.hash) return false;
+    }
     return !s.expect2 ||
            std::memcmp(reinterpret_cast<const void*>(s.address + s.expect2_at), s.expect2, s.expect2_size) == 0;
 }
@@ -1204,7 +1495,8 @@ bool rendermath_install(bool core, bool effects) {
         const int n = install_table("FastEffects", kFfxSites, sizeof(kFfxSites) / sizeof(kFfxSites[0]), 1);
         ok = ok && n == static_cast<int>(sizeof(kFfxSites) / sizeof(kFfxSites[0]));
         if (n) {
-            LOG_INFO("FastEffects: %d of the effects library's vector helpers (set, splat, subtract, float-to-integer, lerp, parameter evaluation, stream reads and forwarding wrappers) replaced "
+            LOG_INFO("FastEffects: %d of the effects library's routines (vector helpers, forwarding wrappers, the "
+                     "keyframe curves, colour packing, the sine/cosine polynomial and other particle glue) replaced "
                      "with direct code (same results)",
                      n);
         }

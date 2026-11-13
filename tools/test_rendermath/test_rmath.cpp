@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <float.h>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -475,6 +476,210 @@ static void test_flush() {
     std::printf("constant flushes: 400000 iterations, %ld device calls, %d mismatches so far\n", calls, g_fail);
 }
 
+// 0x982C30 / 0x9817B0 keyframe curves vs ffx_curve4 / ffx_curve1: random streams (n 0..8; keys sorted, with
+// repeats, or random, NaN/inf/zero/denormal mixed in; values anything), times on keys, between, outside or anything;
+// out, the stream pointer after, and eax/edx/ebx/esi/edi/ebp compared; under x87 precision 24, 53 and 64 bits.
+static uint32_t g_curve_fn, g_cregs[6];
+__declspec(naked) static void call_curve(void* /*out*/, const void* /*t*/, void* /*stream*/) {
+    __asm {
+        push ebp
+        push ebx
+        push esi
+        push edi
+        push dword ptr [esp + 28]
+        push dword ptr [esp + 28]
+        push dword ptr [esp + 28]
+        mov ebx, 0x22222222
+        mov esi, 0x33333333
+        mov edi, 0x44444444
+        mov ebp, 0x55555555
+        call dword ptr [g_curve_fn]
+        add esp, 12
+        mov [g_cregs], eax
+        mov [g_cregs + 4], edx
+        mov [g_cregs + 8], ebx
+        mov [g_cregs + 12], esi
+        mov [g_cregs + 16], edi
+        mov [g_cregs + 20], ebp
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret
+    }
+}
+static float u2f(uint32_t u) { float f; std::memcpy(&f, &u, 4); return f; }
+static uint32_t f2u(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
+static void test_curves() {
+    static uint32_t buf1[64], buf2[64];
+    const unsigned pcs[3] = {_PC_24, _PC_53, _PC_64};
+    long cases = 0;
+    for (int pc = 0; pc < 3; ++pc) {
+        unsigned prev = 0;
+        _controlfp_s(&prev, pcs[pc], _MCW_PC);
+        for (int it = 0; it < 150000; ++it) {
+            const bool four = (it & 1) != 0;
+            const int n = static_cast<int>(rng() % 9);
+            uint32_t* keys = buf1 + 9;  // buf1[8] = n
+            const int mode = rng() % 4;
+            float x = static_cast<float>(static_cast<int>(rng() % 200) - 100) / 8.0f;
+            for (int k = 0; k < n; ++k) {
+                if (mode == 0) { keys[k] = rnd_bits(); continue; }
+                if (mode == 1 && (rng() % 3) == 0) { keys[k] = k ? keys[k - 1] : f2u(x); continue; }
+                x += static_cast<float>(rng() % 64) / 16.0f;
+                keys[k] = f2u(x);
+                if (mode == 2 && (rng() % 6) == 0) keys[k] = rnd_bits();
+            }
+            for (int k = 0; k < n; ++k) keys[n + k] = rnd_bits();
+            for (int k = 0; k < 8; ++k) buf1[k] = rnd_bits();
+            buf1[8] = static_cast<uint32_t>(n);
+            uint32_t t[4];
+            for (int i = 0; i < 4; ++i) {
+                switch (rng() % 5) {
+                case 0: t[i] = n ? keys[rng() % n] : rnd_bits(); break;
+                case 1: t[i] = n ? f2u(u2f(keys[rng() % n]) + static_cast<float>(rng() % 100) / 50.0f - 1.0f) : rnd_bits(); break;
+                case 2: t[i] = f2u(static_cast<float>(static_cast<int>(rng() % 400) - 200) / 4.0f); break;
+                default: t[i] = rnd_bits(); break;
+                }
+            }
+            std::memcpy(buf2, buf1, sizeof(buf1));
+            uint32_t out1[4] = {1, 2, 3, 4}, out2[4] = {1, 2, 3, 4};
+            uint32_t* stream1 = buf1 + 8;
+            uint32_t* stream2 = buf2 + 8;
+            g_curve_fn = four ? 0x982C30 : 0x9817B0;
+            call_curve(out1, t, &stream1);
+            uint32_t r1[6];
+            std::memcpy(r1, g_cregs, 24);
+            g_curve_fn = reinterpret_cast<uint32_t>(four ? reinterpret_cast<const void*>(&ffx_curve4)
+                                                         : reinterpret_cast<const void*>(&ffx_curve1));
+            call_curve(out2, t, &stream2);
+            ++cases;
+            // eax (and edx for one float) point at out1 / out2: compare as offsets
+            if (r1[0] == reinterpret_cast<uint32_t>(out1)) r1[0] = reinterpret_cast<uint32_t>(out2);
+            if (!four && r1[1] == reinterpret_cast<uint32_t>(out1)) r1[1] = reinterpret_cast<uint32_t>(out2);
+            same(out1, out2, four ? 16 : 4, four ? "curve4 out" : "curve1 out", it);
+            if ((stream1 - buf1) != (stream2 - buf2)) {
+                if (g_fail < 20) std::printf("MISMATCH curve stream (iteration %d)\n", it);
+                ++g_fail;
+            }
+            if (std::memcmp(r1, g_cregs, 24) != 0) {
+                if (g_fail < 20) {
+                    std::printf("curve%d registers differ at %d (pc %d): %08X %08X vs %08X %08X\n", four ? 4 : 1, it, pc,
+                                r1[0], r1[1], g_cregs[0], g_cregs[1]);
+                }
+                ++g_fail;
+            }
+        }
+        _controlfp_s(&prev, _PC_53, _MCW_PC);
+        std::printf("keyframe curves, x87 precision %s: %d mismatches so far\n", pc == 0 ? "24" : pc == 1 ? "53" : "64",
+                    g_fail);
+    }
+    std::printf("keyframe curves: %ld cases\n", cases);
+}
+
+// The effects glue rewrites (0x9AF7F0, 0x9B5DC0, 0x9B18A0, 0x9B4C60) vs ffx_mat3_madd, ffx_sincos_poly,
+// ffx_pack_colors, ffx_rows_transposed: random inputs, every output byte and eax/edx (pointers as offsets) compared,
+// and ebx/esi/edi/ebp kept.
+static uint32_t g_gfn, g_gargs[8], g_gn, g_gregs[6];
+__declspec(naked) static void call_glue() {
+    __asm {
+        push ebp
+        push ebx
+        push esi
+        push edi
+        mov ecx, [g_gn]
+    push_loop:
+        test ecx, ecx
+        jz pushed
+        push dword ptr [g_gargs + ecx * 4 - 4]
+        dec ecx
+        jmp push_loop
+    pushed:
+        mov ebx, 0x22222222
+        mov esi, 0x33333333
+        mov edi, 0x44444444
+        mov ebp, 0x55555555
+        call dword ptr [g_gfn]
+        mov ecx, [g_gn]
+        lea esp, [esp + ecx * 4]
+        mov [g_gregs], eax
+        mov [g_gregs + 4], edx
+        mov [g_gregs + 8], ebx
+        mov [g_gregs + 12], esi
+        mov [g_gregs + 16], edi
+        mov [g_gregs + 20], ebp
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret
+    }
+}
+static void glue_compare(const char* what, int it, const uint8_t* o1, const uint8_t* o2, size_t n, const uint32_t* r1,
+                         uint32_t lo1, uint32_t lo2, bool check_edx) {
+    same(o1, o2, n, what, it);
+    uint32_t a = r1[0], d = r1[1];
+    if (a >= lo1 && a < lo1 + 0x400) a += lo2 - lo1;
+    if (d >= lo1 && d < lo1 + 0x400) d += lo2 - lo1;
+    if (a != g_gregs[0] || (check_edx && d != g_gregs[1]) || std::memcmp(r1 + 2, g_gregs + 2, 16) != 0) {
+        if (g_fail < 20) std::printf("%s registers differ at %d: %08X %08X vs %08X %08X\n", what, it, a, d, g_gregs[0], g_gregs[1]);
+        ++g_fail;
+    }
+}
+static void test_glue() {
+    static uint8_t in[0x400], o1[0x400], o2[0x400];
+    for (int it = 0; it < 200000; ++it) {
+        const int kind = it % 4;
+        fill(reinterpret_cast<uint32_t*>(in), 0x100);
+        if (kind == 2 && (rng() & 1)) {  // colours mostly in range
+            for (int i = 0; i < 16; ++i) { float f = static_cast<float>(rng() % 1200) / 1000.0f - 0.1f; std::memcpy(in + i * 4, &f, 4); }
+        }
+        if (kind == 1 && (rng() & 1)) {  // angles mostly in the polynomial's range
+            for (int i = 0; i < 4; ++i) { float f = static_cast<float>(static_cast<int>(rng() % 2000) - 1000) / 600.0f; std::memcpy(in + i * 4, &f, 4); }
+        }
+        fill(reinterpret_cast<uint32_t*>(o1), 0x100);
+        std::memcpy(o2, o1, sizeof(o1));
+        uint32_t r1[6];
+        size_t n = 0;
+        const char* what = "";
+        bool edx = true;
+        for (int pass = 0; pass < 2; ++pass) {
+            uint8_t* o = pass ? o2 : o1;
+            const uint32_t I = reinterpret_cast<uint32_t>(in), O = reinterpret_cast<uint32_t>(o);
+            switch (kind) {
+            case 0:
+                what = "glue 0x9AF7F0"; n = 48; g_gn = 7;
+                g_gargs[0] = O; g_gargs[1] = O + 16; g_gargs[2] = O + 32; g_gargs[3] = I; g_gargs[4] = I + 16; g_gargs[5] = I + 32; g_gargs[6] = I + 64;
+                g_gfn = pass ? reinterpret_cast<uint32_t>(&ffx_mat3_madd) : 0x9AF7F0;
+                break;
+            case 1:
+                what = "glue 0x9B5DC0"; n = 32; g_gn = 3;
+                g_gargs[0] = O; g_gargs[1] = O + 16; g_gargs[2] = I;
+                g_gfn = pass ? reinterpret_cast<uint32_t>(&ffx_sincos_poly) : 0x9B5DC0;
+                break;
+            case 2:
+                what = "glue 0x9B18A0"; n = 16; g_gn = 5;
+                g_gargs[0] = O; g_gargs[1] = I; g_gargs[2] = I + 16; g_gargs[3] = I + 32; g_gargs[4] = I + 48;
+                g_gfn = pass ? reinterpret_cast<uint32_t>(&ffx_pack_colors) : 0x9B18A0;
+                break;
+            default: {
+                what = "glue 0x9B4C60"; n = 0x200; g_gn = 7; edx = false;
+                static int off, stride;
+                if (!pass) { off = static_cast<int>(rng() % 64) * 4; const int strides[5] = {16, 32, 64, 4, 0}; stride = strides[rng() % 5]; }
+                g_gargs[0] = O; g_gargs[1] = static_cast<uint32_t>(off); g_gargs[2] = static_cast<uint32_t>(stride);
+                g_gargs[3] = I; g_gargs[4] = I + 16; g_gargs[5] = I + 32; g_gargs[6] = I + 48;
+                g_gfn = pass ? reinterpret_cast<uint32_t>(&ffx_rows_transposed) : 0x9B4C60;
+                break;
+            }
+            }
+            call_glue();
+            if (!pass) std::memcpy(r1, g_gregs, 24);
+        }
+        glue_compare(what, it, o1, o2, n, r1, reinterpret_cast<uint32_t>(o1), reinterpret_cast<uint32_t>(o2), edx);
+    }
+    std::printf("effects glue: 200000 iterations, %d mismatches so far\n", g_fail);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "child") != 0) return run_parent(argv[0]);
     std::printf("image mapped (child)\n");
@@ -679,5 +884,10 @@ int main(int argc, char** argv) {
     test_random();
     test_matset();
     test_flush();
+    for (int pass = 0; pass < 2; ++pass) {
+        g_nan_heavy = pass == 1;
+        test_curves();
+        test_glue();
+    }
     return g_fail ? 1 : 0;
 }

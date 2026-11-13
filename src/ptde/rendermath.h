@@ -23,6 +23,10 @@
 //    order (tools/test_rendermath compares them call by call).
 //  effects (FastEffects): the effects library's debug-build wrappers that set (0x984890), splat (0x9847C0,
 //    0x984920 through the x87 stack) and subtract (0x984B60) four floats.
+//    Also its debug-build glue where the particle updates spend their time: the keyframe curves (0x982C30 four
+//    lanes, 0x9817B0 one float, x87 steps kept as x87), the three-row multiply-add (0x9AF7F0), the sine/cosine
+//    polynomial (0x9B5DC0), colour packing (0x9B18A0) and transposed rows (0x9B4C60): the same helper operations in
+//    the same order without the debug frames and stack copies (tools/test_rendermath, x87 precision 24/53/64).
 //
 // Each table is checked in full before any of it is written.
 bool rendermath_install(bool core, bool effects);
