@@ -1023,6 +1023,84 @@ static void test_update_loop() {
     std::printf("update loop: 20000 runs, %ld groups of four, %d mismatches so far\n", groups, g_fail);
 }
 
+// _CIsqrt (0xAC1800) vs crt_cisqrt: st(0) = a float, double or extended value (positive, zero, denormal, huge, tiny
+// below the double range), under the control words 0x27F, 0x07F, 0x37F, 0x127F and the other rounding modes; the
+// 80-bit result, the status word (cleared before) and the control word after compared. (Negative, infinite and NaN
+// arguments take the same original code in both, through its error handling, which needs the runtime set up.)
+static uint32_t g_sq_fn;
+static uint16_t g_sq_cw, g_sq_sw, g_sq_cw_after;
+static uint32_t g_sq_preset;
+static const double g_sq_three = 3.0;
+static uint8_t g_sq_in[10], g_sq_out[10];
+__declspec(naked) static void call_sqrt() {
+    __asm {
+        fninit
+        fldcw word ptr [g_sq_cw]
+        fnclex
+        cmp dword ptr [g_sq_preset], 0
+        je no_preset
+        fld1
+        fdiv qword ptr [g_sq_three]
+        fstp st(0)
+    no_preset:
+        fld tbyte ptr [g_sq_in]
+        call dword ptr [g_sq_fn]
+        fnstsw word ptr [g_sq_sw]
+        fnstcw word ptr [g_sq_cw_after]
+        fstp tbyte ptr [g_sq_out]
+        fninit
+        ret
+    }
+}
+static void test_cisqrt() {
+    const uint16_t cws[8] = {0x27F, 0x07F, 0x37F, 0x127F, 0x67F, 0xA7F, 0xE7F, 0x47F};
+    long fast = 0;
+    for (int it = 0; it < 400000; ++it) {
+        uint8_t in[10] = {};
+        // build the 80-bit value directly: sign 0, exponent and mantissa random within ranges
+        uint64_t mant = (static_cast<uint64_t>(rng()) << 32) | rng();
+        uint32_t ex;
+        switch (rng() % 6) {
+        case 0: ex = 0x3FFF - 126 + rng() % 254; mant &= 0xFFFFFF0000000000ull; break;   // a float's
+        case 1: ex = 0x3FFF - 1022 + rng() % 2046; mant &= 0xFFFFFFFFFFFFF800ull; break; // a double's
+        case 2: ex = 0x3FFF - 1100 + rng() % 2200; break;                              // extended, also past double
+        case 3: ex = 0; mant = 0; break;                                                // +0
+        case 4: ex = 0x3FFF - 1023 - rng() % 52; mant &= 0xFFFFFFFFFFFFF800ull; break;  // tiny (double denormal range)
+        default: ex = 0x3FFF + rng() % 64 - 32; break;
+        }
+        if (ex) mant |= 0x8000000000000000ull;
+        std::memcpy(in, &mant, 8);
+        in[8] = static_cast<uint8_t>(ex & 0xFF);
+        in[9] = static_cast<uint8_t>((ex >> 8) & 0x7F);
+        const uint16_t cw = cws[rng() % 8];
+        g_sq_preset = rng() & 1;
+        uint8_t o1[10];
+        uint16_t sw1, cwa1;
+        for (int pass = 0; pass < 2; ++pass) {
+            std::memcpy(g_sq_in, in, 10);
+            g_sq_cw = cw;
+            g_sq_fn = pass ? reinterpret_cast<uint32_t>(&crt_cisqrt) : 0xAC1800;
+            call_sqrt();
+            if (!pass) { std::memcpy(o1, g_sq_out, 10); sw1 = g_sq_sw; cwa1 = g_sq_cw_after; }
+        }
+        if ((cw & 0xCFF) == 0x7F && ex) ++fast;
+        if (std::memcmp(o1, g_sq_out, 10) != 0 || sw1 != g_sq_sw || cwa1 != g_sq_cw_after) {
+            if (g_fail < 20) {
+                std::printf("MISMATCH sqrt (it %d cw %04X exp %04X): sw %04X/%04X cw %04X/%04X\n", it, cw, ex, sw1, g_sq_sw, cwa1, g_sq_cw_after);
+                std::printf("   in ");
+                for (int b = 9; b >= 0; --b) std::printf("%02X", in[b]);
+                std::printf("  out ");
+                for (int b = 9; b >= 0; --b) std::printf("%02X", o1[b]);
+                std::printf(" / ");
+                for (int b = 9; b >= 0; --b) std::printf("%02X", g_sq_out[b]);
+                std::printf("\n");
+            }
+            ++g_fail;
+        }
+    }
+    std::printf("runtime square root: 400000 cases (%ld on the fast path's terms), %d mismatches so far\n", fast, g_fail);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "child") != 0) return run_parent(argv[0]);
     std::printf("image mapped (child)\n");
@@ -1235,6 +1313,7 @@ int main(int argc, char** argv) {
         test_arrays();
         test_particle_loop();
         test_update_loop();
+        test_cisqrt();
     }
     return g_fail ? 1 : 0;
 }

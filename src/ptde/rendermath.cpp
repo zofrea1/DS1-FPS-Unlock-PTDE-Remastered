@@ -1604,6 +1604,50 @@ __declspec(naked) void ffx_update_loop_entry() {
     }
 }
 
+// The runtime's x87 square root _CIsqrt (0xAC1800: argument and result in st(0)), behind the engine's sqrtf (0x419980)
+// and called directly by much of the engine (bounds, physics, the effects' eased curves), on both threads. It stores
+// the argument as a double to classify it; for a positive finite one it loads the control word 0x7F | (the thread's
+// precision bits) (round to nearest, every exception masked) unless the word is 0x27F, and runs fsqrt. On the way out,
+// with a word other than 0x27F and the precision exception masked, a set precision flag (sticky: in practice always
+// set) sends it through the runtime's floating-point error handling (__startOneArgErrorHandling, __87except: for an
+// inexact result the value stored as a double and loaded back, the word restored, errno untouched) - on Direct3D's
+// render thread (word 0x07F) for every square root. With the thread's word of the form 0x7F | precision, the same
+// here directly: fsqrt, and for a word other than 0x27F with the flag set the store to a double and the load back.
+// Zero, negative (the domain error: errno and the runtime's handling), infinite and NaN arguments, and any other
+// control word, go on in the original code, entered after its first two instructions (done the same way here).
+__declspec(naked) void crt_cisqrt() {
+    __asm {
+        sub esp, 12
+        fst qword ptr [esp]
+        mov eax, [esp + 4]
+        test eax, eax
+        js slow
+        cmp eax, 0x7FF00000
+        jae slow
+        or eax, [esp]
+        jz slow
+        fnstcw word ptr [esp + 8]
+        movzx eax, word ptr [esp + 8]
+        and eax, 0xCFF
+        cmp eax, 0x7F
+        jne slow
+        fsqrt
+        cmp word ptr [esp + 8], 0x27F
+        je done
+        fnstsw ax
+        test al, 0x20
+        jz done
+        fstp qword ptr [esp]
+        fld qword ptr [esp]
+    done:
+        add esp, 12
+        ret
+    slow:
+        mov eax, 0xAC1806
+        jmp eax
+    }
+}
+
 struct Site {
     const char* name;
     uintptr_t address;
@@ -1711,6 +1755,8 @@ const uint8_t kQuadLoop[] = {0xC7, 0x85, 0x7C, 0xEB, 0xFF, 0xFF, 0x00, 0x00, 0x0
 // 0xA4D420 up to its debug fill's count (the rest by hash), and the code from 0xA4DEE8 to its particle loop
 const uint8_t kUpdateHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0x83, 0x80, 0x04, 0x01, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x50, 0x53, 0xB8, 0xB8, 0x18, 0x00, 0x00, 0xE8, 0xA1, 0x45, 0x07, 0x00, 0x56, 0x57, 0x8D, 0xBD, 0x38, 0xE7, 0xFF, 0xFF, 0xB9};
 const uint8_t kUpdatePreLoop[] = {0x88, 0x95, 0xD7, 0xF8, 0xFF, 0xFF, 0x0F, 0xB6, 0x85, 0xD7, 0xF8, 0xFF, 0xFF, 0x85, 0xC0, 0x74, 0x0B, 0x8B, 0x4B, 0x28, 0x89, 0x8D, 0x40, 0xE7, 0xFF, 0xFF, 0xEB, 0x09, 0x8B, 0x53, 0x08, 0x89, 0x95, 0x40, 0xE7, 0xFF, 0xFF, 0x8B, 0x85, 0x40, 0xE7, 0xFF, 0xFF, 0x89, 0x43, 0x28, 0x8B, 0x4B, 0x20, 0xC1, 0xE1, 0x04, 0x89, 0x8D, 0xD0, 0xF8, 0xFF, 0xFF};
+// _CIsqrt (0xAC1800) and the start of its body (the rest by hash)
+const uint8_t kCiSqrtHead[] = {0x83, 0xEC, 0x0C, 0xDD, 0x14, 0x24, 0xE8, 0x2D, 0xE3, 0x00, 0x00, 0xE8, 0x0D, 0x00, 0x00, 0x00, 0x83, 0xC4, 0x0C, 0xC3, 0x8D, 0x54, 0x24, 0x04, 0xE8, 0xD8, 0xE2, 0x00, 0x00, 0x52, 0x9B, 0xD9};
 // 0x419890 through its constants (-0.0f at 0x11E7FF0, 1.0 at 0x11E7C90) to the loop's first load
 const uint8_t kRsqrtHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x55, 0x0C, 0x0F, 0x57, 0xC9, 0xF3, 0x0F, 0x10,
                               0x15, 0xF0, 0x7F, 0x1E, 0x01, 0xF2, 0x0F, 0x10, 0x1D, 0x90, 0x7C, 0x1E, 0x01, 0x8D, 0x44,
@@ -1744,6 +1790,8 @@ const Site kCoreSites[] = {
      reinterpret_cast<const void*>(&vec4_rsqrt)},
     {"box transform", 0x446D30, kAabbHead, sizeof(kAabbHead), nullptr, 0, 0, reinterpret_cast<const void*>(&aabb_transform),
      0x7ECAA53Cu, 16, 3495},
+    {"runtime square root", 0xAC1800, kCiSqrtHead, sizeof(kCiSqrtHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&crt_cisqrt), 0x1AB0EB6Eu, 0x20, 154},
 };
 
 // Bone palettes (table 3, installed with the core sites; RemoteControl `fastmath bone 0|1`): 0x41FB20 and its two
@@ -2154,7 +2202,8 @@ bool rendermath_install(bool core, bool effects) {
         if (n) {
             LOG_INFO("FastRenderMath: %d of the engine's vector and matrix helpers (four-float add, subtract, multiply, "
                      "multiply-add, not-equal, saturate and reciprocal square root, 3x4 matrix add and multiply, 4x4 "
-                     "multiply and transpose, box transform) run as SSE with the same results",
+                     "multiply and transpose, box transform, the runtime square root's common case) run with the "
+                     "same results",
                      n);
         }
         const int nb = install_table("FastRenderMath", kBoneSites, sizeof(kBoneSites) / sizeof(kBoneSites[0]), 3);

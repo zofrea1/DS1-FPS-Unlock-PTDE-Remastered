@@ -32,7 +32,8 @@
 //    code (the same helper calls on the same values; no state carried between passes but the counter), the last by
 //    the game's code so the function's frame ends as before (tested on fake frames against the original loops).
 //  core also has the box transform 0x446D30 (a box through a 4x4 matrix as a box) in packed SSE, every operation
-//    rounded and ordered as the original's.
+//    rounded and ordered as the original's, and the runtime's _CIsqrt (0xAC1800) for positive finite arguments under
+//    the usual control words without the runtime's error-handling round trip (same result, status and control words).
 //
 // Each table is checked in full before any of it is written.
 bool rendermath_install(bool core, bool effects);
