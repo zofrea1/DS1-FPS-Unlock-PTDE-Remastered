@@ -171,6 +171,27 @@ float* __cdecl vec4_saturate(float* out, const float* in) {
     return out;
 }
 
+// 0x419890 reciprocal square root (cdecl: out, in), the engine's scalar SSE loop: per lane +inf for +-0, 0x7FFFFFFF
+// for x < 0 (also -inf), +0 for +inf, otherwise (float)(1.0 / (double)(float)sqrt((double)x)); a NaN lane goes the
+// last way and comes out quieted. A float sqrt or quotient rounded through double first rounds the same as directly
+// (53 >= 2 * 24 + 2), so sqrtps and divps give the same bits; zero and negative lanes take 1.0 into them instead, so no
+// divide-by-zero or invalid flag is raised that the original's branches would not raise. All lanes are read before out
+// is written, as there (its results go to a temporary first).
+float* __cdecl vec4_rsqrt(float* out, const float* in) {
+    const __m128 x = _mm_loadu_ps(in);
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 one = _mm_set1_ps(1.0f);
+    const __m128 is0 = _mm_cmpeq_ps(x, zero);
+    const __m128 neg = _mm_cmplt_ps(x, zero);
+    const __m128 skip = _mm_or_ps(is0, neg);
+    const __m128 xs = _mm_or_ps(_mm_andnot_ps(skip, x), _mm_and_ps(skip, one));
+    const __m128 r = _mm_div_ps(one, _mm_sqrt_ps(xs));
+    const __m128 special = _mm_or_ps(_mm_and_ps(is0, _mm_castsi128_ps(_mm_set1_epi32(0x7F800000))),
+                                     _mm_and_ps(neg, _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF))));
+    _mm_storeu_ps(out, _mm_or_ps(_mm_andnot_ps(skip, r), special));
+    return out;
+}
+
 // One row step of the engine's matrix multiplies, as the originals do it: every lane in double, rounded to float, the
 // row stored before the next step reads it (and the next B row) back from memory. Operand order (which NaN comes out
 // when both are NaN), measured on the originals: the first step multiplies b*s in every lane, the later steps b*s in
@@ -455,6 +476,10 @@ const uint8_t k430AC0Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0x
 const uint8_t k4193E0Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0xAA, 0x3E, 0xA9, 0xFF, 0x83, 0xC4, 0x08};
 const uint8_t kSaturateHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x45, 0x0C, 0xF3, 0x0F, 0x10,
                                  0x00, 0xF3, 0x0F, 0x10, 0x0D, 0x60, 0x52, 0x0D, 0x01, 0x83, 0xEC, 0x10};
+// 0x419890 through its constants (-0.0f at 0x11E7FF0, 1.0 at 0x11E7C90) to the loop's first load
+const uint8_t kRsqrtHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x55, 0x0C, 0x0F, 0x57, 0xC9, 0xF3, 0x0F, 0x10,
+                              0x15, 0xF0, 0x7F, 0x1E, 0x01, 0xF2, 0x0F, 0x10, 0x1D, 0x90, 0x7C, 0x1E, 0x01, 0x8D, 0x44,
+                              0x24, 0xF0, 0x83, 0xEC, 0x20, 0x33, 0xC9, 0x2B, 0xD0};
 const uint8_t kFfxHead30Ecx[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B,
                                  0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0x57, 0x51, 0x8D, 0x7D, 0xD0};
 const uint8_t kParamEvalBody[] = {0x59, 0x89, 0x4D, 0xFC, 0x8B, 0x43, 0x14, 0x50, 0x8B, 0x4B, 0x10, 0x51, 0x8B, 0x55, 0xFC, 0x52, 0x8B, 0x43, 0x0C, 0x50};
@@ -480,6 +505,8 @@ const Site kCoreSites[] = {
      reinterpret_cast<const void*>(&mat34_mul)},
     {"four-float saturate", 0x407720, kSaturateHead, sizeof(kSaturateHead), nullptr, 0, 0,
      reinterpret_cast<const void*>(&vec4_saturate)},
+    {"four-float reciprocal square root", 0x419890, kRsqrtHead, sizeof(kRsqrtHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&vec4_rsqrt)},
 };
 
 
@@ -837,7 +864,8 @@ bool rendermath_install(bool core, bool effects) {
         ok = ok && n == static_cast<int>(sizeof(kCoreSites) / sizeof(kCoreSites[0]));
         if (n) {
             LOG_INFO("FastRenderMath: %d of the engine's vector and matrix helpers (four-float add, subtract, multiply, "
-                     "multiply-add, not-equal and saturate, 3x4 matrix add and multiply, 4x4 multiply and transpose) run as "
+                     "multiply-add, not-equal, saturate and reciprocal square root, 3x4 matrix add and multiply, 4x4 "
+                     "multiply and transpose) run as "
                      "SSE with the same results",
                      n);
         }

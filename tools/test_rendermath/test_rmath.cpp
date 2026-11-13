@@ -385,6 +385,19 @@ int main(int argc, char** argv) {
             same(x1, x2, 16, "saturate in place", it);
             fill(c, 4);
         }
+        // reciprocal square root (0x419890): random bits, and positive values of every size half the time
+        {
+            if (it & 1) for (int i = 0; i < 4; ++i) c[i] = rng() & 0x7FFFFFFFu;
+            fill(o1, 4); std::memcpy(o2, o1, 16);
+            reinterpret_cast<F2>(0x419890)(o1, c);
+            vec4_rsqrt(reinterpret_cast<float*>(o2), reinterpret_cast<float*>(c));
+            same(o1, o2, 16, "rsqrt", it);
+            std::memcpy(x1, c, 16); std::memcpy(x2, c, 16);
+            reinterpret_cast<F2>(0x419890)(x1, x1);
+            vec4_rsqrt(reinterpret_cast<float*>(x2), reinterpret_cast<float*>(x2));
+            same(x1, x2, 16, "rsqrt in place", it);
+            fill(c, 4);
+        }
         // stream read-splat: the output and the stream pointer moved on
         {
             const uint32_t* s1 = a + (it % 8);
