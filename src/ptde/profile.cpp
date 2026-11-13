@@ -10,6 +10,7 @@
 
 #if FPSU_DIAGNOSTICS
 
+#include "limiter.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -463,13 +464,34 @@ bool player_position(float* xyz) {
     return true;
 }
 
-uint64_t thread_cycles(HANDLE h) {
-    ULONG64 c = 0;
-    return h && QueryThreadCycleTime(h, &c) ? c : 0;
-}
-
 // TSC cycles per second, measured against the performance counter.
 double g_cycles_per_s = 0.0;
+
+// A thread's CPU time in TSC cycles. Wine does not count cycles (QueryThreadCycleTime gives 0): there its kernel and
+// user time (from the system's per-thread accounting, 10 ms steps) stands in, converted to cycles.
+uint64_t thread_cycles(HANDLE h) {
+    ULONG64 c = 0;
+    if (!h) return 0;
+    if (QueryThreadCycleTime(h, &c) && c) return c;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (g_cycles_per_s <= 0.0 || !GetThreadTimes(h, &created, &exited, &kernel, &user)) return 0;
+    const uint64_t t = ((static_cast<uint64_t>(kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime) +
+                       ((static_cast<uint64_t>(user.dwHighDateTime) << 32) | user.dwLowDateTime);
+    return t ? static_cast<uint64_t>(static_cast<double>(t) * (g_cycles_per_s / 1e7)) + 1 : 0;
+}
+
+// Frame times (ms) for the [perf] line's percentiles: written by the render thread at each frame boundary, read by
+// the profiler thread (a frame or two may be torn at the window's edge; that does not move a percentile).
+constexpr int kFrameRing = 8192;
+float g_frame_ring[kFrameRing];
+volatile LONG g_frame_ring_n = 0;
+LONG g_frame_ring_read = 0;
+
+void name_this_thread(const wchar_t* name) {
+    using SetDescFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+    static auto fn = reinterpret_cast<SetDescFn>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"));
+    if (fn) fn(GetCurrentThread(), name);
+}
 void calibrate_cycles() {
     const int64_t q0 = qpc();
     const uint64_t c0 = __rdtsc();
@@ -528,6 +550,28 @@ void report() {
     char line[2048];
     int n = std::snprintf(line, sizeof(line), "[perf] %.1fs: %.1f fps", window, frames / window);
     if (frame.count) n += std::snprintf(line + n, sizeof(line) - n, " (frame avg %.2f max %.1f ms)", frame.sum / frame.count, frame.max);
+    {
+        // Percentiles of this window's frame times, and the frames that took over 1.5x the cap's interval.
+        const LONG end = g_frame_ring_n;
+        LONG begin = g_frame_ring_read;
+        if (end - begin > kFrameRing) begin = end - kFrameRing;
+        g_frame_ring_read = end;
+        std::vector<float> ft;
+        ft.reserve(static_cast<size_t>(end - begin > 0 ? end - begin : 0));
+        for (LONG i = begin; i < end; ++i) ft.push_back(g_frame_ring[i % kFrameRing]);
+        if (!quiet && ft.size() >= 10) {
+            std::sort(ft.begin(), ft.end());
+            auto pct = [&](double p) { return ft[static_cast<size_t>(p * (ft.size() - 1) + 0.5)]; };
+            const int cap = limiter_requested_fps();
+            const double slow = cap > 0 ? 1500.0 / cap : 0.0;
+            int over = 0;
+            for (float v : ft) over += (slow > 0.0 && v > slow) ? 1 : 0;
+            n += std::snprintf(line + n, sizeof(line) - n, " (frames p50 %.1f p95 %.1f p99 %.1f ms", pct(0.50), pct(0.95),
+                               pct(0.99));
+            if (slow > 0.0) n += std::snprintf(line + n, sizeof(line) - n, ", %d over %.1f ms", over, slow);
+            n += std::snprintf(line + n, sizeof(line) - n, ")");
+        }
+    }
     if (game.count)
         n += std::snprintf(line + n, sizeof(line) - n, " | game update avg %.2f max %.1f ms", game.sum / game.count, game.max);
     if (game_cpu >= 0) n += std::snprintf(line + n, sizeof(line) - n, ", game thread cpu %.0f%%", game_cpu);
@@ -1471,7 +1515,10 @@ DWORD WINAPI profile_thread(void*) {
 bool profile_enabled() { return g_enabled; }
 
 void profile_game_frame_begin() {
-    if (!g_game_thread_id) g_game_thread_id = GetCurrentThreadId();
+    if (!g_game_thread_id) {
+        g_game_thread_id = GetCurrentThreadId();
+        if (g_enabled) name_this_thread(L"ds-game");
+    }
     g_update_start = qpc();
 }
 
@@ -1486,7 +1533,13 @@ void profile_game_frame(double ms) {
 
 void profile_frame_boundary() {
     const int64_t now = qpc();
-    if (g_last_boundary) g_frame_ms.add(ms_of(now - g_last_boundary));
+    if (!g_last_boundary && g_enabled) name_this_thread(L"ds-render");
+    if (g_last_boundary) {
+        const double ms = ms_of(now - g_last_boundary);
+        g_frame_ms.add(ms);
+        g_frame_ring[g_frame_ring_n % kFrameRing] = static_cast<float>(ms);
+        InterlockedIncrement(&g_frame_ring_n);
+    }
     g_last_boundary = now;
     InterlockedIncrement(&g_frames);
 }

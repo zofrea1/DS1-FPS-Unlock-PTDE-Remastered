@@ -3,14 +3,51 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <share.h>
+#include <string>
 
 namespace {
 FILE* g_file = nullptr;
-std::mutex g_mu;
+std::mutex g_mu;       // the file
+std::mutex g_pend_mu;  // g_pending
+std::string g_pending;
+volatile bool g_buffered = false;
+
+// Under g_mu.
+void write_pending() {
+    std::string out;
+    {
+        std::lock_guard<std::mutex> lock(g_pend_mu);
+        out.swap(g_pending);
+    }
+    if (!out.empty() && g_file) std::fwrite(out.data(), 1, out.size(), g_file);
+}
+
+DWORD WINAPI flusher(void*) {
+    for (;;) {
+        Sleep(250);
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (!g_file) continue;
+        write_pending();
+        std::fflush(g_file);
+    }
+}
 }  // namespace
+
+void log_set_buffered(bool on) {
+    static bool started = false;
+    if (on && !started) {
+        started = true;
+        HANDLE h = CreateThread(nullptr, 0, flusher, nullptr, 0, nullptr);
+        if (!h) return;
+        CloseHandle(h);
+    }
+    g_buffered = on;
+}
 
 void log_init(const wchar_t* dll_path, const wchar_t* file_name) {
     wchar_t path[MAX_PATH];
@@ -31,12 +68,41 @@ void log_init(const wchar_t* dll_path, const wchar_t* file_name) {
 }
 
 void log_write(const char* level, const char* fmt, ...) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    if (g_buffered && std::strcmp(level, "error") != 0) {
+        char text[4096];
+        int n = std::snprintf(text, sizeof(text), "[%04u-%02u-%02u %02u:%02u:%02u.%03u] [%s] ", st.wYear, st.wMonth,
+                              st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, level);
+        va_list ap;
+        va_start(ap, fmt);
+        const int m = std::vsnprintf(text + n, sizeof(text) - n, fmt, ap);
+        va_end(ap);
+        std::lock_guard<std::mutex> lock(g_pend_mu);
+        if (m >= 0 && n + m < static_cast<int>(sizeof(text))) {
+            g_pending.append(text, n + m);
+        } else {
+            // Longer than the buffer: formatted again at its full length.
+            g_pending.append(text, n);
+            va_start(ap, fmt);
+            const int need = std::vsnprintf(nullptr, 0, fmt, ap);
+            va_end(ap);
+            if (need > 0) {
+                std::string big(static_cast<size_t>(need) + 1, '\0');
+                va_start(ap, fmt);
+                std::vsnprintf(&big[0], big.size(), fmt, ap);
+                va_end(ap);
+                g_pending.append(big.data(), static_cast<size_t>(need));
+            }
+        }
+        g_pending.push_back('\n');
+        return;
+    }
     std::lock_guard<std::mutex> lock(g_mu);
     if (!g_file) {
         return;
     }
-    SYSTEMTIME st;
-    GetLocalTime(&st);
+    write_pending();
     std::fprintf(g_file, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] [%s] ", st.wYear, st.wMonth, st.wDay,
                  st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, level);
     va_list ap;
@@ -50,6 +116,7 @@ void log_write(const char* level, const char* fmt, ...) {
 void log_close() {
     std::lock_guard<std::mutex> lock(g_mu);
     if (g_file) {
+        write_pending();
         std::fclose(g_file);
         g_file = nullptr;
     }

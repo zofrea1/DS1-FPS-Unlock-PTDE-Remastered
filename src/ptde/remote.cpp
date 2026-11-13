@@ -292,6 +292,7 @@ std::string shader_name(void* sh) {
 }
 
 std::unordered_map<std::string, int> g_made;  // shader creations by name (name_shader)
+bool g_shader_dumps = true;
 int g_made_fresh = 0, g_made_again = 0;
 ULONGLONG g_made_next = 0;
 
@@ -329,6 +330,7 @@ void name_shader(const DWORD* code, void* shader, const char* prefix) {
         }
         if (line[0]) LOG_INFO("%s", line);
     }
+    if (!g_shader_dumps) return;
     std::wstring dir = std::wstring(g_dir) + L"\\fpsu-shaders";
     CreateDirectoryW(dir.c_str(), nullptr);
     std::wstring path = dir + L"\\" + widen(name) + L".txt";
@@ -1559,6 +1561,8 @@ DWORD WINAPI poll_thread(void*) {
 
 std::string remote_shader_name(void* shader) { return shader_name(shader); }
 
+void remote_set_shader_dumps(bool on) { g_shader_dumps = on; }
+
 bool remote_start() {
     GetModuleFileNameW(nullptr, g_dir, MAX_PATH);
     wchar_t* slash = wcsrchr(g_dir, L'\\');
@@ -1657,6 +1661,7 @@ std::string remote_shader_name(void*) { return "none"; }
 
 void remote_game_frame() {}
 bool remote_start() { return false; }
+void remote_set_shader_dumps(bool) {}
 bool remote_enabled() { return false; }
 void remote_hook_device(IDirect3DDevice9*) {}
 void remote_pad(DWORD, void*, DWORD*) {}

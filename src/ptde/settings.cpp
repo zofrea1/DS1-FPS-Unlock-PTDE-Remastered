@@ -265,6 +265,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.profile = parse_bool(val);
         } else if (key == "remotecontrol") {
             s.remote_control = parse_bool(val);
+        } else if (key == "remoteshaderdumps") {
+            s.remote_shader_dumps = parse_bool(val);
         } else if (key == "skippresentrepeat") {
             s.skip_present_repeat = parse_bool(val);
         } else if (key == "dxvk") {

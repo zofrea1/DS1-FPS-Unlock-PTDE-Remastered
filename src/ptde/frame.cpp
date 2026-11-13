@@ -548,9 +548,11 @@ bool frame_install(const Settings& settings) {
     }
     present_install(settings);
     if (settings.profile) {
+        log_set_buffered(true);
         profile_start();
     }
     if (settings.remote_control) {
+        remote_set_shader_dumps(settings.remote_shader_dumps);
         remote_start();
     }
     return true;
