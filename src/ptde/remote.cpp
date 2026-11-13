@@ -4,6 +4,7 @@
 
 #if FPSU_DIAGNOSTICS
 
+#include "frame.h"
 #include "limiter.h"
 #include "profile.h"
 #include "atoc.h"
@@ -25,6 +26,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+extern volatile int g_cmd_totals[6];
 
 namespace {
 
@@ -865,7 +868,51 @@ void scan_value(const float* src) {
     out("scanval: %d places", hits);
 }
 
+// pscwatch NAME REG FRAMES: the first value the game gives pixel shader constant REG in each of FRAMES frames, with the
+// time, written to NAME.psc ("ms frame x y z w") once done. For values computed on the CPU each frame (exposure).
+struct PscRow {
+    double ms;
+    int frame;
+    float v[4];
+};
+std::vector<PscRow> g_psc_rows;
+std::string g_psc_name;
+volatile LONG g_psc_reg = -1;
+volatile LONG g_psc_left = 0;
+int g_psc_last_frame = -1;
+
+void psc_note(const float* v) {
+    const int frame = g_cmd_totals[2];
+    if (frame == g_psc_last_frame) return;
+    g_psc_last_frame = frame;
+    LARGE_INTEGER now{}, freq{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    PscRow r{1000.0 * static_cast<double>(now.QuadPart) / static_cast<double>(freq.QuadPart), frame,
+             {v[0], v[1], v[2], v[3]}};
+    g_psc_rows.push_back(r);
+    if (InterlockedDecrement(&g_psc_left) > 0) return;
+    g_psc_reg = -1;
+    wchar_t path[MAX_PATH];
+    std::swprintf(path, MAX_PATH, L"%s\\%hs.psc", g_dir, g_psc_name.c_str());
+    FILE* f = _wfopen(path, L"wb");
+    if (f) {
+        for (const auto& row : g_psc_rows) {
+            std::fprintf(f, "%.3f %d %.7g %.7g %.7g %.7g\n", row.ms, row.frame, row.v[0], row.v[1], row.v[2], row.v[3]);
+        }
+        std::fclose(f);
+    }
+    out("pscwatch %s done: %u frames", g_psc_name.c_str(), static_cast<unsigned>(g_psc_rows.size()));
+    g_psc_rows.clear();
+}
+
 HRESULT WINAPI hk_set_ps_const(IDirect3DDevice9* dev, UINT start, const float* v, UINT count) {
+    if (g_psc_left > 0 && v) {
+        const LONG reg = g_psc_reg;
+        if (reg >= 0 && static_cast<UINT>(reg) >= start && static_cast<UINT>(reg) < start + count) {
+            psc_note(v + (reg - start) * 4);
+        }
+    }
     if (g_scan_reg >= 0 && v && !g_vb_ps.empty() && g_cur_ps == g_vb_ps &&
         static_cast<UINT>(g_scan_reg) >= start && static_cast<UINT>(g_scan_reg) < start + count) {
         const LONG reg = g_scan_reg;
@@ -1058,6 +1105,175 @@ std::vector<std::vector<std::string>> g_game_cmds;
 volatile bool g_god = false;
 float g_hold_pos[3] = {};
 ULONGLONG g_hold_until = 0;
+
+// memsnap NAME N: the game's writable memory (private regions and the exe's data sections) written to
+// NAME_f0.bin .. NAME_f<N-1>.bin at the start of N consecutive game frames, with the region list in NAME.regions
+// ("base size offset", hex). With "forcedt" the world steps by a fixed time per frame, so two runs that differ only in
+// that step show which values move by a fixed amount per frame (frame-counted code) and which by time.
+struct SnapRegion {
+    uintptr_t base;
+    size_t size;
+};
+std::vector<SnapRegion> g_snap_regions;
+std::string g_memsnap_name;
+volatile LONG g_game_frames = 0;  // calls of the game's frame function (remote_game_frame)
+LONG g_watch_frames0 = 0;
+volatile LONG g_memsnap_left = 0;
+int g_memsnap_index = 0;
+constexpr uintptr_t kExeBase = 0x00400000, kExeEnd = 0x015C2000;
+
+bool snap_readable(const MEMORY_BASIC_INFORMATION& m) {
+    if (m.State != MEM_COMMIT || (m.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+    return (m.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+void snap_collect_regions() {
+    g_snap_regions.clear();
+    MEMORY_BASIC_INFORMATION m{};
+    uintptr_t a = 0x10000;
+    while (VirtualQuery(reinterpret_cast<void*>(a), &m, sizeof(m)) == sizeof(m)) {
+        const uintptr_t base = reinterpret_cast<uintptr_t>(m.BaseAddress);
+        const bool exe = m.Type == MEM_IMAGE && base >= kExeBase && base < kExeEnd;
+        if (snap_readable(m) && (m.Type == MEM_PRIVATE || exe)) g_snap_regions.push_back({base, m.RegionSize});
+        const uintptr_t next = base + m.RegionSize;
+        if (next <= a) break;
+        a = next;
+    }
+}
+
+// The whole region if it is still committed and readable, else zeros of its size (the file stays aligned).
+bool snap_write_region(HANDLE f, const SnapRegion& r, LONGLONG offset) {
+    bool ok = true;
+    for (uintptr_t a = r.base; a < r.base + r.size && ok;) {
+        MEMORY_BASIC_INFORMATION m{};
+        if (VirtualQuery(reinterpret_cast<void*>(a), &m, sizeof(m)) != sizeof(m) || !snap_readable(m)) ok = false;
+        else a = reinterpret_cast<uintptr_t>(m.BaseAddress) + m.RegionSize;
+    }
+    LARGE_INTEGER at;
+    at.QuadPart = offset;
+    SetFilePointerEx(f, at, nullptr, FILE_BEGIN);
+    DWORD wrote = 0;
+    if (ok && WriteFile(f, reinterpret_cast<const void*>(r.base), static_cast<DWORD>(r.size), &wrote, nullptr) &&
+        wrote == r.size) {
+        return true;
+    }
+    static char zeros[1 << 16];
+    SetFilePointerEx(f, at, nullptr, FILE_BEGIN);
+    for (size_t left = r.size; left;) {
+        const DWORD n = static_cast<DWORD>(left < sizeof(zeros) ? left : sizeof(zeros));
+        WriteFile(f, zeros, n, &wrote, nullptr);
+        left -= n;
+    }
+    return false;
+}
+
+void memsnap_frame() {
+    if (g_memsnap_left <= 0) return;
+    const ULONGLONG t0 = GetTickCount64();
+    if (g_memsnap_index == 0) {
+        snap_collect_regions();
+        wchar_t path[MAX_PATH];
+        std::swprintf(path, MAX_PATH, L"%s\\%hs.regions", g_dir, g_memsnap_name.c_str());
+        FILE* f = _wfopen(path, L"wb");
+        if (f) {
+            LONGLONG off = 0;
+            for (const auto& r : g_snap_regions) {
+                std::fprintf(f, "%08X %08X %llX\n", static_cast<unsigned>(r.base), static_cast<unsigned>(r.size), off);
+                off += r.size;
+            }
+            std::fclose(f);
+        }
+    }
+    wchar_t path[MAX_PATH];
+    std::swprintf(path, MAX_PATH, L"%s\\%hs_f%d.bin", g_dir, g_memsnap_name.c_str(), g_memsnap_index);
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    LONGLONG off = 0;
+    int lost = 0;
+    if (f != INVALID_HANDLE_VALUE) {
+        for (const auto& r : g_snap_regions) {
+            if (!snap_write_region(f, r, off)) ++lost;
+            off += r.size;
+        }
+        CloseHandle(f);
+    }
+    out("memsnap %s frame %d: %d regions, %.1f MB, %d gone, %llu ms (step %.6f)", g_memsnap_name.c_str(),
+        g_memsnap_index, static_cast<int>(g_snap_regions.size()), off / 1048576.0, lost, GetTickCount64() - t0,
+        *reinterpret_cast<const float*>(0x011E7E90));
+    ++g_memsnap_index;
+    InterlockedDecrement(&g_memsnap_left);
+}
+
+// probe NAME FRAMES: the dwords listed in NAME.addrs (hex, one a line) read at the start of each of FRAMES game frames,
+// without stopping the game; written to NAME.probe: uint32 count, uint32 frames, then per frame double QPC ms,
+// float world step, uint32 values[count] (0xDEADBEEF where unreadable).
+std::vector<uint32_t> g_probe_addrs;
+std::vector<uint32_t> g_probe_buf;
+std::string g_probe_name;
+volatile LONG g_probe_left = 0;
+LONG g_probe_frames = 0;
+
+uint32_t probe_read(uint32_t a) {
+    __try {
+        return *reinterpret_cast<volatile const uint32_t*>(a);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0xDEADBEEF;
+    }
+}
+
+void probe_frame() {
+    if (g_probe_left <= 0) return;
+    LARGE_INTEGER now{}, freq{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    const double ms = 1000.0 * static_cast<double>(now.QuadPart) / static_cast<double>(freq.QuadPart);
+    const float step = *reinterpret_cast<const float*>(0x011E7E90);
+    uint32_t head[3];
+    std::memcpy(head, &ms, 8);
+    std::memcpy(head + 2, &step, 4);
+    g_probe_buf.insert(g_probe_buf.end(), head, head + 3);
+    for (uint32_t a : g_probe_addrs) g_probe_buf.push_back(probe_read(a));
+    if (InterlockedDecrement(&g_probe_left) > 0) return;
+    wchar_t path[MAX_PATH];
+    std::swprintf(path, MAX_PATH, L"%s\\%hs.probe", g_dir, g_probe_name.c_str());
+    FILE* f = _wfopen(path, L"wb");
+    if (f) {
+        const uint32_t hdr[2] = {static_cast<uint32_t>(g_probe_addrs.size()), static_cast<uint32_t>(g_probe_frames)};
+        std::fwrite(hdr, 4, 2, f);
+        std::fwrite(g_probe_buf.data(), 4, g_probe_buf.size(), f);
+        std::fclose(f);
+    }
+    out("probe %s done: %u addresses, %ld frames", g_probe_name.c_str(), static_cast<unsigned>(g_probe_addrs.size()),
+        g_probe_frames);
+    g_probe_buf.clear();
+    g_probe_buf.shrink_to_fit();
+}
+
+void probe_start(const std::string& name, long frames) {
+    if (g_probe_left > 0) {
+        out("probe: %s still running", g_probe_name.c_str());
+        return;
+    }
+    wchar_t path[MAX_PATH];
+    std::swprintf(path, MAX_PATH, L"%s\\%hs.addrs", g_dir, name.c_str());
+    FILE* f = _wfopen(path, L"rb");
+    if (!f) {
+        out("probe: no %s.addrs", name.c_str());
+        return;
+    }
+    g_probe_addrs.clear();
+    char line[64];
+    while (std::fgets(line, sizeof(line), f)) {
+        const unsigned long a = std::strtoul(line, nullptr, 16);
+        if (a) g_probe_addrs.push_back(static_cast<uint32_t>(a));
+    }
+    std::fclose(f);
+    g_probe_name = name;
+    g_probe_frames = frames > 0 ? frames : 20;
+    g_probe_buf.clear();
+    g_probe_buf.reserve(static_cast<size_t>(g_probe_frames) * (g_probe_addrs.size() + 3));
+    InterlockedExchange(&g_probe_left, g_probe_frames);
+    out("probe %s: %u addresses, %ld frames", name.c_str(), static_cast<unsigned>(g_probe_addrs.size()), g_probe_frames);
+}
 
 // Keeps the player's HP at its maximum (chr +0x2D4 HP, +0x2D8 max HP) while `god` is on.
 void god_tick() {
@@ -1462,12 +1678,23 @@ void run(const std::string& line) {
             out("poke %08X: not writable", static_cast<unsigned>(a));
         }
     } else if (c == "watch" && t.size() > 1) {
-        const uint32_t addr = static_cast<uint32_t>(std::strtoul(t[1].c_str(), nullptr, 16));
-        watch_arm_addresses(&addr, 1);
-        out("watch %08X armed (writers go to the main log on watchreport)", addr);
+        // watch ADDR [ADDR ..] (hex, up to 4; xADDR = execute breakpoint): hardware watchpoints; the writers (or
+        // callers) go to the main log on watchreport.
+        uint32_t addr[4] = {};
+        bool exec[4] = {};
+        int n = 0;
+        for (size_t k = 1; k < t.size() && n < 4; ++k) {
+            const char* p = t[k].c_str();
+            exec[n] = *p == 'x' || *p == 'X';
+            if (exec[n]) ++p;
+            addr[n++] = static_cast<uint32_t>(std::strtoul(p, nullptr, 16));
+        }
+        watch_arm_mixed(addr, exec, n);
+        g_watch_frames0 = g_game_frames;
+        out("watch %08X (+%d more) armed (writers go to the main log on watchreport)", addr[0], n - 1);
     } else if (c == "watchreport") {
         watch_report_now();
-        out("watchreport: see PTDE-FPS-Unlock.log");
+        out("watchreport: see PTDE-FPS-Unlock.log (%ld game frames since armed)", g_game_frames - g_watch_frames0);
     } else if (c == "scanval") {
         g_scan_reg = static_cast<LONG>(num(1, 8));
         out("scanval: c%ld at the next %s upload (while a frame capture runs)", num(1, 8), g_vb_ps.c_str());
@@ -1500,6 +1727,34 @@ void run(const std::string& line) {
     } else if (c == "god") {
         g_god = num(1, 1) != 0;
         out("god %d", g_god ? 1 : 0);
+    } else if (c == "pscwatch" && t.size() > 2) {
+        if (g_psc_left > 0) {
+            out("pscwatch: %s still running", g_psc_name.c_str());
+        } else {
+            g_psc_name = t[1];
+            g_psc_rows.clear();
+            g_psc_last_frame = -1;
+            g_psc_reg = static_cast<LONG>(num(2, 0));
+            InterlockedExchange(&g_psc_left, num(3, 300));
+            out("pscwatch %s: c%ld for %ld frames", t[1].c_str(), num(2, 0), num(3, 300));
+        }
+    } else if (c == "probe" && t.size() > 1) {
+        // probe NAME FRAMES: sample the addresses in NAME.addrs at the start of each frame (see probe_frame).
+        probe_start(t[1], num(2, 20));
+    } else if (c == "forcedt") {
+        // forcedt RATE: the world steps 1/RATE s every frame whatever the frame time; forcedt 0 = measured again.
+        const long rate = num(1, 0);
+        frame_force_step(rate > 0 ? 1.0f / static_cast<float>(rate) : 0.0f);
+        out("forcedt %ld", rate);
+    } else if (c == "memsnap" && t.size() > 1) {
+        if (g_memsnap_left > 0) {
+            out("memsnap: %s still running", g_memsnap_name.c_str());
+        } else {
+            g_memsnap_name = t[1];
+            g_memsnap_index = 0;
+            InterlockedExchange(&g_memsnap_left, num(2, 4));
+            out("memsnap %s: %ld frames", t[1].c_str(), num(2, 4));
+        }
     } else if (c == "shot" && t.size() > 1) {
         g_shot_name = t[1];
         g_shot_requested = true;
@@ -1651,6 +1906,9 @@ void remote_pad(DWORD index, void* state, DWORD* result) {
 
 void remote_game_frame() {
     if (!g_on) return;
+    ++g_game_frames;
+    memsnap_frame();
+    probe_frame();
     if (g_god) god_tick();
     if (g_hold_until && GetTickCount64() < g_hold_until) {
         const uintptr_t phys = player_physics();

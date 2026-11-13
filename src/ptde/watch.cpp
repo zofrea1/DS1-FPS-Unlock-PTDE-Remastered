@@ -87,19 +87,29 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
             }
             g_exec_arg0[i] = arg0;
         }
-        const uint32_t v = exec ? 0 : *static_cast<volatile uint32_t*>(g_addr[i]);
+        // An execute slot records its caller (the return address at [esp]) in place of a value, one record per caller.
+        uint32_t v = 0;
+        if (exec) {
+            __try {
+                v = *reinterpret_cast<const uint32_t*>(ctx->Esp);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        } else {
+            v = *static_cast<volatile uint32_t*>(g_addr[i]);
+        }
         float f;
         std::memcpy(&f, &v, 4);
         while (g_lock.exchange(1, std::memory_order_acquire) != 0) YieldProcessor();
         Hit* h = nullptr;
         for (int k = 0; k < g_nhits; ++k) {
-            if (g_hits[k].eip == ctx->Eip && g_hits[k].slot == i) {
+            if (g_hits[k].eip == ctx->Eip && g_hits[k].slot == i && (!exec || g_hits[k].first == v)) {
                 h = &g_hits[k];
                 break;
             }
         }
         if (!h && g_nhits < kMaxHits) {
             h = &g_hits[g_nhits++];
+            *h = Hit{};
             h->eip = ctx->Eip;
             h->slot = i;
             h->first = v;
@@ -272,6 +282,11 @@ void report() {
                  h.slot, g_spec[h.slot].base, g_spec[h.slot].offset, h.eip, h.count, h.first,
                  *reinterpret_cast<const float*>(&h.first), h.last, h.fmin, h.fmax, h.ret[0], h.ret[1], h.ret[2],
                  h.tid);
+        if (g_spec[h.slot].base == 'x') {
+            const uint32_t a0 = g_exec_arg0[h.slot];
+            LOG_INFO("    last call: ecx=%08X first stack argument=%08X (%g)", g_exec_ecx[h.slot], a0,
+                     *reinterpret_cast<const float*>(&a0));
+        }
     }
     g_lock.store(0, std::memory_order_release);
 }
@@ -308,16 +323,20 @@ void watch_poll() {
 }
 
 void watch_arm_addresses(const uint32_t* addresses, int count) {
+    watch_arm_mixed(addresses, nullptr, count);
+}
+
+void watch_arm_mixed(const uint32_t* addresses, const bool* exec, int count) {
     if (g_armed) return;
     if (count > kSlots) count = kSlots;
     g_nspec = count;
     g_nhits = 0;
     for (int i = 0; i < kSlots; ++i) g_addr[i] = nullptr;
     for (int i = 0; i < count; ++i) {
-        g_spec[i].base = 'a';
+        g_spec[i].base = exec && exec[i] ? 'x' : 'a';
         g_spec[i].offset = addresses[i];
         g_addr[i] = reinterpret_cast<void*>(addresses[i]);
-        LOG_INFO("Watch: write watchpoint %d on %08X", i, addresses[i]);
+        LOG_INFO("Watch: %s watchpoint %d on %08X", g_spec[i].base == 'x' ? "execute" : "write", i, addresses[i]);
     }
     if (!g_veh) g_veh = AddVectoredExceptionHandler(1, on_exception);
     apply_registers(true);
@@ -344,6 +363,7 @@ void watch_poll() {}
 uint32_t watch_exec_ecx(int) { return 0; }
 uint32_t watch_exec_arg0(int) { return 0; }
 void watch_arm_addresses(const uint32_t*, int) {}
+void watch_arm_mixed(const uint32_t*, const bool*, int) {}
 void watch_report_now() {}
 
 #endif  // FPSU_DIAGNOSTICS

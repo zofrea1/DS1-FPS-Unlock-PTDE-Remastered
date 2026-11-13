@@ -52,6 +52,8 @@ volatile int g_cmd_totals[6] = {};
 
 namespace {
 
+volatile float g_forced_step = 0.0f;  // frame_force_step (diagnostics)
+
 // Fixed-base 32-bit image (checked at install). All addresses are absolute.
 constexpr uint32_t kImageBase = 0x00400000;
 constexpr uint32_t kImageSize = 0x011C2000;
@@ -211,6 +213,7 @@ void frame_boundary() {
             float dt = static_cast<float>(dt_ms / 1000.0);
             if (dt < kMinStep) dt = kMinStep;
             if (dt > kMaxStep) dt = kMaxStep;
+            if (g_forced_step > 0.0f) dt = g_forced_step;
             *g.step = dt;
             g.written = dt;
         }
@@ -363,6 +366,11 @@ bool apply_vblank_patch() {
 }
 
 }  // namespace
+
+void frame_force_step(float seconds) {
+    g_forced_step = seconds > 0.0f && seconds <= kMaxStep ? seconds : 0.0f;
+    LOG_INFO("Frame step %s", g_forced_step > 0.0f ? "forced" : "measured again");
+}
 
 bool frame_install(const Settings& settings) {
     if (reinterpret_cast<uint32_t>(GetModuleHandleW(nullptr)) != kImageBase) {

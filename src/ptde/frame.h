@@ -14,3 +14,7 @@
 // Works with or without DSfix: if the call is already detoured by DSfix's FPS
 // unlock, this hook sits in front, forwards to it, and writes its value afterwards.
 bool frame_install(const Settings& settings);
+
+// Diagnostics (RemoteControl "forcedt"): every frame steps the world by `seconds` whatever the measured frame time
+// (0 = measured again). Lets two runs differ only in the step, so code that moves by a fixed amount per frame shows.
+void frame_force_step(float seconds);
