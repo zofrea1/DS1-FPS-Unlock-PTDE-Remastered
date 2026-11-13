@@ -1,6 +1,7 @@
 #include "profile.h"
 #include "remote.h"
 #include "streamwatch.h"
+#include "iowatch.h"
 #include "texpreload.h"
 #include "dxgipresent.h"
 
@@ -2105,7 +2106,10 @@ bool profile_start() {
     calibrate_cycles();  // also sets g_freq (qpc() ticks per second)
     find_code_ranges();
     g_enabled = true;
-    if (g_streams_on) streamwatch_install();
+    if (g_streams_on) {
+        streamwatch_install();
+        iowatch_install();
+    }
     if (g_imports_on) imports_install();
     HANDLE thread = CreateThread(nullptr, 0, profile_thread, nullptr, 0, nullptr);
     if (!thread) {
