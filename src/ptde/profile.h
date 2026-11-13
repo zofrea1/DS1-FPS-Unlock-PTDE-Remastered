@@ -17,7 +17,9 @@ struct IDirect3DDevice9;
 bool profile_start();
 // Before profile_start: the spike watch on or off (ProfileSpikes; each of its samples stops the game thread, which
 // costs a lot under Wine on another CPU) and the capture's pause between sampling rounds in ms (ProfileCaptureMs).
-void profile_configure(bool spikes, int capture_ms);
+// `streams`: the game thread's waits for streaming jobs ([stream] lines, ProfileStreams). ProfileD3D = false (d3d.cpp)
+// leaves out the per-call census of the Direct3D device as well.
+void profile_configure(bool spikes, int capture_ms, bool streams);
 bool profile_enabled();
 // The F10 capture without the key (RemoteControl `capture`).
 void profile_request_capture();

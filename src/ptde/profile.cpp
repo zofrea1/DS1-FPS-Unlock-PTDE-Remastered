@@ -38,6 +38,7 @@ namespace {
 
 constexpr int kCaptureSeconds = 10;
 bool g_spikes_on = true;  // ProfileSpikes
+bool g_streams_on = true;  // ProfileStreams
 int g_capture_ms = 1;      // ProfileCaptureMs: the capture's pause between sampling rounds
 constexpr int kReportSeconds = 5;
 constexpr int kMaxPicked = 12;      // threads sampled during a capture
@@ -1776,8 +1777,9 @@ void profile_stall_report(int seconds) {
     CloseHandle(snapshot);
 }
 
-void profile_configure(bool spikes, int capture_ms) {
+void profile_configure(bool spikes, int capture_ms, bool streams) {
     g_spikes_on = spikes;
+    g_streams_on = streams;
     g_capture_ms = capture_ms < 1 ? 1 : (capture_ms > 50 ? 50 : capture_ms);
 }
 
@@ -1785,7 +1787,7 @@ bool profile_start() {
     calibrate_cycles();  // also sets g_freq (qpc() ticks per second)
     find_code_ranges();
     g_enabled = true;
-    streamwatch_install();
+    if (g_streams_on) streamwatch_install();
     HANDLE thread = CreateThread(nullptr, 0, profile_thread, nullptr, 0, nullptr);
     if (!thread) {
         g_enabled = false;
@@ -1809,7 +1811,7 @@ bool profile_start() {
 volatile DWORD g_render_thread_id = 0;
 volatile DWORD g_game_thread_id = 0;
 bool profile_start() { return false; }
-void profile_configure(bool, int) {}
+void profile_configure(bool, int, bool) {}
 bool profile_enabled() { return false; }
 void profile_stall_report(int) {}
 void profile_hook_device(IDirect3DDevice9*) {}

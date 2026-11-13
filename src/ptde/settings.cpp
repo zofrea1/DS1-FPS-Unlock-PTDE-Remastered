@@ -265,6 +265,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.profile = parse_bool(val);
         } else if (key == "profilespikes") {
             s.profile_spikes = parse_bool(val);
+        } else if (key == "profiled3d") {
+            s.profile_d3d = parse_bool(val);
+        } else if (key == "profilestreams") {
+            s.profile_streams = parse_bool(val);
         } else if (key == "profilecapturems") {
             s.profile_capture_ms = std::atoi(val.c_str());
         } else if (key == "remotecontrol") {

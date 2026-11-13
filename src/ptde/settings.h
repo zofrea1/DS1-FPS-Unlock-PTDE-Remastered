@@ -28,6 +28,8 @@ struct Settings {
     bool profile = false;
     bool profile_spikes = true;
     int profile_capture_ms = 1;
+    bool profile_d3d = true;
+    bool profile_streams = true;
     // Development remote control (remote.h): commands from fpsu-cmd.txt beside the game. Diagnostics builds only.
     bool remote_control = false;
     // With RemoteControl: every new shader written to fpsu-shaders (slow on an SD card).

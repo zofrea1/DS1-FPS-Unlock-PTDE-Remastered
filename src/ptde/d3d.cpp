@@ -260,7 +260,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         remote_hook_device(*out);
     }
     // Last, so the census counts what the game calls and chains into every hook above.
-    if (SUCCEEDED(hr) && out && *out && profile_enabled()) {
+    if (SUCCEEDED(hr) && out && *out && profile_enabled() && settings().profile_d3d) {
         profile_hook_device(*out);
     }
     return hr;
