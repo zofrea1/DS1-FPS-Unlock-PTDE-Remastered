@@ -82,13 +82,12 @@ struct Timed {
     volatile int64_t max_ticks = 0;
 };
 Timed g_present, g_rtdata, g_vsc, g_psc, g_dip, g_dp, g_lock_vb, g_lock_ib, g_lock_tex, g_lock_surf, g_getdata;
+// g_freq: ticks of qpc() per second. qpc() reads the TSC (calibrated against QueryPerformanceCounter at start):
+// under Wine on an ARM phone (FEX) every QueryPerformanceCounter call leaves the emulator for native code and costs
+// microseconds, which made timing each draw slow the game down to a quarter; RDTSC is a register read there.
 LARGE_INTEGER g_freq{};
 
-inline int64_t qpc() {
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
-    return t.QuadPart;
-}
+inline int64_t qpc() { return static_cast<int64_t>(__rdtsc()); }
 inline void add_time(Timed& t, int64_t ticks) {
     t.ticks += ticks;
     if (ticks > t.max_ticks) t.max_ticks = ticks;
@@ -495,12 +494,63 @@ void name_this_thread(const wchar_t* name) {
     if (fn) fn(GetCurrentThread(), name);
 }
 void calibrate_cycles() {
-    const int64_t q0 = qpc();
+    LARGE_INTEGER f{}, a{}, b{};
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
     const uint64_t c0 = __rdtsc();
     Sleep(50);
-    const int64_t q1 = qpc();
+    QueryPerformanceCounter(&b);
     const uint64_t c1 = __rdtsc();
-    g_cycles_per_s = static_cast<double>(c1 - c0) / (static_cast<double>(q1 - q0) / g_freq.QuadPart);
+    g_cycles_per_s = static_cast<double>(c1 - c0) / (static_cast<double>(b.QuadPart - a.QuadPart) / f.QuadPart);
+    g_freq.QuadPart = static_cast<LONGLONG>(g_cycles_per_s);
+}
+
+// What common calls cost here, once at start ([bench] lines): under Wine on another CPU (FEX) a call that leaves
+// the emulator for native code costs far more than on a PC, which decides what is cheap enough to do per draw.
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, void*);
+double bench_ns(uint64_t c0, uint64_t c1, int n) { return 1e9 * static_cast<double>(c1 - c0) / g_cycles_per_s / n; }
+void bench_calls() {
+    if (g_cycles_per_s <= 0.0) return;
+    char line[1024];
+    int o = std::snprintf(line, sizeof(line), "[bench] ns per call:");
+    auto run = [&](const char* name, int n, auto&& fn) {
+        const uint64_t c0 = __rdtsc();
+        for (int i = 0; i < n; ++i) fn();
+        const uint64_t c1 = __rdtsc();
+        o += std::snprintf(line + o, sizeof(line) - o, " %s %.0f,", name, bench_ns(c0, c1, n));
+    };
+    volatile uint64_t sink = 0;
+    run("rdtsc", 20000, [&] { sink += __rdtsc(); });
+    run("QueryPerformanceCounter", 20000, [&] { LARGE_INTEGER t; QueryPerformanceCounter(&t); sink += t.QuadPart; });
+    run("GetTickCount64", 20000, [&] { sink += GetTickCount64(); });
+    using TimeGetTimeFn = DWORD(WINAPI*)();
+    HMODULE winmm = LoadLibraryW(L"winmm.dll");
+    auto tgt = winmm ? reinterpret_cast<TimeGetTimeFn>(GetProcAddress(winmm, "timeGetTime")) : nullptr;
+    if (tgt) run("timeGetTime", 20000, [&] { sink += tgt(); });
+    const DWORD tls = TlsAlloc();
+    run("TlsGetValue", 20000, [&] { sink += reinterpret_cast<uintptr_t>(TlsGetValue(tls)); });
+    TlsFree(tls);
+    volatile LONG counter = 0;
+    run("InterlockedIncrement", 20000, [&] { InterlockedIncrement(&counter); });
+    CRITICAL_SECTION cs;
+    InitializeCriticalSection(&cs);
+    run("Enter+LeaveCriticalSection", 20000, [&] { EnterCriticalSection(&cs); LeaveCriticalSection(&cs); });
+    DeleteCriticalSection(&cs);
+    SRWLOCK srw = SRWLOCK_INIT;
+    run("AcquireReleaseSRWLock", 20000, [&] { AcquireSRWLockExclusive(&srw); ReleaseSRWLockExclusive(&srw); });
+    HANDLE ev = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    run("WaitForSingleObject(signaled)", 5000, [&] { sink += WaitForSingleObject(ev, 0); });
+    run("SetEvent", 5000, [&] { SetEvent(ev); });
+    CloseHandle(ev);
+    run("SwitchToThread", 2000, [&] { SwitchToThread(); });
+    run("Sleep(0)", 2000, [&] { Sleep(0); });
+    HMODULE xi = GetModuleHandleW(L"xinput1_4.dll");
+    if (!xi) xi = LoadLibraryW(L"xinput1_4.dll");
+    auto xgs = xi ? reinterpret_cast<XInputGetStateFn>(GetProcAddress(xi, "XInputGetState")) : nullptr;
+    alignas(8) uint8_t state[16];
+    if (xgs) run("XInputGetState(slot 3, empty)", 500, [&] { sink += xgs(3, state); });
+    if (o > 0 && line[o - 1] == ',') line[o - 1] = 0;
+    LOG_INFO("%s (TSC %.1f MHz)", line, g_cycles_per_s / 1e6);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1489,7 +1539,7 @@ DWORD WINAPI spike_thread(void*) {
 volatile bool g_capture_requested = false;  // RemoteControl `capture`: as F10
 
 DWORD WINAPI profile_thread(void*) {
-    calibrate_cycles();
+    bench_calls();
     bool was_down = false;
     int64_t next_report = qpc() + g_freq.QuadPart * kReportSeconds;
     for (;;) {
@@ -1550,6 +1600,19 @@ void profile_render_span(double ms) { g_render_ms.add(ms); }
 
 void profile_hook_device(IDirect3DDevice9* device) {
     if (!g_enabled || !device || g_device_hooked) return;
+    if (g_cycles_per_s > 0.0) {
+        // What one Direct3D call costs on this system, before the census hooks it (the hooks of RemoteControl and the
+        // other features already in place stay in the path, as for the game's own calls).
+        DWORD v = 0;
+        device->GetRenderState(D3DRS_ZENABLE, &v);
+        const uint64_t c0 = __rdtsc();
+        for (int i = 0; i < 20000; ++i) device->GetRenderState(D3DRS_ZENABLE, &v);
+        const uint64_t c1 = __rdtsc();
+        for (int i = 0; i < 20000; ++i) device->SetRenderState(D3DRS_ZENABLE, v);
+        const uint64_t c2 = __rdtsc();
+        LOG_INFO("[bench] Direct3D 9 ns per call: GetRenderState %.0f, SetRenderState (the same value) %.0f",
+                 bench_ns(c0, c1, 20000), bench_ns(c1, c2, 20000));
+    }
     void** vt = *reinterpret_cast<void***>(device);
     g_thunks = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!g_thunks) return;
@@ -1719,7 +1782,7 @@ void profile_configure(bool spikes, int capture_ms) {
 }
 
 bool profile_start() {
-    QueryPerformanceFrequency(&g_freq);
+    calibrate_cycles();  // also sets g_freq (qpc() ticks per second)
     find_code_ranges();
     g_enabled = true;
     streamwatch_install();
