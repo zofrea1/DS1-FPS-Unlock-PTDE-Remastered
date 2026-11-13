@@ -198,6 +198,35 @@ static void test_cull() {
                 counts[0], counts[1], counts[2], fallbacks, g_fail);
 }
 
+
+// The effects library's integer vector ops (0x9852A0 shl, 0x985430 shr, 0x985020 and-not) vs ffx_shl4/shr4/andnot4:
+// random lanes and counts (incl. >= 32), separate and in place (out = a, out = b).
+static void test_intops() {
+    using F = uint32_t*(__cdecl*)(uint32_t*, const uint32_t*, const uint32_t*);
+    struct { uintptr_t orig; F repl; const char* name; } ops[] = {
+        {0x9852A0, &ffx_shl4, "ffx shl"}, {0x985430, &ffx_shr4, "ffx shr"}, {0x985020, &ffx_andnot4, "ffx andnot"}};
+    for (int it = 0; it < 300000; ++it) {
+        alignas(16) uint32_t a[4], b[4], o1[4], o2[4], x1[4], x2[4];
+        for (int i = 0; i < 4; ++i) { a[i] = rng(); b[i] = (it & 1) ? rng() : (rng() % 40); }
+        for (auto& op : ops) {
+            fill(o1, 4); std::memcpy(o2, o1, 16);
+            uint32_t* r1 = reinterpret_cast<F>(op.orig)(o1, a, b);
+            uint32_t* r2 = op.repl(o2, a, b);
+            same(o1, o2, 16, op.name, it);
+            if (r1 != o1 || r2 != o2) { std::printf("return %s\n", op.name); ++g_fail; }
+            std::memcpy(x1, a, 16); std::memcpy(x2, a, 16);
+            reinterpret_cast<F>(op.orig)(x1, x1, b);
+            op.repl(x2, x2, b);
+            same(x1, x2, 16, op.name, it);
+            std::memcpy(x1, b, 16); std::memcpy(x2, b, 16);
+            reinterpret_cast<F>(op.orig)(x1, a, x1);
+            op.repl(x2, a, x2);
+            same(x1, x2, 16, op.name, it);
+        }
+    }
+    std::printf("integer ops: 300000 iterations, %d mismatches so far\n", g_fail);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "child") != 0) return run_parent(argv[0]);
     std::printf("image mapped (child)\n");
@@ -385,5 +414,6 @@ int main(int argc, char** argv) {
     std::printf("%d iterations, %d mismatches so far\n", N, g_fail);
     }
     test_cull();
+    test_intops();
     return g_fail ? 1 : 0;
 }
