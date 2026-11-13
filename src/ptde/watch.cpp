@@ -43,6 +43,15 @@ volatile uint32_t g_exec_arg0[kSlots] = {};
 int g_nspec = 0;
 void* g_addr[kSlots] = {};
 Hit g_hits[kMaxHits];
+// Read/write slots ('r') also keep the order of their first accesses: eip and the value after the access.
+struct Access {
+    uint32_t eip;
+    uint32_t value;
+    int slot;
+};
+constexpr int kMaxAccesses = 192;
+Access g_accesses[kMaxAccesses];
+int g_naccesses = 0;
 int g_nhits = 0;
 std::atomic<int> g_lock{0};
 std::atomic<bool> g_armed{false};
@@ -94,8 +103,10 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
                 v = *reinterpret_cast<const uint32_t*>(ctx->Esp);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
             }
-        } else {
+        } else if (g_spec[i].base != 'r') {
             v = *static_cast<volatile uint32_t*>(g_addr[i]);
+        } else {
+            v = 0xFFFFFFFF;  // a read/write slot must not touch its address here: that would fire it again
         }
         float f;
         std::memcpy(&f, &v, 4);
@@ -118,7 +129,7 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
             h->tid = GetCurrentThreadId();
             const uint32_t* sp = reinterpret_cast<const uint32_t*>(ctx->Esp);
             int n = 0;
-            for (int s = 0; s < 96 && n < 3; ++s) {
+            for (int s = 0; s < 96 && n < 3 && g_spec[i].base != 'r'; ++s) {  // not for r: the stack may hold the watched slot
                 uint32_t w = 0;
                 __try {
                     w = sp[s];
@@ -127,6 +138,9 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
                 }
                 if (in_text(w)) h->ret[n++] = w;
             }
+        }
+        if (g_spec[i].base == 'r' && g_naccesses < kMaxAccesses) {
+            g_accesses[g_naccesses++] = Access{ctx->Eip, v, i};
         }
         if (h) {
             ++h->count;
@@ -168,6 +182,8 @@ void apply_registers(bool enable) {
                         *regs[i] = reinterpret_cast<DWORD>(g_addr[i]);
                         if (g_spec[i].base == 'x') {
                             dr7 |= (1u << (i * 2));  // execute breakpoint: RW = 00, LEN = 00
+                        } else if (g_spec[i].base == 'r') {
+                            dr7 |= (1u << (i * 2)) | (3u << (16 + i * 4)) | (3u << (18 + i * 4));  // RW = 11
                         } else {
                             dr7 |= (1u << (i * 2)) | (1u << (16 + i * 4)) | (3u << (18 + i * 4));
                         }
@@ -288,6 +304,19 @@ void report() {
                      *reinterpret_cast<const float*>(&a0));
         }
     }
+    if (g_naccesses) {
+        LOG_INFO("Watch: first %d reads/writes in order (eip after the access, value, slot):", g_naccesses);
+        char line[512];
+        int n = 0;
+        for (int i = 0; i < g_naccesses; ++i) {
+            n += std::snprintf(line + n, sizeof(line) - n, " %08X=%08X/%d", g_accesses[i].eip, g_accesses[i].value,
+                               g_accesses[i].slot);
+            if ((i % 8) == 7 || i + 1 == g_naccesses) {
+                LOG_INFO("   %s", line);
+                n = 0;
+            }
+        }
+    }
     g_lock.store(0, std::memory_order_release);
 }
 
@@ -323,20 +352,22 @@ void watch_poll() {
 }
 
 void watch_arm_addresses(const uint32_t* addresses, int count) {
-    watch_arm_mixed(addresses, nullptr, count);
+    watch_arm_modes(addresses, nullptr, count);
 }
 
-void watch_arm_mixed(const uint32_t* addresses, const bool* exec, int count) {
+void watch_arm_modes(const uint32_t* addresses, const char* modes, int count) {
     if (g_armed) return;
     if (count > kSlots) count = kSlots;
     g_nspec = count;
     g_nhits = 0;
+    g_naccesses = 0;
     for (int i = 0; i < kSlots; ++i) g_addr[i] = nullptr;
     for (int i = 0; i < count; ++i) {
-        g_spec[i].base = exec && exec[i] ? 'x' : 'a';
+        g_spec[i].base = modes && (modes[i] == 'x' || modes[i] == 'r') ? modes[i] : 'a';
         g_spec[i].offset = addresses[i];
         g_addr[i] = reinterpret_cast<void*>(addresses[i]);
-        LOG_INFO("Watch: %s watchpoint %d on %08X", g_spec[i].base == 'x' ? "execute" : "write", i, addresses[i]);
+        LOG_INFO("Watch: %s watchpoint %d on %08X",
+                 g_spec[i].base == 'x' ? "execute" : g_spec[i].base == 'r' ? "read/write" : "write", i, addresses[i]);
     }
     if (!g_veh) g_veh = AddVectoredExceptionHandler(1, on_exception);
     apply_registers(true);
@@ -363,7 +394,7 @@ void watch_poll() {}
 uint32_t watch_exec_ecx(int) { return 0; }
 uint32_t watch_exec_arg0(int) { return 0; }
 void watch_arm_addresses(const uint32_t*, int) {}
-void watch_arm_mixed(const uint32_t*, const bool*, int) {}
+void watch_arm_modes(const uint32_t*, const char*, int) {}
 void watch_report_now() {}
 
 #endif  // FPSU_DIAGNOSTICS

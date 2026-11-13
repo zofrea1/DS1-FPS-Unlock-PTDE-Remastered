@@ -1678,18 +1678,19 @@ void run(const std::string& line) {
             out("poke %08X: not writable", static_cast<unsigned>(a));
         }
     } else if (c == "watch" && t.size() > 1) {
-        // watch ADDR [ADDR ..] (hex, up to 4; xADDR = execute breakpoint): hardware watchpoints; the writers (or
-        // callers) go to the main log on watchreport.
+        // watch ADDR [ADDR ..] (hex, up to 4; xADDR = execute breakpoint, rADDR = read/write with the access order):
+        // hardware watchpoints; the writers (callers, accesses) go to the main log on watchreport.
         uint32_t addr[4] = {};
-        bool exec[4] = {};
+        char modes[4] = {};
         int n = 0;
         for (size_t k = 1; k < t.size() && n < 4; ++k) {
             const char* p = t[k].c_str();
-            exec[n] = *p == 'x' || *p == 'X';
-            if (exec[n]) ++p;
+            const char m = static_cast<char>(std::tolower(static_cast<unsigned char>(*p)));
+            modes[n] = m == 'x' || m == 'r' ? m : 'a';
+            if (modes[n] != 'a') ++p;
             addr[n++] = static_cast<uint32_t>(std::strtoul(p, nullptr, 16));
         }
-        watch_arm_mixed(addr, exec, n);
+        watch_arm_modes(addr, modes, n);
         g_watch_frames0 = g_game_frames;
         out("watch %08X (+%d more) armed (writers go to the main log on watchreport)", addr[0], n - 1);
     } else if (c == "watchreport") {
