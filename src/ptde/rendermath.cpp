@@ -192,6 +192,68 @@ float* __cdecl vec4_rsqrt(float* out, const float* in) {
     return out;
 }
 
+// 0x41FB20: set 3x4 matrix `index` of a shader-constant block if it changed. eax = index, [esp+4] = block, [esp+8] =
+// matrix, callee pops both. The block's rows at block + (index*3+6)*16 are compared with the matrix's row by row through
+// the four-float not-equal (0x407F50: as doubles, a NaN lane differs, -0 equals +0), stopping at the first that
+// differs; if one does, the 48 bytes are copied 8 at a time in order and, when block+0x10 is set, 0xF652B0(block)
+// (callee pops; takes the index in edi) marks the registers dirty and copies them on. Here the compares as cmpeqps on
+// the same rows in the same order without the calls, the rest the same. ecx, ebx, esi, edi and ebp are kept like the
+// original; eax and edx are scratch, as are xmm0 and xmm1.
+__declspec(naked) void mat_set_if_changed() {
+    __asm {
+        push ecx
+        push esi
+        push edi
+        mov edi, eax
+        mov edx, [esp + 16]
+        mov ecx, [esp + 20]
+        lea eax, [edi + edi * 2 + 6]
+        shl eax, 4
+        lea esi, [eax + edx]
+        movups xmm0, [esi]
+        movups xmm1, [ecx]
+        cmpeqps xmm0, xmm1
+        movmskps eax, xmm0
+        cmp eax, 15
+        jne copy
+        movups xmm0, [esi + 16]
+        movups xmm1, [ecx + 16]
+        cmpeqps xmm0, xmm1
+        movmskps eax, xmm0
+        cmp eax, 15
+        jne copy
+        movups xmm0, [esi + 32]
+        movups xmm1, [ecx + 32]
+        cmpeqps xmm0, xmm1
+        movmskps eax, xmm0
+        cmp eax, 15
+        je done
+    copy:
+        movq xmm0, qword ptr [ecx]
+        movq qword ptr [esi], xmm0
+        movq xmm0, qword ptr [ecx + 8]
+        movq qword ptr [esi + 8], xmm0
+        movq xmm0, qword ptr [ecx + 16]
+        movq qword ptr [esi + 16], xmm0
+        movq xmm0, qword ptr [ecx + 24]
+        movq qword ptr [esi + 24], xmm0
+        movq xmm0, qword ptr [ecx + 32]
+        movq qword ptr [esi + 32], xmm0
+        movq xmm0, qword ptr [ecx + 40]
+        movq qword ptr [esi + 40], xmm0
+        cmp dword ptr [edx + 0x10], 0
+        je done
+        push edx
+        mov eax, 0xF652B0
+        call eax
+    done:
+        pop edi
+        pop esi
+        pop ecx
+        ret 8
+    }
+}
+
 // One row step of the engine's matrix multiplies, as the originals do it: every lane in double, rounded to float, the
 // row stored before the next step reads it (and the next B row) back from memory. Operand order (which NaN comes out
 // when both are NaN), measured on the originals: the first step multiplies b*s in every lane, the later steps b*s in
@@ -476,6 +538,9 @@ const uint8_t k430AC0Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0x
 const uint8_t k4193E0Fwd[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0xAA, 0x3E, 0xA9, 0xFF, 0x83, 0xC4, 0x08};
 const uint8_t kSaturateHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x45, 0x0C, 0xF3, 0x0F, 0x10,
                                  0x00, 0xF3, 0x0F, 0x10, 0x0D, 0x60, 0x52, 0x0D, 0x01, 0x83, 0xEC, 0x10};
+// 0x41FB20 whole (its calls and the dirty-mark call included)
+const uint8_t kMatSetHead[] = {0x51, 0x53, 0x8B, 0x5C, 0x24, 0x10, 0x55, 0x8B, 0x6C, 0x24, 0x10, 0x56, 0x57, 0x8B, 0xF8, 0x8D, 0x44, 0x7F, 0x06, 0xC1, 0xE0, 0x04, 0x8D, 0x34, 0x28, 0x56, 0x8B, 0xC3, 0xE8, 0x0F, 0x84, 0xFE, 0xFF};
+const uint8_t kMatSetRest[] = {0x84, 0xC0, 0x75, 0x20, 0x8D, 0x4E, 0x10, 0x8D, 0x43, 0x10, 0x51, 0xE8, 0xFF, 0x83, 0xFE, 0xFF, 0x84, 0xC0, 0x75, 0x10, 0x8D, 0x56, 0x20, 0x8D, 0x43, 0x20, 0x52, 0xE8, 0xEF, 0x83, 0xFE, 0xFF, 0x84, 0xC0, 0x74, 0x4B, 0xF3, 0x0F, 0x7E, 0x03, 0x66, 0x0F, 0xD6, 0x06, 0xF3, 0x0F, 0x7E, 0x43, 0x08, 0x66, 0x0F, 0xD6, 0x46, 0x08, 0xF3, 0x0F, 0x7E, 0x43, 0x10, 0x66, 0x0F, 0xD6, 0x46, 0x10, 0xF3, 0x0F, 0x7E, 0x43, 0x18, 0x66, 0x0F, 0xD6, 0x46, 0x18, 0xF3, 0x0F, 0x7E, 0x43, 0x20, 0x8D, 0x43, 0x20, 0x8D, 0x4E, 0x20, 0x66, 0x0F, 0xD6, 0x01, 0xF3, 0x0F, 0x7E, 0x40, 0x08, 0x66, 0x0F, 0xD6, 0x41, 0x08, 0x83, 0x7D, 0x10, 0x00, 0x74, 0x06, 0x55, 0xE8, 0x00, 0x57, 0xB4, 0x00, 0x5F, 0x5E, 0x5D, 0x5B, 0x59, 0xC2, 0x08, 0x00};
 // 0x419890 through its constants (-0.0f at 0x11E7FF0, 1.0 at 0x11E7C90) to the loop's first load
 const uint8_t kRsqrtHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x55, 0x0C, 0x0F, 0x57, 0xC9, 0xF3, 0x0F, 0x10,
                               0x15, 0xF0, 0x7F, 0x1E, 0x01, 0xF2, 0x0F, 0x10, 0x1D, 0x90, 0x7C, 0x1E, 0x01, 0x8D, 0x44,
@@ -507,6 +572,8 @@ const Site kCoreSites[] = {
      reinterpret_cast<const void*>(&vec4_saturate)},
     {"four-float reciprocal square root", 0x419890, kRsqrtHead, sizeof(kRsqrtHead), nullptr, 0, 0,
      reinterpret_cast<const void*>(&vec4_rsqrt)},
+    {"set matrix if changed", 0x41FB20, kMatSetHead, sizeof(kMatSetHead), kMatSetRest, 0x21, sizeof(kMatSetRest),
+     reinterpret_cast<const void*>(&mat_set_if_changed)},
 };
 
 
@@ -865,7 +932,7 @@ bool rendermath_install(bool core, bool effects) {
         if (n) {
             LOG_INFO("FastRenderMath: %d of the engine's vector and matrix helpers (four-float add, subtract, multiply, "
                      "multiply-add, not-equal, saturate and reciprocal square root, 3x4 matrix add and multiply, 4x4 "
-                     "multiply and transpose) run as "
+                     "multiply and transpose, set matrix if changed) run as "
                      "SSE with the same results",
                      n);
         }

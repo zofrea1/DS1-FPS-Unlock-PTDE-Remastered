@@ -252,6 +252,74 @@ static void test_random() {
     std::printf("random: 200000 iterations, %d mismatches so far\n", g_fail);
 }
 
+
+// 0x41FB20 set-matrix-if-changed (eax = index, block, matrix; callee pops) vs mat_set_if_changed: random blocks with
+// rows equal, differing in one lane (also NaN, -0 vs +0) or random, with and without the dirty structure (block+0x10)
+// that 0xF652B0 marks and copies into; the whole block and dirty structure compared after, and ecx/ebx/esi/edi/ebp
+// as they come back.
+static uint32_t g_matset_fn, g_regs_out[5];
+__declspec(naked) static void call_matset(uint32_t /*index*/, void* /*block*/, void* /*matrix*/) {
+    __asm {
+        push ebp
+        push ebx
+        push esi
+        push edi
+        push dword ptr [esp + 28]
+        push dword ptr [esp + 28]
+        mov eax, [esp + 28]
+        mov ecx, 0x11111111
+        mov ebx, 0x22222222
+        mov esi, 0x33333333
+        mov edi, 0x44444444
+        mov ebp, 0x55555555
+        mov edx, 0x66666666
+        call dword ptr [g_matset_fn]
+        mov [g_regs_out], ecx
+        mov [g_regs_out + 4], ebx
+        mov [g_regs_out + 8], esi
+        mov [g_regs_out + 12], edi
+        mov [g_regs_out + 16], ebp
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret
+    }
+}
+static void test_matset() {
+    static uint8_t blk1[1024], blk2[1024], d1[8192], d2[8192];
+    for (int it = 0; it < 200000; ++it) {
+        const uint32_t index = rng() % 8;
+        uint32_t m[12];
+        fill(m, 12);
+        for (size_t i = 0; i < sizeof(blk1) / 4; ++i) reinterpret_cast<uint32_t*>(blk1)[i] = rnd_bits();
+        for (size_t i = 0; i < 64; ++i) reinterpret_cast<uint32_t*>(d1)[i] = rng();
+        uint32_t* rows = reinterpret_cast<uint32_t*>(blk1 + (index * 3 + 6) * 16);
+        switch (rng() % 4) {
+        case 0: std::memcpy(rows, m, 48); break;
+        case 1: std::memcpy(rows, m, 48); rows[rng() % 12] = rnd_bits(); break;
+        case 2: std::memcpy(rows, m, 48); rows[rng() % 12] ^= 0x80000000u; break;
+        default: break;
+        }
+        const bool dirty = (rng() & 1) != 0;
+        std::memcpy(blk2, blk1, sizeof(blk1));
+        std::memcpy(d2, d1, sizeof(d1));
+        reinterpret_cast<uint32_t*>(blk1)[4] = dirty ? reinterpret_cast<uint32_t>(d1) : 0;
+        reinterpret_cast<uint32_t*>(blk2)[4] = dirty ? reinterpret_cast<uint32_t>(d2) : 0;
+        g_matset_fn = 0x41FB20;
+        call_matset(index, blk1, m);
+        uint32_t r1[5];
+        std::memcpy(r1, g_regs_out, 20);
+        g_matset_fn = reinterpret_cast<uint32_t>(&mat_set_if_changed);
+        call_matset(index, blk2, m);
+        reinterpret_cast<uint32_t*>(blk2)[4] = reinterpret_cast<uint32_t*>(blk1)[4];
+        same(blk1, blk2, sizeof(blk1), "matset block", it);
+        same(d1, d2, sizeof(d1), "matset dirty", it);
+        if (std::memcmp(r1, g_regs_out, 20) != 0) { std::printf("matset registers differ\n"); ++g_fail; }
+    }
+    std::printf("set matrix if changed: 200000 iterations, %d mismatches so far\n", g_fail);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "child") != 0) return run_parent(argv[0]);
     std::printf("image mapped (child)\n");
@@ -454,5 +522,6 @@ int main(int argc, char** argv) {
     test_cull();
     test_intops();
     test_random();
+    test_matset();
     return g_fail ? 1 : 0;
 }
