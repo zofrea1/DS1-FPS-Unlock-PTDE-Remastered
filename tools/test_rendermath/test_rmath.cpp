@@ -253,11 +253,11 @@ static void test_random() {
 }
 
 
-// 0x41FB20 set-matrix-if-changed (eax = index, block, matrix; callee pops) vs mat_set_if_changed: random blocks with
-// rows equal, differing in one lane (also NaN, -0 vs +0) or random, with and without the dirty structure (block+0x10)
-// that 0xF652B0 marks and copies into; the whole block and dirty structure compared after, and ecx/ebx/esi/edi/ebp
-// as they come back.
-static uint32_t g_matset_fn, g_regs_out[5];
+// 0x41FB20, 0x422110 and 0x4221B0 set-matrix-if-changed (eax = index, block, matrix; callee pops) vs
+// mat_set_if_changed and its two siblings: random blocks with rows equal, differing in one lane (also NaN, -0 vs +0) or
+// random, with and without the dirty structure (block+0x10) that the setters (0xF652B0, 0xF65640, 0xF655F0) mark and
+// copy into; the whole block and dirty structure compared after, and eax/ecx/ebx/esi/edi/ebp as they come back.
+static uint32_t g_matset_fn, g_regs_out[6];
 __declspec(naked) static void call_matset(uint32_t /*index*/, void* /*block*/, void* /*matrix*/) {
     __asm {
         push ebp
@@ -279,6 +279,7 @@ __declspec(naked) static void call_matset(uint32_t /*index*/, void* /*block*/, v
         mov [g_regs_out + 8], esi
         mov [g_regs_out + 12], edi
         mov [g_regs_out + 16], ebp
+        mov [g_regs_out + 20], eax
         pop edi
         pop esi
         pop ebx
@@ -286,15 +287,15 @@ __declspec(naked) static void call_matset(uint32_t /*index*/, void* /*block*/, v
         ret
     }
 }
-static void test_matset() {
-    static uint8_t blk1[1024], blk2[1024], d1[8192], d2[8192];
+static void test_matset_one(const char* what, uint32_t orig, const void* repl, uint32_t k2, uint32_t max_index) {
+    static uint8_t blk1[4096], blk2[4096], d1[8192], d2[8192];
     for (int it = 0; it < 200000; ++it) {
-        const uint32_t index = rng() % 8;
+        const uint32_t index = rng() % (max_index + 1);
         uint32_t m[12];
         fill(m, 12);
         for (size_t i = 0; i < sizeof(blk1) / 4; ++i) reinterpret_cast<uint32_t*>(blk1)[i] = rnd_bits();
-        for (size_t i = 0; i < 64; ++i) reinterpret_cast<uint32_t*>(d1)[i] = rng();
-        uint32_t* rows = reinterpret_cast<uint32_t*>(blk1 + (index * 3 + 6) * 16);
+        for (size_t i = 0; i < 20; ++i) reinterpret_cast<uint32_t*>(d1)[i] = (rng() & 1) ? rng() : 0;
+        uint32_t* rows = reinterpret_cast<uint32_t*>(blk1 + (index * 3 + k2) * 16);
         switch (rng() % 4) {
         case 0: std::memcpy(rows, m, 48); break;
         case 1: std::memcpy(rows, m, 48); rows[rng() % 12] = rnd_bits(); break;
@@ -306,18 +307,172 @@ static void test_matset() {
         std::memcpy(d2, d1, sizeof(d1));
         reinterpret_cast<uint32_t*>(blk1)[4] = dirty ? reinterpret_cast<uint32_t>(d1) : 0;
         reinterpret_cast<uint32_t*>(blk2)[4] = dirty ? reinterpret_cast<uint32_t>(d2) : 0;
-        g_matset_fn = 0x41FB20;
+        g_matset_fn = orig;
         call_matset(index, blk1, m);
-        uint32_t r1[5];
-        std::memcpy(r1, g_regs_out, 20);
-        g_matset_fn = reinterpret_cast<uint32_t>(&mat_set_if_changed);
+        uint32_t r1[6];
+        std::memcpy(r1, g_regs_out, 24);
+        g_matset_fn = reinterpret_cast<uint32_t>(repl);
         call_matset(index, blk2, m);
         reinterpret_cast<uint32_t*>(blk2)[4] = reinterpret_cast<uint32_t*>(blk1)[4];
         same(blk1, blk2, sizeof(blk1), "matset block", it);
         same(d1, d2, sizeof(d1), "matset dirty", it);
-        if (std::memcmp(r1, g_regs_out, 20) != 0) { std::printf("matset registers differ\n"); ++g_fail; }
+        // eax: the destination after a setter is a pointer into d1 / d2; compare it as an offset there
+        if (dirty && r1[5] >= reinterpret_cast<uint32_t>(d1) && r1[5] < reinterpret_cast<uint32_t>(d1) + sizeof(d1)) {
+            r1[5] += reinterpret_cast<uint32_t>(d2) - reinterpret_cast<uint32_t>(d1);
+        }
+        if (std::memcmp(r1, g_regs_out, 24) != 0) {
+            if (g_fail < 20) {
+                std::printf("%s registers differ at %d (index %u): %08X %08X %08X %08X %08X %08X vs %08X %08X %08X %08X "
+                            "%08X %08X\n",
+                            what, it, index, r1[0], r1[1], r1[2], r1[3], r1[4], r1[5], g_regs_out[0], g_regs_out[1],
+                            g_regs_out[2], g_regs_out[3], g_regs_out[4], g_regs_out[5]);
+            }
+            ++g_fail;
+        }
     }
-    std::printf("set matrix if changed: 200000 iterations, %d mismatches so far\n", g_fail);
+    std::printf("%s: 200000 iterations, %d mismatches so far\n", what, g_fail);
+}
+static void test_matset() {
+    test_matset_one("set matrix if changed 0x41FB20", 0x41FB20, reinterpret_cast<const void*>(&mat_set_if_changed), 6, 82);
+    test_matset_one("set matrix if changed 0x422110", 0x422110,
+                    reinterpret_cast<const void*>(&mat_set_if_changed), 6, 82);
+    test_matset_one("set matrix if changed 0x4221B0", 0x4221B0,
+                    reinterpret_cast<const void*>(&mat_set_if_changed_4221B0), 0x78, 41);
+}
+
+// 0x431C30 / 0x431D40 dirty-run flushes vs flush_vs_constants / flush_ps_constants: a fake device whose vtable slots
+// 0x178 and 0x1B4 log every call (device, first register, data offset, count, and the eight dirty words at that moment)
+// and return a changing value; random dirty and mask words (empty, full, sparse, dense, runs across words); the call
+// logs, the dirty words after, and eax/ecx/edx/ebx/esi/edi/ebp compared.
+struct FlushCall {
+    uint32_t dev, start, data_off, count, slot, words[8];
+};
+static FlushCall g_fcalls[300];
+static int g_nfcalls;
+static uint8_t* g_fbase;
+static uint32_t g_fret;
+static HRESULT __stdcall fake_set_const(uint32_t slot, void* dev, uint32_t start, const float* data, uint32_t count) {
+    if (g_nfcalls < 300) {
+        FlushCall& c = g_fcalls[g_nfcalls];
+        c.dev = reinterpret_cast<uint32_t>(dev);
+        c.start = start;
+        c.data_off = static_cast<uint32_t>(reinterpret_cast<const uint8_t*>(data) - g_fbase);
+        c.count = count;
+        c.slot = slot;
+        std::memcpy(c.words, g_fbase, 32);
+    }
+    ++g_nfcalls;
+    return static_cast<HRESULT>(g_fret += 0x01010101u);
+}
+static HRESULT __stdcall fake_vs(void* dev, uint32_t start, const float* data, uint32_t count) {
+    return fake_set_const(0x178, dev, start, data, count);
+}
+static HRESULT __stdcall fake_ps(void* dev, uint32_t start, const float* data, uint32_t count) {
+    return fake_set_const(0x1B4, dev, start, data, count);
+}
+static uint32_t g_flush_fn, g_fregs[7];
+__declspec(naked) static void call_flush(void* /*dirty*/, void* /*ctx*/) {
+    __asm {
+        push ebp
+        push ebx
+        push esi
+        push edi
+        push dword ptr [esp + 24]
+        push dword ptr [esp + 24]
+        mov eax, 0x77777777
+        mov ecx, 0x11111111
+        mov ebx, 0x22222222
+        mov esi, 0x33333333
+        mov edi, 0x44444444
+        mov ebp, 0x55555555
+        mov edx, 0x66666666
+        call dword ptr [g_flush_fn]
+        mov [g_fregs], ecx
+        mov [g_fregs + 4], ebx
+        mov [g_fregs + 8], esi
+        mov [g_fregs + 12], edi
+        mov [g_fregs + 16], ebp
+        mov [g_fregs + 20], eax
+        mov [g_fregs + 24], edx
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret
+    }
+}
+static uint32_t rand_word() {
+    switch (rng() % 8) {
+    case 0: case 1: return 0;
+    case 2: return 0xFFFFFFFFu;
+    case 3: return rng() & rng() & rng();  // sparse
+    case 4: return rng() | rng();          // dense
+    case 5: {                              // one run
+        const uint32_t a = rng() % 32, n = 1 + rng() % 32;
+        const uint64_t m = ((1ull << n) - 1) << a;
+        return static_cast<uint32_t>(m);
+    }
+    case 6: return 0x80000000u >> (rng() % 32) | 1u << (rng() % 32);
+    default: return rng();
+    }
+}
+static void test_flush() {
+    static uint8_t base1[0x40 + 256 * 16], base2[sizeof(base1)];
+    static void* vtbl[128];
+    for (int i = 0; i < 128; ++i) vtbl[i] = nullptr;
+    vtbl[0x178 / 4] = reinterpret_cast<void*>(&fake_vs);
+    vtbl[0x1B4 / 4] = reinterpret_cast<void*>(&fake_ps);
+    void* device[4] = {vtbl, nullptr, nullptr, nullptr};
+    void* ctx[8] = {};
+    ctx[4] = device;  // ctx + 0x10
+    static FlushCall log1[300];
+    long calls = 0;
+    for (int it = 0; it < 400000; ++it) {
+        const bool ps = (it & 1) != 0;
+        uint32_t w[16];
+        for (int i = 0; i < 8; ++i) w[i] = rand_word();
+        const int mm = rng() % 4;
+        for (int i = 0; i < 8; ++i) w[8 + i] = mm == 0 ? 0xFFFFFFFFu : mm == 1 ? rand_word() : (rng() & 1) ? 0xFFFFFFFFu : 0;
+        std::memcpy(base1, w, 64);
+        std::memcpy(base2, w, 64);
+        g_fbase = base1;
+        g_nfcalls = 0;
+        g_fret = 0x10000000u;
+        g_flush_fn = ps ? 0x431D40 : 0x431C30;
+        call_flush(base1, ctx);
+        const int n1 = g_nfcalls;
+        std::memcpy(log1, g_fcalls, sizeof(g_fcalls));
+        uint32_t r1[7];
+        std::memcpy(r1, g_fregs, 28);
+        g_fbase = base2;
+        g_nfcalls = 0;
+        g_fret = 0x10000000u;
+        g_flush_fn = reinterpret_cast<uint32_t>(ps ? &flush_ps_constants : &flush_vs_constants);
+        call_flush(base2, ctx);
+        calls += n1;
+        // ecx is a pointer into base1 / base2 (dirty + 0x20 with no last call, the fake's g_fbase after one): compare
+        // it as an offset
+        for (int k : {0, 6}) {
+            if (r1[k] >= reinterpret_cast<uint32_t>(base1) && r1[k] <= reinterpret_cast<uint32_t>(base1) + sizeof(base1)) {
+                r1[k] += reinterpret_cast<uint32_t>(base2) - reinterpret_cast<uint32_t>(base1);
+            }
+        }
+        if (n1 != g_nfcalls || std::memcmp(log1, g_fcalls, sizeof(FlushCall) * (n1 < 300 ? n1 : 300)) != 0) {
+            if (g_fail < 20) std::printf("MISMATCH flush calls (iteration %d): %d vs %d calls\n", it, n1, g_nfcalls);
+            ++g_fail;
+        }
+        same(base1, base2, 64, "flush words", it);
+        if (std::memcmp(r1, g_fregs, 28) != 0) {
+            if (g_fail < 20) {
+                std::printf("flush registers differ at %d: %08X %08X %08X %08X %08X %08X %08X vs %08X %08X %08X %08X %08X "
+                            "%08X %08X\n",
+                            it, r1[0], r1[1], r1[2], r1[3], r1[4], r1[5], r1[6], g_fregs[0], g_fregs[1], g_fregs[2],
+                            g_fregs[3], g_fregs[4], g_fregs[5], g_fregs[6]);
+            }
+            ++g_fail;
+        }
+    }
+    std::printf("constant flushes: 400000 iterations, %ld device calls, %d mismatches so far\n", calls, g_fail);
 }
 
 int main(int argc, char** argv) {
@@ -523,5 +678,6 @@ int main(int argc, char** argv) {
     test_intops();
     test_random();
     test_matset();
+    test_flush();
     return g_fail ? 1 : 0;
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 // Bit-identical SSE replacements for small vector helpers the render thread calls tens of thousands of times a
 // frame (each entry jumps to the replacement).
 //
@@ -14,6 +16,11 @@
 //    Arithmetic is written in assembly to keep each original's operand order (it decides which NaN comes out when two
 //    meet); tools/test_rendermath runs the game's own code against these on random input, NaN-heavy input and
 //    in-place calls, bit for bit.
+//    Bone palettes (with core): the three set-matrix-if-changed routines (0x41FB20, 0x422110, 0x4221B0; every bone of
+//    every skinned draw) with their setters' dirty marking and 48-byte copy inline instead of a call chain through
+//    memcpy and the runtime's 64-bit shift, and the shader constant flushes (0x431C30 vertex, 0x431D40 pixel) finding
+//    the dirty runs with bit scans instead of testing every bit: the same memory writes and device calls in the same
+//    order (tools/test_rendermath compares them call by call).
 //  effects (FastEffects): the effects library's debug-build wrappers that set (0x984890), splat (0x9847C0,
 //    0x984920 through the x87 stack) and subtract (0x984B60) four floats.
 //
@@ -21,5 +28,8 @@
 bool rendermath_install(bool core, bool effects);
 // RemoteControl `cull 0|1`: the view culling replacement off or on (diagnostic A/B).
 bool rendermath_set_cull(bool on);
-// RemoteControl `fastmath core|effects 0|1` (diagnostic A/B): table 0 core, 1 effects; returns sites switched.
+// RemoteControl `fastmath core|effects|new|bone 0|1` (diagnostic A/B): table 0 core, 1 effects, 2 the newer effects
+// sites, 3 bone palettes; returns sites switched.
 int rendermath_set_table(int table, bool on);
+// RemoteControl `fastmath at ADDR 0|1`: one site (by its game address) off or on; returns sites switched (0 or 1).
+int rendermath_set_site(uintptr_t at, bool on);

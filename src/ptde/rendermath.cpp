@@ -192,22 +192,34 @@ float* __cdecl vec4_rsqrt(float* out, const float* in) {
     return out;
 }
 
-// 0x41FB20: set 3x4 matrix `index` of a shader-constant block if it changed. eax = index, [esp+4] = block, [esp+8] =
-// matrix, callee pops both. The block's rows at block + (index*3+6)*16 are compared with the matrix's row by row through
-// the four-float not-equal (0x407F50: as doubles, a NaN lane differs, -0 equals +0), stopping at the first that
-// differs; if one does, the 48 bytes are copied 8 at a time in order and, when block+0x10 is set, 0xF652B0(block)
-// (callee pops; takes the index in edi) marks the registers dirty and copies them on. Here the compares as cmpeqps on
-// the same rows in the same order without the calls, the rest the same. ecx, ebx, esi, edi and ebp are kept like the
-// original; eax and edx are scratch, as are xmm0 and xmm1.
-__declspec(naked) void mat_set_if_changed() {
+// 0x41FB20, 0x422110, 0x4221B0: set 3x4 matrix `index` of a shader-constant block if it changed (bone palettes and
+// the like). eax = index, [esp+4] = block, [esp+8] = matrix, callee pops both. The block's rows at
+// block + (index*3+K2)*16 are compared with the matrix's row by row through the four-float not-equal (0x407F50: as
+// doubles, a NaN lane differs, -0 equals +0), stopping at the first that differs; if one does, the 48 bytes are copied 8
+// at a time in order and, when block+0x10 is set, a setter (0xF652B0, 0xF65640, 0xF655F0; callee pops, the index in edi)
+// passes them on to the device's shader constants: it marks registers index*3+K1 .. +2 dirty through 0x425670 (bit
+// 0x80000000 >> (r & 31) of word r >> 5 at [block+0x10] + 0x10; that function shifts through the runtime's 64-bit shift
+// helper) and copies the 48 bytes there with memcpy, to [block+0x10] + 0x50 + (index*3+K1)*16, returning memcpy's
+// destination. K2/K1 are 6/8 for the first two (vertex shader registers c8 on) and 0x78/0x80 for the third (c128 on).
+// A skinned model sets every bone of every draw this way: about 20,000 per frame where many animated models are in view
+// (Quelaag's Domain). Here the compares as cmpeqps on the same rows in the same order, the copy as before, and the
+// setter's three bits and 48 bytes inline, with no calls. eax comes back as the original's (some callers return it): 0
+// when nothing changed, matrix + 32 when copied without a setter, the destination (memcpy's return) after one. ecx, ebx,
+// esi, edi and ebp are kept like the original; edx is scratch, as are xmm0 and xmm1. Each entry pushes ecx and loads
+// K2 | K1 << 16 into it for the shared body.
+__declspec(naked) void mat_set_core() {
     __asm {
-        push ecx
+        // [esp] = the caller's ecx, [esp+4] = return, [esp+8] = block, [esp+12] = matrix; eax = index, ecx = K2 | K1 << 16
         push esi
         push edi
+        push ebx
         mov edi, eax
-        mov edx, [esp + 16]
-        mov ecx, [esp + 20]
-        lea eax, [edi + edi * 2 + 6]
+        mov ebx, ecx
+        mov edx, [esp + 20]
+        mov ecx, [esp + 24]
+        lea esi, [edi + edi * 2]
+        movzx eax, bx
+        add eax, esi
         shl eax, 4
         lea esi, [eax + edx]
         movups xmm0, [esi]
@@ -227,7 +239,9 @@ __declspec(naked) void mat_set_if_changed() {
         cmpeqps xmm0, xmm1
         movmskps eax, xmm0
         cmp eax, 15
-        je done
+        jne copy
+        xor eax, eax  // as the original: the last not-equal's false
+        jmp done
     copy:
         movq xmm0, qword ptr [ecx]
         movq qword ptr [esi], xmm0
@@ -241,16 +255,215 @@ __declspec(naked) void mat_set_if_changed() {
         movq qword ptr [esi + 32], xmm0
         movq xmm0, qword ptr [ecx + 40]
         movq qword ptr [esi + 40], xmm0
-        cmp dword ptr [edx + 0x10], 0
-        je done
-        push edx
-        mov eax, 0xF652B0
-        call eax
+        lea eax, [ecx + 32]  // as the original without a setter
+        mov edx, [edx + 0x10]
+        test edx, edx
+        jz done
+        // The setter: the dirty words at shadow + 0x10, register f = index*3 + K1 and the two after it.
+        add edx, 0x10
+        shr ebx, 16
+        lea edi, [edi + edi * 2]
+        add edi, ebx
+        mov ecx, edi
+        mov eax, edi
+        shr eax, 5
+        and ecx, 31
+        mov ebx, 0x80000000
+        shr ebx, cl
+        or [edx + eax * 4], ebx
+        lea ecx, [edi + 1]
+        mov eax, ecx
+        shr eax, 5
+        and ecx, 31
+        mov ebx, 0x80000000
+        shr ebx, cl
+        or [edx + eax * 4], ebx
+        lea ecx, [edi + 2]
+        mov eax, ecx
+        shr eax, 5
+        and ecx, 31
+        mov ebx, 0x80000000
+        shr ebx, cl
+        or [edx + eax * 4], ebx
+        // The 48 bytes from the block's rows to the registers (dirty words + 0x40 + f * 16); eax = the destination,
+        // as the setter's memcpy returns it.
+        shl edi, 4
+        lea eax, [edx + edi + 0x40]
+        movups xmm0, [esi]
+        movups [eax], xmm0
+        movups xmm0, [esi + 16]
+        movups [eax + 16], xmm0
+        movups xmm0, [esi + 32]
+        movups [eax + 32], xmm0
     done:
+        pop ebx
         pop edi
         pop esi
         pop ecx
         ret 8
+    }
+}
+
+// 0x41FB20 and 0x422110 (registers c8 on)
+__declspec(naked) void mat_set_if_changed() {
+    __asm {
+        push ecx
+        mov ecx, 0x00080006
+        jmp mat_set_core
+    }
+}
+
+__declspec(naked) void mat_set_if_changed_4221B0() {
+    __asm {
+        push ecx
+        mov ecx, 0x00800078
+        jmp mat_set_core
+    }
+}
+
+// 0x431C30 and 0x431D40: pass a constant block's dirty registers on to the device, as runs. stdcall (dirty, ctx): the
+// dirty words at dirty + 0 (eight, 256 registers, register r = bit 0x80000000 >> (r & 31) of word r >> 5), a mask at
+// dirty + 0x20, the register data at dirty + 0x40 + r * 16; the device at [ctx + 0x10]. For each word, the masked bits:
+// none ends a run carried in from the word before (flushed); otherwise the word loses them (written back as
+// dirty & ~mask) and they are walked bit by bit, register order, a clear bit ending the run so far: the device's
+// SetVertexShaderConstantF (vtable + 0x178, the first) or SetPixelShaderConstantF (+0x1B4, the second) gets (device,
+// first register, its data, count). A run that reaches the end of a word goes on into the next; one still open after
+// the eighth word is flushed last. Called for every draw (about 1000 a frame in Quelaag's Domain), most of the time
+// with a few short runs: the walk tests all 32 bits of every word with something in it. Here each run is found with
+// two bit scans instead: the same calls with the same arguments in the same order, the dirty words written at the
+// same points with the same values (and words with nothing masked not written, as before). eax returns as the
+// original's: the last call's result when a run was open at the end, else 8 (with ecx = dirty + 0x20, edx = 0).
+// ebx, esi, edi and ebp are kept. Each entry loads its vtable offset into eax (not an argument) for the shared body.
+__declspec(naked) void flush_run() {
+    __asm {
+        // eax = vtable offset, ecx = dirty, edx = ctx, esi = first register, ebx = count; eax/ecx/edx as the call leaves
+        push edi
+        mov edi, esi
+        shl edi, 4
+        lea edi, [ecx + edi + 0x40]
+        mov ecx, [edx + 0x10]
+        mov edx, [ecx]
+        push ebx
+        push edi
+        push esi
+        push ecx
+        call dword ptr [edx + eax]
+        pop edi
+        ret
+    }
+}
+
+__declspec(naked) void flush_core() {
+    __asm {
+        push ebp
+        push ebx
+        push esi
+        push edi
+        push eax  // [esp] = vtable offset, [esp+24] = dirty, [esp+28] = ctx
+        xor ebx, ebx  // count of the open run
+        xor esi, esi  // its first register
+        xor edi, edi  // word
+    word_loop:
+        mov ecx, [esp + 24]
+        mov eax, [ecx + edi * 4]
+        mov edx, [ecx + edi * 4 + 0x20]
+        mov ebp, eax
+        and ebp, edx
+        jnz has_bits
+        test ebx, ebx
+        jz next_word
+        mov edx, [esp + 28]
+        mov eax, [esp]
+        call flush_run
+        xor ebx, ebx
+        jmp next_word
+    has_bits:
+        not edx
+        and eax, edx
+        mov [ecx + edi * 4], eax
+        test ebx, ebx
+        jz find
+        test ebp, 0x80000000
+        jz carried_end
+        mov ecx, 31  // the run carried in goes on from this word's first register
+        jmp count
+    carried_end:
+        mov ecx, [esp + 24]
+        mov edx, [esp + 28]
+        mov eax, [esp]
+        call flush_run
+        xor ebx, ebx
+    find:
+        test ebp, ebp
+        jz next_word
+        bsr ecx, ebp  // p: the bit of the lowest register left
+        mov esi, edi
+        shl esi, 5
+        add esi, 31
+        sub esi, ecx
+    count:
+        // the clear bits below p; none: the run goes to the end of the word (p + 1 registers)
+        mov eax, 1
+        shl eax, cl
+        dec eax
+        mov edx, ebp
+        not edx
+        and edx, eax
+        jnz has_end
+        lea ebx, [ebx + ecx + 1]
+        jmp next_word
+    has_end:
+        bsr edx, edx  // q: the clear bit that ends the run (p - q registers)
+        add ebx, ecx
+        sub ebx, edx
+        mov ecx, edx
+        mov eax, 1
+        shl eax, cl
+        dec eax
+        and ebp, eax
+        mov ecx, [esp + 24]
+        mov edx, [esp + 28]
+        mov eax, [esp]
+        call flush_run
+        xor ebx, ebx
+        jmp find
+    next_word:
+        inc edi
+        cmp edi, 8
+        jl word_loop
+        test ebx, ebx
+        jz no_last
+        mov ecx, [esp + 24]
+        mov edx, [esp + 28]
+        mov eax, [esp]
+        call flush_run
+        jmp leave_
+    no_last:
+        mov eax, 8
+        mov ecx, [esp + 24]
+        add ecx, 0x20
+        xor edx, edx
+    leave_:
+        add esp, 4
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret 8
+    }
+}
+
+__declspec(naked) void flush_vs_constants() {
+    __asm {
+        mov eax, 0x178
+        jmp flush_core
+    }
+}
+
+__declspec(naked) void flush_ps_constants() {
+    __asm {
+        mov eax, 0x1B4
+        jmp flush_core
     }
 }
 
@@ -541,6 +754,19 @@ const uint8_t kSaturateHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x45,
 // 0x41FB20 whole (its calls and the dirty-mark call included)
 const uint8_t kMatSetHead[] = {0x51, 0x53, 0x8B, 0x5C, 0x24, 0x10, 0x55, 0x8B, 0x6C, 0x24, 0x10, 0x56, 0x57, 0x8B, 0xF8, 0x8D, 0x44, 0x7F, 0x06, 0xC1, 0xE0, 0x04, 0x8D, 0x34, 0x28, 0x56, 0x8B, 0xC3, 0xE8, 0x0F, 0x84, 0xFE, 0xFF};
 const uint8_t kMatSetRest[] = {0x84, 0xC0, 0x75, 0x20, 0x8D, 0x4E, 0x10, 0x8D, 0x43, 0x10, 0x51, 0xE8, 0xFF, 0x83, 0xFE, 0xFF, 0x84, 0xC0, 0x75, 0x10, 0x8D, 0x56, 0x20, 0x8D, 0x43, 0x20, 0x52, 0xE8, 0xEF, 0x83, 0xFE, 0xFF, 0x84, 0xC0, 0x74, 0x4B, 0xF3, 0x0F, 0x7E, 0x03, 0x66, 0x0F, 0xD6, 0x06, 0xF3, 0x0F, 0x7E, 0x43, 0x08, 0x66, 0x0F, 0xD6, 0x46, 0x08, 0xF3, 0x0F, 0x7E, 0x43, 0x10, 0x66, 0x0F, 0xD6, 0x46, 0x10, 0xF3, 0x0F, 0x7E, 0x43, 0x18, 0x66, 0x0F, 0xD6, 0x46, 0x18, 0xF3, 0x0F, 0x7E, 0x43, 0x20, 0x8D, 0x43, 0x20, 0x8D, 0x4E, 0x20, 0x66, 0x0F, 0xD6, 0x01, 0xF3, 0x0F, 0x7E, 0x40, 0x08, 0x66, 0x0F, 0xD6, 0x41, 0x08, 0x83, 0x7D, 0x10, 0x00, 0x74, 0x06, 0x55, 0xE8, 0x00, 0x57, 0xB4, 0x00, 0x5F, 0x5E, 0x5D, 0x5B, 0x59, 0xC2, 0x08, 0x00};
+// 0x422110 and 0x4221B0 whole, as 0x41FB20 (their call offsets and the row offset 0x78 of the second differ)
+const uint8_t kMatSetBHead[] = {0x51, 0x53, 0x8B, 0x5C, 0x24, 0x10, 0x55, 0x8B, 0x6C, 0x24, 0x10, 0x56, 0x57, 0x8B, 0xF8, 0x8D, 0x44, 0x7F, 0x06, 0xC1, 0xE0, 0x04, 0x8D, 0x34, 0x28, 0x56, 0x8B, 0xC3, 0xE8, 0x1F, 0x5E, 0xFE, 0xFF};
+const uint8_t kMatSetBRest[] = {0x84, 0xC0, 0x75, 0x20, 0x8D, 0x4E, 0x10, 0x8D, 0x43, 0x10, 0x51, 0xE8, 0x0F, 0x5E, 0xFE, 0xFF, 0x84, 0xC0, 0x75, 0x10, 0x8D, 0x56, 0x20, 0x8D, 0x43, 0x20, 0x52, 0xE8, 0xFF, 0x5D, 0xFE, 0xFF, 0x84, 0xC0, 0x74, 0x4B, 0xF3, 0x0F, 0x7E, 0x03, 0x66, 0x0F, 0xD6, 0x06, 0xF3, 0x0F, 0x7E, 0x43, 0x08, 0x66, 0x0F, 0xD6, 0x46, 0x08, 0xF3, 0x0F, 0x7E, 0x43, 0x10, 0x66, 0x0F, 0xD6, 0x46, 0x10, 0xF3, 0x0F, 0x7E, 0x43, 0x18, 0x66, 0x0F, 0xD6, 0x46, 0x18, 0xF3, 0x0F, 0x7E, 0x43, 0x20, 0x8D, 0x43, 0x20, 0x8D, 0x4E, 0x20, 0x66, 0x0F, 0xD6, 0x01, 0xF3, 0x0F, 0x7E, 0x40, 0x08, 0x66, 0x0F, 0xD6, 0x41, 0x08, 0x83, 0x7D, 0x10, 0x00, 0x74, 0x06, 0x55, 0xE8, 0xA0, 0x34, 0xB4, 0x00, 0x5F, 0x5E, 0x5D, 0x5B, 0x59, 0xC2, 0x08, 0x00};
+const uint8_t kMatSetCHead[] = {0x51, 0x53, 0x8B, 0x5C, 0x24, 0x10, 0x55, 0x8B, 0x6C, 0x24, 0x10, 0x56, 0x57, 0x8B, 0xF8, 0x8D, 0x44, 0x7F, 0x78, 0xC1, 0xE0, 0x04, 0x8D, 0x34, 0x28, 0x56, 0x8B, 0xC3, 0xE8, 0x7F, 0x5D, 0xFE, 0xFF};
+const uint8_t kMatSetCRest[] = {0x84, 0xC0, 0x75, 0x20, 0x8D, 0x4E, 0x10, 0x8D, 0x43, 0x10, 0x51, 0xE8, 0x6F, 0x5D, 0xFE, 0xFF, 0x84, 0xC0, 0x75, 0x10, 0x8D, 0x56, 0x20, 0x8D, 0x43, 0x20, 0x52, 0xE8, 0x5F, 0x5D, 0xFE, 0xFF, 0x84, 0xC0, 0x74, 0x4B, 0xF3, 0x0F, 0x7E, 0x03, 0x66, 0x0F, 0xD6, 0x06, 0xF3, 0x0F, 0x7E, 0x43, 0x08, 0x66, 0x0F, 0xD6, 0x46, 0x08, 0xF3, 0x0F, 0x7E, 0x43, 0x10, 0x66, 0x0F, 0xD6, 0x46, 0x10, 0xF3, 0x0F, 0x7E, 0x43, 0x18, 0x66, 0x0F, 0xD6, 0x46, 0x18, 0xF3, 0x0F, 0x7E, 0x43, 0x20, 0x8D, 0x43, 0x20, 0x8D, 0x4E, 0x20, 0x66, 0x0F, 0xD6, 0x01, 0xF3, 0x0F, 0x7E, 0x40, 0x08, 0x66, 0x0F, 0xD6, 0x41, 0x08, 0x83, 0x7D, 0x10, 0x00, 0x74, 0x06, 0x55, 0xE8, 0xB0, 0x33, 0xB4, 0x00, 0x5F, 0x5E, 0x5D, 0x5B, 0x59, 0xC2, 0x08, 0x00};
+// The three setters these call (0x425670 dirty mark, then memcpy), checked so the inline copy matches what they do
+const uint8_t kBoneSetter8[] = {0x53, 0x55, 0x8B, 0x6C, 0x24, 0x0C, 0x56, 0x8B, 0x75, 0x10, 0x6A, 0x03, 0x8D, 0x5C, 0x7F, 0x08, 0x83, 0xC6, 0x10, 0x56, 0x8B, 0xC3};
+const uint8_t kBoneSetter8Tail[] = {0x8D, 0x44, 0x7F, 0x06, 0xC1, 0xE0, 0x04, 0x83, 0xC3, 0x04, 0x6A, 0x30, 0x03, 0xC5, 0xC1, 0xE3, 0x04, 0x50, 0x03, 0xDE, 0x53};
+const uint8_t kBoneSetter128[] = {0x53, 0x55, 0x8B, 0x6C, 0x24, 0x0C, 0x56, 0x8B, 0x75, 0x10, 0x6A, 0x03, 0x8D, 0x9C, 0x7F, 0x80, 0x00, 0x00, 0x00, 0x83, 0xC6, 0x10, 0x56, 0x8B, 0xC3};
+const uint8_t kBoneSetter128Tail[] = {0x8D, 0x44, 0x7F, 0x78, 0xC1, 0xE0, 0x04, 0x83, 0xC3, 0x04, 0x6A, 0x30, 0x03, 0xC5, 0xC1, 0xE3, 0x04, 0x50, 0x03, 0xDE, 0x53};
+// 0x431C30 and 0x431D40 whole (no calls but through the device's vtable; they differ in its offset)
+const uint8_t kFlushVs[] = {0x83, 0xEC, 0x14, 0x53, 0x55, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x28, 0x33, 0xD2, 0x8D, 0x47, 0x20, 0x33, 0xDB, 0x8B, 0xCF, 0x2B, 0xC7, 0x89, 0x54, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x89, 0x44, 0x24, 0x18, 0xEB, 0x04, 0x8B, 0x44, 0x24, 0x18, 0x8B, 0x31, 0x8B, 0x04, 0x08, 0x8B, 0xEE, 0x23, 0xE8, 0x89, 0x6C, 0x24, 0x1C, 0x74, 0x6A, 0x8B, 0x7C, 0x24, 0x10, 0xF7, 0xD0, 0x23, 0xC6, 0xC1, 0xE7, 0x05, 0x8B, 0xF3, 0x89, 0x7C, 0x24, 0x20, 0x33, 0xED, 0xC1, 0xE6, 0x04, 0x89, 0x01, 0xC1, 0xE7, 0x04, 0x8B, 0xCD, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xD3, 0xE8, 0x8B, 0x4C, 0x24, 0x1C, 0x85, 0xC1, 0x74, 0x10, 0x85, 0xD2, 0x75, 0x09, 0x8B, 0x44, 0x24, 0x20, 0x8D, 0x1C, 0x28, 0x8B, 0xF7, 0x42, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x1F, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8B, 0x54, 0x24, 0x2C, 0x8D, 0x54, 0x16, 0x40, 0x52, 0x53, 0x50, 0x8B, 0x81, 0x78, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x45, 0x83, 0xC7, 0x10, 0x83, 0xFD, 0x20, 0x7C, 0xB3, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x27, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0x78, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x8B, 0x7C, 0x24, 0x28, 0x8B, 0x4C, 0x24, 0x14, 0x8B, 0x44, 0x24, 0x10, 0x40, 0x83, 0xC1, 0x04, 0x83, 0xF8, 0x08, 0x89, 0x44, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x0F, 0x8C, 0x3F, 0xFF, 0xFF, 0xFF, 0x85, 0xD2, 0x74, 0x1D, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0x78, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x5F, 0x5E, 0x5D, 0x5B, 0x83, 0xC4, 0x14, 0xC2, 0x08, 0x00};
+const uint8_t kFlushPs[] = {0x83, 0xEC, 0x14, 0x53, 0x55, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x28, 0x33, 0xD2, 0x8D, 0x47, 0x20, 0x33, 0xDB, 0x8B, 0xCF, 0x2B, 0xC7, 0x89, 0x54, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x89, 0x44, 0x24, 0x18, 0xEB, 0x04, 0x8B, 0x44, 0x24, 0x18, 0x8B, 0x31, 0x8B, 0x04, 0x08, 0x8B, 0xEE, 0x23, 0xE8, 0x89, 0x6C, 0x24, 0x1C, 0x74, 0x6A, 0x8B, 0x7C, 0x24, 0x10, 0xF7, 0xD0, 0x23, 0xC6, 0xC1, 0xE7, 0x05, 0x8B, 0xF3, 0x89, 0x7C, 0x24, 0x20, 0x33, 0xED, 0xC1, 0xE6, 0x04, 0x89, 0x01, 0xC1, 0xE7, 0x04, 0x8B, 0xCD, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xD3, 0xE8, 0x8B, 0x4C, 0x24, 0x1C, 0x85, 0xC1, 0x74, 0x10, 0x85, 0xD2, 0x75, 0x09, 0x8B, 0x44, 0x24, 0x20, 0x8D, 0x1C, 0x28, 0x8B, 0xF7, 0x42, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x1F, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8B, 0x54, 0x24, 0x2C, 0x8D, 0x54, 0x16, 0x40, 0x52, 0x53, 0x50, 0x8B, 0x81, 0xB4, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x45, 0x83, 0xC7, 0x10, 0x83, 0xFD, 0x20, 0x7C, 0xB3, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x27, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0xB4, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x8B, 0x7C, 0x24, 0x28, 0x8B, 0x4C, 0x24, 0x14, 0x8B, 0x44, 0x24, 0x10, 0x40, 0x83, 0xC1, 0x04, 0x83, 0xF8, 0x08, 0x89, 0x44, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x0F, 0x8C, 0x3F, 0xFF, 0xFF, 0xFF, 0x85, 0xD2, 0x74, 0x1D, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0xB4, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x5F, 0x5E, 0x5D, 0x5B, 0x83, 0xC4, 0x14, 0xC2, 0x08, 0x00};
 // 0x419890 through its constants (-0.0f at 0x11E7FF0, 1.0 at 0x11E7C90) to the loop's first load
 const uint8_t kRsqrtHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x55, 0x0C, 0x0F, 0x57, 0xC9, 0xF3, 0x0F, 0x10,
                               0x15, 0xF0, 0x7F, 0x1E, 0x01, 0xF2, 0x0F, 0x10, 0x1D, 0x90, 0x7C, 0x1E, 0x01, 0x8D, 0x44,
@@ -572,8 +798,29 @@ const Site kCoreSites[] = {
      reinterpret_cast<const void*>(&vec4_saturate)},
     {"four-float reciprocal square root", 0x419890, kRsqrtHead, sizeof(kRsqrtHead), nullptr, 0, 0,
      reinterpret_cast<const void*>(&vec4_rsqrt)},
+};
+
+// Bone palettes (table 3, installed with the core sites; RemoteControl `fastmath bone 0|1`): 0x41FB20 and its two
+// siblings with their setter calls inlined (see mat_set_core), and the flushes that pass the dirty registers on to the
+// device (see flush_core). The setters are only checked here (their bytes must be
+// what mat_set_core does inline); they are not patched themselves.
+const Site kBoneSites[] = {
     {"set matrix if changed", 0x41FB20, kMatSetHead, sizeof(kMatSetHead), kMatSetRest, 0x21, sizeof(kMatSetRest),
      reinterpret_cast<const void*>(&mat_set_if_changed)},
+    {"bone setter c8", 0xF652B0, kBoneSetter8, sizeof(kBoneSetter8), kBoneSetter8Tail, 0x1B, sizeof(kBoneSetter8Tail),
+     nullptr},
+    {"bone setter c8 (second)", 0xF65640, kBoneSetter8, sizeof(kBoneSetter8), kBoneSetter8Tail, 0x1B,
+     sizeof(kBoneSetter8Tail), nullptr},
+    {"bone setter c128", 0xF655F0, kBoneSetter128, sizeof(kBoneSetter128), kBoneSetter128Tail, 0x1E,
+     sizeof(kBoneSetter128Tail), nullptr},
+    {"set matrix if changed (second)", 0x422110, kMatSetBHead, sizeof(kMatSetBHead), kMatSetBRest, 0x21,
+     sizeof(kMatSetBRest), reinterpret_cast<const void*>(&mat_set_if_changed)},
+    {"set matrix if changed (c128)", 0x4221B0, kMatSetCHead, sizeof(kMatSetCHead), kMatSetCRest, 0x21,
+     sizeof(kMatSetCRest), reinterpret_cast<const void*>(&mat_set_if_changed_4221B0)},
+    {"vertex shader constant flush", 0x431C30, kFlushVs, sizeof(kFlushVs), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&flush_vs_constants)},
+    {"pixel shader constant flush", 0x431D40, kFlushPs, sizeof(kFlushPs), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&flush_ps_constants)},
 };
 
 
@@ -884,7 +1131,7 @@ struct Saved {
     uintptr_t at;
     uint8_t orig[8];
     const void* target;
-    int table;  // 0 core, 1 effects
+    int table;  // 0 core, 1 effects, 3 bone palettes
     int index;  // in its table
 };
 Saved g_saved[96];
@@ -901,6 +1148,7 @@ int install_table(const char* what, const Site* sites, size_t count, int table) 
     }
     int done = 0;
     for (size_t i = 0; i < count; ++i) {
+        if (!sites[i].replacement) continue;  // checked only
         if (g_saved_n < 96 && (sites[i].address & 7) == 0) {
             g_saved[g_saved_n].at = sites[i].address;
             std::memcpy(g_saved[g_saved_n].orig, reinterpret_cast<const void*>(sites[i].address), 8);
@@ -932,9 +1180,16 @@ bool rendermath_install(bool core, bool effects) {
         if (n) {
             LOG_INFO("FastRenderMath: %d of the engine's vector and matrix helpers (four-float add, subtract, multiply, "
                      "multiply-add, not-equal, saturate and reciprocal square root, 3x4 matrix add and multiply, 4x4 "
-                     "multiply and transpose, set matrix if changed) run as "
-                     "SSE with the same results",
+                     "multiply and transpose) run as SSE with the same results",
                      n);
+        }
+        const int nb = install_table("FastRenderMath", kBoneSites, sizeof(kBoneSites) / sizeof(kBoneSites[0]), 3);
+        ok = ok && nb == 5;
+        if (nb) {
+            LOG_INFO("FastRenderMath: bone palettes: %d sites (the three set-matrix-if-changed routines compare in SSE "
+                     "and write the shader constants and their dirty bits inline, the two shader constant flushes find "
+                     "the dirty runs by bit scans) with the same results and device calls",
+                     nb);
         }
         if (install_cull()) {
             g_cull_installed = true;
@@ -985,33 +1240,49 @@ bool rendermath_set_cull(bool on) {
     return true;
 }
 
-// RemoteControl `fastmath core|effects 0|1`: every 8-aligned site of that table back to the original code or on again,
+// RemoteControl `fastmath core|effects|new|bone 0|1`: every 8-aligned site of that table back to the original code or on again,
 // each in one atomic 8-byte write (diagnostic A/B; a thread inside a site's first instructions at that moment would be
 // cut, so this is for testing only). Returns how many sites were switched.
+namespace {
+// One site back to the original code (on false or no target) or to target, in one atomic 8-byte write.
+bool switch_site(const Saved& sv, const void* target, bool on) {
+    uint8_t b[8];
+    std::memcpy(b, sv.orig, 8);
+    if (on && target) {
+        b[0] = 0xE9;
+        const auto rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(target) - (sv.at + 5));
+        std::memcpy(b + 1, &rel, 4);
+    }
+    uint64_t want = 0, now = 0;
+    std::memcpy(&want, b, 8);
+    std::memcpy(&now, reinterpret_cast<const void*>(sv.at), 8);
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(sv.at), 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+    InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(sv.at), static_cast<LONG64>(want),
+                                 static_cast<LONG64>(now));
+    DWORD ignored = 0;
+    VirtualProtect(reinterpret_cast<void*>(sv.at), 8, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(sv.at), 8);
+    return true;
+}
+}  // namespace
+
+// RemoteControl `fastmath at ADDR 0|1`: the one site at ADDR, as rendermath_set_table.
+int rendermath_set_site(uintptr_t at, bool on) {
+    int n = 0;
+    for (int i = 0; i < g_saved_n; ++i) {
+        if (g_saved[i].at == at && switch_site(g_saved[i], g_saved[i].target, on)) ++n;
+    }
+    return n;
+}
+
 int rendermath_set_table(int table, bool on) {
     int n = 0;
     for (int i = 0; i < g_saved_n; ++i) {
         const Saved& sv = g_saved[i];
         // table 2: the effects sites added 2026-11-13 (integer ops and random numbers at 0-5, the wrappers from 24 on)
         if (table == 2 ? (sv.table != 1 || (sv.index >= 6 && sv.index < 24)) : sv.table != table) continue;
-        uint8_t b[8];
-        std::memcpy(b, sv.orig, 8);
-        if (on) {
-            b[0] = 0xE9;
-            const auto rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(sv.target) - (sv.at + 5));
-            std::memcpy(b + 1, &rel, 4);
-        }
-        uint64_t want = 0, now = 0;
-        std::memcpy(&want, b, 8);
-        std::memcpy(&now, reinterpret_cast<const void*>(sv.at), 8);
-        DWORD old = 0;
-        if (!VirtualProtect(reinterpret_cast<void*>(sv.at), 8, PAGE_EXECUTE_READWRITE, &old)) continue;
-        InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(sv.at), static_cast<LONG64>(want),
-                                     static_cast<LONG64>(now));
-        DWORD ignored = 0;
-        VirtualProtect(reinterpret_cast<void*>(sv.at), 8, old, &ignored);
-        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(sv.at), 8);
-        ++n;
+        if (switch_site(sv, sv.target, on)) ++n;
     }
     return n;
 }
