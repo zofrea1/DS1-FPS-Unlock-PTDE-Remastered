@@ -2137,6 +2137,8 @@ bool profile_start() {
     return true;
 }
 
+void profile_request_capture() { g_capture_requested = true; }
+
 #else  // A release build leaves this diagnostic out (see fpsu_buildcfg.h).
 
 volatile DWORD g_render_thread_id = 0;
@@ -2151,7 +2153,6 @@ void profile_game_frame_begin() {}
 void profile_game_frame(double) {}
 void profile_frame_boundary() {}
 void profile_render_span(double) {}
+void profile_request_capture() {}
 
 #endif  // FPSU_DIAGNOSTICS
-
-void profile_request_capture() { g_capture_requested = true; }
