@@ -668,6 +668,120 @@ void bench_calls() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Import census (ProfileImports): every function the game's executable imports (kernel32, user32, winmm, Steam,
+// XInput, ...) is reached through a small counting thunk, counted per thread (game, render, other). On a phone, where
+// the game runs translated, a call that leaves the game's code (timers, locks, TLS, XInput) costs 5 to 30 times what
+// it costs on a PC ([bench] lines); this says how many of each a frame makes. Each [perf] window logs the busiest.
+// ---------------------------------------------------------------------------------------------------------------
+bool g_imports_on = false;
+struct ImportCount {
+    char name[56];
+    void* original;
+    volatile LONG game, render, other;
+    LONG game_prev, render_prev, other_prev;
+};
+constexpr int kMaxImports = 768;
+constexpr int kThunkBytes = 80;
+ImportCount* g_imports = nullptr;
+int g_import_n = 0;
+
+void put32(uint8_t*& p, const void* v) {
+    const uint32_t u = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(v));
+    std::memcpy(p, &u, 4);
+    p += 4;
+}
+
+// push eax; mov eax, fs:[0x24] (thread id); cmp with the game's, then the render thread's id; lock inc that count;
+// pop eax; jmp [original]. Flags are not an API's input, every other register is kept.
+void emit_thunk(uint8_t* p, ImportCount* c) {
+    uint8_t* const t = p;
+    *p++ = 0x50;
+    const uint8_t fs_tid[] = {0x64, 0xA1, 0x24, 0x00, 0x00, 0x00};
+    std::memcpy(p, fs_tid, 6);
+    p += 6;
+    *p++ = 0x3B; *p++ = 0x05; put32(p, const_cast<DWORD*>(&g_game_thread_id));
+    *p++ = 0x74; *p++ = 22;
+    *p++ = 0x3B; *p++ = 0x05; put32(p, const_cast<DWORD*>(&g_render_thread_id));
+    *p++ = 0x74; *p++ = 28;
+    const struct { volatile LONG* cnt; } tails[3] = {{&c->other}, {&c->game}, {&c->render}};
+    for (const auto& tl : tails) {
+        *p++ = 0xF0; *p++ = 0xFF; *p++ = 0x05; put32(p, const_cast<LONG*>(tl.cnt));
+        *p++ = 0x58;
+        *p++ = 0xFF; *p++ = 0x25; put32(p, &c->original);
+    }
+    (void)t;
+}
+
+void imports_install() {
+    auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) return;
+    g_imports = static_cast<ImportCount*>(VirtualAlloc(nullptr, sizeof(ImportCount) * kMaxImports, MEM_COMMIT | MEM_RESERVE,
+                                                       PAGE_READWRITE));
+    auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, kThunkBytes * kMaxImports, MEM_COMMIT | MEM_RESERVE,
+                                                    PAGE_EXECUTE_READWRITE));
+    if (!g_imports || !code) return;
+    const auto* desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
+    for (; desc->Name && g_import_n < kMaxImports; ++desc) {
+        const char* dll = reinterpret_cast<const char*>(base + desc->Name);
+        const auto* names = reinterpret_cast<const IMAGE_THUNK_DATA32*>(
+            base + (desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk));
+        auto* slots = reinterpret_cast<void**>(base + desc->FirstThunk);
+        for (int i = 0; names[i].u1.AddressOfData && g_import_n < kMaxImports; ++i) {
+            ImportCount* c = &g_imports[g_import_n];
+            char fn[40];
+            if (names[i].u1.Ordinal & IMAGE_ORDINAL_FLAG32) {
+                std::snprintf(fn, sizeof(fn), "#%u", static_cast<unsigned>(IMAGE_ORDINAL32(names[i].u1.Ordinal)));
+            } else {
+                const auto* by_name = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names[i].u1.AddressOfData);
+                std::snprintf(fn, sizeof(fn), "%s", reinterpret_cast<const char*>(by_name->Name));
+            }
+            char mod[16];
+            std::snprintf(mod, sizeof(mod), "%s", dll);
+            if (char* dot = std::strchr(mod, '.')) *dot = 0;
+            std::snprintf(c->name, sizeof(c->name), "%s!%s", mod, fn);
+            c->original = slots[i];
+            uint8_t* thunk = code + kThunkBytes * g_import_n;
+            emit_thunk(thunk, c);
+            DWORD old = 0;
+            if (!VirtualProtect(&slots[i], sizeof(void*), PAGE_READWRITE, &old)) continue;
+            InterlockedExchangePointer(&slots[i], thunk);
+            VirtualProtect(&slots[i], sizeof(void*), old, &old);
+            ++g_import_n;
+        }
+    }
+    FlushInstructionCache(GetCurrentProcess(), code, kThunkBytes * kMaxImports);
+    LOG_INFO("[imports] counting calls to the game's %d imported functions (ProfileImports)", g_import_n);
+}
+
+void imports_report(LONG frames) {
+    if (!g_imports_on || !g_import_n || frames <= 0) return;
+    struct Row { int i; LONG g, r, o; };
+    std::vector<Row> rows;
+    for (int i = 0; i < g_import_n; ++i) {
+        ImportCount& c = g_imports[i];
+        const LONG g = c.game, r = c.render, o = c.other;
+        Row row{i, g - c.game_prev, r - c.render_prev, o - c.other_prev};
+        c.game_prev = g;
+        c.render_prev = r;
+        c.other_prev = o;
+        if (row.g + row.r + row.o > 0) rows.push_back(row);
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.g + a.r + a.o > b.g + b.r + b.o; });
+    char line[4096];
+    int n = std::snprintf(line, sizeof(line), "[imports] calls per frame (game/render/other threads):");
+    for (size_t k = 0; k < rows.size() && k < 24 && n < static_cast<int>(sizeof(line)) - 120; ++k) {
+        const Row& r = rows[k];
+        n += std::snprintf(line + n, sizeof(line) - n, " %s %.1f/%.1f/%.1f%s", g_imports[r.i].name,
+                           static_cast<double>(r.g) / frames, static_cast<double>(r.r) / frames,
+                           static_cast<double>(r.o) / frames, k + 1 < rows.size() ? "," : "");
+    }
+    LOG_INFO("%s", line);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // [perf] line.
 // ---------------------------------------------------------------------------------------------------------------
 uint32_t g_calls_prev[kDeviceSlots];
@@ -880,6 +994,7 @@ void report() {
     float xyz[3];
     if (player_position(xyz)) n += std::snprintf(line + n, sizeof(line) - n, " | pos %.1f %.1f %.1f", xyz[0], xyz[1], xyz[2]);
     if (!quiet) LOG_INFO("%s", line);
+    if (!quiet) imports_report(frames);
     texpreload_report();
     if (!quiet) dxgipresent_report();
 }
@@ -1920,6 +2035,8 @@ void profile_stall_report(int seconds) {
     CloseHandle(snapshot);
 }
 
+void profile_set_imports(bool on) { g_imports_on = on; }
+
 void profile_configure(bool spikes, int capture_ms, bool streams) {
     g_spikes_on = spikes;
     g_streams_on = streams;
@@ -1931,6 +2048,7 @@ bool profile_start() {
     find_code_ranges();
     g_enabled = true;
     if (g_streams_on) streamwatch_install();
+    if (g_imports_on) imports_install();
     HANDLE thread = CreateThread(nullptr, 0, profile_thread, nullptr, 0, nullptr);
     if (!thread) {
         g_enabled = false;
@@ -1955,6 +2073,7 @@ volatile DWORD g_render_thread_id = 0;
 volatile DWORD g_game_thread_id = 0;
 bool profile_start() { return false; }
 void profile_configure(bool, int, bool) {}
+void profile_set_imports(bool) {}
 bool profile_enabled() { return false; }
 void profile_stall_report(int) {}
 void profile_hook_device(IDirect3DDevice9*) {}

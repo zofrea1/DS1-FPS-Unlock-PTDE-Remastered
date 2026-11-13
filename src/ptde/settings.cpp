@@ -285,6 +285,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.profile_d3d = parse_bool(val);
         } else if (key == "profilestreams") {
             s.profile_streams = parse_bool(val);
+        } else if (key == "profileimports") {
+            s.profile_imports = parse_bool(val);
         } else if (key == "profilecapturems") {
             s.profile_capture_ms = std::atoi(val.c_str());
         } else if (key == "remotecontrol") {

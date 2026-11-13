@@ -550,6 +550,7 @@ bool frame_install(const Settings& settings) {
     if (settings.profile) {
         log_set_buffered(true);
         profile_configure(settings.profile_spikes, settings.profile_capture_ms, settings.profile_streams);
+        profile_set_imports(settings.profile_imports);
         profile_start();
     }
     if (settings.remote_control) {

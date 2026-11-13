@@ -20,6 +20,9 @@ bool profile_start();
 // `streams`: the game thread's waits for streaming jobs ([stream] lines, ProfileStreams). ProfileD3D = false (d3d.cpp)
 // leaves out the per-call census of the Direct3D device as well.
 void profile_configure(bool spikes, int capture_ms, bool streams);
+// Before profile_start: count the game's calls to every imported function, per thread (ProfileImports, off by
+// default); each [perf] window then logs an [imports] line.
+void profile_set_imports(bool on);
 bool profile_enabled();
 // The F10 capture without the key (RemoteControl `capture`).
 void profile_request_capture();
