@@ -263,6 +263,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.sfx_watch = std::atoi(val.c_str());
         } else if (key == "profile") {
             s.profile = parse_bool(val);
+        } else if (key == "profilespikes") {
+            s.profile_spikes = parse_bool(val);
+        } else if (key == "profilecapturems") {
+            s.profile_capture_ms = std::atoi(val.c_str());
         } else if (key == "remotecontrol") {
             s.remote_control = parse_bool(val);
         } else if (key == "remoteshaderdumps") {

@@ -37,6 +37,8 @@ volatile DWORD g_game_thread_id = 0;
 namespace {
 
 constexpr int kCaptureSeconds = 10;
+bool g_spikes_on = true;  // ProfileSpikes
+int g_capture_ms = 1;      // ProfileCaptureMs: the capture's pause between sampling rounds
 constexpr int kReportSeconds = 5;
 constexpr int kMaxPicked = 12;      // threads sampled during a capture
 constexpr int kMaxRets = 20;        // game return addresses kept per sample
@@ -898,7 +900,7 @@ void capture() {
             }
             ++p.samples;
         }
-        Sleep(1);
+        Sleep(static_cast<DWORD>(g_capture_ms));
     }
     const double seconds = static_cast<double>(qpc() - t0) / g_freq.QuadPart;
     for (Picked& p : picked) {
@@ -1711,6 +1713,11 @@ void profile_stall_report(int seconds) {
     CloseHandle(snapshot);
 }
 
+void profile_configure(bool spikes, int capture_ms) {
+    g_spikes_on = spikes;
+    g_capture_ms = capture_ms < 1 ? 1 : (capture_ms > 50 ? 50 : capture_ms);
+}
+
 bool profile_start() {
     QueryPerformanceFrequency(&g_freq);
     find_code_ranges();
@@ -1723,7 +1730,8 @@ bool profile_start() {
     }
     SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
     CloseHandle(thread);
-    HANDLE spikes = CreateThread(nullptr, 0, spike_thread, nullptr, 0, nullptr);
+    HANDLE spikes = g_spikes_on ? CreateThread(nullptr, 0, spike_thread, nullptr, 0, nullptr) : nullptr;
+    if (!g_spikes_on) LOG_INFO("[perf] spike watch off (ProfileSpikes = false)");
     if (spikes) {
         SetThreadPriority(spikes, THREAD_PRIORITY_TIME_CRITICAL);
         CloseHandle(spikes);
@@ -1738,6 +1746,7 @@ bool profile_start() {
 volatile DWORD g_render_thread_id = 0;
 volatile DWORD g_game_thread_id = 0;
 bool profile_start() { return false; }
+void profile_configure(bool, int) {}
 bool profile_enabled() { return false; }
 void profile_stall_report(int) {}
 void profile_hook_device(IDirect3DDevice9*) {}

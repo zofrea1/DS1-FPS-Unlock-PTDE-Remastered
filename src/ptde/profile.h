@@ -15,6 +15,9 @@ struct IDirect3DDevice9;
 //    called it.
 // Diagnostic only; a release build compiles these as empty stubs.
 bool profile_start();
+// Before profile_start: the spike watch on or off (ProfileSpikes; each of its samples stops the game thread, which
+// costs a lot under Wine on another CPU) and the capture's pause between sampling rounds in ms (ProfileCaptureMs).
+void profile_configure(bool spikes, int capture_ms);
 bool profile_enabled();
 // The F10 capture without the key (RemoteControl `capture`).
 void profile_request_capture();

@@ -26,6 +26,8 @@ struct Settings {
     // Diagnostic: a [perf] line every 5 s (frame, game update and render times, thread CPU use, Direct3D calls per
     // frame); F10 samples every busy thread for 10 s and logs where the time goes (see profile.h).
     bool profile = false;
+    bool profile_spikes = true;
+    int profile_capture_ms = 1;
     // Development remote control (remote.h): commands from fpsu-cmd.txt beside the game. Diagnostics builds only.
     bool remote_control = false;
     // With RemoteControl: every new shader written to fpsu-shaders (slow on an SD card).
