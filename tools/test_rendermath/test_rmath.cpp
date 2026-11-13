@@ -227,6 +227,31 @@ static void test_intops() {
     std::printf("integer ops: 300000 iterations, %d mismatches so far\n", g_fail);
 }
 
+
+// The effects library's random numbers: 0x983F90 xorshift, 0x983D30 [0,1), 0x9824F0 range (vs ffx_xorshift4 / rand01 /
+// rand_range): output and the state after, random states, ranges (incl. NaN/inf/denormal) and scales.
+static void test_random() {
+    for (int it = 0; it < 200000; ++it) {
+        alignas(16) uint32_t s1[4], s2[4], o1[4], o2[4], sc[4];
+        for (int i = 0; i < 4; ++i) s1[i] = s2[i] = rng() | 1u;
+        fill(o1, 4); std::memcpy(o2, o1, 16);
+        reinterpret_cast<void*(__cdecl*)(void*, void*)>(0x983F90)(o1, s1);
+        ffx_xorshift4(o2, s2);
+        same(o1, o2, 16, "xorshift out", it); same(s1, s2, 16, "xorshift state", it);
+        reinterpret_cast<void*(__cdecl*)(void*, void*)>(0x983D30)(o1, s1);
+        ffx_rand01(reinterpret_cast<float*>(o2), s2);
+        same(o1, o2, 16, "rand01 out", it); same(s1, s2, 16, "rand01 state", it);
+        uint32_t lohi[2] = {rnd_bits(), rnd_bits()};
+        if (it & 1) { float lo = static_cast<float>(rng() % 1000) / 37.0f, hi = static_cast<float>(rng() % 1000) / 13.0f; std::memcpy(&lohi[0], &lo, 4); std::memcpy(&lohi[1], &hi, 4); }
+        const uint32_t* plohi = lohi;
+        fill(sc, 4);
+        reinterpret_cast<void*(__cdecl*)(void*, void*, uint32_t, const void*, uint32_t, void*)>(0x9824F0)(o1, sc, 0, &plohi, 0, s1);
+        ffx_rand_range(reinterpret_cast<float*>(o2), reinterpret_cast<float*>(sc), 0, &plohi, 0, s2);
+        same(o1, o2, 16, "rand range out", it); same(s1, s2, 16, "rand range state", it);
+    }
+    std::printf("random: 200000 iterations, %d mismatches so far\n", g_fail);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "child") != 0) return run_parent(argv[0]);
     std::printf("image mapped (child)\n");
@@ -415,5 +440,6 @@ int main(int argc, char** argv) {
     }
     test_cull();
     test_intops();
+    test_random();
     return g_fail ? 1 : 0;
 }
