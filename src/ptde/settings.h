@@ -8,7 +8,8 @@ constexpr int kMinMaxFps = 10;
 constexpr int kMaxMaxFps = 1000;
 
 struct Settings {
-    // Master switch: false leaves the game unchanged (every fix and diagnostic off), except skip_intro.
+    // Master switch: false leaves the game unchanged (every fix and diagnostic off), except skip_intro and
+    // fix_framerate_kick.
     bool fps_unlock = true;
     // [Phones]: PhoneProfile = auto (the Phone* keys replace the plain ones when the game runs translated for an ARM
     // CPU), true (always), false (never). phone_applied: they were applied.
@@ -181,6 +182,9 @@ struct Settings {
     // Skip the autosave notice and the Bandai Namco, FromSoftware and Havok logos at start-up (see intro.h).
     // Independent of FPSUnlock.
     bool skip_intro = true;
+    // The game's own frame rate check ends online play after 30 seconds that averaged 15 FPS or less, which one
+    // long pause is enough for (see framekick.h). true leaves the check out. Independent of FPSUnlock.
+    bool fix_framerate_kick = true;
     // Log a per-command summary for this many seconds after start (0 = off).
     int survey_seconds = 0;
 };

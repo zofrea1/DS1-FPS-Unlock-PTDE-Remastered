@@ -333,6 +333,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_aspect = parse_bool(val);
         } else if (key == "skipintro") {
             s.skip_intro = parse_bool(val);
+        } else if (key == "fixframeratekick") {
+            s.fix_framerate_kick = parse_bool(val);
         } else if (key == "survey") {
             s.survey_seconds = std::atoi(val.c_str());
         }

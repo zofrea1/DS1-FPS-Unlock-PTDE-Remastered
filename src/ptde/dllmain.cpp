@@ -13,6 +13,8 @@
 #include "frame.h"
 #include "gauge.h"
 #include "intro.h"
+#include "framekick.h"
+#include "focus.h"
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
@@ -79,6 +81,8 @@ DWORD WINAPI worker(void*) {
     // A mod built into this DLL (see extension.h) and the start-up logos do not depend on the FPS unlock.
     if (ext && ext->start) ext->start(g_self);
     intro_install(settings.skip_intro);
+    framekick_install(settings.fix_framerate_kick);
+    focus_install();
 
     wchar_t game_dir[MAX_PATH];
     lstrcpynW(game_dir, exe_path, MAX_PATH);
@@ -104,8 +108,11 @@ DWORD WINAPI worker(void*) {
 
     // FPSUnlock is the master switch (the refresh-rate override in d3d.cpp checks it too).
     if (!settings.fps_unlock) {
-        LOG_INFO("FPSUnlock is false. The game is unchanged%s.",
-                 settings.skip_intro ? ", except the start-up notice and logos (SkipIntro)" : "");
+        LOG_INFO("FPSUnlock is false. The game is unchanged%s%s.",
+                 settings.skip_intro ? ", except the start-up notice and logos (SkipIntro)" : "",
+                 !settings.fix_framerate_kick ? ""
+                 : settings.skip_intro        ? " and the frame rate kick (FixFramerateKick)"
+                                              : ", except the frame rate kick (FixFramerateKick)");
         // A diagnostic, so the original 30 FPS game can be compared with the unlocked one.
         if (settings.bullet_trace) {
             bullettrace_install();

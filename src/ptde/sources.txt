@@ -49,6 +49,8 @@ src\ptde\dxvk.cpp
 src\ptde\dxgipresent.cpp
 src\ptde\steamguard.cpp
 src\ptde\intro.cpp
+src\ptde\framekick.cpp
+src\ptde\focus.cpp
 src\ptde\flick.cpp
 src\ptde\speffect.cpp
 src\ptde\hitrecord.cpp
