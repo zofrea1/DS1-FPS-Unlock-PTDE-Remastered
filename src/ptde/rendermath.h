@@ -19,3 +19,5 @@
 //
 // Each table is checked in full before any of it is written.
 bool rendermath_install(bool core, bool effects);
+// RemoteControl `cull 0|1`: the view culling replacement off or on (diagnostic A/B).
+bool rendermath_set_cull(bool on);

@@ -543,6 +543,105 @@ bool write_jump(uintptr_t site, const void* target) {
     return true;
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------
+// View culling: 0x593E40 (cdecl: planes = 6 x (a, b, c, d), box = two corners of 4 floats, the 4th ignored) gives
+// 0 when the box is fully on the positive side of a plane, 1 when it straddles a plane, 2 when inside all six. Per
+// plane, per axis, the sign of the coefficient (>= 0, or NaN) picks the first corner's value for the near point and
+// the second's for the far point (the other way round when negative); near = float(((y*b + x*a) + z*c) + d) in x87
+// arithmetic (each step rounded to the thread's precision, the sum stored as a float). near > 0 (or NaN): outside, no
+// further planes. far > 0 (or NaN): straddles. The original runs it one plane at a time with x87 compares through
+// fnstsw and integer masks; here four planes at a time in SSE.
+// The render thread (the only caller) runs x87 at 24-bit precision (control word 0x007F, set by Direct3D). Each x87
+// step then rounds to a 24-bit significand like an SSE single, but with x87's wide exponent: the results are the same
+// whenever every intermediate stays a normal float. With every input zero or of magnitude 2^-40..2^40, products lie
+// in 2^-80..2^80 and every nonzero sum is a multiple of 2^-103: never denormal, never overflowing. Anything else (another
+// precision or rounding mode, NaN, inf, huge or tiny values) runs the original code.
+using CullFn = int(__cdecl*)(const float*, const uint32_t*);
+CullFn g_cull_original = reinterpret_cast<CullFn>(0x593E40);  // the trampoline once installed
+
+inline __m128i cull_in_range(__m128 v) {
+    const __m128i a = _mm_and_si128(_mm_castps_si128(v), _mm_set1_epi32(0x7FFFFFFF));
+    // |v| in [2^-40, 2^40): biased exponent 87..166, i.e. bits 0x2B800000 <= a < 0x53800000; or zero.
+    const __m128i lo = _mm_cmpgt_epi32(a, _mm_set1_epi32(0x2B800000 - 1));
+    const __m128i hi = _mm_cmplt_epi32(a, _mm_set1_epi32(0x53800000));
+    const __m128i zero = _mm_cmpeq_epi32(a, _mm_setzero_si128());
+    return _mm_or_si128(_mm_and_si128(lo, hi), zero);
+}
+
+int __cdecl cull_box(const float* planes, const uint32_t* box) {
+    unsigned short cw;
+    __asm fnstcw cw
+    // 24-bit precision (bits 8-9 = 00) and round to nearest (bits 10-11 = 00).
+    if (cw & 0x0F00) return g_cull_original(planes, box);
+    const __m128 p0 = _mm_loadu_ps(planes), p1 = _mm_loadu_ps(planes + 4), p2 = _mm_loadu_ps(planes + 8),
+                 p3 = _mm_loadu_ps(planes + 12), p4 = _mm_loadu_ps(planes + 16), p5 = _mm_loadu_ps(planes + 20);
+    const __m128 c0 = _mm_loadu_ps(reinterpret_cast<const float*>(box));
+    const __m128 c1 = _mm_loadu_ps(reinterpret_cast<const float*>(box + 4));
+    // Range check: the 24 plane floats and the corners' x, y, z (w becomes 1.0).
+    const __m128 c0xyz = _mm_and_ps(c0, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
+    const __m128 c1xyz = _mm_and_ps(c1, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
+    __m128i ok = _mm_and_si128(cull_in_range(p0), cull_in_range(p1));
+    ok = _mm_and_si128(ok, _mm_and_si128(cull_in_range(p2), cull_in_range(p3)));
+    ok = _mm_and_si128(ok, _mm_and_si128(cull_in_range(p4), cull_in_range(p5)));
+    ok = _mm_and_si128(ok, _mm_and_si128(cull_in_range(c0xyz), cull_in_range(c1xyz)));
+    if (_mm_movemask_epi8(ok) != 0xFFFF) return g_cull_original(planes, box);
+
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 ax = _mm_shuffle_ps(c0, c0, 0x00), ay = _mm_shuffle_ps(c0, c0, 0x55), az = _mm_shuffle_ps(c0, c0, 0xAA);
+    const __m128 bx = _mm_shuffle_ps(c1, c1, 0x00), by = _mm_shuffle_ps(c1, c1, 0x55), bz = _mm_shuffle_ps(c1, c1, 0xAA);
+    int outside = 0, straddle = 0;
+    auto group = [&](__m128 q0, __m128 q1, __m128 q2, __m128 q3, int lanes) {
+        _MM_TRANSPOSE4_PS(q0, q1, q2, q3);  // q0 = a, q1 = b, q2 = c, q3 = d of four planes
+        const __m128 ma = _mm_cmpge_ps(q0, zero), mb = _mm_cmpge_ps(q1, zero), mc = _mm_cmpge_ps(q2, zero);
+        const __m128 nx = _mm_or_ps(_mm_and_ps(ma, ax), _mm_andnot_ps(ma, bx));
+        const __m128 ny = _mm_or_ps(_mm_and_ps(mb, ay), _mm_andnot_ps(mb, by));
+        const __m128 nz = _mm_or_ps(_mm_and_ps(mc, az), _mm_andnot_ps(mc, bz));
+        const __m128 fx = _mm_or_ps(_mm_and_ps(ma, bx), _mm_andnot_ps(ma, ax));
+        const __m128 fy = _mm_or_ps(_mm_and_ps(mb, by), _mm_andnot_ps(mb, ay));
+        const __m128 fz = _mm_or_ps(_mm_and_ps(mc, bz), _mm_andnot_ps(mc, az));
+        const __m128 near_ = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(ny, q1), _mm_mul_ps(nx, q0)), _mm_mul_ps(nz, q2)), q3);
+        const __m128 far_ = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(fy, q1), _mm_mul_ps(fx, q0)), _mm_mul_ps(fz, q2)), q3);
+        outside |= _mm_movemask_ps(_mm_cmpgt_ps(near_, zero)) & lanes;
+        straddle |= _mm_movemask_ps(_mm_cmpgt_ps(far_, zero)) & lanes;
+    };
+    group(p0, p1, p2, p3, 0xF);
+    group(p4, p5, p4, p5, 0x3);
+    if (outside) return 0;
+    return straddle ? 1 : 2;
+}
+
+// The fallback: the original's first six bytes (push ebp; mov ebp, esp; and esp, -16), then a jump past them.
+const uint8_t kCullHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x81, 0xEC, 0xF4, 0x00, 0x00, 0x00, 0x53, 0x56, 0x57,
+                             0x8B, 0x0D, 0x60, 0x52, 0x0D, 0x01, 0x8B, 0x15, 0x64, 0x52, 0x0D, 0x01};
+uint8_t g_cull_off[8];  // the original's first 8 bytes (for rendermath_set_cull)
+bool g_cull_installed = false;
+
+bool install_cull() {
+    if (std::memcmp(reinterpret_cast<const void*>(0x593E40), kCullHead, sizeof(kCullHead)) != 0) return false;
+    // Its constants: zeros at 0x10D5260, ones at 0x10D5280, the xyz mask at 0x10D54F0.
+    const uint32_t* zeros = reinterpret_cast<const uint32_t*>(0x10D5260);
+    const uint32_t* ones = reinterpret_cast<const uint32_t*>(0x10D5280);
+    const uint32_t* mask = reinterpret_cast<const uint32_t*>(0x10D54F0);
+    for (int i = 0; i < 4; ++i) {
+        if (zeros[i] != 0 || ones[i] != 0x3F800000u || mask[i] != (i < 3 ? 0xFFFFFFFFu : 0u)) return false;
+    }
+    auto* t = static_cast<uint8_t*>(VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!t) return false;
+    std::memcpy(t, kCullHead, 6);
+    t[6] = 0xE9;
+    const auto rel = static_cast<int32_t>(0x593E46 - (reinterpret_cast<uintptr_t>(t) + 11));
+    std::memcpy(t + 7, &rel, 4);
+    FlushInstructionCache(GetCurrentProcess(), t, 16);
+    g_cull_original = reinterpret_cast<CullFn>(t);
+    std::memcpy(g_cull_off, reinterpret_cast<const void*>(0x593E40), 8);
+    if (!write_jump(0x593E40, reinterpret_cast<const void*>(&cull_box))) {
+        g_cull_original = reinterpret_cast<CullFn>(0x593E40);
+        return false;
+    }
+    return true;
+}
+
 // All or nothing for one table: every site is checked before any is written.
 int install_table(const char* what, const Site* sites, size_t count) {
     for (size_t i = 0; i < count; ++i) {
@@ -580,6 +679,14 @@ bool rendermath_install(bool core, bool effects) {
                      "SSE with the same results",
                      n);
         }
+        if (install_cull()) {
+            g_cull_installed = true;
+            LOG_INFO("FastRenderMath: the view culling test (bounding box against the six view planes, 0x593E40) runs "
+                     "four planes at a time in SSE with the same results (the original code for unusual inputs)");
+        } else {
+            LOG_ERROR("FastRenderMath: the view culling test at 0x593E40 does not match this build. Left as it is.");
+            ok = false;
+        }
     }
     if (effects) {
         const int n = install_table("FastEffects", kFfxSites, sizeof(kFfxSites) / sizeof(kFfxSites[0]));
@@ -591,4 +698,32 @@ bool rendermath_install(bool core, bool effects) {
         }
     }
     return ok;
+}
+
+// RemoteControl `cull 0|1`: the view culling replacement off (the original code) or on again, for an A/B in one session.
+// The first 8 bytes (16-aligned) are swapped in one atomic write, so the render thread sees either version whole.
+bool rendermath_set_cull(bool on) {
+    if (!g_cull_installed) return false;
+    uint64_t now = 0;
+    std::memcpy(&now, reinterpret_cast<const void*>(0x593E40), 8);
+    uint64_t want = 0;
+    if (on) {
+        uint8_t b[8];
+        std::memcpy(b, &now, 8);
+        b[0] = 0xE9;
+        const auto rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&cull_box) - (0x593E40 + 5));
+        std::memcpy(b + 1, &rel, 4);
+        std::memcpy(b + 5, g_cull_off + 5, 3);
+        std::memcpy(&want, b, 8);
+    } else {
+        std::memcpy(&want, g_cull_off, 8);
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(0x593E40), 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+    InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(0x593E40), static_cast<LONG64>(want),
+                                 static_cast<LONG64>(now));
+    DWORD ignored = 0;
+    VirtualProtect(reinterpret_cast<void*>(0x593E40), 8, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(0x593E40), 8);
+    return true;
 }

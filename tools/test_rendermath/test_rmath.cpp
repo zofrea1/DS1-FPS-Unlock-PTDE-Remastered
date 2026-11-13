@@ -3,6 +3,7 @@
 // input) and the registers the custom-convention originals keep.
 #include <windows.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -143,6 +144,58 @@ static int run_parent(const char* self) {
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
     return static_cast<int>(code);
+}
+
+
+// View culling (0x593E40 vs cull_box): random planes and boxes, many built so that the near or far sum lands on or
+// next to zero, some outside the replacement's range (it hands those to the original), at x87 24-bit precision (the
+// render thread's) and at 53-bit (the replacement falls back to the original).
+static float rf(float scale) { std::normal_distribution<float> n(0.0f, scale); return n(rng); }
+static void test_cull() {
+    int counts[3] = {}, fallbacks = 0;
+    const unsigned cws[2] = {0x007F, 0x027F};
+    for (int pass = 0; pass < 2; ++pass) {
+        unsigned short cw = static_cast<unsigned short>(cws[pass]), saved;
+        __asm fnstcw saved
+        __asm fldcw cw
+        const int N = pass == 0 ? 1000000 : 100000;
+        for (int it = 0; it < N; ++it) {
+            alignas(16) float pl[24];
+            alignas(16) uint32_t box[8];
+            float c0[4], c1[4];
+            for (int i = 0; i < 3; ++i) { c0[i] = rf(50.0f); c1[i] = c0[i] + std::fabs(rf(10.0f)); }
+            c0[3] = rf(1.0f); c1[3] = rf(1.0f);
+            if (it % 3 == 0) std::swap(c0[it % 2], c1[it % 2]);
+            for (int k = 0; k < 6; ++k) {
+                float a = rf(1.0f), b = rf(1.0f), c = rf(1.0f);
+                if (it % 11 == 0) a = 0.0f;
+                if (it % 13 == 0) b = -0.0f;
+                // d: random, or exactly cancelling the near (or far) sum computed in float
+                const float nx = a >= 0 ? c0[0] : c1[0], ny = b >= 0 ? c0[1] : c1[1], nz = c >= 0 ? c0[2] : c1[2];
+                const float fx = a >= 0 ? c1[0] : c0[0], fy = b >= 0 ? c1[1] : c0[1], fz = c >= 0 ? c1[2] : c0[2];
+                float d;
+                switch (rng() % 5) {
+                case 0: d = -((ny * b + nx * a) + nz * c); break;
+                case 1: d = -((fy * b + fx * a) + fz * c); break;
+                case 2: { float e = -((ny * b + nx * a) + nz * c); uint32_t u; std::memcpy(&u, &e, 4); u += (rng() % 5) - 2; std::memcpy(&d, &u, 4); } break;
+                case 3: { float e = -((fy * b + fx * a) + fz * c); uint32_t u; std::memcpy(&u, &e, 4); u += (rng() % 5) - 2; std::memcpy(&d, &u, 4); } break;
+                default: d = rf(100.0f);
+                }
+                pl[k * 4] = a; pl[k * 4 + 1] = b; pl[k * 4 + 2] = c; pl[k * 4 + 3] = d;
+            }
+            std::memcpy(box, c0, 16); std::memcpy(box + 4, c1, 16);
+            // Out of range now and then: huge, tiny, denormal, inf, NaN.
+            if (it % 97 == 0) { uint32_t u = rnd_bits(); std::memcpy(&pl[rng() % 24], &u, 4); ++fallbacks; }
+            if (it % 101 == 0) box[rng() % 8] = rnd_bits();
+            const int r1 = reinterpret_cast<int(__cdecl*)(const float*, const uint32_t*)>(0x593E40)(pl, box) & 0xFF;
+            const int r2 = cull_box(pl, box);
+            if (r1 != r2) { if (g_fail < 20) std::printf("MISMATCH cull cw %04X it %d: %d vs %d\n", cw, it, r1, r2); ++g_fail; }
+            if (pass == 0 && r1 >= 0 && r1 < 3) ++counts[r1];
+        }
+        __asm fldcw saved
+    }
+    std::printf("cull: outside %d, straddle %d, inside %d (24-bit pass), %d inputs pushed out of range; %d mismatches so far\n",
+                counts[0], counts[1], counts[2], fallbacks, g_fail);
 }
 
 int main(int argc, char** argv) {
@@ -331,5 +384,6 @@ int main(int argc, char** argv) {
     }
     std::printf("%d iterations, %d mismatches so far\n", N, g_fail);
     }
+    test_cull();
     return g_fail ? 1 : 0;
 }

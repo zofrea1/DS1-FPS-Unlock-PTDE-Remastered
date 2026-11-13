@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <intrin.h>
+#include <float.h>
 #include <tlhelp32.h>
 #include <psapi.h>
 
@@ -145,6 +146,30 @@ std::unordered_set<void*> g_tex_drawn;       // textures drawn with at least onc
 volatile LONG g_draw_new_tex = 0;            // the last draw's textures used for the first time
 volatile LONG g_slow_logged = 0;
 constexpr double kSlowCallMs = 3.0;
+// Redundancy census: per state-setting kind, calls that set what is already set (as seen from the game's side) and
+// the TSC ticks spent inside the runtime for that kind. Render thread only (the device's owner); no state blocks in
+// this game (FilterSamplerStates logs 0 recorded / applied).
+enum RedKind { kRedRs, kRedTex, kRedVs, kRedPs, kRedDecl, kRedStream, kRedIdx, kRedRt, kRedDs, kRedVsc, kRedPsc,
+               kRedDraw, kRedKinds };
+const char* const kRedNames[kRedKinds] = {"rs", "tex", "vs", "ps", "decl", "stream", "idx", "rt", "ds",
+                                          "vs-const", "ps-const", "draws"};
+volatile uint32_t g_red_calls[kRedKinds], g_red_same[kRedKinds];
+volatile uint64_t g_red_ticks[kRedKinds];
+uint32_t g_red_calls_prev[kRedKinds], g_red_same_prev[kRedKinds];
+uint64_t g_red_ticks_prev[kRedKinds];
+DWORD g_rs_val[256];
+uint8_t g_rs_known[256];
+void* g_tex_cur[20];
+struct StreamState { void* vb; UINT off, stride; bool known; };
+StreamState g_stream_cur[16];
+void* g_idx_cur = nullptr;
+void* g_rt_cur[4];
+void* g_ds_cur = nullptr;
+inline void red_note(RedKind k, bool same, int64_t ticks) {
+    ++g_red_calls[k];
+    if (same) ++g_red_same[k];
+    g_red_ticks[k] += static_cast<uint64_t>(ticks);
+}
 constexpr LONG kSlowCallLines = 400;
 
 uint64_t pair_key() {
@@ -187,7 +212,11 @@ HRESULT WINAPI hook_dip(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, INT base, UI
     const bool first = pair_first_draw();
     const int64_t t0 = qpc();
     const HRESULT hr = reinterpret_cast<DipFn>(g_orig[kDrawIndexed])(d, type, base, min, num, start, prims);
-    note_slow_call("DrawIndexedPrimitive", qpc() - t0, first ? 1 : 0);
+    {
+        const int64_t dt = qpc() - t0;
+        red_note(kRedDraw, false, dt);
+        note_slow_call("DrawIndexedPrimitive", dt, first ? 1 : 0);
+    }
     return hr;
 }
 HRESULT WINAPI hook_dp(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, UINT start, UINT prims) {
@@ -196,7 +225,11 @@ HRESULT WINAPI hook_dp(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, UINT start, U
     const bool first = pair_first_draw();
     const int64_t t0 = qpc();
     const HRESULT hr = reinterpret_cast<DpFn>(g_orig[kDrawPrimitive])(d, type, start, prims);
-    note_slow_call("DrawPrimitive", qpc() - t0, first ? 1 : 0);
+    {
+        const int64_t dt = qpc() - t0;
+        red_note(kRedDraw, false, dt);
+        note_slow_call("DrawPrimitive", dt, first ? 1 : 0);
+    }
     return hr;
 }
 using DpUpFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, const void*, UINT);
@@ -209,7 +242,11 @@ HRESULT WINAPI hook_dpup(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, UINT prims,
     const bool first = pair_first_draw();
     const int64_t t0 = qpc();
     const HRESULT hr = reinterpret_cast<DpUpFn>(g_orig[kDrawUp])(d, type, prims, data, stride);
-    note_slow_call("DrawPrimitiveUP", qpc() - t0, first ? 1 : 0);
+    {
+        const int64_t dt = qpc() - t0;
+        red_note(kRedDraw, false, dt);
+        note_slow_call("DrawPrimitiveUP", dt, first ? 1 : 0);
+    }
     return hr;
 }
 HRESULT WINAPI hook_dipup(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, UINT min, UINT num, UINT prims,
@@ -219,30 +256,40 @@ HRESULT WINAPI hook_dipup(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, UINT min, 
     const int64_t t0 = qpc();
     const HRESULT hr =
         reinterpret_cast<DipUpFn>(g_orig[kDrawIndexedUp])(d, type, min, num, prims, idx, fmt, data, stride);
-    note_slow_call("DrawIndexedPrimitiveUP", qpc() - t0, first ? 1 : 0);
+    {
+        const int64_t dt = qpc() - t0;
+        red_note(kRedDraw, false, dt);
+        note_slow_call("DrawIndexedPrimitiveUP", dt, first ? 1 : 0);
+    }
     return hr;
 }
 HRESULT WINAPI hook_set_vs(IDirect3DDevice9* d, void* sh) {
     ++g_calls[kSetVertexShader];
+    const bool same = g_cur_vs == sh;
     g_cur_vs = sh;
     const int64_t t0 = qpc();
     const HRESULT hr = reinterpret_cast<SetShaderFn>(g_orig[kSetVertexShader])(d, sh);
+    red_note(kRedVs, same, qpc() - t0);
     note_slow_call("SetVertexShader", qpc() - t0, -1);
     return hr;
 }
 HRESULT WINAPI hook_set_ps(IDirect3DDevice9* d, void* sh) {
     ++g_calls[kSetPixelShader];
+    const bool same = g_cur_ps == sh;
     g_cur_ps = sh;
     const int64_t t0 = qpc();
     const HRESULT hr = reinterpret_cast<SetShaderFn>(g_orig[kSetPixelShader])(d, sh);
+    red_note(kRedPs, same, qpc() - t0);
     note_slow_call("SetPixelShader", qpc() - t0, -1);
     return hr;
 }
 HRESULT WINAPI hook_set_decl(IDirect3DDevice9* d, void* decl) {
     ++g_calls[kSetVertexDecl];
+    const bool same = g_cur_decl == decl;
     g_cur_decl = decl;
     const int64_t t0 = qpc();
     const HRESULT hr = reinterpret_cast<SetShaderFn>(g_orig[kSetVertexDecl])(d, decl);
+    red_note(kRedDecl, same, qpc() - t0);
     note_slow_call("SetVertexDeclaration", qpc() - t0, -1);
     return hr;
 }
@@ -281,9 +328,69 @@ HRESULT WINAPI hook_create_tex(IDirect3DDevice9* d, UINT w, UINT h, UINT levels,
 HRESULT WINAPI hook_set_tex_slow(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* t) {
     ++g_calls[kSetTexture];
     if (stage < 8) g_stage_tex[stage] = t;
+    const int slot = stage < 16 ? static_cast<int>(stage) : (stage >= D3DDMAPSAMPLER && stage <= D3DVERTEXTEXTURESAMPLER3 ?
+                                                              16 + static_cast<int>(stage - D3DDMAPSAMPLER) : -1);
+    const bool same = slot >= 0 && g_tex_cur[slot] == t;
+    if (slot >= 0) g_tex_cur[slot] = t;
     const int64_t t0 = qpc();
     const HRESULT hr = reinterpret_cast<SetTextureSlowFn>(g_orig[kSetTexture])(d, stage, t);
+    red_note(kRedTex, same, qpc() - t0);
     note_slow_call("SetTexture", qpc() - t0, -1);
+    return hr;
+}
+
+using SetRsFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DRENDERSTATETYPE, DWORD);
+HRESULT WINAPI hook_set_rs(IDirect3DDevice9* d, D3DRENDERSTATETYPE st, DWORD v) {
+    ++g_calls[kSetRenderState];
+    const unsigned i = static_cast<unsigned>(st) & 255u;
+    const bool same = g_rs_known[i] && g_rs_val[i] == v;
+    g_rs_val[i] = v;
+    g_rs_known[i] = 1;
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<SetRsFn>(g_orig[kSetRenderState])(d, st, v);
+    red_note(kRedRs, same, qpc() - t0);
+    return hr;
+}
+using SetStreamFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, IDirect3DVertexBuffer9*, UINT, UINT);
+HRESULT WINAPI hook_set_stream(IDirect3DDevice9* d, UINT n, IDirect3DVertexBuffer9* vb, UINT off, UINT stride) {
+    ++g_calls[kSetStreamSource];
+    bool same = false;
+    if (n < 16) {
+        StreamState& c = g_stream_cur[n];
+        same = c.known && c.vb == vb && c.off == off && c.stride == stride;
+        c = StreamState{vb, off, stride, true};
+    }
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<SetStreamFn>(g_orig[kSetStreamSource])(d, n, vb, off, stride);
+    red_note(kRedStream, same, qpc() - t0);
+    return hr;
+}
+HRESULT WINAPI hook_set_idx(IDirect3DDevice9* d, void* ib) {
+    ++g_calls[kSetIndices];
+    const bool same = g_idx_cur == ib;
+    g_idx_cur = ib;
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<SetShaderFn>(g_orig[kSetIndices])(d, ib);
+    red_note(kRedIdx, same, qpc() - t0);
+    return hr;
+}
+using SetRtFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
+HRESULT WINAPI hook_set_rt(IDirect3DDevice9* d, DWORD i, IDirect3DSurface9* s) {
+    ++g_calls[kSetRenderTarget];
+    const bool same = i < 4 && g_rt_cur[i] == s;
+    if (i < 4) g_rt_cur[i] = s;
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<SetRtFn>(g_orig[kSetRenderTarget])(d, i, s);
+    red_note(kRedRt, same, qpc() - t0);
+    return hr;
+}
+HRESULT WINAPI hook_set_ds(IDirect3DDevice9* d, void* s) {
+    ++g_calls[kSetDepthStencil];
+    const bool same = g_ds_cur == s;
+    g_ds_cur = s;
+    const int64_t t0 = qpc();
+    const HRESULT hr = reinterpret_cast<SetShaderFn>(g_orig[kSetDepthStencil])(d, s);
+    red_note(kRedDs, same, qpc() - t0);
     return hr;
 }
 
@@ -489,6 +596,12 @@ float g_frame_ring[kFrameRing];
 volatile LONG g_frame_ring_n = 0;
 LONG g_frame_ring_read = 0;
 
+unsigned raw_x87_cw() {
+    unsigned short cw = 0;
+    __asm fnstcw cw
+    return cw;
+}
+
 void name_this_thread(const wchar_t* name) {
     using SetDescFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
     static auto fn = reinterpret_cast<SetDescFn>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"));
@@ -600,7 +713,7 @@ void report() {
     g_game_cycles_prev = gc;
     g_render_cycles_prev = rc;
 
-    char line[2048];
+    char line[4096];
     int n = std::snprintf(line, sizeof(line), "[perf] %.1fs: %.1f fps", window, frames / window);
     if (frame.count) n += std::snprintf(line + n, sizeof(line) - n, " (frame avg %.2f max %.1f ms)", frame.sum / frame.count, frame.max);
     {
@@ -688,6 +801,16 @@ void report() {
         n += std::snprintf(line + n, sizeof(line) - n,
                            " | creates/frame: rt %.2f ds %.2f tex %.2f vb %.2f ib %.2f offscreen %.2f", per(28), per(29),
                            per(23) + per(24) + per(25), per(26), per(27), per(36));
+        n += std::snprintf(line + n, sizeof(line) - n, " | redundant/frame (of calls, ms in the runtime):");
+        for (int k = 0; k < kRedKinds; ++k) {
+            const uint32_t c = g_red_calls[k] - g_red_calls_prev[k], sm = g_red_same[k] - g_red_same_prev[k];
+            const uint64_t tk = g_red_ticks[k] - g_red_ticks_prev[k];
+            g_red_calls_prev[k] += c;
+            g_red_same_prev[k] += sm;
+            g_red_ticks_prev[k] += tk;
+            if (c) n += std::snprintf(line + n, sizeof(line) - n, " %s %.0f of %.0f, %.3f ms;", kRedNames[k], sm / f, c / f,
+                                      ms_of(static_cast<int64_t>(tk)) / f);
+        }
         n += std::snprintf(line + n, sizeof(line) - n, " | waits:");
         lock_part("vb-lock", vb, g_prev_vb, true);
         lock_part("ib-lock", ib, g_prev_ib, true);
@@ -1579,7 +1702,10 @@ bool profile_enabled() { return g_enabled; }
 void profile_game_frame_begin() {
     if (!g_game_thread_id) {
         g_game_thread_id = GetCurrentThreadId();
-        if (g_enabled) name_this_thread(L"ds-game");
+        if (g_enabled) {
+            name_this_thread(L"ds-game");
+            LOG_INFO("[perf] game thread x87 control word %04X, MXCSR %08X", raw_x87_cw(), _mm_getcsr());
+        }
     }
     g_update_start = qpc();
 }
@@ -1595,7 +1721,10 @@ void profile_game_frame(double ms) {
 
 void profile_frame_boundary() {
     const int64_t now = qpc();
-    if (!g_last_boundary && g_enabled) name_this_thread(L"ds-render");
+    if (!g_last_boundary && g_enabled) {
+        name_this_thread(L"ds-render");
+        LOG_INFO("[perf] render thread x87 control word %04X, MXCSR %08X", raw_x87_cw(), _mm_getcsr());
+    }
     if (g_last_boundary) {
         const double ms = ms_of(now - g_last_boundary);
         g_frame_ms.add(ms);
@@ -1647,6 +1776,11 @@ void profile_hook_device(IDirect3DDevice9* device) {
             case kSetPixelShader: own = reinterpret_cast<void*>(&hook_set_ps); break;
             case kSetVertexDecl: own = reinterpret_cast<void*>(&hook_set_decl); break;
             case kSetTexture: own = reinterpret_cast<void*>(&hook_set_tex_slow); break;
+            case kSetRenderState: own = reinterpret_cast<void*>(&hook_set_rs); break;
+            case kSetStreamSource: own = reinterpret_cast<void*>(&hook_set_stream); break;
+            case kSetIndices: own = reinterpret_cast<void*>(&hook_set_idx); break;
+            case kSetRenderTarget: own = reinterpret_cast<void*>(&hook_set_rt); break;
+            case kSetDepthStencil: own = reinterpret_cast<void*>(&hook_set_ds); break;
             case kCreateTexture: own = reinterpret_cast<void*>(&hook_create_tex); break;
             default: break;
         }

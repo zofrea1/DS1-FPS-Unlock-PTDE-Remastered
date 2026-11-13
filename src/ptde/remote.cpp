@@ -8,6 +8,7 @@
 #include "profile.h"
 #include "atoc.h"
 #include "resolution.h"
+#include "rendermath.h"
 #include "watch.h"
 #include "log.h"
 
@@ -1292,6 +1293,8 @@ void run(const std::string& line) {
     } else if (c == "fps") {
         limiter_set_fps(static_cast<int>(num(1, 0)));
         out("fps %ld", num(1, 0));
+    } else if (c == "cull") {
+        out("cull %ld: %s", num(1, 1), rendermath_set_cull(num(1, 1) != 0) ? "done" : "not installed");
     } else if (c == "limitpoint" && t.size() > 1) {
         limiter_set_point(t[1] == "present" ? kLimitPresent : kLimitEarly);
         out("limitpoint %s", limiter_point() == kLimitPresent ? "present" : "early");
