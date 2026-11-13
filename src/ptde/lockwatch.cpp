@@ -24,7 +24,7 @@ const uint8_t kTryHead[5] = {0x56, 0x83, 0xC1, 0x04, 0x51};
 const uint8_t kUnlockHead[5] = {0x83, 0xC1, 0x04, 0x51, 0xFF};
 
 constexpr double kLogMs = 40.0;
-constexpr LONG kMaxLogged = 400;
+constexpr LONG kMaxLogged = 1500;
 constexpr int kHeldMax = 24;
 
 struct Held {
@@ -32,7 +32,26 @@ struct Held {
     LONGLONG since;
     uint32_t site;
     int depth;
+    ULONGLONG cpu;  // the thread's CPU time (100 ns) when taken, for the watched sites only
 };
+
+// The resource loader's worker (0x66C4F0 takes 0x135F628 and 0x135F648, then 0x60B470 the file load event queue's
+// lock): its holds also log the holder's own CPU time, which tells work from waiting.
+constexpr uint32_t kCpuSites[] = {0x0066C56E, 0x0066C58E, 0x0060B4AC};
+
+ULONGLONG thread_cpu() {
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+    return ((static_cast<ULONGLONG>(k.dwHighDateTime) << 32) | k.dwLowDateTime) +
+           ((static_cast<ULONGLONG>(u.dwHighDateTime) << 32) | u.dwLowDateTime);
+}
+
+bool cpu_site(uint32_t site) {
+    for (uint32_t s : kCpuSites) {
+        if (s == site) return true;
+    }
+    return false;
+}
 struct PerThread {
     Held held[kHeldMax];
     int n;
@@ -67,7 +86,7 @@ void took(void* m, uint32_t site, LONGLONG now) {
             return;
         }
     }
-    if (t.n < kHeldMax) t.held[t.n++] = Held{m, now, site, 1};
+    if (t.n < kHeldMax) t.held[t.n++] = Held{m, now, site, 1, cpu_site(site) ? thread_cpu() : 0};
 }
 
 int __fastcall hk_lock(void* self, void*, int timeout) {
@@ -108,12 +127,15 @@ int __fastcall hk_unlock(void* self, void*) {
         if (--t.held[i].depth > 0) break;
         const LONGLONG held = ticks() - t.held[i].since;
         const uint32_t site = t.held[i].site;
+        const ULONGLONG cpu0 = t.held[i].cpu;
         t.held[i] = t.held[--t.n];
         if (held >= g_min_ticks && InterlockedIncrement(&g_logged) <= kMaxLogged) {
             char who[32];
             label(GetCurrentThreadId(), who, sizeof(who));
-            LOG_INFO("[lock] %s held mutex %p for %.1f ms (taken at %08X)", who, self,
-                     1000.0 * static_cast<double>(held) / g_freq.QuadPart, site);
+            char cpu[48] = "";
+            if (cpu0) std::snprintf(cpu, sizeof(cpu), ", its own cpu %.1f ms", (thread_cpu() - cpu0) / 10000.0);
+            LOG_INFO("[lock] %s held mutex %p for %.1f ms (taken at %08X%s)", who, self,
+                     1000.0 * static_cast<double>(held) / g_freq.QuadPart, site, cpu);
         }
         break;
     }
