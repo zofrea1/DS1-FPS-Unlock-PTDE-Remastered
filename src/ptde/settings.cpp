@@ -317,6 +317,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fast_read_locks = parse_bool(val) || lower(trim(val)) == "always";
         } else if (key == "preloadtextures") {
             s.preload_textures = parse_bool(val);
+        } else if (key == "cachedrivetype") {
+            s.cache_drive_type = parse_bool(val);
         } else if (key == "fasteffects") {
             s.fast_effects = parse_bool(val);
         } else if (key == "fastrendermath") {

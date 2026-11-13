@@ -1905,6 +1905,12 @@ void profile_frame_boundary() {
         g_frame_ms.add(ms);
         g_frame_ring[g_frame_ring_n % kFrameRing] = static_cast<float>(ms);
         InterlockedIncrement(&g_frame_ring_n);
+        // Every frame of 33 ms or more, for counting hitches over a scripted run (loads, streaming).
+        static LONG hitches = 0;
+        if (ms >= 33.0 && hitches < 6000) {
+            ++hitches;
+            LOG_INFO("[hitch] frame %.1f ms", ms);
+        }
     }
     g_last_boundary = now;
     InterlockedIncrement(&g_frames);

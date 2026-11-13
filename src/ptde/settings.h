@@ -162,6 +162,9 @@ struct Settings {
     bool fast_read_locks = true;
     // Textures go to the graphics card on the loading thread as they are made, not at their first draw (texpreload.h).
     bool preload_textures = true;
+    // The loader's drive type question (GetDriveTypeW for every file, asked while it holds the locks the game thread
+    // waits on) is answered once per drive (drivetype.h). Independent of FPSUnlock.
+    bool cache_drive_type = true;
     // The effects library's debug checks (stack fills and guard checks, see ffx.h) are skipped.
     bool fast_effects = true;
     // Two hot render-thread math helpers run as SSE with identical results (see rendermath.h).
