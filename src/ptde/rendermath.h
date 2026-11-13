@@ -21,3 +21,5 @@
 bool rendermath_install(bool core, bool effects);
 // RemoteControl `cull 0|1`: the view culling replacement off or on (diagnostic A/B).
 bool rendermath_set_cull(bool on);
+// RemoteControl `fastmath core|effects 0|1` (diagnostic A/B): table 0 core, 1 effects; returns sites switched.
+int rendermath_set_table(int table, bool on);

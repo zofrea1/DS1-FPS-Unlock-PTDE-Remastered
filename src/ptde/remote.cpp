@@ -1293,6 +1293,9 @@ void run(const std::string& line) {
     } else if (c == "fps") {
         limiter_set_fps(static_cast<int>(num(1, 0)));
         out("fps %ld", num(1, 0));
+    } else if (c == "fastmath" && t.size() > 2) {
+        const int table = t[1] == "effects" ? 1 : t[1] == "new" ? 2 : 0;
+        out("fastmath %s %ld: %d sites", t[1].c_str(), num(2, 1), rendermath_set_table(table, num(2, 1) != 0));
     } else if (c == "cull") {
         out("cull %ld: %s", num(1, 1), rendermath_set_cull(num(1, 1) != 0) ? "done" : "not installed");
     } else if (c == "limitpoint" && t.size() > 1) {

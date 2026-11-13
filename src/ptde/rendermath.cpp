@@ -482,6 +482,26 @@ const Site kCoreSites[] = {
      reinterpret_cast<const void*>(&vec4_saturate)},
 };
 
+// More forwarding wrappers (found 2026-11-13 by scanning the library): each one's bytes from the argument pushes to its
+// end equal those of a wrapper above with as many arguments, apart from the helper it calls.
+const uint8_t kFwd984C20[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x86, 0x00, 0x00, 0x00, 0x83, 0xC4, 0x0C};
+const uint8_t kFwd9851E0[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x86, 0x00, 0x00, 0x00, 0x83, 0xC4, 0x0C};
+const uint8_t kFwd985370[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x86, 0x00, 0x00, 0x00, 0x83, 0xC4, 0x0C};
+const uint8_t kFwd9B5A50[] = {0x8B, 0x43, 0x14, 0x50, 0x8B, 0x4B, 0x10, 0x51, 0x8B, 0x53, 0x0C, 0x52, 0x8D, 0x45, 0xB0, 0x50, 0xE8, 0x72, 0x07, 0xA7, 0xFF, 0x83, 0xC4, 0x10};
+const uint8_t kFwd9B5C20[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0x2A, 0xB0, 0xA7, 0xFF, 0x83, 0xC4, 0x08};
+const uint8_t kFwd9B5CE0[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0x7A, 0x3B, 0xA6, 0xFF, 0x83, 0xC4, 0x08};
+const uint8_t kFwd9B66B0[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x36, 0x05, 0xA6, 0xFF, 0x83, 0xC4, 0x0C};
+const uint8_t kFwd9B6770[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x96, 0xE6, 0xA7, 0xFF, 0x83, 0xC4, 0x0C};
+const uint8_t kFwd9B6830[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x86, 0x0C, 0xA5, 0xFF, 0x83, 0xC4, 0x0C};
+const uint8_t kFwd9B68F0[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x56, 0x0C, 0xA5, 0xFF, 0x83, 0xC4, 0x0C};
+const uint8_t kFwd9B69B0[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0x8A, 0x00, 0x00, 0x00, 0x83, 0xC4, 0x08};
+const uint8_t kFwd9B6B80[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0xFA, 0x0D, 0xA5, 0xFF, 0x83, 0xC4, 0x08};
+const uint8_t kFwd9B6D00[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0x6A, 0x59, 0xA9, 0xFF, 0x83, 0xC4, 0x08};
+const uint8_t kFwdA51E80[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0xD6, 0xC3, 0x9F, 0xFF, 0x83, 0xC4, 0x0C};
+const uint8_t kFwdA51F40[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x46, 0x30, 0x9E, 0xFF, 0x83, 0xC4, 0x0C};
+const uint8_t kFwdA52000[] = {0x8B, 0x43, 0x10, 0x50, 0x8B, 0x4B, 0x0C, 0x51, 0x8D, 0x55, 0xB0, 0x52, 0xE8, 0x46, 0x4B, 0x9C, 0xFF, 0x83, 0xC4, 0x0C};
+const uint8_t kFwdA520C0[] = {0x8B, 0x43, 0x0C, 0x50, 0x8D, 0x4D, 0xB0, 0x51, 0xE8, 0xBA, 0x08, 0x9C, 0xFF, 0x83, 0xC4, 0x08};
+
 const Site kFfxSites[] = {
     {"set", 0x984890, kFfxHead30, sizeof(kFfxHead30), kSet4Body, 0x29, sizeof(kSet4Body),
      reinterpret_cast<const void*>(&ffx_set4)},
@@ -519,6 +539,40 @@ const Site kFfxSites[] = {
      sizeof(kParamEvalBody), reinterpret_cast<const void*>(&ffx_param_eval)},
     {"stream read-splat", 0x983A90, kFfxHead30Lea, sizeof(kFfxHead30Lea), kReadSplatBody, 0x29, sizeof(kReadSplatBody),
      reinterpret_cast<const void*>(&ffx_read_splat)},
+    {"0x984CE0 wrapper", 0x984C20, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd984C20, 0x29, sizeof(kFwd984C20),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x984CE0>)},
+    {"0x9852A0 wrapper", 0x9851E0, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9851E0, 0x29, sizeof(kFwd9851E0),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x9852A0>)},
+    {"0x985430 wrapper", 0x985370, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd985370, 0x29, sizeof(kFwd985370),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x985430>)},
+    {"0x426200 wrapper", 0x9B5A50, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B5A50, 0x29, sizeof(kFwd9B5A50),
+     reinterpret_cast<const void*>(&ffx_fwd3<0x426200>)},
+    {"0x430C80 wrapper", 0x9B5C20, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B5C20, 0x29, sizeof(kFwd9B5C20),
+     reinterpret_cast<const void*>(&ffx_fwd1<0x430C80>)},
+    {"0x419890 wrapper", 0x9B5CE0, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B5CE0, 0x29, sizeof(kFwd9B5CE0),
+     reinterpret_cast<const void*>(&ffx_fwd1<0x419890>)},
+    {"0x416C20 wrapper", 0x9B66B0, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B66B0, 0x29, sizeof(kFwd9B66B0),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x416C20>)},
+    {"0x434E40 wrapper", 0x9B6770, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B6770, 0x29, sizeof(kFwd9B6770),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x434E40>)},
+    {"0x4074F0 wrapper", 0x9B6830, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B6830, 0x29, sizeof(kFwd9B6830),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x4074F0>)},
+    {"0x407580 wrapper", 0x9B68F0, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B68F0, 0x29, sizeof(kFwd9B68F0),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x407580>)},
+    {"0x9B6A70 wrapper", 0x9B69B0, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B69B0, 0x29, sizeof(kFwd9B69B0),
+     reinterpret_cast<const void*>(&ffx_fwd1<0x9B6A70>)},
+    {"0x4079B0 wrapper", 0x9B6B80, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B6B80, 0x29, sizeof(kFwd9B6B80),
+     reinterpret_cast<const void*>(&ffx_fwd1<0x4079B0>)},
+    {"0x44C6A0 wrapper", 0x9B6D00, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwd9B6D00, 0x29, sizeof(kFwd9B6D00),
+     reinterpret_cast<const void*>(&ffx_fwd1<0x44C6A0>)},
+    {"0x44E290 wrapper", 0xA51E80, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwdA51E80, 0x29, sizeof(kFwdA51E80),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x44E290>)},
+    {"0x434FC0 wrapper", 0xA51F40, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwdA51F40, 0x29, sizeof(kFwdA51F40),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x434FC0>)},
+    {"0x416B80 wrapper", 0xA52000, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwdA52000, 0x29, sizeof(kFwdA52000),
+     reinterpret_cast<const void*>(&ffx_fwd2<0x416B80>)},
+    {"0x4129B0 wrapper", 0xA520C0, kFfxHead50Lea, sizeof(kFfxHead50Lea), kFwdA520C0, 0x29, sizeof(kFwdA520C0),
+     reinterpret_cast<const void*>(&ffx_fwd1<0x4129B0>)},
 };
 
 bool matches(const Site& s) {
@@ -642,8 +696,19 @@ bool install_cull() {
     return true;
 }
 
+// The original first 8 bytes of every site written (for rendermath_set: an A/B in one session).
+struct Saved {
+    uintptr_t at;
+    uint8_t orig[8];
+    const void* target;
+    int table;  // 0 core, 1 effects
+    int index;  // in its table
+};
+Saved g_saved[96];
+int g_saved_n = 0;
+
 // All or nothing for one table: every site is checked before any is written.
-int install_table(const char* what, const Site* sites, size_t count) {
+int install_table(const char* what, const Site* sites, size_t count, int table) {
     for (size_t i = 0; i < count; ++i) {
         if (!matches(sites[i])) {
             LOG_ERROR("%s: the %s at 0x%X does not match this build. Not patching.", what, sites[i].name,
@@ -653,6 +718,14 @@ int install_table(const char* what, const Site* sites, size_t count) {
     }
     int done = 0;
     for (size_t i = 0; i < count; ++i) {
+        if (g_saved_n < 96 && (sites[i].address & 7) == 0) {
+            g_saved[g_saved_n].at = sites[i].address;
+            std::memcpy(g_saved[g_saved_n].orig, reinterpret_cast<const void*>(sites[i].address), 8);
+            g_saved[g_saved_n].target = sites[i].replacement;
+            g_saved[g_saved_n].table = table;
+            g_saved[g_saved_n].index = static_cast<int>(i);
+            ++g_saved_n;
+        }
         if (write_jump(sites[i].address, sites[i].replacement)) {
             ++done;
         } else {
@@ -671,7 +744,7 @@ bool rendermath_install(bool core, bool effects) {
     }
     bool ok = true;
     if (core) {
-        const int n = install_table("FastRenderMath", kCoreSites, sizeof(kCoreSites) / sizeof(kCoreSites[0]));
+        const int n = install_table("FastRenderMath", kCoreSites, sizeof(kCoreSites) / sizeof(kCoreSites[0]), 0);
         ok = ok && n == static_cast<int>(sizeof(kCoreSites) / sizeof(kCoreSites[0]));
         if (n) {
             LOG_INFO("FastRenderMath: %d of the engine's vector and matrix helpers (four-float add, subtract, multiply, "
@@ -689,7 +762,7 @@ bool rendermath_install(bool core, bool effects) {
         }
     }
     if (effects) {
-        const int n = install_table("FastEffects", kFfxSites, sizeof(kFfxSites) / sizeof(kFfxSites[0]));
+        const int n = install_table("FastEffects", kFfxSites, sizeof(kFfxSites) / sizeof(kFfxSites[0]), 1);
         ok = ok && n == static_cast<int>(sizeof(kFfxSites) / sizeof(kFfxSites[0]));
         if (n) {
             LOG_INFO("FastEffects: %d of the effects library's vector helpers (set, splat, subtract, float-to-integer, lerp, parameter evaluation, stream reads and forwarding wrappers) replaced "
@@ -726,4 +799,35 @@ bool rendermath_set_cull(bool on) {
     VirtualProtect(reinterpret_cast<void*>(0x593E40), 8, old, &ignored);
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(0x593E40), 8);
     return true;
+}
+
+// RemoteControl `fastmath core|effects 0|1`: every 8-aligned site of that table back to the original code or on again,
+// each in one atomic 8-byte write (diagnostic A/B; a thread inside a site's first instructions at that moment would be
+// cut, so this is for testing only). Returns how many sites were switched.
+int rendermath_set_table(int table, bool on) {
+    int n = 0;
+    for (int i = 0; i < g_saved_n; ++i) {
+        const Saved& sv = g_saved[i];
+        // table 2: the effects wrappers added 2026-11-13 (index 18 on)
+        if (table == 2 ? (sv.table != 1 || sv.index < 18) : sv.table != table) continue;
+        uint8_t b[8];
+        std::memcpy(b, sv.orig, 8);
+        if (on) {
+            b[0] = 0xE9;
+            const auto rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(sv.target) - (sv.at + 5));
+            std::memcpy(b + 1, &rel, 4);
+        }
+        uint64_t want = 0, now = 0;
+        std::memcpy(&want, b, 8);
+        std::memcpy(&now, reinterpret_cast<const void*>(sv.at), 8);
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(sv.at), 8, PAGE_EXECUTE_READWRITE, &old)) continue;
+        InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(sv.at), static_cast<LONG64>(want),
+                                     static_cast<LONG64>(now));
+        DWORD ignored = 0;
+        VirtualProtect(reinterpret_cast<void*>(sv.at), 8, old, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(sv.at), 8);
+        ++n;
+    }
+    return n;
 }
