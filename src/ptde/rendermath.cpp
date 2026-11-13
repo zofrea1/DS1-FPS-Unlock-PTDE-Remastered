@@ -1249,6 +1249,361 @@ uint32_t __cdecl ffx_bounds3(uint32_t* out_min, uint32_t* out_max, uint32_t n, c
     return 0;
 }
 
+// 0x99C540, the effects library's particle quad builder, spends its time in a loop over the particles
+// (0x99E9B0..0x99F1EA; counter at ebp-0x1484, n = the third argument, particles of 72 bytes from the second, output
+// entries of 48 bytes from the first). Per particle: three splats (through the x87 stack) of floats 0, 4, 8 into the
+// three-row multiply-add 0x9AF7F0 with the matrix at ebp-0x12C0; splats of 0xC and 0x10 into the multiply-adds
+// 0x553700 with the rows at ebp-0x4E0 / -0x890 and -0x500 / -0x8B0; splats of 0x38..0x44 times the rows at
+// ebp-0x8F0, -0x910, -0x930, -0x8D0 (0x5537E0) into the colour packing 0x9B18A0; then three transposed-row writes
+// (0x9B4C60) to the output at offsets 0, 16 and 32 with the stride at ebp-0x668 (with the rows at ebp-0x540 and
+// ebp-0x1430). The body is straight-line and reads no frame cell it writes (no state carried between particles), so
+// here the first n - 1 particles are done with the same operations in the same order on the same values without the
+// debug copies, and the last one is left to the game's code (the counter set to n - 1 and the loop entered at its
+// test): every frame cell and register the function goes on with is as before.
+volatile long g_ploop_calls = 0, g_ploop_iters = 0;
+
+uint32_t __cdecl ffx_particle_loop(uint8_t* ebp, const uint8_t* ebx) {
+    const uint32_t n = *reinterpret_cast<const uint32_t*>(ebx + 0x10);
+    ++g_ploop_calls;
+    g_ploop_iters += n;
+    if (n < 2) return 0;
+    const uint32_t parts = *reinterpret_cast<const uint32_t*>(ebx + 0xC);
+    const uint32_t outs = *reinterpret_cast<const uint32_t*>(ebx + 8);
+    const auto F = [ebp](uint32_t off) { return reinterpret_cast<const float*>(ebp - off); };
+    const auto U = [ebp](uint32_t off) { return reinterpret_cast<const uint32_t*>(ebp - off); };
+    for (uint32_t i = 0; i + 1 < n; ++i) {
+        const auto* p = reinterpret_cast<const uint32_t*>(parts + 72 * i);
+        alignas(16) uint32_t r1[4], r2[4], r3[4], r4[12], r5[4], r6[4], r9[4], r10[4], r11[4], r12[4];
+        alignas(16) float r7[4], r8[4], r13[4], r14[4], r15[4], r16[4];
+        alignas(16) uint32_t r17[4];
+        splat_u32(r1, x87_pass(p[0]));
+        splat_u32(r2, x87_pass(p[1]));
+        splat_u32(r3, x87_pass(p[2]));
+        ffx_mat3_madd(r4, r4 + 4, r4 + 8, reinterpret_cast<const float*>(r1), reinterpret_cast<const float*>(r2),
+                      reinterpret_cast<const float*>(r3), F(0x12C0));
+        splat_u32(r5, x87_pass(p[3]));
+        splat_u32(r6, x87_pass(p[4]));
+        vec4_madd(r7, reinterpret_cast<const float*>(r5), F(0x4E0), F(0x890));
+        vec4_madd(r8, reinterpret_cast<const float*>(r6), F(0x500), F(0x8B0));
+        splat_u32(r9, x87_pass(p[14]));
+        splat_u32(r10, x87_pass(p[15]));
+        splat_u32(r11, x87_pass(p[16]));
+        splat_u32(r12, x87_pass(p[17]));
+        vec4_mul(r13, reinterpret_cast<const float*>(r9), F(0x8F0));
+        vec4_mul(r14, reinterpret_cast<const float*>(r10), F(0x910));
+        vec4_mul(r15, reinterpret_cast<const float*>(r11), F(0x930));
+        vec4_mul(r16, reinterpret_cast<const float*>(r12), F(0x8D0));
+        ffx_pack_colors(r17, reinterpret_cast<const uint32_t*>(r13), reinterpret_cast<const uint32_t*>(r14),
+                        reinterpret_cast<const uint32_t*>(r15), reinterpret_cast<const uint32_t*>(r16));
+        auto* o = reinterpret_cast<uint8_t*>(outs + 48 * i);
+        const int stride = *reinterpret_cast<const int*>(ebp - 0x668);
+        ffx_rows_transposed(o, 0, stride, r4, r4 + 4, r4 + 8, U(0x540));
+        ffx_rows_transposed(o, 16, stride, U(0x540), U(0x540), r17, reinterpret_cast<const uint32_t*>(r7));
+        ffx_rows_transposed(o, 32, stride, reinterpret_cast<const uint32_t*>(r8), U(0x540), U(0x1430), U(0x540));
+    }
+    return n - 1;
+}
+
+// Entered by a jump at 0x99E9B0 (the loop's counter = 0): the particles up to the last, then the counter, eax, ecx
+// and edx as the game's code has them there, and on to the loop's test at 0x99E9CB.
+__declspec(naked) void ffx_particle_loop_entry() {
+    __asm {
+        push ebx
+        push ebp
+        call ffx_particle_loop
+        add esp, 8
+        mov dword ptr [ebp - 0x1484], eax
+        mov eax, dword ptr [ebp - 0x1474]
+        mov ecx, dword ptr [ebp - 0x147C]
+        mov edx, dword ptr [ebp - 0x1478]
+        push 0x99E9CB
+        ret
+    }
+}
+
+// 0xA4D420, the effects library's particle update, spends its time in a loop over its particle arrays four at a time
+// (0xA4DF22..0xA4FB9A): the byte offset at ebp-0x730 counts down by 16 from [ebx+0x20] * 16; each pass reads 16 bytes
+// at that offset from the arrays at [ebx+8] .. [ebx+0x28], runs a fixed chain of the library's helpers (the part
+// from 0xA4E658 only when [ebx+0x4C] is set; the parameter evaluations 0x9B4650 on the objects at [ebx+0x44] and
+// [ebx+0x48]) and writes six results back at the offset. The two paths below are generated from the game's code
+// (tools/test_rendermath/ffxloop, a symbolic trace of the loop body): the same helper calls at the same addresses, in
+// the same order, with the same inputs, and the same six writes, without the debug copies. Only the offset is carried
+// from pass to pass, so the passes down to offset 16 are done here and the last (offset 0) is left to the game's
+// code, entered at the loop's top with the counter at 16: every frame cell the function goes on with is as before.
+static void a4_iter_skip(uint8_t* ebp, const uint8_t* ebx, uint32_t off) {
+    alignas(16) uint32_t r1[4];  // 00A4DF43
+    std::memcpy(r1, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x8)) + off, 16);
+    alignas(16) uint32_t r2[4];  // 00A4DFB0
+    std::memcpy(r2, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0xc)) + off, 16);
+    alignas(16) uint32_t r3[4];  // 00A4E01D
+    std::memcpy(r3, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x10)) + off, 16);
+    alignas(16) uint32_t r4[4];  // 00A4E08A
+    std::memcpy(r4, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x14)) + off, 16);
+    alignas(16) uint32_t r5[4];  // 00A4E0F7
+    std::memcpy(r5, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x18)) + off, 16);
+    alignas(16) uint32_t r6[4];  // 00A4E164
+    std::memcpy(r6, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x1c)) + off, 16);
+    alignas(16) uint32_t r7[4];  // 00A4E1D1
+    std::memcpy(r7, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x24)) + off, 16);
+    alignas(16) uint32_t r8[4];  // 00A4E23E
+    std::memcpy(r8, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x28)) + off, 16);
+    alignas(16) uint32_t r9[4];  // 00A4E2AE
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984B60)(r9, reinterpret_cast<const uint32_t*>(ebp - 0xd0), r7);
+    alignas(16) uint32_t r10[4];  // 00A4E31E
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x9B5990)(r10, r4, reinterpret_cast<const uint32_t*>(ebp - 0x370));
+    alignas(16) uint32_t r11[4];  // 00A4E38E
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x9B5990)(r11, r5, reinterpret_cast<const uint32_t*>(ebp - 0x390));
+    alignas(16) uint32_t r12[4];  // 00A4E3FE
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x9B5990)(r12, r6, reinterpret_cast<const uint32_t*>(ebp - 0x3b0));
+    alignas(16) uint32_t r13[4];  // 00A4E475
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r13, r10, reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r1);
+    alignas(16) uint32_t r14[4];  // 00A4E4EC
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r14, r11, reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r2);
+    alignas(16) uint32_t r15[4];  // 00A4E563
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r15, r12, reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r3);
+    alignas(16) uint32_t r16[4];  // 00A4F07C
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r16, reinterpret_cast<const uint32_t*>(ebp - 0x4d0), reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r4);
+    alignas(16) uint32_t r17[4];  // 00A4F0F3
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r17, reinterpret_cast<const uint32_t*>(ebp - 0x4f0), reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r5);
+    alignas(16) uint32_t r18[4];  // 00A4F16A
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r18, reinterpret_cast<const uint32_t*>(ebp - 0x510), reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r6);
+    alignas(16) uint32_t r19[4];  // 00A4F1E1
+    reinterpret_cast<void*(__fastcall*)(uint32_t, uint32_t, void*, const void*, uint32_t, const void*)>(0x9B4650)(*reinterpret_cast<const uint32_t*>(ebx + 0x44), 0, r19, r9, *reinterpret_cast<const uint32_t*>(ebx + 0x2c), r8);
+    alignas(16) uint32_t r20[4];  // 00A4F225
+    reinterpret_cast<void*(__fastcall*)(uint32_t, uint32_t, void*, const void*, uint32_t, const void*)>(0x9B4650)(*reinterpret_cast<const uint32_t*>(ebx + 0x48), 0, r20, r7, *reinterpret_cast<const uint32_t*>(ebx + 0x2c), r8);
+    alignas(16) uint32_t r21[4];  // 00A4F23F
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r21, r19, reinterpret_cast<const uint32_t*>(ebp - 0x2f0));
+    alignas(16) uint32_t r22[4];  // 00A4F2AF
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r22, r21, r20);
+    alignas(16) uint32_t r23[4];  // 00A4F31F
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984B60)(r23, reinterpret_cast<const uint32_t*>(ebp - 0x330), r22);
+    alignas(16) uint32_t r24[4];  // 00A4F38F
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r24, r23, r23);
+    alignas(16) uint32_t r25[4];  // 00A4F406
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x9B2EC0)(r25, r16, r17, r18);
+    alignas(16) uint32_t r26[4];  // 00A4F46F
+    reinterpret_cast<void*(__cdecl*)(void*, const void*)>(0x9B5CE0)(r26, r25);
+    alignas(16) uint32_t r27[4];  // 00A4F4D8
+    reinterpret_cast<void*(__cdecl*)(void*, const void*)>(0x985500)(r27, r26);
+    alignas(16) uint32_t r28[4];  // 00A4F541
+    reinterpret_cast<void*(__cdecl*)(void*, const void*)>(0xA520C0)(r28, r26);
+    alignas(16) uint32_t r29[4];  // 00A4F5B1
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0xA51E80)(r29, r27, r28);
+    alignas(16) uint32_t r30[4];  // 00A4F621
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0xA51F40)(r30, r25, r24);
+    alignas(16) uint32_t r31[4];  // 00A4F691
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984F60)(r31, r26, r29);
+    alignas(16) uint32_t r32[4];  // 00A4F701
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r32, r16, r31);
+    alignas(16) uint32_t r33[4];  // 00A4F771
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r33, r17, r31);
+    alignas(16) uint32_t r34[4];  // 00A4F7E1
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r34, r18, r31);
+    alignas(16) uint32_t r35[4];  // 00A4F858
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r35, r32, r22, r16);
+    alignas(16) uint32_t r36[4];  // 00A4F8CF
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r36, r33, r22, r17);
+    alignas(16) uint32_t r37[4];  // 00A4F946
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r37, r34, r22, r18);
+    alignas(16) uint32_t r38[4];  // 00A4F9B6
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984F60)(r38, r35, r30);
+    alignas(16) uint32_t r39[4];  // 00A4FA26
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984F60)(r39, r36, r30);
+    alignas(16) uint32_t r40[4];  // 00A4FA96
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984F60)(r40, r37, r30);
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x8)) + off, r13, 16);  // 00A4FB03
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0xc)) + off, r14, 16);  // 00A4FB1D
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x10)) + off, r15, 16);  // 00A4FB37
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x14)) + off, r38, 16);  // 00A4FB51
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x18)) + off, r39, 16);  // 00A4FB6B
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x1c)) + off, r40, 16);  // 00A4FB85
+}
+
+static void a4_iter_full(uint8_t* ebp, const uint8_t* ebx, uint32_t off) {
+    alignas(16) uint32_t r1[4];  // 00A4DF43
+    std::memcpy(r1, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x8)) + off, 16);
+    alignas(16) uint32_t r2[4];  // 00A4DFB0
+    std::memcpy(r2, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0xc)) + off, 16);
+    alignas(16) uint32_t r3[4];  // 00A4E01D
+    std::memcpy(r3, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x10)) + off, 16);
+    alignas(16) uint32_t r4[4];  // 00A4E08A
+    std::memcpy(r4, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x14)) + off, 16);
+    alignas(16) uint32_t r5[4];  // 00A4E0F7
+    std::memcpy(r5, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x18)) + off, 16);
+    alignas(16) uint32_t r6[4];  // 00A4E164
+    std::memcpy(r6, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x1c)) + off, 16);
+    alignas(16) uint32_t r7[4];  // 00A4E1D1
+    std::memcpy(r7, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x24)) + off, 16);
+    alignas(16) uint32_t r8[4];  // 00A4E23E
+    std::memcpy(r8, reinterpret_cast<const uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x28)) + off, 16);
+    alignas(16) uint32_t r9[4];  // 00A4E2AE
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984B60)(r9, reinterpret_cast<const uint32_t*>(ebp - 0xd0), r7);
+    alignas(16) uint32_t r10[4];  // 00A4E31E
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x9B5990)(r10, r4, reinterpret_cast<const uint32_t*>(ebp - 0x370));
+    alignas(16) uint32_t r11[4];  // 00A4E38E
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x9B5990)(r11, r5, reinterpret_cast<const uint32_t*>(ebp - 0x390));
+    alignas(16) uint32_t r12[4];  // 00A4E3FE
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x9B5990)(r12, r6, reinterpret_cast<const uint32_t*>(ebp - 0x3b0));
+    alignas(16) uint32_t r13[4];  // 00A4E475
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r13, r10, reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r1);
+    alignas(16) uint32_t r14[4];  // 00A4E4EC
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r14, r11, reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r2);
+    alignas(16) uint32_t r15[4];  // 00A4E563
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r15, r12, reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r3);
+    alignas(16) uint32_t r16[4];  // 00A4E669
+    reinterpret_cast<void*(__cdecl*)(void*, uint32_t)>(0x984920)(r16, x87_pass(*reinterpret_cast<const uint32_t*>(0x110b414)));
+    alignas(16) uint32_t r17[4];  // 00A4E6D4
+    std::memcpy(r17, ebp - 0x640 + 0x0u, 16);
+    alignas(16) uint32_t r18[4];  // 00A4E73F
+    std::memcpy(r18, ebp - 0x660 + 0x0u, 16);
+    alignas(16) uint32_t r19[4];  // 00A4E7AA
+    std::memcpy(r19, ebp - 0x680 + 0x0u, 16);
+    alignas(16) uint32_t r20[4];  // 00A4E815
+    std::memcpy(r20, ebp - 0x6a0 + 0x0u, 16);
+    alignas(16) uint32_t r21[4];  // 00A4E880
+    std::memcpy(r21, ebp - 0x6c0 + 0x0u, 16);
+    alignas(16) uint32_t r22[4];  // 00A4E8F0
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984B60)(r22, r17, r13);
+    alignas(16) uint32_t r23[4];  // 00A4E960
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984B60)(r23, r18, r14);
+    alignas(16) uint32_t r24[4];  // 00A4E9D0
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984B60)(r24, r19, r15);
+    alignas(16) uint32_t r25[4];  // 00A4EA47
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x9B2EC0)(r25, r22, r23, r24);
+    alignas(16) uint32_t r26[4];  // 00A4EAB7
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0xA52000)(r26, r25, r20);
+    alignas(16) uint32_t r27[4];  // 00A4EB27
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0xA52000)(r27, r16, r25);
+    alignas(16) uint32_t r28[4];  // 00A4EB97
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984F60)(r28, r26, r27);
+    alignas(16) uint32_t r29[4];  // 00A4EC00
+    reinterpret_cast<void*(__cdecl*)(void*, const void*)>(0x9B5CE0)(r29, r25);
+    alignas(16) uint32_t r30[4];  // 00A4EC70
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r30, r22, r29);
+    alignas(16) uint32_t r31[4];  // 00A4ECE0
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r31, r23, r29);
+    alignas(16) uint32_t r32[4];  // 00A4ED50
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r32, r24, r29);
+    alignas(16) uint32_t r33[4];  // 00A4EDC0
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r33, r29, r29);
+    alignas(16) uint32_t r34[4];  // 00A4EE30
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r34, r21, r33);
+    alignas(16) uint32_t r35[4];  // 00A4EEA0
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x9B66B0)(r35, r34, r28);
+    alignas(16) uint32_t r36[4];  // 00A4EF17
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r36, r35, r30, reinterpret_cast<const uint32_t*>(ebp - 0x4d0));
+    alignas(16) uint32_t r37[4];  // 00A4EF8E
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r37, r35, r31, reinterpret_cast<const uint32_t*>(ebp - 0x4f0));
+    alignas(16) uint32_t r38[4];  // 00A4F005
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r38, r35, r32, reinterpret_cast<const uint32_t*>(ebp - 0x510));
+    alignas(16) uint32_t r39[4];  // 00A4F07C
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r39, r36, reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r4);
+    alignas(16) uint32_t r40[4];  // 00A4F0F3
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r40, r37, reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r5);
+    alignas(16) uint32_t r41[4];  // 00A4F16A
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r41, r38, reinterpret_cast<const uint32_t*>(ebp - 0x2f0), r6);
+    alignas(16) uint32_t r42[4];  // 00A4F1E1
+    reinterpret_cast<void*(__fastcall*)(uint32_t, uint32_t, void*, const void*, uint32_t, const void*)>(0x9B4650)(*reinterpret_cast<const uint32_t*>(ebx + 0x44), 0, r42, r9, *reinterpret_cast<const uint32_t*>(ebx + 0x2c), r8);
+    alignas(16) uint32_t r43[4];  // 00A4F225
+    reinterpret_cast<void*(__fastcall*)(uint32_t, uint32_t, void*, const void*, uint32_t, const void*)>(0x9B4650)(*reinterpret_cast<const uint32_t*>(ebx + 0x48), 0, r43, r7, *reinterpret_cast<const uint32_t*>(ebx + 0x2c), r8);
+    alignas(16) uint32_t r44[4];  // 00A4F23F
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r44, r42, reinterpret_cast<const uint32_t*>(ebp - 0x2f0));
+    alignas(16) uint32_t r45[4];  // 00A4F2AF
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r45, r44, r43);
+    alignas(16) uint32_t r46[4];  // 00A4F31F
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984B60)(r46, reinterpret_cast<const uint32_t*>(ebp - 0x330), r45);
+    alignas(16) uint32_t r47[4];  // 00A4F38F
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r47, r46, r46);
+    alignas(16) uint32_t r48[4];  // 00A4F406
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x9B2EC0)(r48, r39, r40, r41);
+    alignas(16) uint32_t r49[4];  // 00A4F46F
+    reinterpret_cast<void*(__cdecl*)(void*, const void*)>(0x9B5CE0)(r49, r48);
+    alignas(16) uint32_t r50[4];  // 00A4F4D8
+    reinterpret_cast<void*(__cdecl*)(void*, const void*)>(0x985500)(r50, r49);
+    alignas(16) uint32_t r51[4];  // 00A4F541
+    reinterpret_cast<void*(__cdecl*)(void*, const void*)>(0xA520C0)(r51, r49);
+    alignas(16) uint32_t r52[4];  // 00A4F5B1
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0xA51E80)(r52, r50, r51);
+    alignas(16) uint32_t r53[4];  // 00A4F621
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0xA51F40)(r53, r48, r47);
+    alignas(16) uint32_t r54[4];  // 00A4F691
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984F60)(r54, r49, r52);
+    alignas(16) uint32_t r55[4];  // 00A4F701
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r55, r39, r54);
+    alignas(16) uint32_t r56[4];  // 00A4F771
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r56, r40, r54);
+    alignas(16) uint32_t r57[4];  // 00A4F7E1
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x5537E0)(r57, r41, r54);
+    alignas(16) uint32_t r58[4];  // 00A4F858
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r58, r55, r45, r39);
+    alignas(16) uint32_t r59[4];  // 00A4F8CF
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r59, r56, r45, r40);
+    alignas(16) uint32_t r60[4];  // 00A4F946
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*, const void*)>(0x553700)(r60, r57, r45, r41);
+    alignas(16) uint32_t r61[4];  // 00A4F9B6
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984F60)(r61, r58, r53);
+    alignas(16) uint32_t r62[4];  // 00A4FA26
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984F60)(r62, r59, r53);
+    alignas(16) uint32_t r63[4];  // 00A4FA96
+    reinterpret_cast<void*(__cdecl*)(void*, const void*, const void*)>(0x984F60)(r63, r60, r53);
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x8)) + off, r13, 16);  // 00A4FB03
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0xc)) + off, r14, 16);  // 00A4FB1D
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x10)) + off, r15, 16);  // 00A4FB37
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x14)) + off, r61, 16);  // 00A4FB51
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x18)) + off, r62, 16);  // 00A4FB6B
+    std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x1c)) + off, r63, 16);  // 00A4FB85
+}
+
+volatile long g_a4_calls = 0, g_a4_iters = 0;
+
+uint32_t __cdecl ffx_update_loop(uint8_t* ebp, const uint8_t* ebx) {
+    const uint32_t count = *reinterpret_cast<const uint32_t*>(ebx + 0x20);
+    ++g_a4_calls;
+    g_a4_iters += count;
+    uint32_t off = count << 4;
+    if (count < 2) return off;
+    while (off > 16) {
+        off -= 16;
+        if (*reinterpret_cast<const uint32_t*>(ebx + 0x4C)) {
+            a4_iter_full(ebp, ebx, off);
+        } else {
+            a4_iter_skip(ebp, ebx, off);
+        }
+    }
+    return 16;
+}
+
+// Entered by a jump at 0xA4DEE8 (dl = [ebx+0x28] != 0): the game's code from there to the loop (the array at
+// [ebx+0x28] defaults to the one at [ebx+8]), the passes but the last, the counter, eax and ecx as the game's code
+// has them, and on to the loop's top at 0xA4DF22.
+__declspec(naked) void ffx_update_loop_entry() {
+    __asm {
+        mov byte ptr [ebp - 0x729], dl
+        movzx eax, byte ptr [ebp - 0x729]
+        test eax, eax
+        je no_second
+        mov ecx, dword ptr [ebx + 0x28]
+        mov dword ptr [ebp - 0x18C0], ecx
+        jmp have_second
+    no_second:
+        mov edx, dword ptr [ebx + 8]
+        mov dword ptr [ebp - 0x18C0], edx
+    have_second:
+        mov eax, dword ptr [ebp - 0x18C0]
+        mov dword ptr [ebx + 0x28], eax
+        push ebx
+        push ebp
+        call ffx_update_loop
+        add esp, 8
+        mov dword ptr [ebp - 0x730], eax
+        mov eax, dword ptr [ebp - 0x18C0]
+        mov ecx, dword ptr [ebx + 0x20]
+        shl ecx, 4
+        push 0xA4DF22
+        ret
+    }
+}
+
 struct Site {
     const char* name;
     uintptr_t address;
@@ -1350,6 +1705,12 @@ const uint8_t kAabbHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x81, 0xEC, 0x0
 const uint8_t kArraysHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0x30, 0x02, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xD0, 0xFD, 0xFF, 0xFF, 0xB9};
 // 0x995C60 up to its debug fill's count; the rest by hash
 const uint8_t kBoundsHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0xFC, 0x2A, 0x04, 0x01, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x50, 0x53, 0x81, 0xEC, 0x40, 0x07, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xB0, 0xF8, 0xFF, 0xFF, 0xB9};
+// 0x99C540 up to its debug fill's count (the rest by hash), and its particle loop's start
+const uint8_t kQuadsHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0xB8, 0xC8, 0x1F, 0x00, 0x00, 0xE8, 0x90, 0x54, 0x12, 0x00, 0x56, 0x57, 0x8D, 0xBD, 0x38, 0xE0, 0xFF, 0xFF, 0xB9};
+const uint8_t kQuadLoop[] = {0xC7, 0x85, 0x7C, 0xEB, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xEB, 0x0F};
+// 0xA4D420 up to its debug fill's count (the rest by hash), and the code from 0xA4DEE8 to its particle loop
+const uint8_t kUpdateHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0x83, 0x80, 0x04, 0x01, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x50, 0x53, 0xB8, 0xB8, 0x18, 0x00, 0x00, 0xE8, 0xA1, 0x45, 0x07, 0x00, 0x56, 0x57, 0x8D, 0xBD, 0x38, 0xE7, 0xFF, 0xFF, 0xB9};
+const uint8_t kUpdatePreLoop[] = {0x88, 0x95, 0xD7, 0xF8, 0xFF, 0xFF, 0x0F, 0xB6, 0x85, 0xD7, 0xF8, 0xFF, 0xFF, 0x85, 0xC0, 0x74, 0x0B, 0x8B, 0x4B, 0x28, 0x89, 0x8D, 0x40, 0xE7, 0xFF, 0xFF, 0xEB, 0x09, 0x8B, 0x53, 0x08, 0x89, 0x95, 0x40, 0xE7, 0xFF, 0xFF, 0x8B, 0x85, 0x40, 0xE7, 0xFF, 0xFF, 0x89, 0x43, 0x28, 0x8B, 0x4B, 0x20, 0xC1, 0xE1, 0x04, 0x89, 0x8D, 0xD0, 0xF8, 0xFF, 0xFF};
 // 0x419890 through its constants (-0.0f at 0x11E7FF0, 1.0 at 0x11E7C90) to the loop's first load
 const uint8_t kRsqrtHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x8B, 0x55, 0x0C, 0x0F, 0x57, 0xC9, 0xF3, 0x0F, 0x10,
                               0x15, 0xF0, 0x7F, 0x1E, 0x01, 0xF2, 0x0F, 0x10, 0x1D, 0x90, 0x7C, 0x1E, 0x01, 0x8D, 0x44,
@@ -1604,6 +1965,12 @@ const Site kFfxSites[] = {
      reinterpret_cast<const void*>(&ffx_arrays_44c6a0), 0x073CE9FAu, 40, 1007},
     {"bounds of three arrays", 0x995C60, kBoundsHead, sizeof(kBoundsHead), nullptr, 0, 0,
      reinterpret_cast<const void*>(&ffx_bounds3), 0x15FD9D02u, 55, 3225},
+    {"particle quad builder", 0x99C540, kQuadsHead, sizeof(kQuadsHead), nullptr, 0, 0, nullptr, 0x94826511u, 45, 11428},
+    {"particle quad loop", 0x99E9B0, kQuadLoop, sizeof(kQuadLoop), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&ffx_particle_loop_entry)},
+    {"particle update", 0xA4D420, kUpdateHead, sizeof(kUpdateHead), nullptr, 0, 0, nullptr, 0x79E35490u, 60, 10098},
+    {"particle update loop", 0xA4DEE8, kUpdatePreLoop, sizeof(kUpdatePreLoop), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&ffx_update_loop_entry)},
 };
 
 bool matches(const Site& s) {
@@ -1874,6 +2241,15 @@ bool switch_site(const Saved& sv, const void* target, bool on) {
     return true;
 }
 }  // namespace
+
+// RemoteControl `fastmath stats`: calls and particles through the particle quad loop since the last call.
+void rendermath_stats(long* calls, long* particles, long* update_calls, long* update_groups) {
+    *calls = g_ploop_calls;
+    *particles = g_ploop_iters;
+    *update_calls = g_a4_calls;
+    *update_groups = g_a4_iters;
+    g_ploop_calls = g_ploop_iters = g_a4_calls = g_a4_iters = 0;
+}
 
 // RemoteControl `fastmath at ADDR 0|1`: the one site at ADDR, as rendermath_set_table.
 int rendermath_set_site(uintptr_t at, bool on) {

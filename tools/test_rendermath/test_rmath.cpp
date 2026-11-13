@@ -797,6 +797,232 @@ static void test_arrays() {
     std::printf("arrays and bounds: 200000 iterations, %d mismatches so far\n", g_fail);
 }
 
+// 0x99C540's particle loop (0x99E980..0x99F1EA) run on a fake frame: the original, and with 0x99E9B0 jumping to
+// ffx_particle_loop_entry; the loop's exit 0x99F1EA comes back here. The whole frame above esp, the particles, the
+// output and eax/ecx/edx at the exit compared. n 0..9, strides 0, 16, 48, 48n.
+static uint32_t g_loop_ebp, g_loop_ebx, g_loop_esp, g_loop_saved_esp, g_loop_regs[3], g_loop_entry = 0x99E980;
+__declspec(naked) static void loop_back() {
+    __asm {
+        mov [g_loop_regs], eax
+        mov [g_loop_regs + 4], ecx
+        mov [g_loop_regs + 8], edx
+        mov esp, [g_loop_saved_esp]
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret
+    }
+}
+__declspec(naked) static void run_loop() {
+    __asm {
+        push ebp
+        push ebx
+        push esi
+        push edi
+        mov [g_loop_saved_esp], esp
+        mov ebx, [g_loop_ebx]
+        mov esp, [g_loop_esp]
+        mov ebp, [g_loop_ebp]
+        mov eax, 0x11111111
+        mov ecx, 0x22222222
+        mov edx, 0x33333333
+        push dword ptr [g_loop_entry]
+        ret
+    }
+}
+static void run_loop_at(uint32_t entry) {
+    g_loop_entry = entry;
+    run_loop();
+}
+static void put_jump(uint32_t at, const void* to) {
+    uint8_t b[5] = {0xE9};
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(to) - (at + 5));
+    std::memcpy(b + 1, &rel, 4);
+    std::memcpy(reinterpret_cast<void*>(at), b, 5);
+}
+static void test_particle_loop() {
+    static uint8_t orig_site[12];
+    std::memcpy(orig_site, reinterpret_cast<void*>(0x99E9B0), 12);
+    put_jump(0x99F1EA, reinterpret_cast<const void*>(&loop_back));
+    alignas(16) static uint8_t stack1[0x10000], stack2[0x10000], parts1[9 * 72], parts2[9 * 72], out1[0x10000], out2[0x10000];
+    alignas(16) static uint32_t args1[8], args2[8];
+    long iters = 0;
+    for (int it = 0; it < 30000; ++it) {
+        const uint32_t n = rng() % 10;
+        fill(reinterpret_cast<uint32_t*>(stack1 + 0xE000 - 0x2400), 0x2400 / 4);
+        fill(reinterpret_cast<uint32_t*>(parts1), sizeof(parts1) / 4);
+        if (rng() & 1) {
+            for (size_t i = 0; i < sizeof(parts1) / 4; ++i) { float f = static_cast<float>(static_cast<int>(rng() % 2000) - 1000) / 64.0f; std::memcpy(parts1 + 4 * i, &f, 4); }
+        }
+        const int strides[4] = {0, 16, 48, static_cast<int>(48 * n)};
+        const int stride = strides[rng() % 4];
+        std::memcpy(stack1 + 0xE000 - 0x668, &stride, 4);
+        std::memset(out1, 0xA5, sizeof(out1));
+        std::memcpy(stack2, stack1, sizeof(stack1));
+        std::memcpy(parts2, parts1, sizeof(parts1));
+        std::memcpy(out2, out1, sizeof(out1));
+        uint32_t r1[3];
+        for (int pass = 0; pass < 2; ++pass) {
+            uint8_t* st = pass ? stack2 : stack1;
+            uint32_t* a = pass ? args2 : args1;
+            a[2] = reinterpret_cast<uint32_t>(pass ? out2 : out1);
+            a[3] = reinterpret_cast<uint32_t>(pass ? parts2 : parts1);
+            a[4] = n;
+            g_loop_ebx = reinterpret_cast<uint32_t>(a);
+            g_loop_ebp = reinterpret_cast<uint32_t>(st + 0xE000);
+            g_loop_esp = reinterpret_cast<uint32_t>(st + 0xE000 - 0x2400);
+            if (pass) put_jump(0x99E9B0, reinterpret_cast<const void*>(&ffx_particle_loop_entry));
+            else std::memcpy(reinterpret_cast<void*>(0x99E9B0), orig_site, 12);
+            run_loop_at(0x99E980);
+            if (!pass) std::memcpy(r1, g_loop_regs, 12);
+        }
+        std::memcpy(reinterpret_cast<void*>(0x99E9B0), orig_site, 12);
+        iters += n;
+        {   // the loop's particle pointer (ebp-0x1488) points into each run's own particles: compare as an offset
+            uint32_t q;
+            std::memcpy(&q, stack1 + 0xE000 - 0x1488, 4);
+            const uint32_t b1 = reinterpret_cast<uint32_t>(parts1), b2 = reinterpret_cast<uint32_t>(parts2);
+            if (q >= b1 && q < b1 + sizeof(parts1)) { q += b2 - b1; std::memcpy(stack1 + 0xE000 - 0x1488, &q, 4); }
+        }
+        if (std::memcmp(stack1 + 0xE000 - 0x2400, stack2 + 0xE000 - 0x2400, 0x2400) != 0 && g_fail < 20) {
+            int shown = 0;
+            for (int o = 0; o < 0x2400 && shown < 6; o += 4) {
+                uint32_t x, y;
+                std::memcpy(&x, stack1 + 0xE000 - 0x2400 + o, 4);
+                std::memcpy(&y, stack2 + 0xE000 - 0x2400 + o, 4);
+                if (x != y) { std::printf("  n %u frame ebp-%#x: %08X vs %08X\n", n, 0x2400 - o, x, y); ++shown; }
+            }
+        }
+        same(stack1 + 0xE000 - 0x2400, stack2 + 0xE000 - 0x2400, 0x2400, "particle loop frame", it);
+        same(parts1, parts2, sizeof(parts1), "particle loop particles", it);
+        same(out1, out2, sizeof(out1), "particle loop output", it);
+        // eax/ecx/edx: pointers into out1/out2 or the frames compare as offsets
+        for (int k = 0; k < 3; ++k) {
+            const uint32_t d1 = reinterpret_cast<uint32_t>(out1), d2 = reinterpret_cast<uint32_t>(out2);
+            const uint32_t s1 = reinterpret_cast<uint32_t>(stack1), s2 = reinterpret_cast<uint32_t>(stack2);
+            if (r1[k] >= d1 && r1[k] < d1 + sizeof(out1)) r1[k] += d2 - d1;
+            else if (r1[k] >= s1 && r1[k] < s1 + sizeof(stack1)) r1[k] += s2 - s1;
+        }
+        if (std::memcmp(r1, g_loop_regs, 12) != 0) {
+            if (g_fail < 20) std::printf("particle loop registers differ at %d (n %u): %08X %08X %08X vs %08X %08X %08X\n", it, n, r1[0], r1[1], r1[2], g_loop_regs[0], g_loop_regs[1], g_loop_regs[2]);
+            ++g_fail;
+        }
+    }
+    std::printf("particle loop: 30000 runs, %ld particles, %d mismatches so far\n", iters, g_fail);
+}
+
+// 0xA4D420's particle update loop (entered at 0xA4DEE1, the loop's exit 0xA4FB9A comes back here) on a fake frame:
+// the original, and with 0xA4DEE8 jumping to ffx_update_loop_entry. Arrays of 1..8 groups of four; the branch flag
+// [ebx+0x4C] and the second array [ebx+0x28] (zero: the first array) both ways; the parameter objects of type 4 (the
+// four-lane curve, with a key stream) or a probe type (table slot 29) whose result mixes every input and counts its
+// calls. The whole frame above esp, all arrays, the argument block and eax/ecx/edx at the exit compared.
+static uint32_t g_probe_calls;
+static void* __cdecl probe_eval(uint32_t* out, const uint32_t* a, const uint32_t* self, uint32_t b, const uint32_t* c) {
+    ++g_probe_calls;
+    for (int i = 0; i < 4; ++i) {
+        out[i] = (a[i] * 0x9E3779B1u) ^ ((c[i] << 7) | (c[i] >> 25)) ^ (b * (i + 3)) ^ self[2] ^ (g_probe_calls * 0x85EBCA6Bu);
+    }
+    return out;
+}
+static void test_update_loop() {
+    static uint8_t pre[58];
+    std::memcpy(pre, reinterpret_cast<void*>(0xA4DEE8), sizeof(pre));
+    put_jump(0xA4FB9A, reinterpret_cast<const void*>(&loop_back));
+    *reinterpret_cast<uint32_t*>(0x112D618 + 29 * 4) = reinterpret_cast<uint32_t>(&probe_eval);
+    alignas(16) static uint8_t stack1[0x10000], stack2[0x10000], arr1[9][8 * 16], arr2[9][8 * 16];
+    alignas(16) static uint32_t args1[0x20], args2[0x20], pobj1[2][4], pobj2[2][4], stream[64];
+    long groups = 0;
+    for (int it = 0; it < 20000; ++it) {
+        const uint32_t count = 1 + rng() % 8;
+        fill(reinterpret_cast<uint32_t*>(stack1 + 0xE000 - 0x1A00), 0x1A00 / 4);
+        for (int k = 0; k < 9; ++k) {
+            fill(reinterpret_cast<uint32_t*>(arr1[k]), 8 * 4);
+            if (rng() & 1) {
+                for (int i = 0; i < 32; ++i) { float f = static_cast<float>(static_cast<int>(rng() % 2000) - 1000) / 64.0f; std::memcpy(arr1[k] + 4 * i, &f, 4); }
+            }
+        }
+        // a key stream for type 4: n, keys, values
+        const uint32_t nk = 1 + rng() % 5;
+        stream[0] = nk;
+        float key = -2.0f;
+        for (uint32_t i = 0; i < nk; ++i) { key += static_cast<float>(rng() % 40) / 10.0f; std::memcpy(&stream[1 + i], &key, 4); stream[1 + nk + i] = rnd_bits(); }
+        for (int k = 0; k < 2; ++k) {
+            pobj1[k][0] = (rng() & 1) ? 4u : 29u;
+            pobj1[k][1] = reinterpret_cast<uint32_t>(stream);
+            pobj1[k][2] = rng();
+            pobj1[k][3] = 0;
+        }
+        fill(args1, 0x20);
+        std::memcpy(stack2, stack1, sizeof(stack1));
+        std::memcpy(arr2, arr1, sizeof(arr1));
+        std::memcpy(pobj2, pobj1, sizeof(pobj1));
+        const bool flag = (rng() & 1) != 0, second = (rng() & 1) != 0;
+        uint32_t r1[3];
+        uint32_t calls1 = 0;
+        for (int pass = 0; pass < 2; ++pass) {
+            uint8_t* st = pass ? stack2 : stack1;
+            uint32_t* a = pass ? args2 : args1;
+            auto& arr = pass ? arr2 : arr1;
+            auto& po = pass ? pobj2 : pobj1;
+            if (pass) std::memcpy(args2, args1, sizeof(args1));
+            const int slots[8] = {2, 3, 4, 5, 6, 7, 9, 10};  // ebx + 8 .. 0x1C, 0x24, 0x28
+            for (int k = 0; k < 8; ++k) a[slots[k]] = reinterpret_cast<uint32_t>(arr[k]);
+            if (!second) a[10] = 0;
+            a[8] = count;                                           // ebx + 0x20
+            a[17] = reinterpret_cast<uint32_t>(po[0]);              // ebx + 0x44
+            a[18] = reinterpret_cast<uint32_t>(po[1]);              // ebx + 0x48
+            a[19] = flag ? 1u : 0u;                                 // ebx + 0x4C
+            g_loop_ebx = reinterpret_cast<uint32_t>(a);
+            g_loop_ebp = reinterpret_cast<uint32_t>(st + 0xE000);
+            g_loop_esp = reinterpret_cast<uint32_t>(st + 0xE000 - 0x1A00);
+            if (pass) put_jump(0xA4DEE8, reinterpret_cast<const void*>(&ffx_update_loop_entry));
+            else std::memcpy(reinterpret_cast<void*>(0xA4DEE8), pre, sizeof(pre));
+            g_probe_calls = 0;
+            run_loop_at(0xA4DEE1);
+            if (!pass) { std::memcpy(r1, g_loop_regs, 12); calls1 = g_probe_calls; }
+        }
+        std::memcpy(reinterpret_cast<void*>(0xA4DEE8), pre, sizeof(pre));
+        groups += count;
+        // pointers into each run's own buffers compare as offsets: frame cells, the argument block, registers
+        const uint32_t lo1[4] = {reinterpret_cast<uint32_t>(stack1), reinterpret_cast<uint32_t>(arr1), reinterpret_cast<uint32_t>(pobj1), reinterpret_cast<uint32_t>(args1)};
+        const uint32_t lo2[4] = {reinterpret_cast<uint32_t>(stack2), reinterpret_cast<uint32_t>(arr2), reinterpret_cast<uint32_t>(pobj2), reinterpret_cast<uint32_t>(args2)};
+        const uint32_t len[4] = {sizeof(stack1), sizeof(arr1), sizeof(pobj1), sizeof(args1)};
+        auto map = [&](uint32_t v) {
+            for (int b = 0; b < 4; ++b) if (v >= lo1[b] && v < lo1[b] + len[b]) return v - lo1[b] + lo2[b];
+            return v;
+        };
+        // a cell matches when equal, or equal once a pointer into run 1's buffers is moved to run 2's (a random
+        // value can fall in those ranges too, so only cells that differ are mapped)
+        for (int o = 0; o < 0x1A00; o += 4) {
+            uint32_t v, w;
+            std::memcpy(&v, stack1 + 0xE000 - 0x1A00 + o, 4);
+            std::memcpy(&w, stack2 + 0xE000 - 0x1A00 + o, 4);
+            if (v != w && map(v) == w) std::memcpy(stack1 + 0xE000 - 0x1A00 + o, &w, 4);
+        }
+        for (int k = 0; k < 0x20; ++k) if (args1[k] != args2[k] && map(args1[k]) == args2[k]) args1[k] = args2[k];
+        for (int k = 0; k < 3; ++k) if (r1[k] != g_loop_regs[k] && map(r1[k]) == g_loop_regs[k]) r1[k] = g_loop_regs[k];
+        if (std::memcmp(stack1 + 0xE000 - 0x1A00, stack2 + 0xE000 - 0x1A00, 0x1A00) != 0 && g_fail < 20) {
+            int shown = 0;
+            for (int o = 0; o < 0x1A00 && shown < 6; o += 4) {
+                uint32_t x, y;
+                std::memcpy(&x, stack1 + 0xE000 - 0x1A00 + o, 4);
+                std::memcpy(&y, stack2 + 0xE000 - 0x1A00 + o, 4);
+                if (x != y) { std::printf("  count %u flag %d frame ebp-%#x: %08X vs %08X\n", count, flag, 0x1A00 - o, x, y); ++shown; }
+            }
+        }
+        same(stack1 + 0xE000 - 0x1A00, stack2 + 0xE000 - 0x1A00, 0x1A00, "update loop frame", it);
+        same(arr1, arr2, sizeof(arr1), "update loop arrays", it);
+        same(args1, args2, sizeof(args1), "update loop arguments", it);
+        if (calls1 != g_probe_calls) { if (g_fail < 20) std::printf("update loop probe calls %u vs %u\n", calls1, g_probe_calls); ++g_fail; }
+        if (std::memcmp(r1, g_loop_regs, 12) != 0) {
+            if (g_fail < 20) std::printf("update loop registers differ at %d (count %u): %08X %08X %08X vs %08X %08X %08X\n", it, count, r1[0], r1[1], r1[2], g_loop_regs[0], g_loop_regs[1], g_loop_regs[2]);
+            ++g_fail;
+        }
+    }
+    std::printf("update loop: 20000 runs, %ld groups of four, %d mismatches so far\n", groups, g_fail);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "child") != 0) return run_parent(argv[0]);
     std::printf("image mapped (child)\n");
@@ -1007,6 +1233,8 @@ int main(int argc, char** argv) {
         test_glue();
         test_box();
         test_arrays();
+        test_particle_loop();
+        test_update_loop();
     }
     return g_fail ? 1 : 0;
 }

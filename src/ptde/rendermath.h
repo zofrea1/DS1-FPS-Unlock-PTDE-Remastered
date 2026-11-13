@@ -27,7 +27,10 @@
 //    lanes, 0x9817B0 one float, x87 steps kept as x87), the three-row multiply-add (0x9AF7F0), the sine/cosine
 //    polynomial (0x9B5DC0), colour packing (0x9B18A0), transposed rows (0x9B4C60), vector arrays through 0x44C6A0
 //    (0x994AE0) and the bounds of three arrays (0x995C60): the same helper operations in the same order without the
-//    debug frames and stack copies (tools/test_rendermath, x87 precision 24/53/64).
+//    debug frames and stack copies (tools/test_rendermath, x87 precision 24/53/64). And the per-particle loops of the
+//    quad builder 0x99C540 (0x99E9B0) and the particle update 0xA4D420 (0xA4DEE8): all passes but the last as direct
+//    code (the same helper calls on the same values; no state carried between passes but the counter), the last by
+//    the game's code so the function's frame ends as before (tested on fake frames against the original loops).
 //  core also has the box transform 0x446D30 (a box through a 4x4 matrix as a box) in packed SSE, every operation
 //    rounded and ordered as the original's.
 //
@@ -40,3 +43,6 @@ bool rendermath_set_cull(bool on);
 int rendermath_set_table(int table, bool on);
 // RemoteControl `fastmath at ADDR 0|1`: one site (by its game address) off or on; returns sites switched (0 or 1).
 int rendermath_set_site(uintptr_t at, bool on);
+// RemoteControl `fastmath stats`: calls and particles through the particle quad loop, and calls and groups of four
+// through the particle update loop, since the last query.
+void rendermath_stats(long* calls, long* particles, long* update_calls, long* update_groups);
