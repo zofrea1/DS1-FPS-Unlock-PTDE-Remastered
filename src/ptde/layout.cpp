@@ -69,6 +69,8 @@ using CreateVsFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const DWORD*, IDirect3DVe
 using SetVsFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexShader9*);
 using SetVsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
 using DrawUpFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, const void*, UINT);
+using DrawPrimFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
+using DrawIdxFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
 using DrawIdxUpFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void*, D3DFORMAT,
                                      const void*, UINT);
 using SetScissorFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*);
@@ -79,7 +81,10 @@ DrawUpFn o_draw_up = nullptr;
 DrawIdxUpFn o_draw_idx_up = nullptr;
 SetScissorFn o_set_scissor = nullptr;
 
-enum Kind : uint8_t { kOther = 0, kImage = 1, kText = 2, kBox = 3 };
+// kPlain: any other shader that puts its position through the layout's rows (c0): positions in layout units, floats.
+// Another player's bar has a white outline that stayed full size with the image, text and box kinds and lines all
+// handled (2026-11-14 screenshots): it is taken to be drawn so.
+enum Kind : uint8_t { kOther = 0, kImage = 1, kText = 2, kBox = 3, kPlain = 4 };
 
 bool g_keep_shape = true;
 float g_scale = 1.0f;
@@ -155,7 +160,7 @@ uint8_t classify(const DWORD* code) {
     if (eighth) return kImage;
     if (frc_first) return kText;
     if (c8) return kBox;
-    return kOther;
+    return kPlain;
 }
 
 void send_rows(IDirect3DDevice9* dev, bool shaped) {
@@ -581,6 +586,11 @@ bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDi
             if (g_bound == kBox) {
                 x = box_rows[0] * f[0] + box_rows[1] * f[1] + box_rows[2] * f[2] + box_rows[3];
                 y = box_rows[4] * f[0] + box_rows[5] * f[1] + box_rows[6] * f[2] + box_rows[7];
+            } else if (g_bound == kPlain) {
+                x = f[0];
+                y = f[1];
+                // Not layout units after all (another vertex layout): left as the game drew it.
+                if (!(x > -5000.0f && x < 5000.0f && y > -5000.0f && y < 5000.0f)) return false;
             } else {
                 x = std::floor(f[0]);
                 y = std::floor(f[1]);
@@ -592,6 +602,17 @@ bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDi
         if (y > y1) y1 = y;
     }
     const Fit f = fit_for(x0, y0, x1, y1, menu_open());
+#if FPSU_DIAGNOSTICS
+    // The plain kind's draws, for the record (what the outline turned out to be).
+    static int plain_logged = 0;
+    if (g_bound == kPlain && plain_logged < 16) {
+        ++plain_logged;
+        uint32_t w[4] = {};
+        std::memcpy(w, src, stride >= 16 ? 16 : stride);
+        LOG_INFO("UIScale: a plain draw (%u vertices, stride %u) %.1f,%.1f-%.1f,%.1f, first vertex %08X %08X %08X %08X: %s",
+                 count, stride, x0, y0, x1, y1, w[0], w[1], w[2], w[3], f.any ? "refit" : "left as it is");
+    }
+#endif
     if (!f.any) return false;
     if (g_bound == kBox) {
         // through the box's own matrix: X' = ax + (X - ax) * sx on rows c8 and c9
@@ -630,6 +651,33 @@ bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDi
 }
 
 bool layout_draw() { return g_layout && g_bound != kOther && (g_shaped || g_scale < 0.999f || g_world_scale < 0.999f); }
+
+#if FPSU_DIAGNOSTICS
+// Draws in the layout's pass that are not refit at all: from a vertex buffer, or with a shader of none of the kinds
+// (logged, the first few; what the player bar's outline is if the plain kind is not it).
+DrawPrimFn o_draw_prim = nullptr;
+DrawIdxFn o_draw_idx = nullptr;
+int g_logged_unfit = 0;
+
+void note_unfit(const char* call, D3DPRIMITIVETYPE type, UINT prims) {
+    if (!g_layout || g_logged_unfit >= 16) return;
+    if (g_scale >= 0.999f && g_world_scale >= 0.999f) return;
+    ++g_logged_unfit;
+    LOG_INFO("UIScale: a %s in the layout's pass is not refit (primitive type %d, %u primitives, shader kind %u)", call,
+             static_cast<int>(type), prims, g_bound);
+}
+
+HRESULT WINAPI hk_draw_prim(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT start, UINT prims) {
+    note_unfit("DrawPrimitive", type, prims);
+    return o_draw_prim(dev, type, start, prims);
+}
+
+HRESULT WINAPI hk_draw_idx(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT min_index, UINT verts,
+                           UINT start, UINT prims) {
+    note_unfit("DrawIndexedPrimitive", type, prims);
+    return o_draw_idx(dev, type, base, min_index, verts, start, prims);
+}
+#endif
 
 #if FPSU_DIAGNOSTICS
 // RemoteControl `uidump N`: the next N draws of the layout, with their place, vertex data, texture and the game code
@@ -701,7 +749,7 @@ void dump_draw(IDirect3DDevice9* dev, const void* data, UINT stride, UINT count,
             ++found;
         }
     }
-    static const char* const kNames[] = {"other", "image", "text", "box"};
+    static const char* const kNames[] = {"other", "image", "text", "box", "plain"};
     LOG_INFO("uidump %s n%u box %.1f,%.1f-%.1f,%.1f data %p tex %p menu %d | stack%s", kNames[g_bound], count, x0, y0,
              x1, y1, data, static_cast<void*>(tex), menu_open() ? 1 : 0, st.c_str());
 }
@@ -725,6 +773,9 @@ UINT vertex_count(D3DPRIMITIVETYPE type, UINT prims) {
 }
 
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT prims, const void* data, UINT stride) {
+#if FPSU_DIAGNOSTICS
+    if (g_bound == kOther) note_unfit("DrawPrimitiveUP", type, prims);
+#endif
     if (!layout_draw()) return o_draw_up(dev, type, prims, data, stride);
     float box[8];
     std::memcpy(box, g_box, sizeof(box));
@@ -738,6 +789,9 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT pri
 
 HRESULT WINAPI hk_draw_idx_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT min_index, UINT verts, UINT prims,
                               const void* indices, D3DFORMAT index_format, const void* data, UINT stride) {
+#if FPSU_DIAGNOSTICS
+    if (g_bound == kOther || min_index != 0) note_unfit("DrawIndexedPrimitiveUP", type, prims);
+#endif
     if (!layout_draw() || min_index != 0) {
         return o_draw_idx_up(dev, type, min_index, verts, prims, indices, index_format, data, stride);
     }
@@ -938,6 +992,12 @@ void layout_hook_device(IDirect3DDevice9* dev, bool own_scissor) {
     if (p && !o_draw_up) o_draw_up = reinterpret_cast<DrawUpFn>(p);
     p = patch_slot(dev, 84, reinterpret_cast<void*>(&hk_draw_idx_up));
     if (p && !o_draw_idx_up) o_draw_idx_up = reinterpret_cast<DrawIdxUpFn>(p);
+#if FPSU_DIAGNOSTICS
+    p = patch_slot(dev, 81, reinterpret_cast<void*>(&hk_draw_prim));
+    if (p && !o_draw_prim) o_draw_prim = reinterpret_cast<DrawPrimFn>(p);
+    p = patch_slot(dev, 82, reinterpret_cast<void*>(&hk_draw_idx));
+    if (p && !o_draw_idx) o_draw_idx = reinterpret_cast<DrawIdxFn>(p);
+#endif
     if (own_scissor) {
         p = patch_slot(dev, 75, reinterpret_cast<void*>(&hk_set_scissor));
         if (p && !o_set_scissor) o_set_scissor = reinterpret_cast<SetScissorFn>(p);
