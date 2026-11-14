@@ -662,30 +662,31 @@ void aspect_adjust_present(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS*
     }
 }
 
+// One slot: our hook in front of the device's method, once. Called again after a Reset (hook_reset): a slot that
+// still leads elsewhere than the method we saved (another hook of this mod or another program went in front of ours
+// and passes calls on to it) is left as it is. Patching it again put our hook in front of those, and ours calls the
+// saved method directly: every hook installed after ours was skipped from the first Reset on (on the Steam Deck, which
+// resets to 1280x800 at start: EffectsResolution's viewports and the menus' clipping rectangles, the frame's
+// scale-down, the Present hooks). Only a slot back on the saved method (our hook gone) is patched again.
+template <typename Fn>
+void hook_once(IDirect3DDevice9* device, int slot, void* hook, Fn* original) {
+    void** vtable = *reinterpret_cast<void***>(device);
+    void* current = vtable[slot];
+    if (current == hook) return;
+    if (*original && current != reinterpret_cast<void*>(*original)) return;
+    void* previous = patch_slot(device, slot, hook);
+    if (previous && !*original) *original = reinterpret_cast<Fn>(previous);
+}
+
 void aspect_hook_device(IDirect3DDevice9* device) {
     if (!device || !g_active) {
         return;
     }
-    void* viewport = patch_slot(device, kSetViewportSlot, reinterpret_cast<void*>(&hook_set_viewport));
-    if (viewport && !g_set_viewport) {
-        g_set_viewport = reinterpret_cast<SetViewportFn>(viewport);
-    }
-    void* scissor = patch_slot(device, kSetScissorSlot, reinterpret_cast<void*>(&hook_set_scissor));
-    if (scissor && !g_set_scissor) {
-        g_set_scissor = reinterpret_cast<SetScissorFn>(scissor);
-    }
-    void* stretch = patch_slot(device, kStretchSlot, reinterpret_cast<void*>(&hook_stretch));
-    if (stretch && !g_stretch) {
-        g_stretch = reinterpret_cast<StretchFn>(stretch);
-    }
-    void* transform = patch_slot(device, kSetTransformSlot, reinterpret_cast<void*>(&hook_set_transform));
-    if (transform && !g_set_transform) {
-        g_set_transform = reinterpret_cast<SetTransformFn>(transform);
-    }
-    void* present = patch_slot(device, kPresentSlot, reinterpret_cast<void*>(&hook_present));
-    if (present && !g_present) {
-        g_present = reinterpret_cast<PresentFn>(present);
-    }
+    hook_once(device, kSetViewportSlot, reinterpret_cast<void*>(&hook_set_viewport), &g_set_viewport);
+    hook_once(device, kSetScissorSlot, reinterpret_cast<void*>(&hook_set_scissor), &g_set_scissor);
+    hook_once(device, kStretchSlot, reinterpret_cast<void*>(&hook_stretch), &g_stretch);
+    hook_once(device, kSetTransformSlot, reinterpret_cast<void*>(&hook_set_transform), &g_set_transform);
+    hook_once(device, kPresentSlot, reinterpret_cast<void*>(&hook_present), &g_present);
     static bool logged = false;
     if (!logged && g_set_viewport && g_present) {
         logged = true;
