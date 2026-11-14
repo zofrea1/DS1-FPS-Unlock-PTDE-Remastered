@@ -566,13 +566,17 @@ Fit fit_for(float x0, float y0, float x1, float y1, bool menu) {
 }
 
 // The draw's vertices with the fit applied, in g_copy; false when nothing changes (the game's data is drawn).
-bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDirect3DDevice9* dev, bool* rows_changed) {
+// `used`: the vertices the draw's indices reach (the rest of the `count` the call names are copied as they are).
+bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDirect3DDevice9* dev, bool* rows_changed,
+           UINT used = 0xFFFFFFFFu) {
     *rows_changed = false;
     if (!data || count == 0 || count > 4096 || stride < 8) return false;
+    if (used > count) used = count;
+    if (used == 0) return false;
     const auto* src = static_cast<const uint8_t*>(data);
     float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
     UINT placed = 0;
-    for (UINT i = 0; i < count; ++i) {
+    for (UINT i = 0; i < used; ++i) {
         const uint8_t* v = src + i * stride;
         float x, y;
         if (g_bound == kImage) {
@@ -634,7 +638,7 @@ bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDi
         return false;
     }
     g_copy.assign(src, src + static_cast<size_t>(count) * stride);
-    for (UINT i = 0; i < count; ++i) {
+    for (UINT i = 0; i < used; ++i) {
         uint8_t* v = g_copy.data() + i * stride;
         if (g_bound == kImage) {
             int16_t s[2];
@@ -836,6 +840,21 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT pri
     return hr;
 }
 
+// The highest index of the draw's indices + 1 (at most `verts`).
+UINT indexed_vertices(D3DPRIMITIVETYPE type, UINT prims, const void* indices, D3DFORMAT format, UINT verts) {
+    const UINT n = vertex_count(type, prims);
+    if (!indices || n == 0 || n > 65536) return verts;
+    UINT top = 0;
+    if (format == D3DFMT_INDEX32) {
+        const auto* ix = static_cast<const uint32_t*>(indices);
+        for (UINT i = 0; i < n; ++i) top = ix[i] > top ? ix[i] : top;
+    } else {
+        const auto* ix = static_cast<const uint16_t*>(indices);
+        for (UINT i = 0; i < n; ++i) top = ix[i] > top ? ix[i] : top;
+    }
+    return top + 1 < verts ? top + 1 : verts;
+}
+
 HRESULT WINAPI hk_draw_idx_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT min_index, UINT verts, UINT prims,
                               const void* indices, D3DFORMAT index_format, const void* data, UINT stride) {
 #if FPSU_DIAGNOSTICS
@@ -846,9 +865,12 @@ HRESULT WINAPI hk_draw_idx_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT
     }
     float box[8];
     std::memcpy(box, g_box, sizeof(box));
-    DUMP_DRAW(dev, data, stride, verts, box);
+    // The vertices the indices reach: another player's bar's outline is a strip through 8 that names 10 (0xF4B7E0),
+    // and the 2 past its data held whatever lay there, which made the outline's place 3160 wide.
+    const UINT used = indexed_vertices(type, prims, indices, index_format, verts);
+    DUMP_DRAW(dev, data, stride, used, box);
     bool rows = false;
-    const bool edited = refit(data, stride, verts, box, dev, &rows);
+    const bool edited = refit(data, stride, verts, box, dev, &rows, used);
     const HRESULT hr =
         o_draw_idx_up(dev, type, min_index, verts, prims, indices, index_format, edited ? g_copy.data() : data, stride);
     if (rows) o_set_vs_const(dev, 8, box, 2);
