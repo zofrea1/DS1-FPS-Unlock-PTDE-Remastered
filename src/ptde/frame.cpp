@@ -519,16 +519,13 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_sfx_distortion) {
             sfx_distortion_install();
         }
+        // Before the game makes its render targets: its anti-aliasing's sample count (it multisamples only when on).
+        atoc_set_msaa_samples(settings.antialiasing_samples);
         shadowmap_set_resolution(settings.shadow_map_resolution);
         int rw = settings.render_width, rh = settings.render_height;
         // YieldToDSFix: DSfix's renderWidth/renderHeight decide, and with them its anti-aliasing, SSAO and depth of
         // field; ours (Supersampling, the depth of field's and effects' resolution, HighPrecisionColor) stay off.
         if (dsfix_yields()) rw = rh = 0;
-        // Before the game makes its render targets: its anti-aliasing's sample count (it multisamples only when on).
-        // DSfix's resolution (ours off) breaks with the game's anti-aliasing on (the scene in a 1024x720 corner of
-        // the picture; DSfix asks for it off): none then.
-        const bool dsfix_resolution = dsfix_changes_resolution() && (rw == 0 || rh == 0);
-        atoc_set_msaa_samples(dsfix_resolution ? 0 : settings.antialiasing_samples);
         if (rw < 0 || rh < 0) {
             // auto: the primary monitor (the game's window or full screen covers it) in the game's own coordinates:
             // its real pixels when DPI aware (DpiAware, set in DllMain), else the scaled-down size Windows gives a
