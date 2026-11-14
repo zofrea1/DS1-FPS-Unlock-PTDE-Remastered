@@ -6,15 +6,17 @@
 //            0.212, the centre the rest; FRPG_Fil_Dof's ps_daad5659 with vs_88b6c82d);
 //   level 3: level 1 halved into 256x180, the same cross there, and the result spread back over 512x360 by four
 //            0.25 taps at +-0.5 texel (ps_bed29ac7 with vs_86c284d1).
-// Every tap counts only when its blur rate (alpha) is at least the centre's, so a sharp foreground does not bleed into
-// the blurred background. At 4K each 512x360 texel covers 7.5x6 screen pixels and a 256x180 one 15x12: the levels'
+// In levels 2 and 3 a tap counts only when its blur rate (alpha) is at least the centre's, so a sharp foreground does
+// not bleed into the blurred background; the averages before them (level 1, and level 3's halving) take everything. At 4K each 512x360 texel covers 7.5x6 screen pixels and a 256x180 one 15x12: the levels'
 // grid shows through in blocks, however smoothly they are read.
 //
 // Here the same three levels are made at half the render resolution (level 3 at a quarter) by separable Gaussians of
 // the same widths, measured in the original 1024x720 pixels (the game's picture was 1024 wide stretched to 1280, so
 // its blur was 1.25 times wider than tall on screen): standard deviations of 1.3, 1.93 and 4.07 original pixels for
-// the three levels (each including the stretch of its read in the composite), measured against the game's levels. The taps keep the game's rule
-// (a tap counts when its rate is at least the centre's). The composite (main_composite) is the game's math with these
+// the three levels (each including the stretch of its read in the composite), measured against the game's levels. Levels 2 and 3 keep the game's rule (a tap
+// counts when its rate is at least the centre's); level 1 is a plain blur like the game's average. With the rule on
+// level 1 too (before 2026-11-14) small bright gaps, the sky between far leaves, were never mixed with what is around
+// them: every level kept them at full brightness and the blurred canopy showed sharp sparkles where the game's is smooth. The composite (main_composite) is the game's math with these
 // levels in place of the small ones.
 //
 // Built with fxc (tools/build_shaders.bat) into dof_hr_*.h; the DLL carries the compiled bytecode and sets, per pass,
@@ -48,7 +50,8 @@ float4 main_down(float2 uv : TEXCOORD0) : COLOR0 {
 // Two neighbouring texels per read: one bilinear fetch between texels i and i + 1 at the ratio of their weights,
 // times the sum of the weights (half the reads); the rate rule is applied to the fetched (interpolated) rate.
 float4 gStep : register(c2);        // xy: one source texel along the axis (uv)
-float4 gKernel : register(c3);      // x: sigma (texels), y: radius (whole texels), z: 1 / (2 sigma^2)
+float4 gKernel : register(c3);      // x: sigma (texels), y: radius (whole texels), z: 1 / (2 sigma^2),
+                                    // w: 1 = every tap counts (level 1), 0 = the rate rule (levels 2 and 3)
 float4 main_blur(float2 uv : TEXCOORD0) : COLOR0 {
     float4 centre = tex2Dlod(gSrc, float4(uv, 0, 0));
     float4 sum = centre;
@@ -62,8 +65,8 @@ float4 main_blur(float2 uv : TEXCOORD0) : COLOR0 {
         float4 b = tex2Dlod(gSrc, float4(uv - gStep.xy * o, 0, 0));
         // The game's rule on 8-bit rates, whose equal steps made it stable: with float rates a tolerance of about one
         // such step, or neighbours on a smooth surface would count or not pixel by pixel (noise).
-        float wa = a.w >= centre.w - 0.006 ? w : 0.0;
-        float wb = b.w >= centre.w - 0.006 ? w : 0.0;
+        float wa = a.w >= centre.w - 0.006 ? w : w * gKernel.w;
+        float wb = b.w >= centre.w - 0.006 ? w : w * gKernel.w;
         sum += a * wa + b * wb;
         total += wa + wb;
     }

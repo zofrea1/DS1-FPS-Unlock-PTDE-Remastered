@@ -957,7 +957,8 @@ void dofhr_pass(IDirect3DDevice9* dev, int dst, IDirect3DBaseTexture9* src, UINT
     dev->SetRenderTarget(0, g_dofhr.surf[dst]);
     const float c[16] = {-1.0f / w, 1.0f / h, 0, 0, 1.0f / src_w, 1.0f / src_h, 0, 0,
                          step ? step[0] : 0, step ? step[1] : 0, 0, 0,
-                         kernel ? kernel[0] : 0, kernel ? kernel[1] : 0, kernel ? kernel[2] : 0, 0};
+                         kernel ? kernel[0] : 0, kernel ? kernel[1] : 0, kernel ? kernel[2] : 0,
+                         kernel ? kernel[3] : 0};
     dev->SetVertexShaderConstantF(0, c, 1);
     dev->SetPixelShaderConstantF(1, c + 4, 3);
     o_set_texture(dev, 0, src);
@@ -966,13 +967,16 @@ void dofhr_pass(IDirect3DDevice9* dev, int dst, IDirect3DBaseTexture9* src, UINT
     o_draw_up(dev, D3DPT_TRIANGLESTRIP, 2, kQuad, 16);
 }
 
-// A separable Gaussian of sigma (sx, sy) texels: src -> tmp along x, tmp -> dst along y.
-void dofhr_blur(IDirect3DDevice9* dev, int src, int tmp, int dst, float sx, float sy) {
+// A separable Gaussian of sigma (sx, sy) texels: src -> tmp along x, tmp -> dst along y. rate_rule: a tap counts
+// only when its blur rate is at least the centre's (the game's levels 2 and 3); without it every tap counts (the
+// game's plain average into level 1).
+void dofhr_blur(IDirect3DDevice9* dev, int src, int tmp, int dst, float sx, float sy, bool rate_rule) {
     const bool quarter = src >= kHrQ;
     const UINT w = quarter ? g_dofhr.qw : g_dofhr.hw, h = quarter ? g_dofhr.qh : g_dofhr.hh;
     // 2.5 sigma (over 99% of the weight); the shader reads two texels a fetch.
-    const float kx[3] = {sx, static_cast<float>(static_cast<int>(sx * 2.5f + 0.999f)), 1.0f / (2.0f * sx * sx)};
-    const float ky[3] = {sy, static_cast<float>(static_cast<int>(sy * 2.5f + 0.999f)), 1.0f / (2.0f * sy * sy)};
+    const float all = rate_rule ? 0.0f : 1.0f;
+    const float kx[4] = {sx, static_cast<float>(static_cast<int>(sx * 2.5f + 0.999f)), 1.0f / (2.0f * sx * sx), all};
+    const float ky[4] = {sy, static_cast<float>(static_cast<int>(sy * 2.5f + 0.999f)), 1.0f / (2.0f * sy * sy), all};
     const float stepx[2] = {1.0f / w, 0}, stepy[2] = {0, 1.0f / h};
     dofhr_pass(dev, tmp, g_dofhr.tex[src], w, h, g_dofhr.blur, stepx, kx);
     dofhr_pass(dev, dst, g_dofhr.tex[tmp], w, h, g_dofhr.blur, stepy, ky);
@@ -1028,11 +1032,12 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
     const float s2qx = kDofSigma[1] * scale * qx, s2qy = kDofSigma[1] * scale * qy;
     // A: the scene's 2x2 average (a half texel box, 1/12) and the composite's bilinear read (1/6) are part of level 1.
     dofhr_pass(dev, kHrA, scene, sd.Width, sd.Height, g_dofhr.down, nullptr, nullptr);
-    dofhr_blur(dev, kHrA, kHrB, kHrL1, inc_sigma(s1x, 0.25f), inc_sigma(s1y, 0.25f));
-    dofhr_blur(dev, kHrL1, kHrB, kHrL2, inc_sigma(s2x, s1x * s1x), inc_sigma(s2y, s1y * s1y));
+    dofhr_blur(dev, kHrA, kHrB, kHrL1, inc_sigma(s1x, 0.25f), inc_sigma(s1y, 0.25f), false);
+    dofhr_blur(dev, kHrL1, kHrB, kHrL2, inc_sigma(s2x, s1x * s1x), inc_sigma(s2y, s1y * s1y), true);
     // Level 3 at a quarter: level 2 averaged down (1/12), then read with a B-spline (1/3 instead of 1/6).
     dofhr_pass(dev, kHrQ, g_dofhr.tex[kHrL2], g_dofhr.hw, g_dofhr.hh, g_dofhr.down, nullptr, nullptr);
-    dofhr_blur(dev, kHrQ, kHrQ2, kHrL3, inc_sigma(s3x, s2qx * s2qx + 0.25f), inc_sigma(s3y, s2qy * s2qy + 0.25f));
+    dofhr_blur(dev, kHrQ, kHrQ2, kHrL3, inc_sigma(s3x, s2qx * s2qx + 0.25f), inc_sigma(s3y, s2qy * s2qy + 0.25f),
+               true);
 
     for (DWORD i = 0; i < 4; ++i) {
         if (i == 0 || rts[i]) dev->SetRenderTarget(i, rts[i]);
