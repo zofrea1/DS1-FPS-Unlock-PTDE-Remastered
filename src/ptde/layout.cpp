@@ -50,16 +50,18 @@
 // (+0x8F4 + i * 0x20: x, y; in use while +0xD) and eight enemies' gauges (+0xD34 + i * 0x24: handle, x, y; shown
 // while +0x20). A draw lying around one of these places (its middle within 110 units across and 90 above to 50 below)
 // is that mark's: never part of a HUD corner group (an enemy's bar near the top left corner was pulled into it), and
-// with UIScaleWorld drawn smaller about that place. The HUD's own top-left pieces (the bars' start and end caps in their
-// fixed rows, the humanity counter) stay HUD even when an enemy's bar passes them. The draw order does not tell them
-// apart: an enemy's bar is drawn in the middle of the HUD's own (after the bars' end caps, before the humanity counter).
+// with UIScaleWorld drawn smaller about that place. The HUD's own top-left pieces (the bars' start and end caps in
+// their fixed rows, the humanity counter) stay HUD even when an enemy's bar passes them. The draw order does not tell
+// them apart: an enemy's bar is drawn in the middle of the HUD's own (after the bars' end caps, before the humanity
+// counter).
 //
 // UIScale (percent, below 100): the HUD's corner groups are drawn smaller, each scaled toward its own corner of the
 // layout: the health and stamina bars with the status icons (top left), the equipment slots (bottom left) and the
-// soul counter (bottom right). A draw belongs to a group when it lies in that group's area; everything else (prompts,
-// boss bars, subtitles), everything while a menu or dialog is open and everything while no character is in the world
-// (the title screen and its menus, whose copyright line and load list reach into those areas) is left at its size. Known limits: an enemy's
-// floating health bar or a boss's name that happens to lie inside a group's area is drawn with that group.
+// soul counter (bottom right). A draw belongs to a group when it lies where that group's pieces are (fit_for);
+// everything else (prompts, boss bars, subtitles, the item pickup window) is left at its size, and so is everything
+// while a menu or a dialog with buttons is open or for half a second after it closes (its fade), and while no
+// character is in the world (the title screen and its menus, whose copyright line and load list reach into those
+// areas).
 namespace {
 
 using CreateVsFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const DWORD*, IDirect3DVertexShader9**);
@@ -318,19 +320,41 @@ bool player_in_world() {
     }
 }
 
-// A menu or dialog is open (MenuMan: its request, its open flags), or no game is loaded (the title screens).
+// A menu is open (MenuMan: its request, its open flags) or a dialog with buttons ([MenuMan+0x9E8]: +0 its text, +0xC
+// 7 or 8; 9 is a message without buttons, whose text stays behind after it, as co-op's world::menu_open reads it).
+bool menu_flags() {
+    __try {
+        const uintptr_t mm = *reinterpret_cast<const uintptr_t*>(kMenuManVar);
+        if (mm < 0x10000) return true;  // no menu manager yet: the title screens
+        // +0x3C: the menu shown (0 none, 8 the start menu's tabs, 2 the inventory, ...); +0x60: a request for one
+        if (*reinterpret_cast<const int32_t*>(mm + 0x3C) != 0) return true;
+        if (*reinterpret_cast<const int32_t*>(mm + 0x60) != 0) return true;
+        static const uint32_t kOpen[] = {0x40, 0x4C, 0x78, 0x84, 0x80, 0x50, 0xAC};
+        for (uint32_t off : kOpen) {
+            if (*reinterpret_cast<const uint8_t*>(mm + off) != 0) return true;
+        }
+        const uintptr_t dialog = *reinterpret_cast<const uintptr_t*>(mm + 0x9E8);
+        if (dialog > 0x10000 && *reinterpret_cast<const uint32_t*>(dialog) != 0) {
+            const uint32_t kind = *reinterpret_cast<const uint32_t*>(dialog + 0xC);
+            if (kind == 7 || kind == 8) return true;
+        }
+        return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+}
+
+// A menu or dialog is open, or closed less than half a second ago (its last frames fade out after the flags clear:
+// the start menu's tabs were pulled into the top left group as it closed), or no game is loaded (the title screens).
 bool menu_open() {
     if (!player_in_world()) return true;
-    const uintptr_t mm = *reinterpret_cast<const uintptr_t*>(kMenuManVar);
-    if (mm < 0x10000) return true;  // no menu manager yet: the title screens
-    // +0x3C: the menu shown (0 none, 8 the start menu's tabs, 2 the inventory, ...); +0x60: a request for one
-    if (*reinterpret_cast<const int32_t*>(mm + 0x3C) != 0) return true;
-    if (*reinterpret_cast<const int32_t*>(mm + 0x60) != 0) return true;
-    static const uint32_t kOpen[] = {0x40, 0x4C, 0x78, 0x84, 0x80, 0x50, 0xAC};
-    for (uint32_t off : kOpen) {
-        if (*reinterpret_cast<const uint8_t*>(mm + off) != 0) return true;
+    static ULONGLONG open_until = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (menu_flags()) {
+        open_until = now + 500;
+        return true;
     }
-    return false;
+    return now < open_until;
 }
 
 bool sane(float v, float lo, float hi) { return v == v && v > lo && v < hi; }
@@ -424,15 +448,19 @@ Fit fit_for(float x0, float y0, float x1, float y1, bool menu) {
         return f;
     }
     if (g_scale >= 0.999f || menu) return f;
-    // The groups' areas in the layout: the bars and status icons start at the left (x 80..330, y 35..210; a long
-    // health bar and its end cap reach far to the right in the bars' rows, y 50..135), the equipment slots with their
-    // names fill x 80..520, y 370..690, the soul counter x 1000..1200, y 620..690. A prompt's button and box (from x 340
-    // on, wider) and the boss bars are outside; marks over things in the world are taken out above.
-    if (x0 >= 70.0f && y0 >= 30.0f && y1 <= 210.0f && x1 <= 1000.0f && (x0 <= 330.0f || (y0 >= 50.0f && y1 <= 135.0f))) {
+    // The groups, from where the HUD's own pieces are (a dump in the world, 2026-11-14): the humanity counter, the
+    // bars and the status icons start at the left (x 70..330, y 30..210) and a long bar's end caps lie further right
+    // in the bars' two rows (hud_top_left_piece); the equipment slots, their counts and the item and spell names start
+    // at x 86..336 and lie within y 375..677; the soul counter's box is x 1028..1186, y 631..672. A wider band took the
+    // start menu's tab icons as it closed (y 60..110 at x 850); a looser bottom left area took the item pickup window's
+    // icon (x 395..453, y 497..550). Prompts, boss bars and the pickup window are outside; marks over things in the
+    // world are taken out above.
+    if (hud_top_left_piece(x0, y0, x1, y1) ||
+        (x0 >= 70.0f && x0 <= 330.0f && y0 >= 30.0f && y1 <= 210.0f && x1 <= 1000.0f)) {
         f = Fit{0.0f, 0.0f, g_scale, g_scale, true};
-    } else if (x0 >= 70.0f && x0 <= 400.0f && y0 >= 370.0f && x1 <= 520.0f) {
+    } else if (x0 >= 80.0f && x0 <= 345.0f && y0 >= 370.0f && y1 <= 685.0f && x1 <= 520.0f) {
         f = Fit{0.0f, kLayoutH, g_scale, g_scale, true};
-    } else if (x0 >= 960.0f && y0 >= 600.0f) {
+    } else if (x0 >= 1015.0f && y0 >= 620.0f && y1 <= 685.0f) {
         f = Fit{kLayoutW, kLayoutH, g_scale, g_scale, true};
     }
     if (f.any && !g_logged_scale) {
@@ -641,7 +669,8 @@ HRESULT WINAPI site_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
         ++logged;
         void* slot = (*reinterpret_cast<void***>(dev))[75];
         LOG_INFO("Menu clipping (the game's call): (%ld,%ld-%ld,%ld) %s %ld,%ld-%ld,%ld on a %dx%d frame; the device's "
-                 "SetScissorRect %p (ours %p, %p)", r->left, r->top, r->right, r->bottom, mapped ? "mapped to" : "kept as",
+                 "SetScissorRect %p (ours %p, %p)", r->left, r->top, r->right, r->bottom,
+                 mapped ? "mapped to" : "kept as",
                  mapped ? m.left : r->left, mapped ? m.top : r->top, mapped ? m.right : r->right,
                  mapped ? m.bottom : r->bottom, fw, fh, slot, reinterpret_cast<void*>(&hk_set_scissor),
                  o_set_scissor ? reinterpret_cast<void*>(o_set_scissor) : nullptr);
