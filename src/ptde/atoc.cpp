@@ -332,7 +332,7 @@ void atoc_hook_device(IDirect3DDevice9* dev, bool force) {
 void atoc_set_mode(int mode) { g_mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode); }
 
 bool atoc_set_msaa_samples(int samples) {
-    if (samples != 2 && samples != 4 && samples != 8) return false;
+    if (samples != 0 && samples != 2 && samples != 4 && samples != 8) return false;
     auto* entry = reinterpret_cast<uint32_t*>(kMsaaTable + 4);
     if (*entry != 2) {
         LOG_ERROR("AntialiasingSamples: the game's multisample table at %08X holds %u, not 2 in this build. Not "
@@ -345,7 +345,12 @@ bool atoc_set_msaa_samples(int samples) {
     *entry = static_cast<uint32_t>(samples);
     DWORD ignored = 0;
     VirtualProtect(entry, 4, old, &ignored);
-    LOG_INFO("AntialiasingSamples: the game's anti-aliasing (when on) multisamples the scene %dx (the game's own: 2x)",
-             samples);
+    if (samples == 0) {
+        LOG_INFO("AntialiasingSamples: DSfix makes the resolution, and it needs the game's anti-aliasing off: the "
+                 "game's Antialiasing option no longer multisamples the scene");
+    } else {
+        LOG_INFO("AntialiasingSamples: the game's anti-aliasing (when on) multisamples the scene %dx (the game's "
+                 "own: 2x)", samples);
+    }
     return true;
 }

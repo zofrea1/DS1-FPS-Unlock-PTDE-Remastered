@@ -13,4 +13,5 @@ void atoc_hook_device(IDirect3DDevice9* dev, bool force = false);
 void atoc_set_mode(int mode);
 // AntialiasingSamples: the samples of the game's anti-aliasing (2 = the game's, 4 or 8). Before the game makes its
 // render targets. False when the game's table does not match this build.
+// 0: none (the option draws as if off; DSfix's resolution needs that).
 bool atoc_set_msaa_samples(int samples);
