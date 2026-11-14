@@ -282,10 +282,25 @@ alignas(16) uint32_t g_vs[kVsRegs][4];
 uint8_t g_vs_known[kVsRegs];
 volatile LONG g_vsc_calls = 0, g_vsc_regs = 0, g_vsc_skipped = 0, g_vsc_sent = 0;
 
+// Render states, filtered the same way (FilterSamplerStates covers both): the game sets about 4,600 a frame in a busy
+// view and four in five repeat the value in place (every draw sets its blend, depth and cull states again). The
+// cache is the last value each state was set to through here by the thread the sampler cache follows; it starts
+// over with the sampler cache (a state block applied, another thread). The two states other code toggles for its
+// own purposes on some drivers (POINTSIZE, the ADAPTIVETESS group: alpha to coverage, depth resolve codes) always go
+// through, and are remembered all the same.
+constexpr int kSetRenderStateSlot = 57;  // IDirect3DDevice9::SetRenderState
+constexpr DWORD kRsCount = 210;
+using SetRenderStateFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DRENDERSTATETYPE, DWORD);
+SetRenderStateFn g_set_rs = nullptr;
+DWORD g_rs_value[kRsCount];
+uint8_t g_rs_known[kRsCount];
+volatile LONG g_rs_seen = 0, g_rs_filtered = 0;
+
 void forget_samplers() {
     for (auto& bits : g_known) {
         bits = 0;
     }
+    std::memset(g_rs_known, 0, sizeof(g_rs_known));
     std::memset(g_vs_known, 0, sizeof(g_vs_known));
 }
 
@@ -312,6 +327,24 @@ int sampler_index(DWORD sampler) {
 }
 
 HRESULT set_sampler_cached(IDirect3DDevice9* device, DWORD sampler, int index, D3DSAMPLERSTATETYPE type, DWORD value);
+
+HRESULT WINAPI hook_set_rs(IDirect3DDevice9* device, D3DRENDERSTATETYPE state, DWORD value) {
+    const DWORD s = static_cast<DWORD>(state);
+    if (g_recording || s >= kRsCount || GetCurrentThreadId() != g_owner) {
+        if (s < kRsCount) g_rs_known[s] = 0;
+        return g_set_rs(device, state, value);
+    }
+    g_rs_seen = g_rs_seen + 1;
+    const bool always = s == D3DRS_POINTSIZE || (s >= D3DRS_ADAPTIVETESS_X && s <= D3DRS_ADAPTIVETESS_W);
+    if (g_ss_enabled && !always && g_rs_known[s] && g_rs_value[s] == value) {
+        g_rs_filtered = g_rs_filtered + 1;
+        return D3D_OK;
+    }
+    const HRESULT hr = g_set_rs(device, state, value);
+    g_rs_value[s] = value;
+    g_rs_known[s] = SUCCEEDED(hr) ? 1 : 0;
+    return hr;
+}
 
 HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMPLERSTATETYPE type, DWORD value) {
     g_seen = g_seen + 1;
@@ -601,6 +634,8 @@ bool install_filter(IDirect3DDevice9* game_device) {
     }
     void* set = patch_slot(real, kSetSamplerSlot, reinterpret_cast<void*>(&hook_set_sampler));
     if (set && !g_set_sampler) g_set_sampler = reinterpret_cast<SetSamplerFn>(set);
+    void* rs = patch_slot(real, kSetRenderStateSlot, reinterpret_cast<void*>(&hook_set_rs));
+    if (rs && !g_set_rs) g_set_rs = reinterpret_cast<SetRenderStateFn>(rs);
     if (g_vsc_enabled) {
         void* vsc = patch_slot(real, kSetVsConstSlot, reinterpret_cast<void*>(&hook_vsc_a));
         if (vsc && !g_vsc_a) g_vsc_a = reinterpret_cast<SetVsConstFn>(vsc);
@@ -702,6 +737,17 @@ void d3dperf_reset() {
     }
     ReleaseSRWLockExclusive(&g_readback_lock);
     forget_samplers();
+}
+
+bool d3dperf_render_state(unsigned long state, unsigned long* value) {
+    if (!g_set_rs || state >= kRsCount || !g_rs_known[state] || GetCurrentThreadId() != g_owner) return false;
+    *value = g_rs_value[state];
+    return true;
+}
+
+void d3dperf_render_state_stats(unsigned long* seen, unsigned long* filtered) {
+    *seen = static_cast<unsigned long>(InterlockedExchange(&g_rs_seen, 0));
+    *filtered = static_cast<unsigned long>(InterlockedExchange(&g_rs_filtered, 0));
 }
 
 unsigned long d3dperf_filtered_samplers() {

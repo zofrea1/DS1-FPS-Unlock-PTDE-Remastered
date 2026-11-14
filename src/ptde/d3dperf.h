@@ -29,6 +29,11 @@ void d3dperf_reset();
 
 // For the profiler: sampler state calls answered by the filter, and readback copies that were not ready (the lock
 // waited after all), since the start.
+// A render state as the device holds it, when the filter knows (set through it by the render thread since the last
+// state block was applied): saves a GetRenderState. False: ask the device.
+bool d3dperf_render_state(unsigned long state, unsigned long* value);
+// Render states that reached the filter and those it dropped, since the last call.
+void d3dperf_render_state_stats(unsigned long* seen, unsigned long* filtered);
 unsigned long d3dperf_filtered_samplers();
 unsigned long d3dperf_seen_samplers();
 unsigned long d3dperf_readback_async();

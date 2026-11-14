@@ -19,6 +19,8 @@
 // way (subroutines, no spare register) gets plain coverage.
 #include "atoc.h"
 
+#include "d3dperf.h"
+
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -172,21 +174,27 @@ IDirect3DPixelShader9* variant_of(IDirect3DDevice9* dev, IDirect3DPixelShader9* 
     return made;
 }
 
+// A render state as the device holds it: from the render-state filter when it knows (three of these were read back
+// from Direct3D for every draw into the multisampled scene, some 7,000 calls a frame in a busy view), else asked.
+DWORD render_state(IDirect3DDevice9* dev, D3DRENDERSTATETYPE state) {
+    unsigned long v = 0;
+    if (d3dperf_render_state(static_cast<unsigned long>(state), &v)) return v;
+    DWORD d = 0;
+    dev->GetRenderState(state, &d);
+    return d;
+}
+
 // Before a draw: coverage on or off, and the sharpened shader in place (true: the game's goes back after the draw).
 bool before_draw(IDirect3DDevice9* dev) {
     if (g_method == Method::None) return false;
     const LONG mode = g_mode;
     bool want = false;
     if (g_multisampled && mode) {
-        DWORD test = FALSE, blend = FALSE;
-        dev->GetRenderState(D3DRS_ALPHATESTENABLE, &test);
-        dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
-        want = test && !blend;
+        want = render_state(dev, D3DRS_ALPHATESTENABLE) && !render_state(dev, D3DRS_ALPHABLENDENABLE);
     }
     if (g_method == Method::Nvidia) {
-        // Read back each time: a state block the game applies may have changed it.
-        DWORD now = 0;
-        dev->GetRenderState(D3DRS_ADAPTIVETESS_Y, &now);
+        // As the device holds it each time: a state block the game applies may have changed it.
+        const DWORD now = render_state(dev, D3DRS_ADAPTIVETESS_Y);
         if ((now == kNvOn) != want) dev->SetRenderState(D3DRS_ADAPTIVETESS_Y, want ? kNvOn : D3DFMT_UNKNOWN);
     } else if (want != g_amd_on) {
         dev->SetRenderState(D3DRS_POINTSIZE, want ? kAmdOn : kAmdOff);
@@ -197,12 +205,11 @@ bool before_draw(IDirect3DDevice9* dev) {
         LOG_INFO("AlphaToCoverage: alpha-tested surfaces now write coverage (first draw)");
     }
     if (!want || mode != 2 || !g_game_ps || !o_set_ps) return false;
-    DWORD func = D3DCMP_ALWAYS, ref = 0;
-    dev->GetRenderState(D3DRS_ALPHAFUNC, &func);
+    const DWORD func = render_state(dev, D3DRS_ALPHAFUNC);
     if (func != D3DCMP_GREATEREQUAL && func != D3DCMP_GREATER) return false;
     IDirect3DPixelShader9* sharp = variant_of(dev, g_game_ps);
     if (!sharp) return false;
-    dev->GetRenderState(D3DRS_ALPHAREF, &ref);
+    const DWORD ref = render_state(dev, D3DRS_ALPHAREF);
     const float c[4] = {static_cast<float>(ref & 0xFF) / 255.0f, 1.0f / 1024.0f, 0.5f, 0.0f};
     dev->SetPixelShaderConstantF(kSharpenConst, c, 1);
     o_set_ps(dev, sharp);
