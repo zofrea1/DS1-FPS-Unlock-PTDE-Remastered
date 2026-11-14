@@ -1,11 +1,13 @@
 #include "aspect.h"
 
+#include "fpsu_buildcfg.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 
@@ -53,6 +55,15 @@ struct Size {
 
 Size display_size(IDirect3D9* d3d, UINT adapter, HWND window) {
     Size s{0, 0};
+#if FPSU_DIAGNOSTICS
+    // Testing on a PC as another screen: FPSU_TEST_DISPLAY=WIDTHxHEIGHT (with SteamDeck=1 and 1280x720, the Deck's
+    // Gamescope report).
+    char test[32] = {};
+    if (GetEnvironmentVariableA("FPSU_TEST_DISPLAY", test, sizeof(test)) > 0) {
+        unsigned w = 0, h = 0;
+        if (std::sscanf(test, "%ux%u", &w, &h) == 2 && w >= 640 && h >= 480) return Size{w, h};
+    }
+#endif
     if (window) {
         const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
         MONITORINFO info{};

@@ -456,6 +456,19 @@ bool fx_ready(IDirect3DDevice9* dev) {
     return true;
 }
 
+// Our target bound: the viewport (with the game's depth range) and the clipping rectangle the whole of it. Set
+// explicitly rather than left to the render target change: with a device wrapper in between (DSfix's) a clipping
+// rectangle that is not the last viewport set through it is dropped, so the viewport goes first.
+void fx_whole_target(IDirect3DDevice9* dev, const D3DVIEWPORT9& game) {
+    D3DVIEWPORT9 vp = game;
+    vp.X = vp.Y = 0;
+    vp.Width = g_fx.w;
+    vp.Height = g_fx.h;
+    o_set_viewport(dev, &vp);
+    const RECT full{0, 0, static_cast<LONG>(g_fx.w), static_cast<LONG>(g_fx.h)};
+    o_set_scissor(dev, &full);
+}
+
 // 3: the game cleared its 512x360 effects target; its effects go into ours from here.
 void fx_begin(IDirect3DDevice9* dev) {
     IDirect3DBaseTexture9* low = container_of(g_fx.rt0);
@@ -463,8 +476,11 @@ void fx_begin(IDirect3DDevice9* dev) {
     const bool half = g_fx_mode == 3;
     if (half && !g_fx.hdepth_filled) return;  // no half-size depth this frame: the game's effects
     g_fx.small_fx = low;
+    D3DVIEWPORT9 vp{};
+    dev->GetViewport(&vp);
     o_set_rt(dev, 0, g_fx.surf);
     o_set_ds(dev, half ? g_fx.hdepth_surf : g_fx.scene_ds);
+    fx_whole_target(dev, vp);
     o_clear(dev, 0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
     g_fx.phase = true;
     g_fx.swapped = 0;
@@ -479,14 +495,50 @@ void fx_begin(IDirect3DDevice9* dev) {
     }
 }
 
+// The pass ends with our target, a depth of its size and the whole-target viewport in place, unless some of the
+// game's calls reached the device past these hooks (with a device wrapper such as DSfix's in between, a call made on
+// the device under it): its own 512x360 depth or viewport used with our target draws the effects into a corner of it
+// with their depth out of place (the mist cut off at the side, figures' outlines in it). Then the game's
+// low-resolution effects from here on, and what was found in the log.
+bool fx_pass_held(IDirect3DDevice9* dev) {
+    IDirect3DSurface9* rt = nullptr;
+    IDirect3DSurface9* ds = nullptr;
+    D3DVIEWPORT9 vp{};
+    D3DSURFACE_DESC rd{}, dd{};
+    if (FAILED(dev->GetRenderTarget(0, &rt))) rt = nullptr;
+    if (FAILED(dev->GetDepthStencilSurface(&ds))) ds = nullptr;
+    dev->GetViewport(&vp);
+    if (rt) rt->GetDesc(&rd);
+    if (ds) ds->GetDesc(&dd);
+    const bool depth_ok = !ds || (ds != g_fx.depth_small_ds && dd.Width >= g_fx.w && dd.Height >= g_fx.h);
+    const bool ok = rt == g_fx.surf && depth_ok && vp.X == 0 && vp.Y == 0 && vp.Width == g_fx.w && vp.Height == g_fx.h;
+    if (!ok) {
+        LOG_ERROR("Resolution: the effects pass (%ux%u) ended with the device holding a %ux%u target%s, a %ux%u "
+                  "depth%s and the viewport %lu,%lu %lux%lu: some of the game's calls reach the device past this mod's "
+                  "hooks (a device wrapper in between, such as DSfix's?). EffectsResolution is off from here on (the "
+                  "game's low-resolution effects)",
+                  g_fx.w, g_fx.h, rd.Width, rd.Height, rt == g_fx.surf ? " (ours)" : "", dd.Width, dd.Height,
+                  !ds ? " (none)" : (ds == g_fx.depth_small_ds ? " (the game's own)" : ""), vp.X, vp.Y, vp.Width,
+                  vp.Height);
+    }
+    if (rt) rt->Release();
+    if (ds) ds->Release();
+    return ok;
+}
+
 // The game moves on to another target: what it bound stays as it believes.
 void fx_end(IDirect3DDevice9* dev) {
+    const bool held = fx_pass_held(dev);
     for (DWORD s = 0; s < 16; ++s) {
         if (g_fx.swapped & (1u << s)) o_set_texture(dev, s, g_fx.depth_small);
     }
     g_fx.swapped = 0;
     g_fx.phase = false;
-    g_fx.pending = true;
+    g_fx.pending = held;
+    if (!held) {
+        g_fx.hdepth_filled = false;
+        g_fx_mode = 0;
+    }
 }
 
 // 4, half size: the game's own bilateral upsample with our target (s0), our depth (s1) and their size (c12).
@@ -1069,15 +1121,17 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
                 const HRESULT hr = o_draw_up(dev, type, count, data, stride);
                 IDirect3DSurface9* rt = g_fx.rt0;
                 IDirect3DSurface9* ds = g_fx.ds;
+                D3DVIEWPORT9 vp{};
+                dev->GetViewport(&vp);
                 RECT scissor{};
                 dev->GetScissorRect(&scissor);
                 o_set_rt(dev, 0, g_fx.surf);
                 o_set_ds(dev, g_fx.hdepth_surf);
-                const RECT full{0, 0, static_cast<LONG>(g_fx.w), static_cast<LONG>(g_fx.h)};
-                o_set_scissor(dev, &full);
+                fx_whole_target(dev, vp);
                 g_fx.hdepth_filled = SUCCEEDED(o_draw_up(dev, type, count, data, stride));
                 o_set_rt(dev, 0, rt);
                 o_set_ds(dev, ds);
+                o_set_viewport(dev, &vp);
                 o_set_scissor(dev, &scissor);
                 return hr;
             }
