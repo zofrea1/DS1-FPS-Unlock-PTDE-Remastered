@@ -395,6 +395,20 @@ void read_anchors() {
             g_dump_pending = 1;
         }
         boss_was = boss;
+        // The first time another player's gauge is up with UIScaleWorld on, the same (its pieces, 2026-11-14).
+        static bool player_dumped = false;
+        if (!player_dumped && g_world_scale < 0.999f) {
+            for (uintptr_t i = 0; i < 7; ++i) {
+                const uintptr_t e = mm + 0x8F4 + i * 0x20;
+                const float x = *reinterpret_cast<const float*>(e), y = *reinterpret_cast<const float*>(e + 4);
+                if (*reinterpret_cast<const uint8_t*>(e + 0xD) && x > 200.0f && x < 1080.0f && y > 100.0f &&
+                    y < 620.0f) {
+                    player_dumped = true;
+                    g_dump_pending = 2;
+                    break;
+                }
+            }
+        }
 #endif
         if (*reinterpret_cast<const uint8_t*>(mm + 0x9E4)) {
             add_anchor(*reinterpret_cast<const float*>(mm + 0x9D4), *reinterpret_cast<const float*>(mm + 0x9D8), 0);
@@ -429,14 +443,16 @@ bool hud_top_left_piece(float x0, float y0, float x1, float y1) {
 
 // The world mark a draw belongs to, or null.
 // Another player's bar is about 300 units wide (Steam Deck logs, 2026-11-14: its frame 815.8..1115.8 x 234.6..291.6
-// about the gauge at 966.3,262.2, the name above it in 243..261, the fills from 830.8 in 268.6..276.6): a fill starts
-// at the bar's left end and shortens with the health, so at low health its middle lies more than 110 units from the
-// gauge's place and it stayed full size while the frame was drawn smaller. A draw lying wholly within 170 units
-// across and 45 up or down of such a gauge is that bar's too. Not the HUD's own pieces (the stamina bar's end cap
-// was taken for one), and nothing larger than a mark (wider than 340 or taller than 100: a strip and a box drawn
-// right after a load near the players' first places).
-constexpr float kPlayerBarHalf = 170.0f;
-constexpr float kPlayerBarRise = 45.0f;
+// about the gauge at 966.3,262.2, the name above it in 243..261, the fills from 830.8 in 268.6..276.6; the gauge's
+// place moves a few units against the bar from frame to frame): a fill starts at the bar's left end and shortens with
+// the health, so at low health its middle lies more than 110 units from the gauge's place. A player's bar is
+// therefore every draw lying wholly in that box about its gauge (160 across, 36 above, 38 below), and nothing else:
+// the middle rule of the other marks took the game's multiplayer notices near a player (an icon box at 292..372 x
+// 119..223 and its line of text from 390 x 127..155) and drew them shrunk about the player. Not the HUD's own pieces
+// (the stamina bar's end cap was taken for one), and nothing larger than a mark (wider than 340 or taller than 100).
+constexpr float kPlayerBarHalf = 160.0f;
+constexpr float kPlayerBarAbove = 36.0f;
+constexpr float kPlayerBarBelow = 38.0f;
 int g_logged_wide = 0;
 int g_logged_near_miss = 0;
 
@@ -450,9 +466,9 @@ const Anchor* world_mark(float x0, float y0, float x1, float y1) {
     for (int i = 0; i < g_anchor_count; ++i) {
         const Anchor& a = g_anchors[i];
         const float dx = cx - a.x, dy = cy - a.y;
-        const bool near_middle = std::fabs(dx) <= 110.0f && dy >= -90.0f && dy <= 50.0f;
+        const bool near_middle = a.kind != 1 && std::fabs(dx) <= 110.0f && dy >= -90.0f && dy <= 50.0f;
         const bool on_player_bar = a.kind == 1 && x0 >= a.x - kPlayerBarHalf && x1 <= a.x + kPlayerBarHalf &&
-                                   y0 >= a.y - kPlayerBarRise && y1 <= a.y + kPlayerBarRise;
+                                   y0 >= a.y - kPlayerBarAbove && y1 <= a.y + kPlayerBarBelow;
         if (!near_middle && !on_player_bar) {
             // A draw near another player's gauge that is not taken: which (for the next look at a bar's pieces).
             if (a.kind == 1 && g_logged_near_miss < 12 && std::fabs(dx) <= 260.0f && dy >= -130.0f && dy <= 90.0f) {
@@ -466,13 +482,13 @@ const Anchor* world_mark(float x0, float y0, float x1, float y1) {
         if (d < best_d) {
             best_d = d;
             best = &a;
-            best_wide = !near_middle;
+            best_wide = on_player_bar;
         }
     }
     if (best && best_wide && g_logged_wide < 12) {
         ++g_logged_wide;
-        LOG_INFO("UIScale: a draw %.1f,%.1f-%.1f,%.1f at the end of another player's bar (gauge at %.1f,%.1f) is "
-                 "part of it", x0, y0, x1, y1, best->x, best->y);
+        LOG_INFO("UIScale: a draw %.1f,%.1f-%.1f,%.1f is part of another player's bar (gauge at %.1f,%.1f)", x0, y0,
+                 x1, y1, best->x, best->y);
     }
     return best;
 }
@@ -631,8 +647,14 @@ bool dump_read(const uintptr_t* p, uintptr_t* v) {
 
 void dump_draw(IDirect3DDevice9* dev, const void* data, UINT stride, UINT count, const float* box_rows,
                const void* from) {
-    if (g_dump_pending.exchange(0)) {
-        LOG_INFO("UIScale: a boss's health bar came up; the next 300 draws of the layout follow (uidump)");
+    if (const int why = g_dump_pending.exchange(0)) {
+        LOG_INFO("UIScale: %s came up; the next 300 draws of the layout follow (uidump)",
+                 why == 2 ? "another player's health bar" : "a boss's health bar");
+        read_anchors();
+        for (int i = 0; i < g_anchor_count; ++i) {
+            LOG_INFO("uidump: world mark %d (kind %u) at %.1f,%.1f", i, g_anchors[i].kind, g_anchors[i].x,
+                     g_anchors[i].y);
+        }
         g_dump = 300;
     }
     if (g_dump.load() <= 0) return;
