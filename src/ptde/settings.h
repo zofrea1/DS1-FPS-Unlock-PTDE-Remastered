@@ -81,9 +81,9 @@ struct Settings {
     int effects_resolution = 0;
     // The scene's colour targets in 16-bit float, dithered into the 8-bit picture (resolution.h), with RenderResolution.
     bool high_precision_color = false;
+    int ui_scale_world = 100;      // UIScaleWorld: marks over things in the world (layout.h)
+    bool even_frame_steps = true;  // EvenFrameSteps: the cap's schedule as the frames' clock (frame.cpp)
     // With the game's own anti-aliasing (multisampling) on: alpha-tested surfaces write coverage (atoc.h).
-    int ui_scale_world = 100;
-    bool even_frame_steps = true;  // EvenFrameSteps: the cap's schedule as the frames' clock (frame.cpp)  // UIScaleWorld: marks over things in the world (layout.h)
     bool alpha_to_coverage = true;
     bool alpha_to_coverage_force = false;  // AlphaToCoverage = force: NVIDIA's switch even when the driver does not say it has it
     // The samples of the game's own anti-aliasing when it is on: 2 (the game's), 4 or 8 (atoc.h).
@@ -151,7 +151,7 @@ struct Settings {
     // vblank counter reaches its 30 FPS schedule.
     bool skip_present_repeat = false;
     // Run Direct3D 9 on Vulkan through DXVK (dxvk_d3d9.dll beside this DLL). Off by default.
-    bool dxvk = false;
+    bool dxvk = true;
     // DXVK may take exclusive fullscreen (dxvk.allowFse), which G-SYNC / variable refresh needs under DXVK (dxvk.h):
     // 0 auto (only while Windows HDR is off for the display), 1 always, 2 never.
     int dxvk_exclusive_fullscreen = 0;
