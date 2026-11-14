@@ -76,12 +76,12 @@ struct Settings {
     float dof_strength = 1.0f;
     // The depth of field's blur levels with the game's widths at half the render size (1), at the render size (2, level 3
     // at half) or the game's 512x360 (0).
-    int dof_resolution = 0;
+    int dof_resolution = 1;
     // The game's low-resolution effects (glows, mist, fog, smoke) at half the scene's size (3), its full size (2) or
     // the game's 512x360 (0) (resolution.h), with RenderResolution.
-    int effects_resolution = 0;
+    int effects_resolution = 3;
     // The scene's colour targets in 16-bit float, dithered into the 8-bit picture (resolution.h), with RenderResolution.
-    bool high_precision_color = false;
+    bool high_precision_color = true;
     int ui_scale_world = 100;      // UIScaleWorld: marks over things in the world (layout.h)
     bool even_frame_steps = true;  // EvenFrameSteps: the cap's schedule as the frames' clock (frame.cpp)
     // With the game's own anti-aliasing (multisampling) on: alpha-tested surfaces write coverage (atoc.h).
@@ -99,7 +99,7 @@ struct Settings {
     // The HUD's corner groups at this size, percent (50..100).
     int ui_scale = 100;
     // The shadow map's side: 2048 (the game's), 4096 or 8192 (shadowbias.h).
-    int shadow_map_resolution = 2048;
+    int shadow_map_resolution = 4096;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.
@@ -163,9 +163,6 @@ struct Settings {
     // and variable refresh works without exclusive fullscreen. DxvkExclusiveFullscreen then has nothing to do.
     bool dxvk_dxgi_present = true;
     bool dxvk_paced_present = true;  // DxvkPacedPresent: flips timed to the game's steps (dxgipresent.h)
-    // ProtonSampleShading: under Proton / Wine, Proton's own DXVK shades every anti-aliasing sample
-    // (d3d9.forceSampleRateShading through DXVK_CONFIG, dxvk.h).
-    bool proton_sample_shading = true;
     int dxvk_hdr_swap_chain = 0;  // 0 off, 1 scRGB (true), 2 hdr10  // DxvkHdrSwapChain: scRGB swap chain on an HDR display (dxgipresent.h)
     bool scan_watch = false;  // [Diagnostics] ScanWatch: the display's refreshes and session hotkeys (scanwatch.h)
     // The game's brightness gamma ramp (gamma.h): 0 auto and 1 passed on (as the system Direct3D 9 does), 2 never.

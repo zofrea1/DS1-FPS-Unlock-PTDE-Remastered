@@ -362,11 +362,6 @@ IDirect3D9* WINAPI hook_direct3d_create9(UINT sdk_version) {
     if (settings().fps_unlock && settings().dxvk) {
         route_to_dxvk();
     }
-    static bool proton_options = false;
-    if (settings().fps_unlock && !proton_options) {
-        proton_options = true;
-        dxvk_proton_options(settings().proton_sample_shading);
-    }
     IDirect3D9* d3d = g_create(sdk_version);
     const PtdeExtension* ext = ptde_extension();
     if (d3d && (settings().fps_unlock || (ext && ext->wants_device && ext->wants_device()))) {
