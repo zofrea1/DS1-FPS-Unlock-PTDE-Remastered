@@ -12,6 +12,8 @@ bool aspect_is_enabled();
 
 // True once a taller-than-16:9 display has been seen and the fix is applying.
 bool aspect_is_active();
+// The picture's aspect while active (the display's), else 16:9.
+float aspect_value();
 
 // Size the swap chain to the display when the game asked for 16:9 on a taller screen,
 // and point the game's camera constants at that aspect (horizontal view unchanged).

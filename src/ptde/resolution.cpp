@@ -7,6 +7,7 @@
 #include <d3d9.h>
 
 #include "aspect.h"
+#include "layout.h"
 #include "shaders/area_reduce_ps.h"
 #include "shaders/dof_composite_ps.h"
 #include "shaders/dof_near_rate_ps.h"
@@ -1171,45 +1172,18 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
 // heading box (848,109-1144,134, the selected tab's name, and 848,137-1144,162) clipped a third of the screen away
 // from its text, which was never drawn. A rectangle set while the frame buffer (the scaled 1280x720 target) is the
 // render target and that lies within 1280x720 is mapped onto the viewport as the menu's vertices are. The game's own
-// full-target rectangles (0,0 to the target size) are larger and stay as they are.
+// full-target rectangles (0,0 to the target size) are larger and stay as they are. With FixAspectUI the layout
+// sits in the middle of a frame of another shape, and the rectangle goes with it.
 
 HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
     if (g_fx.phase && r) {
         const RECT full{0, 0, static_cast<LONG>(g_fx.w), static_cast<LONG>(g_fx.h)};
         return o_set_scissor(dev, &full);
     }
-    if (!r || r->left < 0 || r->top < 0 || r->right > 1280 || r->bottom > 720 ||
-        (g_frame_w == 1280 && g_frame_h == 720)) {
-        return o_set_scissor(dev, r);
-    }
-    IDirect3DSurface9* rt = nullptr;
-    D3DSURFACE_DESC d{};
-    const bool frame = SUCCEEDED(dev->GetRenderTarget(0, &rt)) && rt && SUCCEEDED(rt->GetDesc(&d)) &&
-                       static_cast<int>(d.Width) == g_frame_w && static_cast<int>(d.Height) == g_frame_h;
-    if (rt) rt->Release();
-    // The menu's viewport spans the frame buffer (its full width or height). A small pass's own viewport (the eye
-    // adaptation's 64x64 and 16x16, which can be set while the frame buffer is still bound) and a rectangle that is
-    // just that viewport are left alone.
-    D3DVIEWPORT9 vp{};
-    if (!frame || FAILED(dev->GetViewport(&vp)) || vp.Width == 0 || vp.Height == 0 ||
-        (static_cast<int>(vp.Width) != g_frame_w && static_cast<int>(vp.Height) != g_frame_h) ||
-        (r->left == static_cast<LONG>(vp.X) && r->top == static_cast<LONG>(vp.Y) &&
-         r->right == static_cast<LONG>(vp.X + vp.Width) && r->bottom == static_cast<LONG>(vp.Y + vp.Height))) {
-        return o_set_scissor(dev, r);
-    }
-    const double sx = vp.Width / 1280.0, sy = vp.Height / 720.0;
+    // The menus' rectangles (1280x720 units) go onto the frame buffer as the layout is drawn (layout.cpp).
     RECT m;
-    m.left = vp.X + static_cast<LONG>(r->left * sx);
-    m.top = vp.Y + static_cast<LONG>(r->top * sy);
-    m.right = vp.X + static_cast<LONG>(r->right * sx + 0.999);
-    m.bottom = vp.Y + static_cast<LONG>(r->bottom * sy + 0.999);
-    static int logged = 0;  // the first few, for the log
-    if (logged < 6) {
-        ++logged;
-        LOG_INFO("Resolution: a menu clipping rectangle (%ld,%ld-%ld,%ld in 1280x720) is mapped to %ld,%ld-%ld,%ld",
-                 r->left, r->top, r->right, r->bottom, m.left, m.top, m.right, m.bottom);
-    }
-    return o_set_scissor(dev, &m);
+    if (r && layout_map_scissor(dev, r, g_frame_w, g_frame_h, &m)) return o_set_scissor(dev, &m);
+    return o_set_scissor(dev, r);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1381,6 +1355,8 @@ void* patch_slot(void* object, int slot, void* replacement) {
 bool g_active = false;
 
 }  // namespace
+
+bool resolution_is_active() { return g_active; }
 
 void resolution_hook_device(IDirect3DDevice9* dev) {
     if (!g_active || !dev) return;

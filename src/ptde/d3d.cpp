@@ -3,6 +3,7 @@
 #include "aspect.h"
 #include "atoc.h"
 #include "shadowbias.h"
+#include "layout.h"
 #include "d3dperf.h"
 #include "surfpool.h"
 #include "dxvk.h"
@@ -255,6 +256,10 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         resolution_hook_device(*out);
         if (settings().alpha_to_coverage) {
             atoc_hook_device(*out);
+        }
+        layout_configure(settings().fix_aspect_ui, settings().ui_scale);
+        if ((settings().fix_aspect_ui && aspect_is_active()) || settings().ui_scale < 100) {
+            layout_hook_device(*out, !resolution_is_active());
         }
         shadowbias_set(settings().shadow_bias);
         if (settings().shadow_bias > 0.0f) {

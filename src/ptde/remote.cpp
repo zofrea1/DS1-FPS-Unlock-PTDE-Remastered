@@ -9,6 +9,7 @@
 #include "profile.h"
 #include "atoc.h"
 #include "shadowbias.h"
+#include "layout.h"
 #include "resolution.h"
 #include "rendermath.h"
 #include "watch.h"
@@ -1777,6 +1778,11 @@ void run(const std::string& line) {
         // ours at half resolution.
         resolution_set_effects(static_cast<int>(num(1, 3)));
         out("effects %ld", num(1, 3));
+    } else if (c == "uiscale" && t.size() > 1) {
+        // uiscale N: the HUD's corner groups at N percent for this session (needs UIScale below 100 or FixAspectUI
+        // active at start for the hooks).
+        layout_set_scale(static_cast<int>(num(1, 100)));
+        out("uiscale %ld", num(1, 100));
     } else if (c == "shadowbias" && t.size() > 1) {
         // shadowbias B: the ShadowBias amount for this session (0 = the game's comparison; needs ShadowBias > 0 in the
         // INI at start for the hooks).

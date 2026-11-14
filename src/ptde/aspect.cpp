@@ -28,8 +28,14 @@ constexpr float kVanillaAspect = 16.f / 9.f;
 constexpr float kVanillaFovY = 0.75049156f;
 constexpr float kPi = 3.14159265f;
 
-// Below this, the display is taller than 16:9 (16:10 is 1.6, 16:9 is 1.778).
+// Below this, the display is taller than 16:9 (16:10 is 1.6, 16:9 is 1.778); above kWide it is wider (21:9 is 2.33 or
+// 2.39, 32:9 is 3.56).
 constexpr float kWiderThan = 1.70f;
+constexpr float kWide = 1.80f;
+
+bool other_than_16_9(float aspect) {
+    return aspect < kWiderThan || aspect > kWide;
+}
 
 bool g_enabled = false;
 bool g_active = false;
@@ -141,7 +147,9 @@ void __cdecl adjust_perspective(float* fov, float* aspect) {
     if (!(f > 0.05f && f < 3.0f)) {
         return;
     }
-    *fov = 2.f * std::atan(std::tan(f * 0.5f) * kVanillaAspect / g_aspect);
+    // Taller than 16:9: the vertical view opens so the horizontal one stays (Vert+). Wider: the vertical view stays
+    // and the wider aspect adds to the sides (Hor+).
+    if (g_aspect < kVanillaAspect) *fov = 2.f * std::atan(std::tan(f * 0.5f) * kVanillaAspect / g_aspect);
     *aspect = g_aspect;
 }
 
@@ -271,10 +279,20 @@ void start_cover_thread() {
     }
 }
 
-// A 16:9 rectangle centered in a taller surface: the game's letterbox.
+// A 16:9 rectangle centered in a taller surface (the game's letterbox) or in a wider one (its pillarbox).
 bool is_letterbox(LONG x, LONG y, LONG w, LONG h, LONG bw, LONG bh) {
     if (bw < 16 || bh < 16 || w < 16 || h < 16) {
         return false;
+    }
+    if (static_cast<float>(bw) / static_cast<float>(bh) > kWide) {
+        if (h * 10 < bh * 9 || y > bh / 25 || w + 8 >= bw) {
+            return false;
+        }
+        if (!near_f(static_cast<float>(w) / static_cast<float>(h), kVanillaAspect, 0.04f)) {
+            return false;
+        }
+        const LONG dx = x - (bw - w) / 2;
+        return dx < 8 && dx > -8;
     }
     if (w * 10 < bw * 9 || x > bw / 25) {
         return false;
@@ -439,6 +457,14 @@ bool correct_matrix(float* m) {
     if (!row_major && !column_major) {
         return false;
     }
+    if (g_aspect > kVanillaAspect) {
+        const float x = m[5] / g_aspect;  // wider: the vertical scale stays, the horizontal one shrinks
+        if (near_f(m[0], x, 0.0001f)) {
+            return false;
+        }
+        m[0] = x;
+        return true;
+    }
     const float y = m[0] * g_aspect;
     if (near_f(m[5], y, 0.0001f)) {
         return false;
@@ -530,6 +556,10 @@ bool aspect_is_active() {
     return g_active;
 }
 
+float aspect_value() {
+    return g_active ? g_aspect : kVanillaAspect;
+}
+
 void aspect_adjust_present(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS* pp, const char* where) {
     if (!g_enabled || !d3d || !pp || pp->BackBufferWidth == 0 || pp->BackBufferHeight == 0) {
         if (!g_enabled) {
@@ -560,16 +590,16 @@ void aspect_adjust_present(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS*
     // that display. A smaller 16:10 window is left at its own size and only the bars inside it go.
     UINT target_w = pp->BackBufferWidth;
     UINT target_h = pp->BackBufferHeight;
-    if (display_aspect < kWiderThan && (request_is_16_9 || request_matches)) {
+    if (other_than_16_9(display_aspect) && (request_is_16_9 || request_matches)) {
         target_w = display.w;
         target_h = display.h;
     }
     const float aspect = static_cast<float>(target_w) / static_cast<float>(target_h);
-    if (!(aspect < kWiderThan)) {
+    if (!other_than_16_9(aspect)) {
         static bool logged = false;
         if (!logged) {
             logged = true;
-            LOG_INFO("Aspect: %ux%u is 16:9 or wider; left unchanged", target_w, target_h);
+            LOG_INFO("Aspect: %ux%u is 16:9; left unchanged", target_w, target_h);
         }
         g_active = false;
         g_cover = false;
@@ -588,9 +618,14 @@ void aspect_adjust_present(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS*
     if (log_w != target_w || log_h != target_h || log_rw != pp->BackBufferWidth || log_rh != pp->BackBufferHeight) {
         LOG_INFO("Aspect: %s game asked for %ux%u; presenting %ux%u (%.3f)", where, pp->BackBufferWidth,
                  pp->BackBufferHeight, target_w, target_h, aspect);
-        if (g_proj_hooked) {
+        if (g_proj_hooked && aspect < kVanillaAspect) {
             LOG_INFO("Aspect: screen cameras use aspect %.3f; horizontal view unchanged, vertical view %.1f -> %.1f deg "
                      "(at the default 43 deg)", aspect, kVanillaFovY * (180.f / kPi), vert_plus_fovy(aspect) * (180.f / kPi));
+        } else if (g_proj_hooked) {
+            const float hx = 2.f * std::atan(std::tan(kVanillaFovY * 0.5f) * kVanillaAspect) * (180.f / kPi);
+            const float hw = 2.f * std::atan(std::tan(kVanillaFovY * 0.5f) * aspect) * (180.f / kPi);
+            LOG_INFO("Aspect: screen cameras use aspect %.3f; vertical view unchanged, horizontal view %.1f -> %.1f deg "
+                     "(at the default 43 deg)", aspect, hx, hw);
         }
         log_w = target_w;
         log_h = target_h;

@@ -203,6 +203,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_sun_with_dsfix = parse_bool(val);
         } else if (key == "hidemousecursor") {
             s.hide_mouse_cursor = parse_bool(val);
+        } else if (key == "fixaspectui") {
+            s.fix_aspect_ui = parse_bool(val);
+        } else if (key == "uiscale") {
+            s.ui_scale = std::atoi(val.c_str());
         } else if (key == "shadowbias") {
             s.shadow_bias = static_cast<float>(std::atof(val.c_str()));
         } else if (key == "anisotropicfiltering") {

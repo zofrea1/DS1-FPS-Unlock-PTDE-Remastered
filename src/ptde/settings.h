@@ -90,6 +90,10 @@ struct Settings {
     int anisotropic_filtering = 16;
     // Taken off the light's clip depth in the characters' and objects' shadow comparison (shadowbias.h). 0 = off.
     float shadow_bias = 0.006f;
+    // With FixAspect active: the HUD and menus keep their 16:9 shape instead of stretching with the screen (layout.h).
+    bool fix_aspect_ui = true;
+    // The HUD's corner groups at this size, percent (50..100).
+    int ui_scale = 100;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.
