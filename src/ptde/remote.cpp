@@ -373,6 +373,10 @@ volatile bool g_capturing = false;
 volatile bool g_frame_requested = false;
 std::string g_frame_name, g_shot_name, g_dump_name;
 volatile bool g_shot_requested = false, g_dump_requested = false;
+// shotfb NAME: the frame as the game hands it to the back buffer (the source of its last StretchRect), at the frame
+// buffer's own size: the picture before the scale to the window.
+volatile bool g_shotfb_requested = false;
+std::string g_shotfb_name;
 volatile LONG g_query_frames = 0;  // log occlusion query results for this many more frames
 std::mutex g_frame_lock;
 std::string g_frame;
@@ -652,7 +656,7 @@ void track(void* p, char kind, UINT w, UINT h, D3DFORMAT f, DWORD usage, const c
         hook_release(p);
     }
     char fb[16];
-    const std::string st = game_stack(_AddressOfReturnAddress(), 6);
+    const std::string st = game_stack(_AddressOfReturnAddress(), (w >= 2048 && w == h) ? 28 : 6);
     out("create %c%d %s %ux%u %s usage 0x%lX caller %p game%s", kind, id, what, w, h, fmt_name(f, fb),
         static_cast<unsigned long>(usage), caller, st.c_str());
 }
@@ -696,6 +700,20 @@ HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* s, const REC
         if (dr) std::snprintf(b, sizeof(b), "%ld,%ld-%ld,%ld", dr->left, dr->top, dr->right, dr->bottom);
         cap("StretchRect %s [%s] -> %s [%s] filter %d", surface_text(s).c_str(), a, surface_text(d).c_str(), b,
             static_cast<int>(f));
+    }
+    if (g_shotfb_requested && s && d) {
+        IDirect3DSurface9* bb = nullptr;
+        if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb) {
+            if (bb == d) {
+                g_shotfb_requested = false;
+                D3DSURFACE_DESC sd{};
+                s->GetDesc(&sd);
+                save_surface_png(dev, s, shot_path(g_shotfb_name, L".bmp"));
+                out("shotfb %s: saved %ux%u format %d", g_shotfb_name.c_str(), sd.Width, sd.Height,
+                    static_cast<int>(sd.Format));
+            }
+            bb->Release();
+        }
     }
     return o_stretch(dev, s, sr, d, dr, f);
 }
@@ -807,6 +825,29 @@ HRESULT WINAPI hk_draw_idx(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, INT base, 
     return o_draw_idx(dev, t, base, mn, nv, si, pc);
 }
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, UINT pc, const void* v, UINT stride) {
+    if (g_shotfb_requested) {
+        // The game's own last step in a window: a quad of the frame buffer (texture 0) drawn into the back buffer.
+        IDirect3DSurface9* bb = nullptr;
+        IDirect3DSurface9* rt = nullptr;
+        IDirect3DBaseTexture9* tex = nullptr;
+        if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb &&
+            SUCCEEDED(dev->GetRenderTarget(0, &rt)) && rt == bb && SUCCEEDED(dev->GetTexture(0, &tex)) && tex &&
+            tex->GetType() == D3DRTYPE_TEXTURE) {
+            IDirect3DSurface9* level = nullptr;
+            if (SUCCEEDED(static_cast<IDirect3DTexture9*>(tex)->GetSurfaceLevel(0, &level)) && level) {
+                g_shotfb_requested = false;
+                D3DSURFACE_DESC sd{};
+                level->GetDesc(&sd);
+                save_surface_png(dev, level, shot_path(g_shotfb_name, L".bmp"));
+                out("shotfb %s: saved %ux%u format %d", g_shotfb_name.c_str(), sd.Width, sd.Height,
+                    static_cast<int>(sd.Format));
+                level->Release();
+            }
+        }
+        if (tex) tex->Release();
+        if (rt) rt->Release();
+        if (bb) bb->Release();
+    }
     if (g_capturing) {
         // Full-screen passes are usually a quad or triangle drawn from memory: show its first vertex.
         const float* f = static_cast<const float*>(v);
@@ -1788,6 +1829,9 @@ void run(const std::string& line) {
     } else if (c == "frame" && t.size() > 1) {
         g_frame_name = t[1];
         g_frame_requested = true;
+    } else if (c == "shotfb" && t.size() > 1) {
+        g_shotfb_name = t[1];
+        g_shotfb_requested = true;
     } else if (c == "capture") {
         profile_request_capture();
         out("capture requested (the [prof] lines go to the main log in about 12 s)");
