@@ -20,6 +20,7 @@
 
 #include "gamma.h"
 #include "log.h"
+#include "shaders/dxgi_hdr10_ps.h"
 #include "shaders/dxgi_scrgb_ps.h"
 #include "shaders/dxgi_scrgb_vs.h"
 
@@ -91,7 +92,8 @@ struct Window {
     UINT width = 0, height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the frames' (Vulkan's) format
     UINT flags = 0;
-    bool scrgb = false;        // the DXGI swap chain is FP16 scRGB (DxvkHdrSwapChain on a display in HDR)
+    bool scrgb = false;        // the DXGI swap chain is converted (DxvkHdrSwapChain on a display in HDR)
+    bool pq = false;           // ... as HDR10 (10 bits, PQ, BT.2020) instead of FP16 scRGB
     bool display_hdr = false;  // Windows runs the window's display in HDR (looked at every 128 frames)
     float white = 1.0f;        // its SDR brightness setting / 80 nits
     LONGLONG looked = 0;       // when the display's colour mode was last read (only with DxvkHdrSwapChain)
@@ -120,6 +122,7 @@ struct Dev {
     // DxvkHdrSwapChain: the SDR picture into scRGB (shaders/dxgi_scrgb.hlsl)
     ID3D11VertexShader* scrgb_vs = nullptr;
     ID3D11PixelShader* scrgb_ps = nullptr;
+    ID3D11PixelShader* hdr10_ps = nullptr;
     ID3D11Buffer* scrgb_cb = nullptr;
     float scrgb_cb_white = -1.0f;
     bool scrgb_failed = false;
@@ -874,6 +877,7 @@ void destroy_dev_interop(Dev* d) {
         }
         release(d->scrgb_vs);
         release(d->scrgb_ps);
+        release(d->hdr10_ps);
         release(d->scrgb_cb);
         release(d->back_fence);
         if (d->back_event) CloseHandle(d->back_event);
@@ -1581,9 +1585,11 @@ bool make_scrgb_shaders(Dev* d) {
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     if (FAILED(d->d3d->CreateVertexShader(kDxgiScrgbVs, sizeof(kDxgiScrgbVs), nullptr, &d->scrgb_vs)) ||
         FAILED(d->d3d->CreatePixelShader(kDxgiScrgbPs, sizeof(kDxgiScrgbPs), nullptr, &d->scrgb_ps)) ||
+        FAILED(d->d3d->CreatePixelShader(kDxgiHdr10Ps, sizeof(kDxgiHdr10Ps), nullptr, &d->hdr10_ps)) ||
         FAILED(d->d3d->CreateBuffer(&bd, nullptr, &d->scrgb_cb))) {
         release(d->scrgb_vs);
         release(d->scrgb_ps);
+        release(d->hdr10_ps);
         release(d->scrgb_cb);
         d->scrgb_failed = true;
         LOG_ERROR("DxvkHdrSwapChain: the scRGB pass could not be made; the swap chain stays 8-bit");
@@ -1618,11 +1624,13 @@ void look_at_display(Window* w) {
 
 // Under g_d3d, before a frame goes into the window's swap chain: its format for the display now.
 void fit_format(Dev* d, Window* w) {
-    const bool want = g_hdr_chain.load() == 1 && w->display_hdr && make_scrgb_shaders(d);
-    if (want == w->scrgb) return;
+    const int mode = g_hdr_chain.load();
+    const bool want = mode != 0 && w->display_hdr && make_scrgb_shaders(d);
+    const bool want_pq = want && mode == 2;
+    if (want == w->scrgb && want_pq == w->pq) return;
     d->ctx->ClearState();
     d->ctx->Flush();
-    const DXGI_FORMAT f = want ? DXGI_FORMAT_R16G16B16A16_FLOAT : w->format;
+    const DXGI_FORMAT f = !want ? w->format : want_pq ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT;
     HRESULT hr = w->chain->ResizeBuffers(0, w->width, w->height, f, w->flags);
     if (FAILED(hr)) {
         static bool logged = false;
@@ -1634,12 +1642,18 @@ void fit_format(Dev* d, Window* w) {
     }
     IDXGISwapChain3* c3 = nullptr;
     if (SUCCEEDED(w->chain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&c3)))) {
-        hr = c3->SetColorSpace1(want ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        hr = c3->SetColorSpace1(!want      ? DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+                                : want_pq ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                                          : DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
         c3->Release();
     }
     w->scrgb = want;
+    w->pq = want_pq;
     LOG_INFO("DxvkHdrSwapChain: the DXGI swap chain is now %s (colour space %08lX)",
-             want ? "FP16 scRGB, the SDR picture converted as Windows composes it" : "8-bit SDR", hr);
+             !want     ? "8-bit SDR"
+             : want_pq ? "HDR10 (10-bit PQ, BT.2020), the SDR picture converted as Windows composes it"
+                       : "FP16 scRGB, the SDR picture converted as Windows composes it",
+             hr);
 }
 
 // Under g_d3d: the mode mark (dxgipresent_show_mark) in the top right corner of the back buffer.
@@ -1648,7 +1662,7 @@ void draw_mark(Dev* d, Window* w, ID3D11Texture2D* back) {
     if (!until || qpc_now() > until) return;
     ID3D11RenderTargetView* rtv = nullptr;
     if (FAILED(d->d3d->CreateRenderTargetView(back, nullptr, &rtv)) || !rtv) return;
-    const float k = w->scrgb ? w->white : 1.0f;
+    const float k = w->pq ? 0.6f : w->scrgb ? w->white : 1.0f;
     const int pacing = g_pacing.load();
     const float colors[3][4] = {{k, 0, 0, 1}, {0, k, 0, 1}, {k, k, 0, 1}};
     const float* c = colors[pacing >= 0 && pacing <= 2 ? pacing : 0];
@@ -1690,7 +1704,7 @@ void copy_out(Dev* d, Window* w, ID3D11Texture2D* src, ID3D11ShaderResourceView*
     d->ctx->IASetInputLayout(nullptr);
     d->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     d->ctx->VSSetShader(d->scrgb_vs, nullptr, 0);
-    d->ctx->PSSetShader(d->scrgb_ps, nullptr, 0);
+    d->ctx->PSSetShader(w->pq ? d->hdr10_ps : d->scrgb_ps, nullptr, 0);
     d->ctx->PSSetShaderResources(0, 1, srv);
     d->ctx->PSSetConstantBuffers(0, 1, &d->scrgb_cb);
     d->ctx->Draw(3, 0);
@@ -2339,7 +2353,7 @@ void dxgipresent_set_precopy(int on) {
 }
 
 void dxgipresent_set_hdr_chain(int on) {
-    g_hdr_chain = on ? 1 : 0;
+    g_hdr_chain = on < 0 ? 0 : (on > 2 ? 2 : on);
 }
 
 int dxgipresent_hdr_chain() {

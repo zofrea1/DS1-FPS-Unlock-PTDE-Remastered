@@ -67,9 +67,10 @@ void hotkeys() {
         mark();
     }
     if (h && !was_h) {
-        const int next = dxgipresent_hdr_chain() ? 0 : 1;
+        const int next = (dxgipresent_hdr_chain() + 1) % 3;  // off -> scRGB -> HDR10 -> off
         dxgipresent_set_hdr_chain(next);
-        LOG_INFO("Session: Ctrl+Shift+H, scRGB swap chain %s (blue mark on, grey off)", next ? "on" : "off");
+        static const char* const kKinds[3] = {"8-bit (grey mark)", "FP16 scRGB (blue mark)", "HDR10 (blue mark)"};
+        LOG_INFO("Session: Ctrl+Shift+H, swap chain %s", kKinds[next]);
         mark();
     }
     was_u = u;

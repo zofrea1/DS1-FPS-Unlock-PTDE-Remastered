@@ -318,7 +318,7 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "dxvkpacedpresent") {
             s.dxvk_paced_present = parse_bool(val);
         } else if (key == "dxvkhdrswapchain") {
-            s.dxvk_hdr_swap_chain = parse_bool(val);
+            s.dxvk_hdr_swap_chain = lower(trim(val)) == "hdr10" ? 2 : parse_bool(val) ? 1 : 0;
         } else if (key == "scanwatch") {
             s.scan_watch = parse_bool(val);
         } else if (key == "gammaramp") {

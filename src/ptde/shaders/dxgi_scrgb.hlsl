@@ -24,3 +24,20 @@ float4 main_ps(float4 pos : SV_Position) : SV_Target {
     const float3 c = gSource.Load(int3(pos.xy, 0)).rgb;
     return float4(srgb_to_linear(c) * gScale.x, 1.0);
 }
+
+// HDR10 (DxvkHdrSwapChain = hdr10): the same light (SDR white / 80 nits scale, in nits = scRGB x 80), into BT.2020
+// primaries and the PQ curve (SMPTE ST 2084), for a 10-bit swap chain in the display's own scanout format.
+float3 pq(float3 nits) {
+    const float m1 = 0.1593017578125, m2 = 78.84375, c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    const float3 y = pow(saturate(nits / 10000.0), m1);
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+}
+
+float4 main_ps_pq(float4 pos : SV_Position) : SV_Target {
+    const float3 c = gSource.Load(int3(pos.xy, 0)).rgb;
+    const float3 lin = srgb_to_linear(c) * gScale.x * 80.0;
+    const float3x3 to2020 = float3x3(0.6274040, 0.3292820, 0.0433136,
+                                     0.0690970, 0.9195400, 0.0113612,
+                                     0.0163916, 0.0880132, 0.8955950);
+    return float4(pq(max(mul(to2020, lin), 0.0)), 1.0);
+}

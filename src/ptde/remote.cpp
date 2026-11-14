@@ -1615,7 +1615,8 @@ void run(const std::string& line) {
         dxgipresent_set_precopy(static_cast<int>(num(1, 1)));
         out("dxgiprecopy %ld", num(1, 1));
     } else if (c == "dxgihdr") {
-        // dxgihdr [0|1]: DxvkHdrSwapChain for this session (an FP16 scRGB swap chain on a display in HDR).
+        // dxgihdr [0|1|2]: DxvkHdrSwapChain for this session (1 an FP16 scRGB, 2 an HDR10 swap chain on a display in
+        // HDR).
         if (t.size() > 1) dxgipresent_set_hdr_chain(static_cast<int>(num(1, 0)));
         out("dxgihdr %d", dxgipresent_hdr_chain());
     } else if (c == "limitpoint" && t.size() > 1) {
