@@ -571,6 +571,7 @@ bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDi
     if (!data || count == 0 || count > 4096 || stride < 8) return false;
     const auto* src = static_cast<const uint8_t*>(data);
     float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    UINT placed = 0;
     for (UINT i = 0; i < count; ++i) {
         const uint8_t* v = src + i * stride;
         float x, y;
@@ -595,11 +596,17 @@ bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDi
                 y = std::floor(f[1]);
             }
         }
+        // A vertex far off the layout is a placeholder of the game's (another player's bar draws its outline as ten
+        // vertices, some at -2596.4,30: a box 3160 wide, which no rule took, so the outline stayed full size); the
+        // draw's place is that of the others. It moves with them.
+        if (x < -1000.0f || x > kLayoutW + 1000.0f || y < -1000.0f || y > kLayoutH + 1000.0f) continue;
+        ++placed;
         if (x < x0) x0 = x;
         if (x > x1) x1 = x;
         if (y < y0) y0 = y;
         if (y > y1) y1 = y;
     }
+    if (placed == 0) return false;
     const Fit f = fit_for(x0, y0, x1, y1, menu_open());
 #if FPSU_DIAGNOSTICS
     // The plain kind's draws, for the record (what the outline turned out to be).
