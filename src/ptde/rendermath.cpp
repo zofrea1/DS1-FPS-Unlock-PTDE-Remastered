@@ -2188,6 +2188,13 @@ int install_table(const char* what, const Site* sites, size_t count, int table) 
     return done;
 }
 
+// The sites a table replaces (the others are only checked).
+int replaced(const Site* sites, size_t count) {
+    int n = 0;
+    for (size_t i = 0; i < count; ++i) n += sites[i].replacement ? 1 : 0;
+    return n;
+}
+
 }  // namespace
 
 bool rendermath_install(bool core, bool effects) {
@@ -2198,7 +2205,7 @@ bool rendermath_install(bool core, bool effects) {
     bool ok = true;
     if (core) {
         const int n = install_table("FastRenderMath", kCoreSites, sizeof(kCoreSites) / sizeof(kCoreSites[0]), 0);
-        ok = ok && n == static_cast<int>(sizeof(kCoreSites) / sizeof(kCoreSites[0]));
+        ok = ok && n == replaced(kCoreSites, sizeof(kCoreSites) / sizeof(kCoreSites[0]));
         if (n) {
             LOG_INFO("FastRenderMath: %d of the engine's vector and matrix helpers (four-float add, subtract, multiply, "
                      "multiply-add, not-equal, saturate and reciprocal square root, 3x4 matrix add and multiply, 4x4 "
@@ -2207,7 +2214,7 @@ bool rendermath_install(bool core, bool effects) {
                      n);
         }
         const int nb = install_table("FastRenderMath", kBoneSites, sizeof(kBoneSites) / sizeof(kBoneSites[0]), 3);
-        ok = ok && nb == 5;
+        ok = ok && nb == replaced(kBoneSites, sizeof(kBoneSites) / sizeof(kBoneSites[0]));
         if (nb) {
             LOG_INFO("FastRenderMath: bone palettes: %d sites (the three set-matrix-if-changed routines compare in SSE "
                      "and write the shader constants and their dirty bits inline, the two shader constant flushes find "
@@ -2225,7 +2232,7 @@ bool rendermath_install(bool core, bool effects) {
     }
     if (effects) {
         const int n = install_table("FastEffects", kFfxSites, sizeof(kFfxSites) / sizeof(kFfxSites[0]), 1);
-        ok = ok && n == static_cast<int>(sizeof(kFfxSites) / sizeof(kFfxSites[0]));
+        ok = ok && n == replaced(kFfxSites, sizeof(kFfxSites) / sizeof(kFfxSites[0]));
         if (n) {
             LOG_INFO("FastEffects: %d of the effects library's routines (vector helpers, forwarding wrappers, the "
                      "keyframe curves, colour packing, the sine/cosine polynomial and other particle glue) replaced "

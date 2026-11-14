@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <d3d9.h>
 
+#include "aspect.h"
 #include "shaders/area_reduce_ps.h"
 #include "shaders/dof_composite_ps.h"
 #include "shaders/dof_near_rate_ps.h"
@@ -1335,7 +1336,11 @@ HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const R
         static_cast<int>(sd.Width) == g_frame_w && static_cast<int>(sd.Height) == g_frame_h &&
         SUCCEEDED(dst->GetDesc(&dd)) && (dd.Usage & D3DUSAGE_RENDERTARGET)) {
         const RECT s = sr ? *sr : RECT{0, 0, static_cast<LONG>(sd.Width), static_cast<LONG>(sd.Height)};
-        const RECT d = dr ? *dr : RECT{0, 0, static_cast<LONG>(dd.Width), static_cast<LONG>(dd.Height)};
+        RECT d = dr ? *dr : RECT{0, 0, static_cast<LONG>(dd.Width), static_cast<LONG>(dd.Height)};
+        // FixAspect opens the game's 16:9 present blit to the whole target (aspect.cpp's stretch hook, which this one
+        // is in front of): the same here first, so the average covers that rectangle (a taller screen than 16:9 at
+        // RenderResolution = auto makes this blit a scale-down).
+        if (dr) aspect_open_letterbox(dst, &d);
         const LONG sw = s.right - s.left, sh = s.bottom - s.top, dw = d.right - d.left, dh = d.bottom - d.top;
         // Only a scale-down (in one direction at least, in none up): a same-size copy stays the game's.
         if (dw > 0 && dh > 0 && sw >= dw && sh >= dh && (sw > dw || sh > dh)) {

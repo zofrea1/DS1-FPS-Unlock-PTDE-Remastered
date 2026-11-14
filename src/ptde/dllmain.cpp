@@ -83,7 +83,6 @@ DWORD WINAPI worker(void*) {
     if (ext && ext->start) ext->start(g_self);
     intro_install(settings.skip_intro);
     framekick_install(settings.fix_framerate_kick);
-    focus_install();
     drivetype_install(settings.cache_drive_type, settings.profile);
 
     wchar_t game_dir[MAX_PATH];
@@ -121,6 +120,7 @@ DWORD WINAPI worker(void*) {
         }
         return 0;
     }
+    focus_install();
     if (patches_probe(settings)) {
         if (settings.fix_controller) {
             controller_install(settings);
@@ -160,12 +160,12 @@ DWORD WINAPI worker(void*) {
 }  // namespace
 
 // Kept as a literal: Prepare to Co-op's tools\make_ini.ps1 reads the version from this line.
-const char* ptde_fps_unlock_version() { return "2.2.0"; }
+const char* ptde_fps_unlock_version() { return "2.3.0"; }
 
 namespace {
 constexpr bool same_text(const char* a, const char* b) { return *a == *b && (*a == 0 || same_text(a + 1, b + 1)); }
 }  // namespace
-static_assert(same_text("2.2.0", FPSU_VERSION_STR), "ptde_fps_unlock_version() and fpsu_version.h disagree");
+static_assert(same_text("2.3.0", FPSU_VERSION_STR), "ptde_fps_unlock_version() and fpsu_version.h disagree");
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {

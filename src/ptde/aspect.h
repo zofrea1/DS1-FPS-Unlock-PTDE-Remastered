@@ -21,6 +21,10 @@ void aspect_adjust_present(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS*
 // SetVertexShaderConstantF stays owned by d3d.cpp, which calls aspect_correct_constants.
 void aspect_hook_device(IDirect3DDevice9* device);
 
+// A 16:9 letterbox rectangle on target (the game's present blit) opened to the whole target, as the stretch hook does:
+// true when r was one and is now the target's size. False (r unchanged) when FixAspect is not active or r is not one.
+bool aspect_open_letterbox(IDirect3DSurface9* target, RECT* r);
+
 // If data begins with a 16:9 perspective matrix, write a Vert+ version into out
 // (out must hold count*4 floats) and return true. out is filled only on success.
 bool aspect_correct_constants(const float* data, UINT count, float* out);

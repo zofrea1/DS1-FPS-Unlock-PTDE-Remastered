@@ -73,6 +73,14 @@ HWND WINAPI watched_foreground() {
 
 void focus_install() {
     auto* slot = reinterpret_cast<void**>(kForegroundImport);
+    // Only the game's own import, as the loader filled it in (not another build, or a slot something else rewrote).
+    const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    void* const system = user32 ? reinterpret_cast<void*>(GetProcAddress(user32, "GetForegroundWindow")) : nullptr;
+    if (!system || *slot != system) {
+        LOG_INFO("Focus: the import at 0x%08X is not GetForegroundWindow; focus changes are not logged",
+                 static_cast<unsigned>(kForegroundImport));
+        return;
+    }
     DWORD old = 0;
     if (!VirtualProtect(slot, 4, PAGE_READWRITE, &old)) return;
     g_real = reinterpret_cast<GetForegroundFn>(*slot);

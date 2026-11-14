@@ -398,26 +398,26 @@ HRESULT WINAPI hook_set_scissor(IDirect3DDevice9* device, const RECT* rect) {
     return g_set_scissor(device, use);
 }
 
+bool open_letterbox(IDirect3DSurface9* target, RECT* r) {
+    if (!g_active || !target || !r) {
+        return false;
+    }
+    UINT bw = 0;
+    UINT bh = 0;
+    if (!target_size(target, &bw, &bh) || !is_letterbox(r->left, r->top, r->right - r->left, r->bottom - r->top,
+                                                        static_cast<LONG>(bw), static_cast<LONG>(bh))) {
+        return false;
+    }
+    *r = RECT{0, 0, static_cast<LONG>(bw), static_cast<LONG>(bh)};
+    static bool logged = false;
+    note_once(&logged, "Aspect: a 16:9 present blit was opened to the full target");
+    return true;
+}
+
 HRESULT WINAPI hook_stretch(IDirect3DDevice9* device, IDirect3DSurface9* src, const RECT* src_rect, IDirect3DSurface9* dst,
                             const RECT* dst_rect, D3DTEXTUREFILTERTYPE filter) {
-    RECT expanded{};
-    const RECT* use = dst_rect;
-    if (g_active && dst && dst_rect) {
-        UINT bw = 0;
-        UINT bh = 0;
-        const LONG w = dst_rect->right - dst_rect->left;
-        const LONG h = dst_rect->bottom - dst_rect->top;
-        if (target_size(dst, &bw, &bh) &&
-            is_letterbox(dst_rect->left, dst_rect->top, w, h, static_cast<LONG>(bw), static_cast<LONG>(bh))) {
-            expanded.left = 0;
-            expanded.top = 0;
-            expanded.right = static_cast<LONG>(bw);
-            expanded.bottom = static_cast<LONG>(bh);
-            use = &expanded;
-            static bool logged = false;
-            note_once(&logged, "Aspect: a 16:9 present blit was opened to the full target");
-        }
-    }
+    RECT expanded = dst_rect ? *dst_rect : RECT{};
+    const RECT* use = dst_rect && open_letterbox(dst, &expanded) ? &expanded : dst_rect;
     return g_stretch(device, src, src_rect, dst, use, filter);
 }
 
@@ -657,6 +657,8 @@ void aspect_hook_device(IDirect3DDevice9* device) {
         LOG_INFO("Aspect: letterbox hooks installed");
     }
 }
+
+bool aspect_open_letterbox(IDirect3DSurface9* target, RECT* r) { return open_letterbox(target, r); }
 
 bool aspect_correct_constants(const float* data, UINT count, float* out) {
     return correct_upload(data, count, out);

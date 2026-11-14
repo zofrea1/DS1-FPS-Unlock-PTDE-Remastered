@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set VERSION=2.2.0
+set VERSION=2.3.0
 set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
 
 rem Release builds of both DLLs: the [Diagnostics] tools compiled out (src\common\fpsu_buildcfg.h).
