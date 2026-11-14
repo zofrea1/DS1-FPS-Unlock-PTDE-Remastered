@@ -425,20 +425,46 @@ bool hud_top_left_piece(float x0, float y0, float x1, float y1) {
 }
 
 // The world mark a draw belongs to, or null.
+// Another player's bar is about 300 units wide (a Steam Deck log, 2026-11-14: its frame 815.8..1115.8 about the gauge
+// at 966.3, the name above it in 243..261): pieces at its ends have their middles about 150 units from the gauge's
+// place, past the window above, and stayed full size while the rest of the bar was drawn smaller. A draw lying
+// wholly within 170 units across of such a gauge (100 above, 60 below) is that bar's too.
+constexpr float kPlayerBarHalf = 170.0f;
+int g_logged_wide = 0;
+int g_logged_near_miss = 0;
+
 const Anchor* world_mark(float x0, float y0, float x1, float y1) {
     if (!g_anchor_count || hud_top_left_piece(x0, y0, x1, y1)) return nullptr;
     const float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
     const Anchor* best = nullptr;
     float best_d = 1e9f;
+    bool best_wide = false;
     for (int i = 0; i < g_anchor_count; ++i) {
         const Anchor& a = g_anchors[i];
         const float dx = cx - a.x, dy = cy - a.y;
-        if (std::fabs(dx) > 110.0f || dy < -90.0f || dy > 50.0f) continue;
+        const bool near_middle = std::fabs(dx) <= 110.0f && dy >= -90.0f && dy <= 50.0f;
+        const bool on_player_bar = a.kind == 1 && x0 >= a.x - kPlayerBarHalf && x1 <= a.x + kPlayerBarHalf &&
+                                   y0 >= a.y - 100.0f && y1 <= a.y + 60.0f;
+        if (!near_middle && !on_player_bar) {
+            // A draw near another player's gauge that is not taken: which (for the next look at a bar's pieces).
+            if (a.kind == 1 && g_logged_near_miss < 12 && std::fabs(dx) <= 260.0f && dy >= -130.0f && dy <= 90.0f) {
+                ++g_logged_near_miss;
+                LOG_INFO("UIScale: a draw %.1f,%.1f-%.1f,%.1f near another player's gauge at %.1f,%.1f is not its",
+                         x0, y0, x1, y1, a.x, a.y);
+            }
+            continue;
+        }
         const float d = dx * dx + dy * dy;
         if (d < best_d) {
             best_d = d;
             best = &a;
+            best_wide = !near_middle;
         }
+    }
+    if (best && best_wide && g_logged_wide < 12) {
+        ++g_logged_wide;
+        LOG_INFO("UIScale: a draw %.1f,%.1f-%.1f,%.1f at the end of another player's bar (gauge at %.1f,%.1f) is "
+                 "part of it", x0, y0, x1, y1, best->x, best->y);
     }
     return best;
 }
