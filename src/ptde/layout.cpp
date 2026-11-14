@@ -476,6 +476,13 @@ bool layout_map_scissor(IDirect3DDevice9* dev, const RECT* r, int frame_w, int f
         (static_cast<int>(vp.Width) != frame_w && static_cast<int>(vp.Height) != frame_h) ||
         (r->left == static_cast<LONG>(vp.X) && r->top == static_cast<LONG>(vp.Y) &&
          r->right == static_cast<LONG>(vp.X + vp.Width) && r->bottom == static_cast<LONG>(vp.Y + vp.Height))) {
+        static int left_alone = 0;  // the first few, for the log
+        if (left_alone < 8 && (frame_w != 1280 || frame_h != 720 || shaped) && r->right - r->left > 64) {
+            ++left_alone;
+            LOG_INFO("Resolution: a clipping rectangle (%ld,%ld-%ld,%ld) is left as it is: the target is %ux%u (the "
+                     "frame is %dx%d), the viewport %lu,%lu %lux%lu", r->left, r->top, r->right, r->bottom, d.Width,
+                     d.Height, frame_w, frame_h, vp.X, vp.Y, vp.Width, vp.Height);
+        }
         return false;
     }
     // 1280x720 onto the viewport, about its middle by kx and ky
