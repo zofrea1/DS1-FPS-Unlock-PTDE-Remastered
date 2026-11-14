@@ -46,5 +46,11 @@ enum DxvkFse {
 // is then not used (no Vulkan swap chain to make exclusive).
 bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen, bool dxgi_present);
 
+// Under Proton / Wine (the Steam Deck, Linux, GameNative), before the game's Direct3DCreate9: options for the DXVK
+// that runs the game there (Proton's own), through DXVK_CONFIG. sample_shading (INI ProtonSampleShading):
+// d3d9.forceSampleRateShading, for the black specks on grass and fine detail with the game's anti-aliasing on.
+// Nothing on Windows. A DXVK older than the variable (GameNative's 1.10) ignores it.
+void dxvk_proton_options(bool sample_shading);
+
 // DXVK's 32-bit d3d9.dll, renamed, in the folder of this DLL.
 inline constexpr wchar_t kDxvkFileName[] = L"dxvk_d3d9.dll";

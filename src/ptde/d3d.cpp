@@ -285,7 +285,8 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             aspect_hook_device(*out);
         }
         // Ours takes precedence over DSfix's filteringOverride: the hook sits under DSfix's device wrapper.
-        d3dperf_set_anisotropy(settings().anisotropic_filtering);
+        // YieldToDSFix: DSfix's filteringOverride decides (0 here = the game's own filtering reaches it).
+        d3dperf_set_anisotropy(dsfix_yields() ? 0 : settings().anisotropic_filtering);
         d3dperf_hook_device(*out, settings().async_readback, settings().filter_sampler_states,
                             settings().filter_shader_constants);
         if (settings().reuse_surfaces) {
@@ -309,10 +310,11 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
                 passcull_hook_device(*out);
             }
         }
-        layout_configure(settings().fix_aspect_ui, settings().ui_scale);
+        // YieldToDSFix: DSfix's HUD mod (enableHudMod, hudScaleFactor) decides the HUD's size.
+        const int ui_scale = dsfix_yields() ? 100 : settings().ui_scale;
+        layout_configure(settings().fix_aspect_ui, ui_scale);
         layout_set_world_scale(settings().ui_scale_world);
-        if ((settings().fix_aspect_ui && aspect_is_active()) || settings().ui_scale < 100 ||
-            settings().ui_scale_world < 100) {
+        if ((settings().fix_aspect_ui && aspect_is_active()) || ui_scale < 100 || settings().ui_scale_world < 100) {
             layout_hook_device(*out, !resolution_is_active());
         }
         if (resolution_is_active() || (settings().fix_aspect_ui && aspect_is_active())) layout_patch_scissor_sites();
@@ -359,6 +361,11 @@ IDirect3D9* WINAPI hook_direct3d_create9(UINT sdk_version) {
     // Direct3D and the device are left alone.
     if (settings().fps_unlock && settings().dxvk) {
         route_to_dxvk();
+    }
+    static bool proton_options = false;
+    if (settings().fps_unlock && !proton_options) {
+        proton_options = true;
+        dxvk_proton_options(settings().proton_sample_shading);
     }
     IDirect3D9* d3d = g_create(sdk_version);
     const PtdeExtension* ext = ptde_extension();

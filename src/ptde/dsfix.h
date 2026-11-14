@@ -25,3 +25,7 @@ bool dsfix_changes_resolution();
 bool dsfix_loaded();
 // DSfix's render size from the last probe (1024x720 when it does not change it).
 void dsfix_render_size(int* width, int* height);
+// YieldToDSFix: with DSfix loaded, this mod's picture settings that DSfix has its own of step back (the resolution with
+// what rides on it, anisotropic filtering, the HUD's size). dsfix_yields() is true only with both. Set from DllMain.
+void dsfix_set_yield(bool on);
+bool dsfix_yields();

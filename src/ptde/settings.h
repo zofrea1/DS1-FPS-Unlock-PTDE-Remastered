@@ -104,6 +104,9 @@ struct Settings {
     bool hide_mouse_cursor = true;
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.
     bool fix_sun_with_dsfix = true;
+    // YieldToDSFix: with DSfix loaded, DSfix's own settings decide the resolution (and what rides on it), the
+    // texture filtering and the HUD's size; ours step back (dsfix.h).
+    bool yield_to_dsfix = false;
     // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
     bool fix_ui = true;
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each
@@ -160,6 +163,9 @@ struct Settings {
     // and variable refresh works without exclusive fullscreen. DxvkExclusiveFullscreen then has nothing to do.
     bool dxvk_dxgi_present = true;
     bool dxvk_paced_present = true;  // DxvkPacedPresent: flips timed to the game's steps (dxgipresent.h)
+    // ProtonSampleShading: under Proton / Wine, Proton's own DXVK shades every anti-aliasing sample
+    // (d3d9.forceSampleRateShading through DXVK_CONFIG, dxvk.h).
+    bool proton_sample_shading = true;
     int dxvk_hdr_swap_chain = 0;  // 0 off, 1 scRGB (true), 2 hdr10  // DxvkHdrSwapChain: scRGB swap chain on an HDR display (dxgipresent.h)
     bool scan_watch = false;  // [Diagnostics] ScanWatch: the display's refreshes and session hotkeys (scanwatch.h)
     // The game's brightness gamma ramp (gamma.h): 0 auto and 1 passed on (as the system Direct3D 9 does), 2 never.

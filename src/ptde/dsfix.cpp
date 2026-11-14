@@ -37,7 +37,11 @@ bool non_system_dinput8(const wchar_t* game_dir) {
 
 namespace {
 DsfixInfo g_last;
+bool g_yield = false;
 }  // namespace
+
+void dsfix_set_yield(bool on) { g_yield = on; }
+bool dsfix_yields() { return g_yield && dsfix_loaded(); }
 
 bool dsfix_filtering_override() { return g_last.dll_found && g_last.ini_found && g_last.filtering_override != 0; }
 bool dsfix_loaded() { return g_last.dll_found && g_last.ini_found; }

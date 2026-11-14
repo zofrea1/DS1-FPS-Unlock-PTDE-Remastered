@@ -523,6 +523,9 @@ bool frame_install(const Settings& settings) {
         atoc_set_msaa_samples(settings.antialiasing_samples);
         shadowmap_set_resolution(settings.shadow_map_resolution);
         int rw = settings.render_width, rh = settings.render_height;
+        // YieldToDSFix: DSfix's renderWidth/renderHeight decide, and with them its anti-aliasing, SSAO and depth of
+        // field; ours (Supersampling, the depth of field's and effects' resolution, HighPrecisionColor) stay off.
+        if (dsfix_yields()) rw = rh = 0;
         if (rw < 0 || rh < 0) {
             // auto: the primary monitor (the game's window or full screen covers it) in the game's own coordinates:
             // its real pixels when DPI aware (DpiAware, set in DllMain), else the scaled-down size Windows gives a

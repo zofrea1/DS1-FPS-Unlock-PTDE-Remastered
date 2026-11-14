@@ -201,6 +201,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_sfx_actions = parse_bool(val);
         } else if (key == "fixsfxdistortion") {
             s.fix_sfx_distortion = parse_bool(val);
+        } else if (key == "yieldtodsfix") {
+            s.yield_to_dsfix = parse_bool(val);
         } else if (key == "fixsun") {
             s.fix_sun_with_dsfix = parse_bool(val);
         } else if (key == "hidemousecursor") {
@@ -317,6 +319,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.dxvk_dxgi_present = parse_bool(val);
         } else if (key == "dxvkpacedpresent") {
             s.dxvk_paced_present = parse_bool(val);
+        } else if (key == "protonsampleshading") {
+            s.proton_sample_shading = parse_bool(val);
         } else if (key == "dxvkhdrswapchain") {
             s.dxvk_hdr_swap_chain = lower(trim(val)) == "hdr10" ? 2 : parse_bool(val) ? 1 : 0;
         } else if (key == "scanwatch") {

@@ -262,6 +262,19 @@ void add_dxvk_option(const char* key, const char* value) {
 
 }  // namespace
 
+void dxvk_proton_options(bool sample_shading) {
+    if (!GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")) return;
+    if (!sample_shading) {
+        LOG_INFO("DXVK: ProtonSampleShading is false; Proton's DXVK keeps its own sample shading");
+        return;
+    }
+    add_dxvk_option("d3d9.forceSampleRateShading", "True");
+    char now[2048] = {};
+    GetEnvironmentVariableA("DXVK_CONFIG", now, sizeof(now));
+    LOG_INFO("DXVK: Proton / Wine: Proton's DXVK is asked to shade every anti-aliasing sample (ProtonSampleShading; "
+             "DXVK_CONFIG \"%s\"; it costs GPU time only while the game's anti-aliasing is on)", now);
+}
+
 bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen, bool dxgi_present) {
     char dxvk_name[MAX_PATH];
     narrow(dxvk_path, dxvk_name);
