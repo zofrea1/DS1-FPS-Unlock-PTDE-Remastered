@@ -26,6 +26,7 @@ src\ptde\profile.cpp
 src\ptde\remote.cpp
 src\ptde\resolution.cpp
 src\ptde\atoc.cpp
+src\ptde\shadowbias.cpp
 src\ptde\trace.cpp
 src\ptde\watch.cpp
 src\ptde\fixes.cpp

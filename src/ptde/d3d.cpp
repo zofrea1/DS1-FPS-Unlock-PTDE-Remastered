@@ -2,6 +2,7 @@
 
 #include "aspect.h"
 #include "atoc.h"
+#include "shadowbias.h"
 #include "d3dperf.h"
 #include "surfpool.h"
 #include "dxvk.h"
@@ -254,6 +255,10 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         resolution_hook_device(*out);
         if (settings().alpha_to_coverage) {
             atoc_hook_device(*out);
+        }
+        shadowbias_set(settings().shadow_bias);
+        if (settings().shadow_bias > 0.0f) {
+            shadowbias_hook_device(*out);
         }
     }
     if (SUCCEEDED(hr) && out && *out && remote_enabled()) {
