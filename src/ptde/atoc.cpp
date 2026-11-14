@@ -293,7 +293,7 @@ constexpr uintptr_t kMsaaTable = 0x010D38CC;
 
 }  // namespace
 
-void atoc_hook_device(IDirect3DDevice9* dev) {
+void atoc_hook_device(IDirect3DDevice9* dev, bool force) {
     if (!dev) return;
     IDirect3D9* d3d = nullptr;
     D3DDEVICE_CREATION_PARAMETERS cp{};
@@ -309,6 +309,11 @@ void atoc_hook_device(IDirect3DDevice9* dev) {
     };
     g_method = supported(kNvOn) ? Method::Nvidia : (supported(kAmdOn) ? Method::Amd : Method::None);
     d3d->Release();
+    if (g_method == Method::None && force) {
+        g_method = Method::Nvidia;
+        LOG_INFO("AlphaToCoverage = force: the graphics driver reports neither NVIDIA's nor AMD's switch; NVIDIA's is "
+                 "used anyway (if the edges of grass and leaves do not get smoother, the driver ignores it)");
+    }
     if (g_method == Method::None) {
         LOG_INFO("AlphaToCoverage: the graphics driver offers neither NVIDIA's nor AMD's switch for it; not used");
         return;

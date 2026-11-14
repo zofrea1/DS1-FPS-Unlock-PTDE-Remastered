@@ -294,7 +294,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         gamma_hook_device(*out, settings().gamma_ramp, g_dxvk_active);
         resolution_hook_device(*out);
         if (settings().alpha_to_coverage) {
-            atoc_hook_device(*out);
+            atoc_hook_device(*out, settings().alpha_to_coverage_force);
         }
         // Last, so the draws it leaves out reach no other hook.
         // Not beside DSfix: it puts textures back through state blocks, which the watch for reads does not see.
@@ -313,6 +313,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         if ((settings().fix_aspect_ui && aspect_is_active()) || settings().ui_scale < 100) {
             layout_hook_device(*out, !resolution_is_active());
         }
+        if (resolution_is_active() || (settings().fix_aspect_ui && aspect_is_active())) layout_patch_scissor_sites();
         shadowbias_set(settings().shadow_bias);
         if (settings().shadow_bias > 0.0f) {
             shadowbias_hook_device(*out);

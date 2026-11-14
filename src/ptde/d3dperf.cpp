@@ -657,7 +657,8 @@ bool install_filter(IDirect3DDevice9* game_device) {
     describe(reinterpret_cast<const void*>(g_set_sampler), fn, sizeof(fn));
     LOG_INFO("FilterSamplerStates: sampler states that repeat the value in place skip Direct3D (device %p%s; method "
              "table %s, SetSamplerState %s; %d of the device's own copies of these methods hooked as well)",
-             real, real == game_device ? ", under the wrapper the game holds" : "", table, fn, sources);
+             real, real == game_device ? ", the one the game holds" : ", under the wrapper the game holds", table, fn,
+             sources);
     real->Release();
     return g_set_sampler != nullptr;
 }

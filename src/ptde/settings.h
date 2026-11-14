@@ -83,6 +83,7 @@ struct Settings {
     bool high_precision_color = false;
     // With the game's own anti-aliasing (multisampling) on: alpha-tested surfaces write coverage (atoc.h).
     bool alpha_to_coverage = true;
+    bool alpha_to_coverage_force = false;  // AlphaToCoverage = force: NVIDIA's switch even when the driver does not say it has it
     // The samples of the game's own anti-aliasing when it is on: 2 (the game's), 4 or 8 (atoc.h).
     int antialiasing_samples = 2;
     bool render_scale_post = false;  // experiment: scale the post-processing targets too

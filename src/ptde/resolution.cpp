@@ -502,6 +502,10 @@ void fx_begin(IDirect3DDevice9* dev) {
 // the device under it): its own 512x360 depth or viewport used with our target draws the effects into a corner of it
 // with their depth out of place (the mist cut off at the side, figures' outlines in it). Then the game's
 // low-resolution effects from here on, and what was found in the log.
+HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt);
+HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds);
+HRESULT WINAPI hk_set_viewport(IDirect3DDevice9* dev, const D3DVIEWPORT9* vp);
+
 bool fx_pass_held(IDirect3DDevice9* dev) {
     IDirect3DSurface9* rt = nullptr;
     IDirect3DSurface9* ds = nullptr;
@@ -517,11 +521,13 @@ bool fx_pass_held(IDirect3DDevice9* dev) {
     if (!ok) {
         LOG_ERROR("Resolution: the effects pass (%ux%u) ended with the device holding a %ux%u target%s, a %ux%u "
                   "depth%s and the viewport %lu,%lu %lux%lu: some of the game's calls reach the device past this mod's "
-                  "hooks (a device wrapper in between, such as DSfix's?). EffectsResolution is off from here on (the "
-                  "game's low-resolution effects)",
+                  "hooks (the device's SetRenderTarget %p, SetDepthStencilSurface %p, SetViewport %p; ours %p, %p, %p). "
+                  "EffectsResolution is off from here on (the game's low-resolution effects)",
                   g_fx.w, g_fx.h, rd.Width, rd.Height, rt == g_fx.surf ? " (ours)" : "", dd.Width, dd.Height,
                   !ds ? " (none)" : (ds == g_fx.depth_small_ds ? " (the game's own)" : ""), vp.X, vp.Y, vp.Width,
-                  vp.Height);
+                  vp.Height, (*reinterpret_cast<void***>(dev))[37], (*reinterpret_cast<void***>(dev))[39],
+                  (*reinterpret_cast<void***>(dev))[47], reinterpret_cast<void*>(&hk_set_rt),
+                  reinterpret_cast<void*>(&hk_set_ds), reinterpret_cast<void*>(&hk_set_viewport));
     }
     if (rt) rt->Release();
     if (ds) ds->Release();
@@ -1185,9 +1191,12 @@ HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
         const RECT full{0, 0, static_cast<LONG>(g_fx.w), static_cast<LONG>(g_fx.h)};
         return o_set_scissor(dev, &full);
     }
-    // The menus' rectangles (1280x720 units) go onto the frame buffer as the layout is drawn (layout.cpp).
+    // The menus' rectangles (1280x720 units) go onto the frame buffer as the layout is drawn (layout.cpp), unless
+    // the game's call site mapped this one already (layout_patch_scissor_sites).
     RECT m;
-    if (r && layout_map_scissor(dev, r, g_frame_w, g_frame_h, &m)) return o_set_scissor(dev, &m);
+    if (r && !layout_scissor_premapped() && layout_map_scissor(dev, r, g_frame_w, g_frame_h, &m)) {
+        return o_set_scissor(dev, &m);
+    }
     return o_set_scissor(dev, r);
 }
 
@@ -1362,6 +1371,11 @@ bool g_active = false;
 }  // namespace
 
 bool resolution_is_active() { return g_active; }
+
+void resolution_frame_size(int* width, int* height) {
+    *width = g_active ? g_frame_w : 0;
+    *height = g_active ? g_frame_h : 0;
+}
 
 void resolution_hook_device(IDirect3DDevice9* dev) {
     if (!g_active || !dev) return;

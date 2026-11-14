@@ -14,6 +14,8 @@ struct IDirect3DDevice9;
 void resolution_hook_device(IDirect3DDevice9* device);
 // The render resolution is in use (its device hooks are in place).
 bool resolution_is_active();
+// The frame buffer's size (the game's 1280x720 target as this module made it); 0 while inactive.
+void resolution_frame_size(int* width, int* height);
 // DSfix is there: the original-size post targets are made under its device wrapper (before resolution_hook_device).
 void resolution_bypass_dsfix(bool on);
 

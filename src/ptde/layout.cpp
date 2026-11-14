@@ -1,6 +1,7 @@
 #include "layout.h"
 
 #include "aspect.h"
+#include "resolution.h"
 #include "fpsu_buildcfg.h"
 #include "log.h"
 
@@ -71,6 +72,7 @@ enum Kind : uint8_t { kOther = 0, kImage = 1, kText = 2, kBox = 3 };
 bool g_keep_shape = true;
 float g_scale = 1.0f;
 bool g_own_scissor = false;  // no render-resolution module in front: the clipping rectangles are mapped here
+bool g_premapped = false;    // the render thread's: a call site of the game mapped the rectangle on its way
 
 SRWLOCK g_lock = SRWLOCK_INIT;
 std::unordered_map<IDirect3DVertexShader9*, uint8_t> g_kinds;
@@ -524,9 +526,37 @@ HRESULT WINAPI hk_draw_idx_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT
 
 HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
     RECT m;
-    if (g_own_scissor && r && layout_map_scissor(dev, r, 1280, 720, &m)) return o_set_scissor(dev, &m);
+    if (g_own_scissor && r && !g_premapped && layout_map_scissor(dev, r, 1280, 720, &m)) return o_set_scissor(dev, &m);
     return o_set_scissor(dev, r);
 }
+
+// The game's menu clipping calls (layout_patch_scissor_sites): `push rect; push device; call [vtable+0x12C]`, the
+// call replaced by `call [g_site_fn]` (stdcall, the same stack).
+HRESULT WINAPI site_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
+    int fw = 0, fh = 0;
+    resolution_frame_size(&fw, &fh);
+    if (fw <= 0 || fh <= 0) {
+        fw = 1280;
+        fh = 720;
+    }
+    RECT m;
+    const bool mapped = r && layout_map_scissor(dev, r, fw, fh, &m);
+    static int logged = 0;  // what the first calls brought, for the log
+    if (logged < 6 && r) {
+        ++logged;
+        void* slot = (*reinterpret_cast<void***>(dev))[75];
+        LOG_INFO("Menu clipping (the game's call): (%ld,%ld-%ld,%ld) %s %ld,%ld-%ld,%ld on a %dx%d frame; the device's "
+                 "SetScissorRect %p (ours %p, %p)", r->left, r->top, r->right, r->bottom, mapped ? "mapped to" : "kept as",
+                 mapped ? m.left : r->left, mapped ? m.top : r->top, mapped ? m.right : r->right,
+                 mapped ? m.bottom : r->bottom, fw, fh, slot, reinterpret_cast<void*>(&hk_set_scissor),
+                 o_set_scissor ? reinterpret_cast<void*>(o_set_scissor) : nullptr);
+    }
+    g_premapped = true;
+    const HRESULT hr = dev->SetScissorRect(mapped ? &m : r);
+    g_premapped = false;
+    return hr;
+}
+void* g_site_fn = reinterpret_cast<void*>(&site_set_scissor);
 
 void* patch_slot(void* object, int slot, void* replacement) {
     void** vtable = *reinterpret_cast<void***>(object);
@@ -550,6 +580,43 @@ void layout_configure(bool keep_shape, int scale_percent) {
 }
 
 void layout_set_scale(int scale_percent) { layout_configure(g_keep_shape, scale_percent); }
+
+bool layout_scissor_premapped() { return g_premapped; }
+
+void layout_patch_scissor_sites() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    // mov eax, [edx|ecx + 0x12C]; call eax
+    struct Site {
+        uintptr_t at;
+        uint8_t modrm;
+    };
+    static const Site kSites[] = {{0x00F4A286, 0x82}, {0x00F4A388, 0x81}, {0x00F4A416, 0x82}, {0x00F4A518, 0x81}};
+    for (const Site& s : kSites) {
+        const auto* p = reinterpret_cast<const uint8_t*>(s.at);
+        const uint8_t want[8] = {0x8B, s.modrm, 0x2C, 0x01, 0x00, 0x00, 0xFF, 0xD0};
+        if (std::memcmp(p, want, 8) != 0) {
+            LOG_ERROR("Menu clipping: the game's call at %08X is not the one this build knows; menu clipping "
+                      "rectangles are mapped by the device hook alone", static_cast<unsigned>(s.at));
+            return;
+        }
+    }
+    for (const Site& s : kSites) {
+        auto* p = reinterpret_cast<uint8_t*>(s.at);
+        DWORD old = 0;
+        if (!VirtualProtect(p, 8, PAGE_EXECUTE_READWRITE, &old)) continue;
+        uint8_t code[8] = {0xFF, 0x15, 0, 0, 0, 0, 0x90, 0x90};  // call [g_site_fn]; nop; nop
+        const uint32_t addr = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_site_fn));
+        std::memcpy(code + 2, &addr, 4);
+        std::memcpy(p, code, 8);
+        DWORD ignored = 0;
+        VirtualProtect(p, 8, old, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), p, 8);
+    }
+    LOG_INFO("Menu clipping: the game's 4 clipping calls (0xF4A270..0xF4A450) map their rectangles for the frame "
+             "buffer themselves");
+}
 
 void layout_dump(int draws) {
 #if FPSU_DIAGNOSTICS

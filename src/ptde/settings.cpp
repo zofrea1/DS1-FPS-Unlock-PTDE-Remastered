@@ -244,7 +244,8 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "antialiasingsamples") {
             s.antialiasing_samples = std::atoi(val.c_str());
         } else if (key == "alphatocoverage") {
-            s.alpha_to_coverage = parse_bool(val);
+            s.alpha_to_coverage_force = lower(trim(val)) == "force";
+            s.alpha_to_coverage = s.alpha_to_coverage_force || parse_bool(val);
         } else if (key == "fixstaminatick") {
             s.fix_stamina_tick = parse_bool(val);
         } else if (key == "fixslidecontact") {

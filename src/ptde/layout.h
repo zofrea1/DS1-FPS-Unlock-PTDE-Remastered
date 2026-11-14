@@ -18,3 +18,11 @@ void layout_hook_device(IDirect3DDevice9* dev, bool own_scissor);
 // A clipping rectangle the menus set in 1280x720 units, mapped onto the frame buffer (frame_w x frame_h) as the layout
 // is drawn. False when the rectangle is not one of those (the caller passes the game's on).
 bool layout_map_scissor(IDirect3DDevice9* dev, const RECT* r, int frame_w, int frame_h, RECT* out);
+// The game's four menu clipping calls (its 2D renderer's commands, 0xF4A270..0xF4A450) go through a function of ours
+// that maps the rectangle before the device sees it, so the mapping does not depend on a hook of the device's
+// SetScissorRect being on the path the game's call takes (on the Steam Deck no call of the game reached it). The
+// rectangle is then passed on through the device as before, marked as mapped.
+void layout_patch_scissor_sites();
+// True while a rectangle mapped at the call site is on its way through the device (the SetScissorRect hooks pass it
+// on unchanged).
+bool layout_scissor_premapped();
