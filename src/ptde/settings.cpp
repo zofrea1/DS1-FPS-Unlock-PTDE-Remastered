@@ -321,6 +321,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.filter_sampler_states = parse_bool(val);
         } else if (key == "filtershaderconstants") {
             s.filter_shader_constants = parse_bool(val);
+        } else if (key == "skipunusedreflection") {
+            s.skip_unused_reflection = parse_bool(val);
         } else if (key == "reusesurfaces") {
             s.reuse_surfaces = parse_bool(val);
         } else if (key == "fastreadlocks") {

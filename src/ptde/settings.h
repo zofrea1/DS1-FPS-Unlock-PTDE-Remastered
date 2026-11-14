@@ -167,6 +167,7 @@ struct Settings {
     bool filter_shader_constants = false;
     // Depth-stencil and offscreen surfaces made and released every frame are kept and handed out again (surfpool.h).
     bool reuse_surfaces = true;
+    bool skip_unused_reflection = true;  // SkipUnusedReflection (passcull.h)
     // The game's read locks count without kernel calls (rwlock.h).
     bool fast_read_locks = true;
     // Textures go to the graphics card on the loading thread as they are made, not at their first draw (texpreload.h).

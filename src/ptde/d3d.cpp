@@ -4,6 +4,7 @@
 #include "atoc.h"
 #include "shadowbias.h"
 #include "layout.h"
+#include "passcull.h"
 #include "d3dperf.h"
 #include "surfpool.h"
 #include "dxgipresent.h"
@@ -175,6 +176,7 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     d3dperf_reset();
     surfpool_reset();
     resolution_reset();
+    passcull_reset();
     const HRESULT hr = g_reset(device, pp);
     if (SUCCEEDED(hr) && aspect_is_active()) {
         aspect_hook_device(device);
@@ -258,6 +260,19 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         resolution_hook_device(*out);
         if (settings().alpha_to_coverage) {
             atoc_hook_device(*out);
+        }
+        // Last, so the draws it leaves out reach no other hook.
+        // Not beside DSfix: it puts textures back through state blocks, which the watch for reads does not see.
+        if (dsfix_loaded()) {
+            passcull_set_mode(0);
+            if (settings().skip_unused_reflection) {
+                LOG_INFO("SkipUnusedReflection: off while DSfix is loaded");
+            }
+        } else {
+            passcull_set_mode(settings().skip_unused_reflection ? 1 : 0);
+            if (settings().skip_unused_reflection || settings().remote_control) {
+                passcull_hook_device(*out);
+            }
         }
         layout_configure(settings().fix_aspect_ui, settings().ui_scale);
         if ((settings().fix_aspect_ui && aspect_is_active()) || settings().ui_scale < 100) {

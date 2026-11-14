@@ -5,6 +5,7 @@
 #include "lockwatch.h"
 #include "texpreload.h"
 #include "dxgipresent.h"
+#include "passcull.h"
 
 #include "d3dperf.h"
 #include "surfpool.h"
@@ -1057,6 +1058,12 @@ void report() {
     if (!quiet) imports_report(frames);
     texpreload_report();
     if (!quiet) dxgipresent_report();
+    long skipped = 0, drawn = 0, stale = 0;
+    passcull_take_stats(&skipped, &drawn, &stale);
+    if (!quiet && (skipped || stale)) {
+        LOG_INFO("SkipUnusedReflection: the mirrored scene skipped %ld times, drawn %ld times; %ld draws read the "
+                 "kept copy", skipped, drawn, stale);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------

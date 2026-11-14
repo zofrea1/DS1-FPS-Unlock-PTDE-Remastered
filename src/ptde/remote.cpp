@@ -11,6 +11,7 @@
 #include "atoc.h"
 #include "shadowbias.h"
 #include "layout.h"
+#include "passcull.h"
 #include "resolution.h"
 #include "rendermath.h"
 #include "watch.h"
@@ -378,6 +379,8 @@ volatile bool g_shot_requested = false, g_dump_requested = false;
 // shotfb NAME: the frame as the game hands it to the back buffer (the source of its last StretchRect), at the frame
 // buffer's own size: the picture before the scale to the window.
 volatile bool g_shotfb_requested = false;
+volatile bool g_passdump_requested = false;
+std::string g_passdump_name;
 std::string g_shotfb_name;
 volatile LONG g_query_frames = 0;  // log occlusion query results for this many more frames
 std::mutex g_frame_lock;
@@ -553,6 +556,18 @@ HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, H
     if (g_dump_requested) {
         g_dump_requested = false;
         dump_targets(dev, g_dump_name);
+    }
+    if (g_passdump_requested) {
+        g_passdump_requested = false;
+        IDirect3DSurface9* level = nullptr;
+        IDirect3DTexture9* copy = passcull_copy();
+        if (copy && SUCCEEDED(copy->GetSurfaceLevel(0, &level)) && level) {
+            save_surface_png(dev, level, shot_path(g_passdump_name, L".bmp"));
+            level->Release();
+            out("passdump %s: saved (unused for %d frames)", g_passdump_name.c_str(), passcull_unused_frames());
+        } else {
+            out("passdump %s: no copy (unused for %d frames)", g_passdump_name.c_str(), passcull_unused_frames());
+        }
     }
     if (g_query_frames > 0) InterlockedDecrement(&g_query_frames);
     if (g_seq_left > 0 && GetTickCount64() >= g_seq_next) {
@@ -1575,6 +1590,14 @@ void run(const std::string& line) {
         out("fastmath %s %ld: %d sites", t[1].c_str(), num(2, 1), rendermath_set_table(table, num(2, 1) != 0));
     } else if (c == "cull") {
         out("cull %ld: %s", num(1, 1), rendermath_set_cull(num(1, 1) != 0) ? "done" : "not installed");
+    } else if (c == "passdump" && t.size() > 1) {
+        // passdump NAME: the kept copy of the water's mirror scene (passcull 1, after a frame that drew it).
+        g_passdump_name = t[1];
+        g_passdump_requested = true;
+    } else if (c == "passcull") {
+        // passcull [0|1|2]: the water's mirror scene drawn always, skipped while unused, or always skipped.
+        if (t.size() > 1) passcull_set_mode(static_cast<int>(num(1, 1)));
+        out("passcull %d (unused for %d frames)", passcull_mode(), passcull_unused_frames());
     } else if (c == "dxgipace") {
         // dxgipace [0|1|2] [HZ]: paced presenting through DXGI off, on, or waiting for each frame without holding
         // it; HZ = as if the display refreshed at that rate (0 = the real display).
