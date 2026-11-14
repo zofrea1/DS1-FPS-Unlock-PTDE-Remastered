@@ -742,6 +742,14 @@ HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseT
     if (g_capturing) cap("SetTexture %lu %s", static_cast<unsigned long>(stage), texture_text(t).c_str());
     return o_set_texture(dev, stage, t);
 }
+// In a frame capture: every sampler state the game sets (stage, state, value), for working out which of them change
+// anything by the next draw.
+using SetSamplerFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, D3DSAMPLERSTATETYPE, DWORD);
+SetSamplerFn o_set_sampler = nullptr;
+HRESULT WINAPI hk_set_sampler(IDirect3DDevice9* dev, DWORD stage, D3DSAMPLERSTATETYPE type, DWORD value) {
+    if (g_capturing) cap("SS %lu %d %lu", static_cast<unsigned long>(stage), static_cast<int>(type), static_cast<unsigned long>(value));
+    return o_set_sampler(dev, stage, type, value);
+}
 HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
     if (g_capturing && r) cap("SetScissor %ld,%ld-%ld,%ld", r->left, r->top, r->right, r->bottom);
     return o_set_scissor(dev, r);
@@ -1880,6 +1888,7 @@ void remote_hook_device(IDirect3DDevice9* dev) {
     hook(dev, kSetRenderState, o_set_rs, reinterpret_cast<void*>(&hk_set_rs));
     hook(dev, kSetTexture, o_set_texture, reinterpret_cast<void*>(&hk_set_texture));
     hook(dev, kSetScissor, o_set_scissor, reinterpret_cast<void*>(&hk_set_scissor));
+    hook(dev, 69, o_set_sampler, reinterpret_cast<void*>(&hk_set_sampler));
     hook(dev, kDrawPrim, o_draw, reinterpret_cast<void*>(&hk_draw));
     hook(dev, kDrawIdxPrim, o_draw_idx, reinterpret_cast<void*>(&hk_draw_idx));
     hook(dev, kDrawPrimUP, o_draw_up, reinterpret_cast<void*>(&hk_draw_up));
