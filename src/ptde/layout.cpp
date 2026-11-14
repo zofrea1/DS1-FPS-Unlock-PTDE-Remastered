@@ -710,11 +710,16 @@ void dump_draw(IDirect3DDevice9* dev, const void* data, UINT stride, UINT count,
 #define DUMP_DRAW(dev, data, stride, count, box) ((void)0)
 #endif
 
+// Lines too: another player's bar has a white outline drawn as lines, which stayed full size around the shrunk bar
+// while lines counted no vertices here (Steam Deck and PC screenshots, 2026-11-14).
 UINT vertex_count(D3DPRIMITIVETYPE type, UINT prims) {
     switch (type) {
         case D3DPT_TRIANGLELIST: return prims * 3;
         case D3DPT_TRIANGLESTRIP:
         case D3DPT_TRIANGLEFAN: return prims + 2;
+        case D3DPT_LINELIST: return prims * 2;
+        case D3DPT_LINESTRIP: return prims + 1;
+        case D3DPT_POINTLIST: return prims;
         default: return 0;
     }
 }
