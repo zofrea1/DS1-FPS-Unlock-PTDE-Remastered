@@ -166,6 +166,26 @@ void* patch_slot(void* object, int slot, void* replacement) {
 
 }  // namespace
 
+// The side of the shadow map is one number in the game's data (0x12DFF34, 2048). The game reads it when it makes the
+// shadow map (0x100A32B: a packed-depth colour target and its depth), for the viewport of each slice (0xEB4856: with
+// four slices each has a quarter, half the side) and for the half-texel step of the matrix that looks the shadow up
+// (0xF477DB). Everything else works in the map's own 0..1 coordinates, so a larger number gives the same shadows
+// from more texels.
+constexpr uintptr_t kShadowMapSize = 0x012DFF34;
+
+bool shadowmap_set_resolution(int size) {
+    if (size != 4096 && size != 8192) return size == 2048;
+    auto* p = reinterpret_cast<int32_t*>(kShadowMapSize);
+    if (*p != 2048) {
+        LOG_ERROR("ShadowMapResolution: the shadow map size at %08X is %d, not 2048 (another build or mod?). Not "
+                  "changing it.", static_cast<unsigned>(kShadowMapSize), *p);
+        return false;
+    }
+    *p = size;
+    LOG_INFO("ShadowMapResolution: the shadow map is %dx%d (the game's own: 2048x2048)", size, size);
+    return true;
+}
+
 void shadowbias_set(float bias) {
     g_bias = bias < 0.0f ? 0.0f : (bias > 1.0f ? 1.0f : bias);
 }

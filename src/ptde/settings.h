@@ -94,6 +94,8 @@ struct Settings {
     bool fix_aspect_ui = true;
     // The HUD's corner groups at this size, percent (50..100).
     int ui_scale = 100;
+    // The shadow map's side: 2048 (the game's), 4096 or 8192 (shadowbias.h).
+    int shadow_map_resolution = 2048;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.

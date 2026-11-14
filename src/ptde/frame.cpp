@@ -17,6 +17,7 @@
 #include "profile.h"
 #include "remote.h"
 #include "atoc.h"
+#include "shadowbias.h"
 #include "dsfix.h"
 #include "resolution.h"
 #include "script.h"
@@ -481,6 +482,7 @@ bool frame_install(const Settings& settings) {
         }
         // Before the game makes its render targets: its anti-aliasing's sample count (it multisamples only when on).
         atoc_set_msaa_samples(settings.antialiasing_samples);
+        shadowmap_set_resolution(settings.shadow_map_resolution);
         int rw = settings.render_width, rh = settings.render_height;
         if (rw < 0 || rh < 0) {
             // auto: the primary monitor (the game's window or full screen covers it) in the game's own coordinates:
