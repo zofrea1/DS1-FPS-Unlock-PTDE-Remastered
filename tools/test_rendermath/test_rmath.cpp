@@ -577,6 +577,182 @@ static void test_curves() {
     std::printf("keyframe curves: %ld cases\n", cases);
 }
 
+// 0x983400 (the eased keyframe curve) vs ffx_curve4_eased: streams of n 1..8 keys (sorted and finite: increasing,
+// with repeats, sometimes +inf at the end, denormals and zeros of both signs among them), any values, tangent angles
+// below, at and above pi/4 and anything (NaN, inf); times on keys, between, outside, +-inf, denormal. (A NaN time or
+// a -inf key makes the segment fraction NaN, and the original's sqrtf then goes through the C runtime's error handling,
+// which needs the runtime set up; both versions call that same _CIsqrt with the same argument.) out, the stream after,
+// eax/edx/ebx/esi/edi/ebp compared, under x87 precision 24, 53 and 64 bits.
+static uint32_t eased_angle() {
+    const float pi4f = 0.785398185253143310546875f;  // the double at 0x1115B88 is this float exactly
+    switch (rng() % 6) {
+    case 0: return f2u(pi4f);
+    case 1: { const uint32_t u = f2u(pi4f); return (rng() & 1) ? u + 1 + rng() % 3 : u - 1 - rng() % 3; }
+    case 2: return f2u(static_cast<float>(rng() % 1000) / 636.0f);         // 0 .. 1.57
+    case 3: return f2u(-static_cast<float>(rng() % 1000) / 636.0f);
+    default: return rnd_bits();
+    }
+}
+static void test_eased() {
+    static uint32_t buf1[64], buf2[64];
+    const unsigned pcs[3] = {_PC_24, _PC_53, _PC_64};
+    long cases = 0, eased = 0, fast_lanes = 0;
+    for (int pc = 0; pc < 3; ++pc) {
+        unsigned prev = 0;
+        _controlfp_s(&prev, pcs[pc], _MCW_PC);
+        for (int it = 0; it < 200000; ++it) {
+            const int n = 1 + static_cast<int>(rng() % 8);
+            uint32_t* keys = buf1 + 9;  // buf1[8] = n
+            float x = static_cast<float>(static_cast<int>(rng() % 200) - 100) / 8.0f;
+            if (rng() % 8 == 0) x = u2f(rng() & 0x807FFFFFu);  // a denormal or zero to start
+            for (int k = 0; k < n; ++k) {
+                if (k && rng() % 4 == 0) { keys[k] = keys[k - 1]; continue; }
+                const int step = static_cast<int>(rng() % 4);
+                x += step == 0 ? u2f(rng() & 0x007FFFFFu) : step == 1 ? static_cast<float>(rng() % 64) / 1024.0f
+                                                                      : static_cast<float>(rng() % 64) / 16.0f;
+                keys[k] = f2u(x);
+            }
+            if (n > 1 && rng() % 10 == 0) keys[n - 1] = 0x7F800000u;
+            for (int k = 0; k < n; ++k) keys[n + k] = rnd_bits();
+            for (int k = 0; k < 2 * n; ++k) keys[2 * n + k] = eased_angle();
+            for (int k = 0; k < 8; ++k) buf1[k] = rnd_bits();
+            buf1[8] = static_cast<uint32_t>(n);
+            uint32_t t[4];
+            for (int i = 0; i < 4; ++i) {
+                const int a = static_cast<int>(rng() % n);
+                switch (rng() % 6) {
+                case 0: t[i] = keys[a]; break;
+                case 1:
+                case 2: {
+                    const int b = a + 1 < n ? a + 1 : a;
+                    const float lo = u2f(keys[a]), hi = u2f(keys[b]);
+                    const float f = static_cast<float>(rng() % 1001) / 1000.0f;
+                    t[i] = f2u(hi == u2f(0x7F800000u) ? lo + f : lo + (hi - lo) * f);
+                    break;
+                }
+                case 3: t[i] = f2u(u2f(keys[a]) + static_cast<float>(static_cast<int>(rng() % 200) - 100) / 64.0f); break;
+                case 4: t[i] = (rng() & 1) ? 0xFF800000u : 0x7F800000u; break;
+                default: t[i] = rng() % 3 ? f2u(static_cast<float>(static_cast<int>(rng() % 400) - 200) / 4.0f)
+                                          : (rng() & 0x807FFFFFu);
+                }
+                if ((t[i] & 0x7F800000u) == 0x7F800000u && (t[i] & 0x007FFFFFu)) t[i] = 0;  // no NaN times
+                if (u2f(keys[0]) < u2f(t[i]) && u2f(t[i]) < u2f(keys[n - 1])) ++eased;
+            }
+            std::memcpy(buf2, buf1, sizeof(buf1));
+            uint32_t out1[4] = {1, 2, 3, 4}, out2[4] = {1, 2, 3, 4};
+            uint32_t* stream1 = buf1 + 8;
+            uint32_t* stream2 = buf2 + 8;
+            g_curve_fn = 0x983400;
+            call_curve(out1, t, &stream1);
+            uint32_t r1[6];
+            std::memcpy(r1, g_cregs, 24);
+            g_curve_fn = reinterpret_cast<uint32_t>(&ffx_curve4_eased);
+            call_curve(out2, t, &stream2);
+            if (pc == 0) {  // how many lanes the SSE path finishes (no fallback to the x87 code)
+                const uint32_t* kk = keys;
+                for (int i = 0; i < 4; ++i) {
+                    const unsigned csr = _mm_getcsr();
+                    _mm_setcsr(csr & ~0x3Fu);
+                    uint32_t r = 0;
+                    if (eased_lane_ss(kk, kk + n, kk + 2 * n, kk + 3 * n, n, t[i], *reinterpret_cast<const uint32_t*>(0x112D704),
+                                      *reinterpret_cast<const uint32_t*>(0x11D92AC), &r) &&
+                        (_mm_getcsr() & 0x1Du) == 0 && u2f(keys[0]) < u2f(t[i]) && u2f(t[i]) < u2f(keys[n - 1])) {
+                        ++fast_lanes;
+                    }
+                    _mm_setcsr(csr);
+                }
+            }
+            ++cases;
+            if (r1[0] == reinterpret_cast<uint32_t>(out1)) r1[0] = reinterpret_cast<uint32_t>(out2);
+            same(out1, out2, 16, "eased curve out", it);
+            if ((stream1 - buf1) != (stream2 - buf2)) {
+                if (g_fail < 20) std::printf("MISMATCH eased curve stream (iteration %d)\n", it);
+                ++g_fail;
+            }
+            if (std::memcmp(r1, g_cregs, 24) != 0) {
+                if (g_fail < 20) {
+                    std::printf("eased curve registers differ at %d (pc %d): %08X %08X vs %08X %08X\n", it, pc, r1[0],
+                                r1[1], g_cregs[0], g_cregs[1]);
+                }
+                ++g_fail;
+            }
+        }
+        _controlfp_s(&prev, _PC_53, _MCW_PC);
+        std::printf("eased curve, x87 precision %s: %d mismatches so far\n", pc == 0 ? "24" : pc == 1 ? "53" : "64",
+                    g_fail);
+    }
+    std::printf("eased curve: %ld cases (%ld lanes inside the keys, eased; at precision 24, %ld of them finished in SSE)\n",
+                cases, eased, fast_lanes);
+}
+
+// The eased curve at x87 precision 24 (the render thread's, where the SSE path runs) with the data the game has: finite
+// keys spread or bunched (steps down to one ulp), finite values of any size, angles across -pi/2..pi/2 and next to
+// pi/4, times between keys and right next to them (u near 0 and 1).
+static void test_eased_real() {
+    static uint32_t buf1[64], buf2[64];
+    unsigned prev = 0;
+    _controlfp_s(&prev, _PC_24, _MCW_PC);
+    long cases = 0;
+    const int before = g_fail;
+    for (int it = 0; it < 1500000; ++it) {
+        const int n = 2 + static_cast<int>(rng() % 7);
+        uint32_t* keys = buf1 + 9;
+        float x = static_cast<float>(static_cast<int>(rng() % 2000) - 1000) / 64.0f;
+        for (int k = 0; k < n; ++k) {
+            switch (rng() % 4) {
+            case 0: keys[k] = f2u(x) + 1 + rng() % 4; x = u2f(keys[k]); break;  // a few ulps on
+            case 1: x += static_cast<float>(rng() % 100) / 1000.0f + 0.001f; keys[k] = f2u(x); break;
+            default: x += static_cast<float>(rng() % 400) / 50.0f + 0.01f; keys[k] = f2u(x); break;
+            }
+        }
+        for (int k = 0; k < n; ++k) {
+            const float m = (rng() % 4) ? 1.0f : (rng() % 2 ? 1e-3f : 1e6f);
+            keys[n + k] = f2u((static_cast<float>(static_cast<int>(rng() % 20001) - 10000) / 10000.0f) * m);
+        }
+        for (int k = 0; k < 2 * n; ++k) {
+            const uint32_t q = f2u(0.785398185253143310546875f);
+            switch (rng() % 3) {
+            case 0: keys[2 * n + k] = q + static_cast<uint32_t>(static_cast<int>(rng() % 9) - 4); break;
+            default: keys[2 * n + k] = f2u((static_cast<float>(static_cast<int>(rng() % 3141)) - 1570.0f) / 1000.0f); break;
+            }
+        }
+        buf1[8] = static_cast<uint32_t>(n);
+        uint32_t t[4];
+        for (int i = 0; i < 4; ++i) {
+            const int a = static_cast<int>(rng() % (n - 1));
+            const uint32_t lo = keys[a], hi = keys[a + 1];
+            switch (rng() % 4) {
+            case 0: t[i] = lo + 1; break;   // just after a key
+            case 1: t[i] = hi - 1; break;   // just before the next
+            default: {
+                const float f = static_cast<float>(rng() % 100001) / 100000.0f;
+                t[i] = f2u(u2f(lo) + (u2f(hi) - u2f(lo)) * f);
+            }
+            }
+            if ((t[i] & 0x7F800000u) == 0x7F800000u) t[i] = lo;  // one ulp off +-0 or the top: no NaN or inf times
+        }
+        std::memcpy(buf2, buf1, sizeof(buf1));
+        uint32_t out1[4] = {1, 2, 3, 4}, out2[4] = {1, 2, 3, 4};
+        uint32_t* stream1 = buf1 + 8;
+        uint32_t* stream2 = buf2 + 8;
+        g_curve_fn = 0x983400;
+        call_curve(out1, t, &stream1);
+        uint32_t r1[6];
+        std::memcpy(r1, g_cregs, 24);
+        g_curve_fn = reinterpret_cast<uint32_t>(&ffx_curve4_eased);
+        call_curve(out2, t, &stream2);
+        ++cases;
+        if (r1[0] == reinterpret_cast<uint32_t>(out1)) r1[0] = reinterpret_cast<uint32_t>(out2);
+        same(out1, out2, 16, "eased curve (game data) out", it);
+        if (std::memcmp(r1, g_cregs, 24) != 0 || (stream1 - buf1) != (stream2 - buf2)) {
+            if (g_fail < 20) std::printf("eased curve (game data): registers or stream differ at %d\n", it);
+            ++g_fail;
+        }
+    }
+    _controlfp_s(&prev, _PC_53, _MCW_PC);
+    std::printf("eased curve, game data at x87 precision 24: %ld cases, %d mismatches\n", cases, g_fail - before);
+}
+
 // The effects glue rewrites (0x9AF7F0, 0x9B5DC0, 0x9B18A0, 0x9B4C60) vs ffx_mat3_madd, ffx_sincos_poly,
 // ffx_pack_colors, ffx_rows_transposed: random inputs, every output byte and eax/edx (pointers as offsets) compared,
 // and ebx/esi/edi/ebp kept.
@@ -1103,6 +1279,7 @@ static void test_cisqrt() {
 
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "child") != 0) return run_parent(argv[0]);
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf("image mapped (child)\n");
     probe_orders(0);
     probe_orders(1);
@@ -1308,6 +1485,10 @@ int main(int argc, char** argv) {
     for (int pass = 0; pass < 2; ++pass) {
         g_nan_heavy = pass == 1;
         test_curves();
+        if (!g_nan_heavy) {
+            test_eased();
+            test_eased_real();
+        }
         test_glue();
         test_box();
         test_arrays();

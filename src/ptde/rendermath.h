@@ -45,5 +45,5 @@ int rendermath_set_table(int table, bool on);
 // RemoteControl `fastmath at ADDR 0|1`: one site (by its game address) off or on; returns sites switched (0 or 1).
 int rendermath_set_site(uintptr_t at, bool on);
 // RemoteControl `fastmath stats`: calls and particles through the particle quad loop, and calls and groups of four
-// through the particle update loop, since the last query.
-void rendermath_stats(long* calls, long* particles, long* update_calls, long* update_groups);
+// through the particle update loop, and calls of the eased keyframe curve, since the last query.
+void rendermath_stats(long* calls, long* particles, long* update_calls, long* update_groups, long* eased_calls);

@@ -1510,10 +1510,11 @@ void run(const std::string& line) {
         limiter_set_fps(static_cast<int>(num(1, 0)));
         out("fps %ld", num(1, 0));
     } else if (c == "fastmath" && t.size() > 1 && t[1] == "stats") {
-        long calls = 0, particles = 0, ucalls = 0, groups = 0;
-        rendermath_stats(&calls, &particles, &ucalls, &groups);
-        out("fastmath stats: particle quad loop %ld calls, %ld particles; update loop %ld calls, %ld groups of four", calls,
-            particles, ucalls, groups);
+        long calls = 0, particles = 0, ucalls = 0, groups = 0, eased = 0;
+        rendermath_stats(&calls, &particles, &ucalls, &groups, &eased);
+        out("fastmath stats: particle quad loop %ld calls, %ld particles; update loop %ld calls, %ld groups of four; "
+            "eased curve %ld calls",
+            calls, particles, ucalls, groups, eased);
     } else if (c == "fastmath" && t.size() > 3 && t[1] == "at") {
         const auto at = static_cast<uintptr_t>(std::strtoul(t[2].c_str(), nullptr, 16));
         out("fastmath at %X %ld: %d sites", static_cast<unsigned>(at), num(3, 1), rendermath_set_site(at, num(3, 1) != 0));

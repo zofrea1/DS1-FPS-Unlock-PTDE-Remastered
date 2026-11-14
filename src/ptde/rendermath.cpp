@@ -819,6 +819,335 @@ uint64_t __cdecl ffx_curve1(uint32_t* out, const uint32_t* t, uintptr_t* stream)
     return reinterpret_cast<uintptr_t>(out) | static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out)) << 32;
 }
 
+// 0x983400, the eased keyframe curve (four lanes; the Kiln of the First Flame's ash and embers lean on it): the
+// stream holds n, then the keys, the values and two tangent angles a and b per key. Per lane: the time through the
+// x87 stack; at or before key 0 the first value, at or after the last key the last value; else the segment j (the
+// first key after the time) and u = (t - k[j]) / (k[j+1] - k[j]). Each angle against pi/4 (the double at 0x1115B88)
+// picks an ease of u: the cubic Hermite 0x9E3510 (0, 1.5, 1, 0.7, u) or (0, 0.7, 1, 1.5, u) (its basis terms rounded
+// to floats), a quarter circle 1 - (h - 1)^2 through the engine's sqrtf (0x982160 -> 0x419980 -> _CIsqrt), or the
+// same mirrored (1 - ... of 1 - h); blended with u by the angle (a / pi4, or (a - pi4) / pi4 above pi/4); the two
+// ends interpolated by u, and the values by that. Debug build: every intermediate stored to the frame and read back,
+// the Hermite and sqrtf with their debug frames and stack checks, the arguments pushed through the x87 stack. Here the
+// same x87 instructions in the same order with the same float stores, so the same results at any x87 precision; the
+// Hermite inline, _CIsqrt called as the original calls it; the comparisons as SSE compares of the same values (the
+// same outcomes, NaN included). eax = out, edx = lane 3, as the original leaves them.
+namespace {
+// 0x9E3510 (0, m0, 1, m1, u)
+uint32_t eased_hermite(uint32_t u, uint32_t m0, uint32_t m1) {
+    const uint32_t p0 = 0, p1 = 0x3F800000u;
+    uint32_t t2, t3, h00, h01, h10, h11, r;
+    __asm {
+        fld dword ptr [u]
+        fmul dword ptr [u]
+        fstp dword ptr [t2]
+        fld dword ptr [t2]
+        fmul dword ptr [u]
+        fstp dword ptr [t3]
+        fld dword ptr [t3]
+        fmul qword ptr ds:[0x11E7DE0]
+        fld dword ptr [t2]
+        fmul qword ptr ds:[0x11E7F20]
+        _emit 0xDE  // fsubp: st(1) - st
+        _emit 0xE9
+        fadd qword ptr ds:[0x11E7C90]
+        fstp dword ptr [h00]
+        fld dword ptr [t3]
+        fmul qword ptr ds:[0x11E8318]
+        fld dword ptr [t2]
+        fmul qword ptr ds:[0x11E7F20]
+        _emit 0xDE  // faddp
+        _emit 0xC1
+        fstp dword ptr [h01]
+        fld dword ptr [t2]
+        fmul qword ptr ds:[0x11E7DE0]
+        fsubr dword ptr [t3]
+        fadd dword ptr [u]
+        fstp dword ptr [h10]
+        fld dword ptr [t3]
+        fsub dword ptr [t2]
+        fstp dword ptr [h11]
+        fld dword ptr [h00]
+        fmul dword ptr [p0]
+        fld dword ptr [h01]
+        fmul dword ptr [p1]
+        _emit 0xDE  // faddp
+        _emit 0xC1
+        fld dword ptr [h10]
+        fmul dword ptr [m0]
+        _emit 0xDE  // faddp
+        _emit 0xC1
+        fld dword ptr [h11]
+        fmul dword ptr [m1]
+        _emit 0xDE  // faddp
+        _emit 0xC1
+        fstp dword ptr [r]
+    }
+    return r;
+}
+
+// sqrtf(1 - (x - 1)^2) as the original computes it: the square in x87 with 1 the double at 0x11E7C90, rounded to a
+// float, then 0x982160 (the float through the x87 stack, _CIsqrt, the result rounded to a float)
+uint32_t eased_circle(uint32_t x) {
+    uint32_t q, g;
+    __asm {
+        fld dword ptr [x]
+        fsub qword ptr ds:[0x11E7C90]
+        fld dword ptr [x]
+        fsub qword ptr ds:[0x11E7C90]
+        _emit 0xDE  // fmulp
+        _emit 0xC9
+        fld1
+        _emit 0xDE  // fsubrp: st - st(1)
+        _emit 0xE1
+        fstp dword ptr [q]
+        fld dword ptr [q]
+        mov eax, 0xAC1800
+        call eax
+        fstp dword ptr [g]
+    }
+    return g;
+}
+
+// 1 - x (x a float), rounded to a float
+uint32_t eased_flip(uint32_t x) {
+    uint32_t r;
+    __asm {
+        fld dword ptr [x]
+        fld1
+        _emit 0xDE  // fsubrp: st - st(1)
+        _emit 0xE1
+        fstp dword ptr [r]
+    }
+    return r;
+}
+
+// (x - pi4) / pi4 * (p - q) + q
+uint32_t eased_mix_above(uint32_t x, uint32_t p, uint32_t q) {
+    uint32_t r;
+    __asm {
+        fld dword ptr [x]
+        fsub qword ptr ds:[0x1115B88]
+        fdiv qword ptr ds:[0x1115B88]
+        fld dword ptr [p]
+        fsub dword ptr [q]
+        _emit 0xDE  // fmulp
+        _emit 0xC9
+        fadd dword ptr [q]
+        fstp dword ptr [r]
+    }
+    return r;
+}
+
+// x / pi4 * (p - q) + q
+uint32_t eased_mix_below(uint32_t x, uint32_t p, uint32_t q) {
+    uint32_t r;
+    __asm {
+        fld dword ptr [x]
+        fdiv qword ptr ds:[0x1115B88]
+        fld dword ptr [p]
+        fsub dword ptr [q]
+        _emit 0xDE  // fmulp
+        _emit 0xC9
+        fadd dword ptr [q]
+        fstp dword ptr [r]
+    }
+    return r;
+}
+
+uint32_t eased_lane(const uint32_t* k, const uint32_t* v, const uint32_t* a_in, const uint32_t* b_in, int n,
+                    uint32_t time, uint32_t m15, uint32_t m07) {
+    const uint32_t tq = x87_pass(time);
+    const float tf = bits_f(tq);
+    if (bits_f(k[0]) >= tf) return x87_pass(v[0]);
+    if (bits_f(k[n - 1]) <= tf) return x87_pass(v[n - 1]);
+    int j = 0;
+    while (j < n - 1 && !(bits_f(k[j + 1]) >= tf)) ++j;
+    const uint32_t* k0 = k + j;
+    const uint32_t* k1 = k + j + 1;
+    uint32_t u;
+    __asm {
+        mov eax, k0
+        mov ecx, k1
+        fld dword ptr [tq]
+        fsub dword ptr [eax]
+        fld dword ptr [ecx]
+        fsub dword ptr [eax]
+        _emit 0xDE  // fdivp: st(1) / st
+        _emit 0xF9
+        fstp dword ptr [u]
+    }
+    const uint32_t v0 = x87_pass(v[j]), v1 = x87_pass(v[j + 1]);
+    const uint32_t a = x87_pass(a_in[j]), b = x87_pass(b_in[j]);
+    const double pi4 = *reinterpret_cast<const double*>(0x1115B88);
+    uint32_t e1, e2;
+    if (static_cast<double>(bits_f(a)) > pi4) {
+        const uint32_t g = eased_circle(eased_hermite(u, m15, m07));
+        e1 = eased_mix_above(a, g, u);
+        if (static_cast<double>(bits_f(b)) <= pi4) {
+            e2 = eased_mix_below(b, u, g);
+        } else {
+            const uint32_t m = eased_flip(eased_circle(eased_flip(eased_hermite(u, m07, m15))));
+            e2 = eased_mix_above(b, m, u);
+        }
+    } else {
+        const uint32_t m = eased_flip(eased_circle(eased_flip(eased_hermite(u, m07, m15))));
+        e1 = eased_mix_below(a, u, m);
+        if (static_cast<double>(bits_f(b)) > pi4) {
+            e2 = eased_mix_above(b, m, u);
+        } else {
+            const uint32_t g = eased_circle(eased_hermite(u, m15, m07));
+            e2 = eased_mix_below(b, u, g);
+        }
+    }
+    uint32_t w, res;
+    __asm {
+        fld dword ptr [e2]
+        fsub dword ptr [e1]
+        fmul dword ptr [u]
+        fadd dword ptr [e1]
+        fstp dword ptr [w]
+        fld dword ptr [w]
+        fld1
+        _emit 0xDE  // fsubrp: st - st(1)
+        _emit 0xE1
+        fmul dword ptr [v0]
+        fld dword ptr [w]
+        fmul dword ptr [v1]
+        _emit 0xDE  // faddp
+        _emit 0xC1
+        fstp dword ptr [res]
+    }
+    return res;
+}
+// The render thread's case: x87 precision 24 bits, rounding to nearest, its exceptions masked (Direct3D's 0x07F), and
+// SSE rounding to nearest without flush-to-zero or denormals-are-zero, its exceptions masked. Each x87 operation then
+// rounds to a float's 24 bits, every constant here is a float exactly (pi/4 at 0x1115B88 included) and every stored
+// intermediate is a float already, so the same operations in the same order in single-precision SSE give the same
+// results, as long as nothing leaves the float range (an x87 register has a wider exponent), no NaN is involved (the
+// two pick NaN payloads differently) and the square roots' arguments are not negative (the runtime's error path; with
+// the segment found as above, u is in (0, 1] and they are not). The caller clears the SSE flags and redoes any lane
+// that raised invalid, divide-by-zero, overflow or underflow, or that returns false here (a NaN or infinite input),
+// with the x87 code above. The square root: _CIsqrt's fsqrt at 24 bits, then stored as a float: sqrtss.
+inline __m128 eased_ss(uint32_t bits) { return _mm_castsi128_ps(_mm_cvtsi32_si128(static_cast<int>(bits))); }
+
+inline bool eased_finite(uint32_t bits) { return (bits & 0x7F800000u) != 0x7F800000u; }
+
+inline __m128 eased_hermite_ss(__m128 u, __m128 m0, __m128 m1) {
+    const __m128 one = _mm_set_ss(1.0f), two = _mm_set_ss(2.0f), three = _mm_set_ss(3.0f), mtwo = _mm_set_ss(-2.0f);
+    const __m128 t2 = _mm_mul_ss(u, u);
+    const __m128 t3 = _mm_mul_ss(t2, u);
+    const __m128 h00 = _mm_add_ss(_mm_sub_ss(_mm_mul_ss(t3, two), _mm_mul_ss(t2, three)), one);
+    const __m128 h01 = _mm_add_ss(_mm_mul_ss(t3, mtwo), _mm_mul_ss(t2, three));
+    const __m128 h10 = _mm_add_ss(_mm_sub_ss(t3, _mm_mul_ss(t2, two)), u);
+    const __m128 h11 = _mm_sub_ss(t3, t2);
+    __m128 r = _mm_add_ss(_mm_mul_ss(h00, _mm_setzero_ps()), _mm_mul_ss(h01, one));
+    r = _mm_add_ss(r, _mm_mul_ss(h10, m0));
+    return _mm_add_ss(r, _mm_mul_ss(h11, m1));
+}
+
+inline __m128 eased_circle_ss(__m128 x) {
+    const __m128 one = _mm_set_ss(1.0f);
+    const __m128 d = _mm_sub_ss(x, one);
+    return _mm_sqrt_ss(_mm_sub_ss(one, _mm_mul_ss(d, d)));
+}
+
+inline __m128 eased_flip_ss(__m128 x) { return _mm_sub_ss(_mm_set_ss(1.0f), x); }
+
+inline __m128 eased_mix_above_ss(__m128 x, __m128 p, __m128 q, __m128 pi4) {
+    return _mm_add_ss(_mm_mul_ss(_mm_div_ss(_mm_sub_ss(x, pi4), pi4), _mm_sub_ss(p, q)), q);
+}
+
+inline __m128 eased_mix_below_ss(__m128 x, __m128 p, __m128 q, __m128 pi4) {
+    return _mm_add_ss(_mm_mul_ss(_mm_div_ss(x, pi4), _mm_sub_ss(p, q)), q);
+}
+
+bool eased_lane_ss(const uint32_t* k, const uint32_t* v, const uint32_t* a_in, const uint32_t* b_in, int n,
+                   uint32_t time, uint32_t m15, uint32_t m07, uint32_t* res) {
+    const uint32_t tq = x87_pass(time);
+    const float tf = bits_f(tq);
+    if (bits_f(k[0]) >= tf) {
+        *res = x87_pass(v[0]);
+        return true;
+    }
+    if (bits_f(k[n - 1]) <= tf) {
+        *res = x87_pass(v[n - 1]);
+        return true;
+    }
+    int j = 0;
+    while (j < n - 1 && !(bits_f(k[j + 1]) >= tf)) ++j;
+    const uint32_t k0 = k[j], k1 = k[j + 1], v0 = v[j], v1 = v[j + 1], ab = a_in[j], bb = b_in[j];
+    if (!eased_finite(tq) || !eased_finite(k0) || !eased_finite(k1) || !eased_finite(v0) || !eased_finite(v1) ||
+        !eased_finite(ab) || !eased_finite(bb)) {
+        return false;
+    }
+    const __m128 pi4 = eased_ss(0x3F490FDBu);  // the double at 0x1115B88 (checked at install) is this float exactly
+    const __m128 t = eased_ss(tq), u = _mm_div_ss(_mm_sub_ss(t, eased_ss(k0)), _mm_sub_ss(eased_ss(k1), eased_ss(k0)));
+    const __m128 a = eased_ss(ab), b = eased_ss(bb), mm15 = eased_ss(m15), mm07 = eased_ss(m07);
+    const double pi4d = *reinterpret_cast<const double*>(0x1115B88);
+    __m128 e1, e2;
+    if (static_cast<double>(bits_f(ab)) > pi4d) {
+        const __m128 g = eased_circle_ss(eased_hermite_ss(u, mm15, mm07));
+        e1 = eased_mix_above_ss(a, g, u, pi4);
+        if (static_cast<double>(bits_f(bb)) <= pi4d) {
+            e2 = eased_mix_below_ss(b, u, g, pi4);
+        } else {
+            const __m128 m = eased_flip_ss(eased_circle_ss(eased_flip_ss(eased_hermite_ss(u, mm07, mm15))));
+            e2 = eased_mix_above_ss(b, m, u, pi4);
+        }
+    } else {
+        const __m128 m = eased_flip_ss(eased_circle_ss(eased_flip_ss(eased_hermite_ss(u, mm07, mm15))));
+        e1 = eased_mix_below_ss(a, u, m, pi4);
+        if (static_cast<double>(bits_f(bb)) > pi4d) {
+            e2 = eased_mix_above_ss(b, m, u, pi4);
+        } else {
+            const __m128 g = eased_circle_ss(eased_hermite_ss(u, mm15, mm07));
+            e2 = eased_mix_below_ss(b, u, g, pi4);
+        }
+    }
+    const __m128 w = _mm_add_ss(_mm_mul_ss(_mm_sub_ss(e2, e1), u), e1);
+    const __m128 r = _mm_add_ss(_mm_mul_ss(eased_flip_ss(w), eased_ss(v0)), _mm_mul_ss(w, eased_ss(v1)));
+    *res = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_castps_si128(r)));
+    return true;
+}
+}  // namespace
+
+volatile long g_eased_calls = 0;
+
+uint64_t __cdecl ffx_curve4_eased(uint32_t* out, const uint32_t* t, uintptr_t* stream) {
+    ++g_eased_calls;
+    const uintptr_t base = *stream;
+    const int n = *reinterpret_cast<const int*>(base);
+    const uintptr_t keys = base + 4;
+    const uintptr_t vals = keys + 4u * static_cast<uint32_t>(n);
+    const uintptr_t a = vals + 4u * static_cast<uint32_t>(n);
+    const uintptr_t b = a + 4u * static_cast<uint32_t>(n);
+    *stream = b + 4u * static_cast<uint32_t>(n);
+    alignas(16) uint32_t tl[4], res[4];
+    std::memcpy(tl, t, 16);
+    const uint32_t m15 = *reinterpret_cast<const uint32_t*>(0x112D704);
+    const uint32_t m07 = *reinterpret_cast<const uint32_t*>(0x11D92AC);
+    const auto* kp = reinterpret_cast<const uint32_t*>(keys);
+    const auto* vp = reinterpret_cast<const uint32_t*>(vals);
+    const auto* ap = reinterpret_cast<const uint32_t*>(a);
+    const auto* bp = reinterpret_cast<const uint32_t*>(b);
+    uint16_t cw = 0;
+    __asm fnstcw word ptr [cw]
+    const unsigned csr = _mm_getcsr();
+    // x87: precision 24, round to nearest, all masked; SSE: round to nearest, no FTZ/DAZ, all masked
+    const bool fast = (cw & 0x0F3Fu) == 0x003Fu && (csr & 0xFFC0u) == 0x1F80u;
+    if (fast) _mm_setcsr(csr & ~0x3Fu);
+    for (int i = 0; i < 4; ++i) {
+        if (fast && eased_lane_ss(kp, vp, ap, bp, n, tl[i], m15, m07, &res[i])) {
+            if ((_mm_getcsr() & 0x1Du) == 0) continue;  // no invalid, divide-by-zero, overflow or underflow
+            _mm_setcsr(csr & ~0x3Fu);
+        }
+        res[i] = eased_lane(kp, vp, ap, bp, n, tl[i], m15, m07);
+    }
+    if (fast) _mm_setcsr(csr);
+    std::memcpy(out, res, 16);
+    return reinterpret_cast<uintptr_t>(out) | static_cast<uint64_t>(res[3]) << 32;
+}
+
 // More of the effects library's debug-build glue, each the same helper calls in the same order with the same inputs,
 // without the debug frame and the two or three stack copies of every intermediate result:
 //  0x9AF7F0 (out0, out1, out2, a, b, c, m): three rows of a*m[k] + b*m[k+3] + c*m[k+6] + m[k+9] (rows of 16 bytes),
@@ -1737,6 +2066,19 @@ const uint8_t kFlushVs[] = {0x83, 0xEC, 0x14, 0x53, 0x55, 0x56, 0x57, 0x8B, 0x7C
 const uint8_t kFlushPs[] = {0x83, 0xEC, 0x14, 0x53, 0x55, 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x28, 0x33, 0xD2, 0x8D, 0x47, 0x20, 0x33, 0xDB, 0x8B, 0xCF, 0x2B, 0xC7, 0x89, 0x54, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x89, 0x44, 0x24, 0x18, 0xEB, 0x04, 0x8B, 0x44, 0x24, 0x18, 0x8B, 0x31, 0x8B, 0x04, 0x08, 0x8B, 0xEE, 0x23, 0xE8, 0x89, 0x6C, 0x24, 0x1C, 0x74, 0x6A, 0x8B, 0x7C, 0x24, 0x10, 0xF7, 0xD0, 0x23, 0xC6, 0xC1, 0xE7, 0x05, 0x8B, 0xF3, 0x89, 0x7C, 0x24, 0x20, 0x33, 0xED, 0xC1, 0xE6, 0x04, 0x89, 0x01, 0xC1, 0xE7, 0x04, 0x8B, 0xCD, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xD3, 0xE8, 0x8B, 0x4C, 0x24, 0x1C, 0x85, 0xC1, 0x74, 0x10, 0x85, 0xD2, 0x75, 0x09, 0x8B, 0x44, 0x24, 0x20, 0x8D, 0x1C, 0x28, 0x8B, 0xF7, 0x42, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x1F, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8B, 0x54, 0x24, 0x2C, 0x8D, 0x54, 0x16, 0x40, 0x52, 0x53, 0x50, 0x8B, 0x81, 0xB4, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x45, 0x83, 0xC7, 0x10, 0x83, 0xFD, 0x20, 0x7C, 0xB3, 0xEB, 0x23, 0x85, 0xD2, 0x74, 0x27, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0xB4, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x33, 0xD2, 0x8B, 0x7C, 0x24, 0x28, 0x8B, 0x4C, 0x24, 0x14, 0x8B, 0x44, 0x24, 0x10, 0x40, 0x83, 0xC1, 0x04, 0x83, 0xF8, 0x08, 0x89, 0x44, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x14, 0x0F, 0x8C, 0x3F, 0xFF, 0xFF, 0xFF, 0x85, 0xD2, 0x74, 0x1D, 0x8B, 0x4C, 0x24, 0x2C, 0x8B, 0x41, 0x10, 0x8B, 0x08, 0x52, 0x8D, 0x53, 0x04, 0xC1, 0xE2, 0x04, 0x03, 0xD7, 0x52, 0x53, 0x50, 0x8B, 0x81, 0xB4, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0x5F, 0x5E, 0x5D, 0x5B, 0x83, 0xC4, 0x14, 0xC2, 0x08, 0x00};
 // 0x982C30 and 0x9817B0 up to their debug fill's count (FastEffects zeroes it); the rest by hash
 const uint8_t kCurve4Head[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0xC0, 0x03, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0x40, 0xFC, 0xFF, 0xFF, 0xB9};
+const uint8_t kEasedHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0xE0, 0x00, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0x20, 0xFF, 0xFF, 0xFF, 0xB9};
+// what the eased curve's replacement does inline or reads directly: 0x9E3510 (from +16 by hash), 0x982160 and 0x419980
+// whole, and its constants
+const uint8_t kHermiteHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x1C, 0xB8, 0xCC, 0xCC, 0xCC, 0xCC, 0x89, 0x45, 0xE4, 0x89, 0x45};
+const uint8_t kSqrtfWrap[] = {0x55, 0x8B, 0xEC, 0x51, 0xD9, 0x45, 0x08, 0xD9, 0x1C, 0x24, 0xE8, 0x11, 0x78, 0xA9, 0xFF, 0x83, 0xC4, 0x04, 0x3B, 0xEC, 0xE8, 0xFC, 0x48, 0x14, 0x00, 0x5D, 0xC3};
+const uint8_t kSqrtf[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x83, 0xEC, 0x08, 0xD9, 0x45, 0x08, 0xE8, 0x6F, 0x7E, 0x6A, 0x00, 0xD9, 0x5C, 0x24, 0x04, 0xD9, 0x44, 0x24, 0x04, 0x8B, 0xE5, 0x5D, 0xC3};
+const uint8_t kEasedK1115B88[] = {0x00, 0x00, 0x00, 0x60, 0xFB, 0x21, 0xE9, 0x3F};  // pi / 4 (double)
+const uint8_t kEasedK11E7C90[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x3F};  // 1 (double)
+const uint8_t kEasedK11E7DE0[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40};  // 2 (double)
+const uint8_t kEasedK11E7F20[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x40};  // 3 (double)
+const uint8_t kEasedK11E8318[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0};  // -2 (double)
+const uint8_t kEasedK11D92AC[] = {0x33, 0x33, 0x33, 0x3F};  // 0.7 (float)
+const uint8_t kEasedK112D704[] = {0x00, 0x00, 0xC0, 0x3F};  // 1.5 (float)
 const uint8_t kCurve1Head[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x04, 0x01, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0xFC, 0xFE, 0xFF, 0xFF, 0xB9};
 // 0x9AF7F0, 0x9B5DC0, 0x9B18A0 and 0x9B4C60 up to their debug fill's count; the rest by hash
 const uint8_t kMatMaddHead[] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08, 0x83, 0xE4, 0xF0, 0x83, 0xC4, 0x04, 0x55, 0x8B, 0x6B, 0x04, 0x89, 0x6C, 0x24, 0x04, 0x8B, 0xEC, 0x81, 0xEC, 0x90, 0x01, 0x00, 0x00, 0x57, 0x8D, 0xBD, 0x70, 0xFE, 0xFF, 0xFF, 0xB9};
@@ -2019,6 +2361,18 @@ const Site kFfxSites[] = {
     {"particle update", 0xA4D420, kUpdateHead, sizeof(kUpdateHead), nullptr, 0, 0, nullptr, 0x79E35490u, 60, 10098},
     {"particle update loop", 0xA4DEE8, kUpdatePreLoop, sizeof(kUpdatePreLoop), nullptr, 0, 0,
      reinterpret_cast<const void*>(&ffx_update_loop_entry)},
+    {"eased keyframe curve (four lanes)", 0x983400, kEasedHead, sizeof(kEasedHead), nullptr, 0, 0,
+     reinterpret_cast<const void*>(&ffx_curve4_eased), 0x90B2E845u, 40, 1305},
+    {"eased curve's Hermite", 0x9E3510, kHermiteHead, sizeof(kHermiteHead), nullptr, 0, 0, nullptr, 0x6D7240C8u, 16, 153},
+    {"eased curve's sqrtf", 0x982160, kSqrtfWrap, sizeof(kSqrtfWrap), nullptr, 0, 0, nullptr},
+    {"engine's sqrtf", 0x419980, kSqrtf, sizeof(kSqrtf), nullptr, 0, 0, nullptr},
+    {"eased curve constant pi / 4 (double)", 0x1115B88, kEasedK1115B88, sizeof(kEasedK1115B88), nullptr, 0, 0, nullptr},
+    {"eased curve constant 1 (double)", 0x11E7C90, kEasedK11E7C90, sizeof(kEasedK11E7C90), nullptr, 0, 0, nullptr},
+    {"eased curve constant 2 (double)", 0x11E7DE0, kEasedK11E7DE0, sizeof(kEasedK11E7DE0), nullptr, 0, 0, nullptr},
+    {"eased curve constant 3 (double)", 0x11E7F20, kEasedK11E7F20, sizeof(kEasedK11E7F20), nullptr, 0, 0, nullptr},
+    {"eased curve constant -2 (double)", 0x11E8318, kEasedK11E8318, sizeof(kEasedK11E8318), nullptr, 0, 0, nullptr},
+    {"eased curve constant 0.7 (float)", 0x11D92AC, kEasedK11D92AC, sizeof(kEasedK11D92AC), nullptr, 0, 0, nullptr},
+    {"eased curve constant 1.5 (float)", 0x112D704, kEasedK112D704, sizeof(kEasedK112D704), nullptr, 0, 0, nullptr},
 };
 
 bool matches(const Site& s) {
@@ -2298,13 +2652,15 @@ bool switch_site(const Saved& sv, const void* target, bool on) {
 }
 }  // namespace
 
-// RemoteControl `fastmath stats`: calls and particles through the particle quad loop since the last call.
-void rendermath_stats(long* calls, long* particles, long* update_calls, long* update_groups) {
+// RemoteControl `fastmath stats`: calls and particles through the particle quad loop, the update loop's calls and
+// groups, and the eased curve's calls, since the last call.
+void rendermath_stats(long* calls, long* particles, long* update_calls, long* update_groups, long* eased_calls) {
     *calls = g_ploop_calls;
     *particles = g_ploop_iters;
     *update_calls = g_a4_calls;
     *update_groups = g_a4_iters;
-    g_ploop_calls = g_ploop_iters = g_a4_calls = g_a4_iters = 0;
+    *eased_calls = g_eased_calls;
+    g_ploop_calls = g_ploop_iters = g_a4_calls = g_a4_iters = g_eased_calls = 0;
 }
 
 // RemoteControl `fastmath at ADDR 0|1`: the one site at ADDR, as rendermath_set_table.
