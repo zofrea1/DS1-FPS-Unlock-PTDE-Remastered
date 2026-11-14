@@ -118,15 +118,22 @@ DWORD WINAPI watch_main(void*) {
         return 0;
     }
     LOG_INFO("ScanWatch: waiting on the vertical blanks of %s (the primary display) to see when it refreshes", g_display);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     LONGLONG last = 0;
     for (;;) {
+        const LONGLONG before = now_qpc();
         if (FAILED(out->WaitForVBlank())) {
             Sleep(5);
             last = 0;
             continue;
         }
         const LONGLONG now = now_qpc();
+        // A display that sleeps (or is not driven) answers at once: no blanks to count, and no spinning.
+        if (now - before < g_freq / 4000) {
+            Sleep(5);
+            last = 0;
+            continue;
+        }
         const LONGLONG flip = g_last_flip.load();
         std::lock_guard<std::mutex> g(g_lock);
         if (last && g_gaps < kMax) g_gap_us[g_gaps++] = to_us(now - last);

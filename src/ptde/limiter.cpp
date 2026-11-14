@@ -123,9 +123,10 @@ void wait_for_slot() {
     }
     ++g_index;
     const LONGLONG upcoming = g_origin + (g_index * g_freq) / g_fps;
-    // A hitch leaves the old schedule in the past. The following frame starts a fresh interval from now, so the
-    // limiter does not skip waits trying to repay the missed time.
-    if (upcoming <= now.QuadPart) {
+    // A frame more than half a step late (or a hitch) leaves the old schedule behind: the following frame starts a
+    // fresh step from now. Kept, the next frame came early to make up the time (a 2.2 ms step after a late one at a
+    // 225 cap), the world moved a short step and the display could not show it any sooner.
+    if (upcoming <= now.QuadPart || now.QuadPart - target > g_freq / (2 * g_fps)) {
         g_origin = now.QuadPart;
         g_index = 1;
     }
