@@ -893,7 +893,7 @@ struct DofHr {
     IDirect3DSurface9* surf[6] = {};
     UINT hw = 0, hh = 0, qw = 0, qh = 0;
     bool failed = false;
-    bool logged = false;
+    UINT logged_w = 0;  // the level size last logged
 };
 DofHr g_dofhr;
 enum { kHrA, kHrL1, kHrL2, kHrQ, kHrQ2, kHrL3, kHrCount };
@@ -1100,8 +1100,8 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
     o_set_ps(dev, bound);
     if (bound) bound->Release();
     scene->Release();
-    if (!g_dofhr.logged) {
-        g_dofhr.logged = true;
+    if (g_dofhr.logged_w != g_dofhr.hw) {
+        g_dofhr.logged_w = g_dofhr.hw;
         LOG_INFO("Resolution: the depth of field's blur levels are made at %ux%u and %ux%u from the %ux%u scene, with "
                  "the game's widths (in place of its 512x360 and 256x180)", g_dofhr.hw, g_dofhr.hh, g_dofhr.qw,
                  g_dofhr.qh, sd.Width, sd.Height);
