@@ -365,12 +365,30 @@ void add_anchor(float x, float y, uint8_t kind) {
     }
 }
 
+#if FPSU_DIAGNOSTICS
+std::atomic<int> g_dump_pending{0};  // a boss gauge came up: dump its frame's layout draws (read_anchors)
+#endif
+
 // The world marks' places (see the top of this file).
 void read_anchors() {
     g_anchor_count = 0;
     __try {
         const uintptr_t mm = *reinterpret_cast<const uintptr_t*>(kMenuManVar);
         if (mm < 0x10000) return;
+#if FPSU_DIAGNOSTICS
+        // A boss's health bar (its handle at MenuMan+0xF64 / +0xF78, -1 none) lies at the bottom near the equipment
+        // slots: the first time one comes up with UIScale on, the layout's draws are logged (where its name and ends
+        // are has not been seen yet).
+        static int boss_dumps = 0;
+        static bool boss_was = false;
+        const bool boss = *reinterpret_cast<const uint32_t*>(mm + 0xF64) != 0xFFFFFFFFu ||
+                          *reinterpret_cast<const uint32_t*>(mm + 0xF78) != 0xFFFFFFFFu;
+        if (boss && !boss_was && boss_dumps < 2 && g_scale < 0.999f) {
+            ++boss_dumps;
+            g_dump_pending = 1;
+        }
+        boss_was = boss;
+#endif
         if (*reinterpret_cast<const uint8_t*>(mm + 0x9E4)) {
             add_anchor(*reinterpret_cast<const float*>(mm + 0x9D4), *reinterpret_cast<const float*>(mm + 0x9D8), 0);
         }
@@ -557,6 +575,10 @@ bool dump_read(const uintptr_t* p, uintptr_t* v) {
 
 void dump_draw(IDirect3DDevice9* dev, const void* data, UINT stride, UINT count, const float* box_rows,
                const void* from) {
+    if (g_dump_pending.exchange(0)) {
+        LOG_INFO("UIScale: a boss's health bar came up; the next 300 draws of the layout follow (uidump)");
+        g_dump = 300;
+    }
     if (g_dump.load() <= 0) return;
     g_dump.fetch_sub(1);
     const auto* src = static_cast<const uint8_t*>(data);
