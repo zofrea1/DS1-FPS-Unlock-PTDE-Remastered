@@ -363,6 +363,8 @@ bool menu_open() {
 bool sane(float v, float lo, float hi) { return v == v && v > lo && v < hi; }
 
 void add_anchor(float x, float y, uint8_t kind) {
+    // 0,0: a gauge whose place is not set yet (other players' gauges in the first frames, a Steam Deck log).
+    if (x == 0.0f && y == 0.0f) return;
     if (g_anchor_count < 16 && sane(x, -2000.0f, 3280.0f) && sane(y, -2000.0f, 2720.0f)) {
         g_anchors[g_anchor_count++] = Anchor{x, y, kind};
     }
@@ -416,25 +418,31 @@ void read_anchors() {
 }
 
 // The HUD's own top-left pieces, at the game's fixed places: the humanity counter and the bars' left part (x0 up to
-// 180, rows 50..146), and the bars' end caps (8 wide, in the two bar rows 71.5..91.5 and 91.5..111.5).
+// 180, rows 50..146), and the bars' end caps (8 wide, in the two bar rows 71.5..91.5 and 91.5..111.5; the stamina
+// bar's cap ends at 110.5 on a Steam Deck, 2026-11-14, so a point either way).
 bool hud_top_left_piece(float x0, float y0, float x1, float y1) {
     if (x0 >= 70.0f && x0 <= 180.0f && y0 >= 50.0f && y1 <= 146.0f) return true;
     const bool cap = x1 - x0 <= 8.5f && x0 > 180.0f && x1 <= 1000.0f;
-    return cap && ((std::fabs(y0 - 71.5f) < 0.75f && std::fabs(y1 - 91.5f) < 0.75f) ||
-                   (std::fabs(y0 - 91.5f) < 0.75f && std::fabs(y1 - 111.5f) < 0.75f));
+    return cap && ((std::fabs(y0 - 71.5f) < 0.75f && std::fabs(y1 - 91.5f) < 1.25f) ||
+                   (std::fabs(y0 - 91.5f) < 0.75f && std::fabs(y1 - 111.5f) < 1.25f));
 }
 
 // The world mark a draw belongs to, or null.
-// Another player's bar is about 300 units wide (a Steam Deck log, 2026-11-14: its frame 815.8..1115.8 about the gauge
-// at 966.3, the name above it in 243..261): pieces at its ends have their middles about 150 units from the gauge's
-// place, past the window above, and stayed full size while the rest of the bar was drawn smaller. A draw lying
-// wholly within 170 units across of such a gauge (100 above, 60 below) is that bar's too.
+// Another player's bar is about 300 units wide (Steam Deck logs, 2026-11-14: its frame 815.8..1115.8 x 234.6..291.6
+// about the gauge at 966.3,262.2, the name above it in 243..261, the fills from 830.8 in 268.6..276.6): a fill starts
+// at the bar's left end and shortens with the health, so at low health its middle lies more than 110 units from the
+// gauge's place and it stayed full size while the frame was drawn smaller. A draw lying wholly within 170 units
+// across and 45 up or down of such a gauge is that bar's too. Not the HUD's own pieces (the stamina bar's end cap
+// was taken for one), and nothing larger than a mark (wider than 340 or taller than 100: a strip and a box drawn
+// right after a load near the players' first places).
 constexpr float kPlayerBarHalf = 170.0f;
+constexpr float kPlayerBarRise = 45.0f;
 int g_logged_wide = 0;
 int g_logged_near_miss = 0;
 
 const Anchor* world_mark(float x0, float y0, float x1, float y1) {
     if (!g_anchor_count || hud_top_left_piece(x0, y0, x1, y1)) return nullptr;
+    if (x1 - x0 > 340.0f || y1 - y0 > 100.0f) return nullptr;
     const float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
     const Anchor* best = nullptr;
     float best_d = 1e9f;
@@ -444,7 +452,7 @@ const Anchor* world_mark(float x0, float y0, float x1, float y1) {
         const float dx = cx - a.x, dy = cy - a.y;
         const bool near_middle = std::fabs(dx) <= 110.0f && dy >= -90.0f && dy <= 50.0f;
         const bool on_player_bar = a.kind == 1 && x0 >= a.x - kPlayerBarHalf && x1 <= a.x + kPlayerBarHalf &&
-                                   y0 >= a.y - 100.0f && y1 <= a.y + 60.0f;
+                                   y0 >= a.y - kPlayerBarRise && y1 <= a.y + kPlayerBarRise;
         if (!near_middle && !on_player_bar) {
             // A draw near another player's gauge that is not taken: which (for the next look at a bar's pieces).
             if (a.kind == 1 && g_logged_near_miss < 12 && std::fabs(dx) <= 260.0f && dy >= -130.0f && dy <= 90.0f) {
