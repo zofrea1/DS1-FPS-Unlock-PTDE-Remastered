@@ -57,8 +57,9 @@
 //
 // UIScale (percent, below 100): the HUD's corner groups are drawn smaller, each scaled toward its own corner of the
 // layout: the health and stamina bars with the status icons (top left), the equipment slots (bottom left) and the
-// soul counter (bottom right). A draw belongs to a group when it lies where that group's pieces are (fit_for);
-// everything else (prompts, boss bars, subtitles, the item pickup window) is left at its size, and so is everything
+// soul counter (bottom right); a boss's health bar toward the bottom edge. A draw belongs to a group when it lies
+// where that group's pieces are (fit_for); everything else (prompts, subtitles, the item pickup window) is left at
+// its size, and so is everything
 // while a menu or a dialog with buttons is open or for half a second after it closes (its fade), and while no
 // character is in the world (the title screen and its menus, whose copyright line and load list reach into those
 // areas).
@@ -92,6 +93,8 @@ struct Anchor {
 Anchor g_anchors[16];
 int g_anchor_count = 0;
 int g_logged_world = 0;
+bool g_boss_up = false;  // a boss's health bar is up this frame (read_anchors)
+bool g_logged_boss = false;
 void read_anchors();
 bool g_own_scissor = false;  // no render-resolution module in front: the clipping rectangles are mapped here
 bool g_premapped = false;    // the render thread's: a call site of the game mapped the rectangle on its way
@@ -372,17 +375,19 @@ std::atomic<int> g_dump_pending{0};  // a boss gauge came up: dump its frame's l
 // The world marks' places (see the top of this file).
 void read_anchors() {
     g_anchor_count = 0;
+    g_boss_up = false;
     __try {
         const uintptr_t mm = *reinterpret_cast<const uintptr_t*>(kMenuManVar);
         if (mm < 0x10000) return;
-#if FPSU_DIAGNOSTICS
-        // A boss's health bar (its handle at MenuMan+0xF64 / +0xF78, -1 none) lies at the bottom near the equipment
-        // slots: the first time one comes up with UIScale on, the layout's draws are logged (where its name and ends
-        // are has not been seen yet).
-        static int boss_dumps = 0;
-        static bool boss_was = false;
+        // A boss's health bar: its handle at MenuMan+0xF64 (a second boss's at +0xF78), -1 none.
         const bool boss = *reinterpret_cast<const uint32_t*>(mm + 0xF64) != 0xFFFFFFFFu ||
                           *reinterpret_cast<const uint32_t*>(mm + 0xF78) != 0xFFFFFFFFu;
+        g_boss_up = boss;
+#if FPSU_DIAGNOSTICS
+        // The first two times one comes up with UIScale on, the layout's draws are logged (a second boss's bar has
+        // not been seen yet).
+        static int boss_dumps = 0;
+        static bool boss_was = false;
         if (boss && !boss_was && boss_dumps < 2 && g_scale < 0.999f) {
             ++boss_dumps;
             g_dump_pending = 1;
@@ -406,6 +411,7 @@ void read_anchors() {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_anchor_count = 0;
+        g_boss_up = false;
     }
 }
 
@@ -441,6 +447,9 @@ struct Fit {  // x' = ax + (x - ax) * sx, the same in y
     float ax, ay, sx, sy;
     bool any;
 };
+
+// The middle of a boss's health bar across (its ends at 375.5 and 1099.1).
+constexpr float kBossMiddle = 737.3f;
 
 // What to do with a draw whose corners in the layout are x0..x1, y0..y1.
 Fit fit_for(float x0, float y0, float x1, float y1, bool menu) {
@@ -480,6 +489,19 @@ Fit fit_for(float x0, float y0, float x1, float y1, bool menu) {
         f = Fit{0.0f, kLayoutH, g_scale, g_scale, true};
     } else if (x0 >= 1015.0f && y0 >= 620.0f && y1 <= 685.0f) {
         f = Fit{kLayoutW, kLayoutH, g_scale, g_scale, true};
+    } else if (g_boss_up && x0 >= 370.0f && x1 <= 1105.0f && y0 >= 440.0f && y1 <= 632.0f) {
+        // A boss's health bar (a dump on the Steam Deck, 2026-11-14): its left end with the name 375..452 x 551..611,
+        // the name 400.. x 555..581, the frame 452..1009 x 581..604, the fills from 393 in 586..598, the right end
+        // 1007..1099 x 571..626; a second boss's bar above it (not seen yet; the band reaches up to 440). Toward the
+        // bottom edge below the bar's middle (x 737), as the bottom groups go toward their corners. Only while a boss
+        // gauge is up: the item pickup window and the prompts use the same area (they shrink too if they come up
+        // during a boss fight).
+        f = Fit{kBossMiddle, kLayoutH, g_scale, g_scale, true};
+        if (!g_logged_boss) {
+            g_logged_boss = true;
+            LOG_INFO("UIScale: a boss's health bar is drawn at %.0f%% (a draw %.1f,%.1f-%.1f,%.1f)", g_scale * 100.0,
+                     x0, y0, x1, y1);
+        }
     }
     if (f.any && !g_logged_scale) {
         g_logged_scale = true;
