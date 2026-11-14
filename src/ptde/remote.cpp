@@ -1605,6 +1605,10 @@ void run(const std::string& line) {
         if (t.size() > 1) dxgipresent_set_pacing(static_cast<int>(num(1, 1)), nullptr);
         if (t.size() > 2) dxgipresent_test_refresh(static_cast<int>(num(2, 0)));
         out("dxgipace %d", dxgipresent_pacing());
+    } else if (c == "evensteps" && t.size() > 1) {
+        // evensteps 0|1: EvenFrameSteps for this session (the cap's schedule as the frames' clock).
+        frame_set_even_steps(num(1, 1) != 0);
+        out("evensteps %ld", num(1, 1));
     } else if (c == "dxgiprecopy" && t.size() > 1) {
         // dxgiprecopy 0|1: timed presenting copies each frame into the back buffer ahead and flips once the copy is
         // done (1), or copies it just before its flip (0).

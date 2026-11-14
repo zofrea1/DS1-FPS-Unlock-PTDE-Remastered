@@ -402,6 +402,8 @@ bool apply_vblank_patch() {
 
 }  // namespace
 
+void frame_set_even_steps(bool on) { g_even_steps = on; }
+
 long long frame_boundary_qpc() { return g_boundary_qpc.load(std::memory_order_acquire); }
 
 void frame_force_step(float seconds) {

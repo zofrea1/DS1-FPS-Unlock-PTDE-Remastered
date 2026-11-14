@@ -22,3 +22,5 @@ void frame_force_step(float seconds);
 // When the draw thread last began a frame (performance counter ticks; 0 before the first). The game's time step is
 // the time between two of these, so it is the time the frame's picture shows (dxgipresent.cpp paces flips by it).
 long long frame_boundary_qpc();
+// RemoteControl `evensteps 0|1`: EvenFrameSteps for this session.
+void frame_set_even_steps(bool on);
