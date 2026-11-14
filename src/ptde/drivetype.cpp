@@ -52,7 +52,10 @@ bool root_key(LPCWSTR path, wchar_t* out) {
 }
 
 bool lookup(const wchar_t* key, UINT* type) {
-    const LONG n = g_root_n;
+    // An acquire read of the count (the publisher increments it after the entry, with a barrier): under a translator
+    // that does not keep x86's store order (Box64, FEX on the phones), a plain read could see the new count before
+    // the entry's type and answer DRIVE_UNKNOWN.
+    const LONG n = InterlockedCompareExchange(&g_root_n, 0, 0);
     for (LONG i = 0; i < n; ++i) {
         if (std::wcscmp(g_roots[i].root, key) == 0) {
             *type = g_roots[i].type;
