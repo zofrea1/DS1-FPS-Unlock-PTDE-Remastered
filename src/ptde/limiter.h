@@ -25,3 +25,8 @@ void limiter_wait_present();
 void limiter_frame_boundary();
 // Milliseconds the cap has waited since the last take. The frame survey adds this in.
 double limiter_take_wait_ms();
+// The times (performance counter ticks) the frames that waited were due, in order, one per frame: its place on the
+// cap's schedule when it came at most half a frame late, otherwise when it actually went. The game samples its input
+// there, so it is when that frame's picture is of (frame.cpp's even steps takes them at its frame boundaries). False
+// when none is waiting.
+bool limiter_take_slot(long long* out);

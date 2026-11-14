@@ -58,6 +58,9 @@ int dxgipresent_hdr_chain();
 // Development (scanwatch.h): told the time of each flip as it is asked for; a mark in the top right corner for
 // `seconds` showing the presenting mode (green timed, red the GPU when done, yellow when ready) and the swap chain
 // (blue scRGB, grey 8-bit).
+// Development (RemoteControl dxgiprecopy): timed presenting puts each frame into the back buffer as soon as the flip
+// before it is done and flips it when that copy is finished (1, the default), or copies it just before its flip (0).
+void dxgipresent_set_precopy(int on);
 void dxgipresent_set_flip_observer(void (*observer)(long long qpc));
 void dxgipresent_show_mark(double seconds);
 // Development: pace (and count close flips) as if the display refreshed at hz; 0 = the real display again.

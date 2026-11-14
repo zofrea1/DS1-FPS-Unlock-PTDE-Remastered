@@ -123,6 +123,11 @@ struct Dev {
     ID3D11Buffer* scrgb_cb = nullptr;
     float scrgb_cb_white = -1.0f;
     bool scrgb_failed = false;
+    // Timed presenting: signalled when the next frame's copy into the back buffer is done (the flip waits for it on
+    // the CPU, so Present itself has no GPU work in front of it).
+    ID3D11Fence* back_fence = nullptr;
+    HANDLE back_event = nullptr;
+    uint64_t back_value = 0;
 };
 
 struct Surface {
@@ -244,6 +249,7 @@ void drain_jobs();
 
 // A copied frame for the flipping thread.
 struct Flip {
+    uint64_t seq = 0;
     Swap* swap = nullptr;
     uint32_t stage = 0;
     LONGLONG content = 0, ready = 0;
@@ -254,6 +260,13 @@ std::vector<Flip> g_flips;
 HANDLE g_flip_event = nullptr;      // a frame to flip
 HANDLE g_stage_event = nullptr;     // a private texture came free
 HANDLE g_flipper = nullptr;
+uint64_t g_flip_seq = 0;            // the copying thread's
+std::atomic<int> g_precopy{1};       // development (dxgiprecopy): the frame into the back buffer ahead, flip waits
+uint64_t g_in_back = 0;             // the flipping thread's: the flip whose frame is in the back buffer already
+uint64_t g_in_back_value = 0;       // its back_fence value
+uint32_t g_flip_call_us[4096];      // how long Present took on the flipping thread
+uint32_t g_flip_calls = 0;
+uint32_t g_copy_waits = 0;          // flips that had to wait for their copy at their time
 
 // DxvkHdrSwapChain (dxgipresent_set_hdr_chain): 1 = on a display Windows runs in HDR (or composes in FP16 for Auto
 // Color Management) the DXGI swap chain is FP16
@@ -847,6 +860,9 @@ void destroy_dev_interop(Dev* d) {
         release(d->scrgb_vs);
         release(d->scrgb_ps);
         release(d->scrgb_cb);
+        release(d->back_fence);
+        if (d->back_event) CloseHandle(d->back_event);
+        d->back_event = nullptr;
         release(d->ready_fence);
         release(d->release_fence);
         if (d->ready_event) CloseHandle(d->ready_event);
@@ -1744,6 +1760,7 @@ void copy_job(const Job& j) {
         }
     }
     Flip f;
+    f.seq = ++g_flip_seq;
     f.swap = s;
     f.content = j.content;
     f.ready = qpc_now();
@@ -1757,6 +1774,7 @@ void copy_job(const Job& j) {
             d->ctx->CopyResource(s->stage[f.stage], im.tex);
         } else {
             // no private texture: straight into the back buffer and flipped at once (as mode 2)
+            g_in_back = 0;
             look_at_display(s->window);
             fit_format(d, s->window);
             ID3D11Texture2D* back = nullptr;
@@ -1783,41 +1801,85 @@ void copy_job(const Job& j) {
     SetEvent(g_flip_event);
 }
 
+// Under g_d3d: a copied frame into the back buffer ahead of its time, with a fence value for when the GPU is done.
+void put_in_back_buffer(const Flip& f) {
+    Swap* s = f.swap;
+    Dev* d = s->dev;
+    fit_format(d, s->window);
+    ID3D11Texture2D* back = nullptr;
+    if (SUCCEEDED(s->window->chain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back)))) {
+        copy_out(d, s->window, s->stage[f.stage], &s->stage_srv[f.stage], back);
+        back->Release();
+    }
+    if (!d->back_fence) d->d3d->CreateFence(0, D3D11_FENCE_FLAG_NONE, __uuidof(ID3D11Fence),
+                                            reinterpret_cast<void**>(&d->back_fence));
+    if (d->back_fence) d->ctx->Signal(d->back_fence, ++d->back_value);
+    d->ctx->Flush();
+    g_in_back = f.seq;
+    g_in_back_value = d->back_value;
+}
+
 // The flipping thread: each copied frame at its time. Normally the next frame or two are already copied while one is
 // held (the delay is about a frame or more); with three waiting the flips have fallen behind, and it catches up
-// without holding.
+// without holding. The frame goes into the back buffer as soon as the flip before it is done, and its time waits for
+// that copy to be finished, so the flip is the only thing Present asks of the GPU: copied at flip time, it waited for
+// the GPU to get round to the copy between DXVK's work (the 2026-11-14 log at a 120 cap: scanout 0.5 to 2 ms after
+// the Present call).
 void flip_one(const Flip& f, bool behind) {
     Swap* s = f.swap;
     Dev* d = s->dev;
     look_at_display(s->window);
+    const bool precopy = g_precopy.load() != 0;
+    if (precopy) {
+        std::lock_guard<std::mutex> g(g_d3d);
+        if (g_in_back != f.seq) put_in_back_buffer(f);
+    }
     const double latency_before = g_latency;
     LONGLONG target = flip_target(f.content, f.ready, g_pacing.load());
     if (behind) target = 0;
     const bool held = target > qpc_now();
     if (held) pace_until(target);
-    HRESULT hr;
+    if (!precopy) {
+        std::lock_guard<std::mutex> g(g_d3d);
+        put_in_back_buffer(f);  // copied now, just before its flip (the GPU does both in turn)
+    } else if (d->back_fence && d->back_fence->GetCompletedValue() < g_in_back_value) {
+        if (!d->back_event) d->back_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (d->back_event && SUCCEEDED(d->back_fence->SetEventOnCompletion(g_in_back_value, d->back_event))) {
+            WaitForSingleObject(d->back_event, 100);
+        }
+        std::lock_guard<std::mutex> g(g_spacing_lock);
+        ++g_copy_waits;
+    }
+    HRESULT hr = S_OK;
     {
         std::lock_guard<std::mutex> g(g_d3d);
-        fit_format(d, s->window);
-        ID3D11Texture2D* back = nullptr;
-        hr = s->window->chain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back));
-        if (SUCCEEDED(hr)) {
-            copy_out(d, s->window, s->stage[f.stage], &s->stage_srv[f.stage], back);
-            back->Release();
-        }
         const LONGLONG flip_t = qpc_now();
-        {
-            std::lock_guard<std::mutex> sg(g_spacing_lock);
-            if (held && g_overs < kSpacingSamples) g_over_us[g_overs++] = to_us(flip_t - target);
-            g_latency_moved_us += std::fabs(g_latency - latency_before) * 1e6 / g_qpc_freq;
-        }
         note_flip(flip_t, f.content, f.ready);
-        if (SUCCEEDED(hr)) hr = s->window->chain->Present(f.sync, f.flags);
+        hr = s->window->chain->Present(f.sync, f.flags);
+        const LONGLONG after = qpc_now();
         sample_composition(s->window->chain);
+        std::lock_guard<std::mutex> sg(g_spacing_lock);
+        if (held && g_overs < kSpacingSamples) g_over_us[g_overs++] = to_us(flip_t - target);
+        g_latency_moved_us += std::fabs(g_latency - latency_before) * 1e6 / g_qpc_freq;
+        if (g_flip_calls < 4096) g_flip_call_us[g_flip_calls++] = to_us(after - flip_t);
     }
     s->stage_busy[f.stage] = false;
     SetEvent(g_stage_event);
     note_present_result(hr);
+    // the next frame into the back buffer now, if it is here
+    Flip next;
+    bool have = false;
+    {
+        std::lock_guard<std::mutex> g(g_flip_lock);
+        if (!g_flips.empty()) {
+            next = g_flips.front();
+            have = true;
+        }
+    }
+    if (have && precopy && next.swap == s) {
+        std::lock_guard<std::mutex> g(g_d3d);
+        put_in_back_buffer(next);
+    }
 }
 
 DWORD WINAPI flipper_main(void*) {
@@ -2170,6 +2232,15 @@ void dxgipresent_report() {
         timeouts = g_ready_timeouts;
         g_spacing_count = g_spacing_close = g_err_count = g_after_count = g_missed = g_ready_timeouts = 0;
         g_after_boundary_us = 0;
+        if (g_flip_calls >= 8) {
+            std::sort(g_flip_call_us, g_flip_call_us + g_flip_calls);
+            LOG_INFO("DXGI present: Present on the flipping thread took half %.3f, 99%% %.3f, most %.2f ms; %u flips "
+                     "waited at their time for their copy", g_flip_call_us[g_flip_calls / 2] / 1000.0,
+                     g_flip_call_us[g_flip_calls * 99 / 100] / 1000.0, g_flip_call_us[g_flip_calls - 1] / 1000.0,
+                     g_copy_waits);
+        }
+        g_flip_calls = 0;
+        g_copy_waits = 0;
         if (g_overs >= 8) {
             std::sort(g_over_us, g_over_us + g_overs);
             LOG_INFO("DXGI present: held flips went out late by half %.3f, 90%% %.3f, 99%% %.3f ms (%u held, the "
@@ -2246,6 +2317,10 @@ void dxgipresent_show_mark(double seconds) {
     QueryPerformanceCounter(&t);
     QueryPerformanceFrequency(&f);
     g_mark_until = t.QuadPart + static_cast<LONGLONG>(seconds * f.QuadPart);
+}
+
+void dxgipresent_set_precopy(int on) {
+    g_precopy = on ? 1 : 0;
 }
 
 void dxgipresent_set_hdr_chain(int on) {

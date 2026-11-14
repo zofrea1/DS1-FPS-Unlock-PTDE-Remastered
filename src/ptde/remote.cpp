@@ -1605,6 +1605,11 @@ void run(const std::string& line) {
         if (t.size() > 1) dxgipresent_set_pacing(static_cast<int>(num(1, 1)), nullptr);
         if (t.size() > 2) dxgipresent_test_refresh(static_cast<int>(num(2, 0)));
         out("dxgipace %d", dxgipresent_pacing());
+    } else if (c == "dxgiprecopy" && t.size() > 1) {
+        // dxgiprecopy 0|1: timed presenting copies each frame into the back buffer ahead and flips once the copy is
+        // done (1), or copies it just before its flip (0).
+        dxgipresent_set_precopy(static_cast<int>(num(1, 1)));
+        out("dxgiprecopy %ld", num(1, 1));
     } else if (c == "dxgihdr") {
         // dxgihdr [0|1]: DxvkHdrSwapChain for this session (an FP16 scRGB swap chain on a display in HDR).
         if (t.size() > 1) dxgipresent_set_hdr_chain(static_cast<int>(num(1, 0)));

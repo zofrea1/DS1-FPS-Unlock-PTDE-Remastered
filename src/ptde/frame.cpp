@@ -196,6 +196,29 @@ void survey_report(LONGLONG now) {
 }
 
 std::atomic<long long> g_boundary_qpc{0};
+bool g_even_steps = true;  // EvenFrameSteps
+LONGLONG g_last_clock = 0;  // the previous frame's clock (even steps)
+uint32_t g_even = 0, g_uneven = 0;  // frames on the schedule's clock / on the boundary's (for the survey)
+
+// The frame's clock. Measured at this boundary, the step carries how long the game thread's update took (2-5 ms,
+// different each frame: the render thread picks the frame up when the update hands it over), so at a cap the game
+// can keep, the steps still wandered a millisecond or two either side (the 2026-11-14 log at a 120 cap: 6.5 to 10.3
+// ms around 8.33), and with variable refresh the display followed. The cap's schedule (FPSLimitPoint = early: the
+// game thread waits there before reading input) is even: a frame that came on it takes its place on the schedule as
+// its time, so the steps are the cap's exactly, and DXVK's flips (dxgipresent.cpp) follow the same clock. A frame more
+// than half a step late, a frame the cap did not wait for, a cap off or at another point: the boundary's time. The
+// cap's thread queues each frame's time (limiter_take_slot), so a boundary takes its own frame's even when the game
+// thread is already waiting for the next.
+LONGLONG frame_clock(LONGLONG t) {
+    LONGLONG s = 0;
+    if (!limiter_take_slot(&s) || !g_even_steps || !limiter_is_on() || limiter_point() != kLimitEarly) return t;
+    if (s <= g_last_clock || s > t || t - s > g.freq.QuadPart / 4) {
+        ++g_uneven;
+        return t;
+    }
+    ++g_even;
+    return s;
+}
 
 // Runs on the draw thread at every frame boundary.
 void frame_boundary() {
@@ -204,7 +227,9 @@ void frame_boundary() {
     limiter_frame_boundary();
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
-    const LONGLONG t = now.QuadPart;
+    const LONGLONG t_real = now.QuadPart;
+    const LONGLONG t = frame_clock(t_real);
+    g_last_clock = t;
     g.wait_sum += limiter_take_wait_ms();
     if (g.last != 0) {
         const double dt_ms = ms_between(g.last, t);
@@ -252,6 +277,11 @@ void frame_boundary() {
 #endif
     g.last = t;
     g_boundary_qpc.store(t, std::memory_order_release);
+    if (g_even_steps && g_even + g_uneven >= 3000) {
+        LOG_INFO("EvenFrameSteps: %u of %u frames on the cap's even clock (the others at their boundary's time: late, "
+                 "loading, or no cap at the early point)", g_even, g_even + g_uneven);
+        g_even = g_uneven = 0;
+    }
     survey_report(t);
 }
 
@@ -380,6 +410,7 @@ void frame_force_step(float seconds) {
 }
 
 bool frame_install(const Settings& settings) {
+    g_even_steps = settings.even_frame_steps;
     if (reinterpret_cast<uint32_t>(GetModuleHandleW(nullptr)) != kImageBase) {
         LOG_ERROR("The game image is not loaded at its preferred base; absolute hook addresses are invalid");
         return false;

@@ -22,6 +22,17 @@ LONGLONG g_freq = 0;
 LONGLONG g_origin = 0;
 LONGLONG g_index = 0;
 LONGLONG g_wait_ticks = 0;
+// limiter_take_slot: the waiting thread puts, the render thread takes.
+constexpr LONG kSlots = 8;
+LONGLONG g_slots[kSlots];
+volatile LONG g_slot_put = 0, g_slot_take = 0;
+
+void put_slot(LONGLONG t) {
+    const LONG put = g_slot_put;
+    if (put - g_slot_take >= kSlots) return;  // nobody takes them (no boundary hook): keep the oldest
+    g_slots[put % kSlots] = t;
+    InterlockedExchange(&g_slot_put, put + 1);
+}
 HANDLE g_timer = nullptr;
 bool g_timer_ready = false;
 
@@ -98,9 +109,12 @@ void wait_for_slot() {
     if (g_index == 0) {
         g_origin = now.QuadPart;
         g_index = 1;
+        put_slot(now.QuadPart);
         return;
     }
     const LONGLONG target = g_origin + (g_index * g_freq) / g_fps;
+    // on the schedule, or (more than half a frame late) when it really goes
+    put_slot(now.QuadPart - target > g_freq / (2 * g_fps) ? now.QuadPart : target);
     if (now.QuadPart < target) {
         const LONGLONG before = now.QuadPart;
         sleep_until(target);
@@ -173,6 +187,15 @@ void limiter_frame_boundary() {
         wait_for_slot();
     }
     g_armed = true;
+}
+
+bool limiter_take_slot(long long* out) {
+    const LONG take = g_slot_take;
+    const LONG put = InterlockedCompareExchange(&g_slot_put, 0, 0);
+    if (put == take) return false;
+    *out = g_slots[take % kSlots];
+    InterlockedExchange(&g_slot_take, take + 1);
+    return true;
 }
 
 double limiter_take_wait_ms() {

@@ -157,6 +157,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fps_unlock = parse_bool(val);
         } else if (key == "maxfps" || key == "targetfps") {
             s.target_fps = parse_max_fps(val, s.target_fps);
+        } else if (key == "evenframesteps") {
+            s.even_frame_steps = parse_bool(val);
         } else if (key == "fpslimitpoint") {
             const std::string point = lower(val);
             if (point == "present") {
