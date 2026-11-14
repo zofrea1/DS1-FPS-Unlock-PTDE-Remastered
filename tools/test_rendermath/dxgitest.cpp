@@ -384,6 +384,18 @@ int main(int argc, char** argv) {
         const int x = static_cast<int>(std::fmod(t * 600.0, static_cast<double>(width)));
         RECT bar{x, 0, x + width / 24, height};
         dev->ColorFill(bb, &bar, D3DCOLOR_XRGB(230, 230, 230));
+        static const char* hitch_env = std::getenv("DXGITEST_HITCH");  // one frame of this many ms every second
+        static double next_hitch = 1.0;
+        if (hitch_env && t >= next_hitch) {
+            next_hitch += 1.0;
+            const double until = t + std::atof(hitch_env) / 1000.0;
+            for (;;) {
+                LARGE_INTEGER q;
+                QueryPerformanceCounter(&q);
+                if (static_cast<double>(q.QuadPart - start.QuadPart) / freq.QuadPart >= until) break;
+                Sleep(1);
+            }
+        }
         if (jitter_ms > 0) {
             // the draw thread taking a different time each frame before its Present
             const double until = t + (std::rand() % 1000) / 1000.0 * jitter_ms / 1000.0;

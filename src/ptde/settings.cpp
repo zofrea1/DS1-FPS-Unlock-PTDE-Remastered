@@ -209,6 +209,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_aspect_ui = parse_bool(val);
         } else if (key == "uiscale") {
             s.ui_scale = std::atoi(val.c_str());
+        } else if (key == "uiscaleworld") {
+            s.ui_scale_world = std::atoi(val.c_str());
         } else if (key == "shadowbias") {
             s.shadow_bias = static_cast<float>(std::atof(val.c_str()));
         } else if (key == "anisotropicfiltering") {

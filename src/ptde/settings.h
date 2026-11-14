@@ -82,6 +82,7 @@ struct Settings {
     // The scene's colour targets in 16-bit float, dithered into the 8-bit picture (resolution.h), with RenderResolution.
     bool high_precision_color = false;
     // With the game's own anti-aliasing (multisampling) on: alpha-tested surfaces write coverage (atoc.h).
+    int ui_scale_world = 100;  // UIScaleWorld: marks over things in the world (layout.h)
     bool alpha_to_coverage = true;
     bool alpha_to_coverage_force = false;  // AlphaToCoverage = force: NVIDIA's switch even when the driver does not say it has it
     // The samples of the game's own anti-aliasing when it is on: 2 (the game's), 4 or 8 (atoc.h).

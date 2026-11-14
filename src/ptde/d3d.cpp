@@ -310,7 +310,9 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             }
         }
         layout_configure(settings().fix_aspect_ui, settings().ui_scale);
-        if ((settings().fix_aspect_ui && aspect_is_active()) || settings().ui_scale < 100) {
+        layout_set_world_scale(settings().ui_scale_world);
+        if ((settings().fix_aspect_ui && aspect_is_active()) || settings().ui_scale < 100 ||
+            settings().ui_scale_world < 100) {
             layout_hook_device(*out, !resolution_is_active());
         }
         if (resolution_is_active() || (settings().fix_aspect_ui && aspect_is_active())) layout_patch_scissor_sites();

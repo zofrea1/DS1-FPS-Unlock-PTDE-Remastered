@@ -1818,6 +1818,11 @@ void run(const std::string& line) {
         // active at start for the hooks).
         layout_set_scale(static_cast<int>(num(1, 100)));
         out("uiscale %ld", num(1, 100));
+    } else if (c == "uiscaleworld" && t.size() > 1) {
+        // uiscaleworld N: the marks over things in the world at N percent for this session (needs the layout hooks:
+        // UIScale or UIScaleWorld below 100, or FixAspectUI active, at start).
+        layout_set_world_scale(static_cast<int>(num(1, 100)));
+        out("uiscaleworld %ld", num(1, 100));
     } else if (c == "uidump") {
         // uidump [N]: the next N (default 300) draws of the HUD and menu layout in the log, with the game code that
         // drew them (needs UIScale below 100 or FixAspectUI active).

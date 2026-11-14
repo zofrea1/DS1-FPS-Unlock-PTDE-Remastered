@@ -9,6 +9,9 @@ struct IDirect3DDevice9;
 //    stretched to the screen's shape.
 //  - UIScale: the HUD's corner groups drawn smaller (percent, 50..100).
 void layout_configure(bool keep_shape, int scale_percent);
+// UIScaleWorld: the marks over things in the world (floating health bars, names over other players, the lock-on
+// marker) drawn at this percent (50..100) about the point they follow.
+void layout_set_world_scale(int scale_percent);
 // RemoteControl `uiscale N`.
 void layout_set_scale(int scale_percent);
 // RemoteControl `uidump N` (diagnostics builds): the next N draws of the layout in the log, and the game's state.

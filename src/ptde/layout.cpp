@@ -45,6 +45,15 @@
 // unstretched size. A health bar whose place then lies outside 0..1280 (a target in the side margins of an ultrawide
 // picture) is not drawn: the game hides bars outside the layout.
 //
+// World marks: the game works out where each mark over something in the world goes (0x4F4030, see above) and keeps
+// the places in MenuMan: the lock-on point (+0x9D4 x, +0x9D8 y; shown while +0x9E4), seven other players' gauges
+// (+0x8F4 + i * 0x20: x, y; in use while +0xD) and eight enemies' gauges (+0xD34 + i * 0x24: handle, x, y; shown
+// while +0x20). A draw lying around one of these places (its middle within 110 units across and 90 above to 50 below)
+// is that mark's: never part of a HUD corner group (an enemy's bar near the top left corner was pulled into it), and
+// with UIScaleWorld drawn smaller about that place. The HUD's own top-left pieces (the bars' start and end caps in their
+// fixed rows, the humanity counter) stay HUD even when an enemy's bar passes them. The draw order does not tell them
+// apart: an enemy's bar is drawn in the middle of the HUD's own (after the bars' end caps, before the humanity counter).
+//
 // UIScale (percent, below 100): the HUD's corner groups are drawn smaller, each scaled toward its own corner of the
 // layout: the health and stamina bars with the status icons (top left), the equipment slots (bottom left) and the
 // soul counter (bottom right). A draw belongs to a group when it lies in that group's area; everything else (prompts,
@@ -71,6 +80,17 @@ enum Kind : uint8_t { kOther = 0, kImage = 1, kText = 2, kBox = 3 };
 
 bool g_keep_shape = true;
 float g_scale = 1.0f;
+float g_world_scale = 1.0f;  // UIScaleWorld
+
+// The world marks' places this frame (read_anchors), the render thread's.
+struct Anchor {
+    float x, y;
+    uint8_t kind;  // 0 lock-on, 1 another player, 2 an enemy
+};
+Anchor g_anchors[16];
+int g_anchor_count = 0;
+int g_logged_world = 0;
+void read_anchors();
 bool g_own_scissor = false;  // no render-resolution module in front: the clipping rectangles are mapped here
 bool g_premapped = false;    // the render thread's: a call site of the game mapped the rectangle on its way
 
@@ -274,6 +294,7 @@ HRESULT WINAPI hk_set_vs_const(IDirect3DDevice9* dev, UINT start, const float* v
             g_layout = true;
             g_shaped = false;
             shape_now();
+            read_anchors();
             if (wants_shape()) send_rows(dev, true);
         } else {
             g_layout = false;
@@ -312,6 +333,68 @@ bool menu_open() {
     return false;
 }
 
+bool sane(float v, float lo, float hi) { return v == v && v > lo && v < hi; }
+
+void add_anchor(float x, float y, uint8_t kind) {
+    if (g_anchor_count < 16 && sane(x, -2000.0f, 3280.0f) && sane(y, -2000.0f, 2720.0f)) {
+        g_anchors[g_anchor_count++] = Anchor{x, y, kind};
+    }
+}
+
+// The world marks' places (see the top of this file).
+void read_anchors() {
+    g_anchor_count = 0;
+    __try {
+        const uintptr_t mm = *reinterpret_cast<const uintptr_t*>(kMenuManVar);
+        if (mm < 0x10000) return;
+        if (*reinterpret_cast<const uint8_t*>(mm + 0x9E4)) {
+            add_anchor(*reinterpret_cast<const float*>(mm + 0x9D4), *reinterpret_cast<const float*>(mm + 0x9D8), 0);
+        }
+        for (uintptr_t i = 0; i < 7; ++i) {
+            const uintptr_t e = mm + 0x8F4 + i * 0x20;
+            if (*reinterpret_cast<const uint8_t*>(e + 0xD)) {
+                add_anchor(*reinterpret_cast<const float*>(e), *reinterpret_cast<const float*>(e + 4), 1);
+            }
+        }
+        for (uintptr_t i = 0; i < 8; ++i) {
+            const uintptr_t e = mm + 0xD34 + i * 0x24;
+            if (*reinterpret_cast<const uint32_t*>(e) != 0xFFFFFFFFu && *reinterpret_cast<const uint8_t*>(e + 0x20)) {
+                add_anchor(*reinterpret_cast<const float*>(e + 4), *reinterpret_cast<const float*>(e + 8), 2);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_anchor_count = 0;
+    }
+}
+
+// The HUD's own top-left pieces, at the game's fixed places: the humanity counter and the bars' left part (x0 up to
+// 180, rows 50..146), and the bars' end caps (8 wide, in the two bar rows 71.5..91.5 and 91.5..111.5).
+bool hud_top_left_piece(float x0, float y0, float x1, float y1) {
+    if (x0 >= 70.0f && x0 <= 180.0f && y0 >= 50.0f && y1 <= 146.0f) return true;
+    const bool cap = x1 - x0 <= 8.5f && x0 > 180.0f && x1 <= 1000.0f;
+    return cap && ((std::fabs(y0 - 71.5f) < 0.75f && std::fabs(y1 - 91.5f) < 0.75f) ||
+                   (std::fabs(y0 - 91.5f) < 0.75f && std::fabs(y1 - 111.5f) < 0.75f));
+}
+
+// The world mark a draw belongs to, or null.
+const Anchor* world_mark(float x0, float y0, float x1, float y1) {
+    if (!g_anchor_count || hud_top_left_piece(x0, y0, x1, y1)) return nullptr;
+    const float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
+    const Anchor* best = nullptr;
+    float best_d = 1e9f;
+    for (int i = 0; i < g_anchor_count; ++i) {
+        const Anchor& a = g_anchors[i];
+        const float dx = cx - a.x, dy = cy - a.y;
+        if (std::fabs(dx) > 110.0f || dy < -90.0f || dy > 50.0f) continue;
+        const float d = dx * dx + dy * dy;
+        if (d < best_d) {
+            best_d = d;
+            best = &a;
+        }
+    }
+    return best;
+}
+
 struct Fit {  // x' = ax + (x - ax) * sx, the same in y
     float ax, ay, sx, sy;
     bool any;
@@ -329,11 +412,23 @@ Fit fit_for(float x0, float y0, float x1, float y1, bool menu) {
         }
         return f;
     }
+    if (const Anchor* a = world_mark(x0, y0, x1, y1)) {
+        if (g_logged_world < 12) {
+            ++g_logged_world;
+            static const char* const kKinds[] = {"the lock-on point", "another player's gauge", "an enemy's gauge"};
+            LOG_INFO("UIScale: a draw %.1f,%.1f-%.1f,%.1f is a mark of %s at %.1f,%.1f (middle %+.1f, %+.1f from it)%s",
+                     x0, y0, x1, y1, kKinds[a->kind < 3 ? a->kind : 0], a->x, a->y, (x0 + x1) * 0.5f - a->x,
+                     (y0 + y1) * 0.5f - a->y, g_world_scale < 0.999f ? ", drawn at UIScaleWorld about it" : "");
+        }
+        if (g_world_scale < 0.999f) f = Fit{a->x, a->y, g_world_scale, g_world_scale, true};
+        return f;
+    }
     if (g_scale >= 0.999f || menu) return f;
     // The groups' areas in the layout: the bars and status icons start at the left (x 80..330, y 35..210; a long
-    // health bar reaches far to the right), the equipment slots with their names fill x 80..520, y 370..690, the soul
-    // counter x 1000..1200, y 620..690. A prompt's button and box (from x 340 on, wider) and the boss bars are outside.
-    if (x0 >= 70.0f && x0 <= 330.0f && y0 >= 30.0f && y1 <= 210.0f && x1 <= 1000.0f) {
+    // health bar and its end cap reach far to the right in the bars' rows, y 50..135), the equipment slots with their
+    // names fill x 80..520, y 370..690, the soul counter x 1000..1200, y 620..690. A prompt's button and box (from x 340
+    // on, wider) and the boss bars are outside; marks over things in the world are taken out above.
+    if (x0 >= 70.0f && y0 >= 30.0f && y1 <= 210.0f && x1 <= 1000.0f && (x0 <= 330.0f || (y0 >= 50.0f && y1 <= 135.0f))) {
         f = Fit{0.0f, 0.0f, g_scale, g_scale, true};
     } else if (x0 >= 70.0f && x0 <= 400.0f && y0 >= 370.0f && x1 <= 520.0f) {
         f = Fit{0.0f, kLayoutH, g_scale, g_scale, true};
@@ -416,7 +511,7 @@ bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDi
     return true;
 }
 
-bool layout_draw() { return g_layout && g_bound != kOther && (g_shaped || g_scale < 0.999f); }
+bool layout_draw() { return g_layout && g_bound != kOther && (g_shaped || g_scale < 0.999f || g_world_scale < 0.999f); }
 
 #if FPSU_DIAGNOSTICS
 // RemoteControl `uidump N`: the next N draws of the layout, with their place, vertex data, texture and the game code
@@ -581,6 +676,11 @@ void layout_configure(bool keep_shape, int scale_percent) {
 
 void layout_set_scale(int scale_percent) { layout_configure(g_keep_shape, scale_percent); }
 
+void layout_set_world_scale(int scale_percent) {
+    const int p = scale_percent < 50 ? 50 : (scale_percent > 100 ? 100 : scale_percent);
+    g_world_scale = p / 100.0f;
+}
+
 bool layout_scissor_premapped() { return g_premapped; }
 
 void layout_patch_scissor_sites() {
@@ -638,6 +738,10 @@ void layout_dump(int draws) {
     }
     LOG_INFO("uidump: WorldChrMan %X first %X player %X; MenuMan %X:%s", static_cast<unsigned>(wcm),
              static_cast<unsigned>(first), static_cast<unsigned>(chr), static_cast<unsigned>(mm), fields);
+    read_anchors();
+    for (int i = 0; i < g_anchor_count; ++i) {
+        LOG_INFO("uidump: world mark %d (kind %u) at %.1f,%.1f", i, g_anchors[i].kind, g_anchors[i].x, g_anchors[i].y);
+    }
     g_dump = draws;
 #else
     (void)draws;

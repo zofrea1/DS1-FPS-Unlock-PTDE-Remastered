@@ -5,6 +5,10 @@
 #include "layout.h"
 #include "log.h"
 
+#include <dxgi.h>
+
+#pragma comment(lib, "dxgi.lib")
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -14,22 +18,6 @@
 #include <mutex>
 
 namespace {
-
-typedef UINT KmtHandle;
-struct OpenFromGdi {
-    WCHAR DeviceName[32];
-    KmtHandle hAdapter;
-    LUID AdapterLuid;
-    UINT VidPnSourceId;
-};
-struct GetScanLine {
-    KmtHandle hAdapter;
-    UINT VidPnSourceId;
-    BOOLEAN InVerticalBlank;
-    UINT ScanLine;
-};
-using OpenFn = LONG(APIENTRY*)(OpenFromGdi*);
-using ScanFn = LONG(APIENTRY*)(GetScanLine*);
 
 LONGLONG g_freq = 0;
 std::atomic<LONGLONG> g_last_flip{0};
@@ -89,57 +77,62 @@ void hotkeys() {
     was_h = h;
 }
 
-DWORD WINAPI watch_main(void*) {
-    OpenFromGdi o{};
-    ScanFn scan = nullptr;
-    if (g_monitor) {
-        HMODULE g = GetModuleHandleW(L"gdi32.dll");
-        auto open = g ? reinterpret_cast<OpenFn>(GetProcAddress(g, "D3DKMTOpenAdapterFromGdiDisplayName")) : nullptr;
-        scan = g ? reinterpret_cast<ScanFn>(GetProcAddress(g, "D3DKMTGetScanLine")) : nullptr;
-        MONITORINFOEXW mi{};
-        mi.cbSize = sizeof(mi);
-        GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
-        wcscpy_s(o.DeviceName, mi.szDevice);
-        WideCharToMultiByte(CP_UTF8, 0, mi.szDevice, -1, g_display, sizeof(g_display), nullptr, nullptr);
-        if (!open || !scan || open(&o) != 0) {
-            LOG_ERROR("ScanWatch: the primary display's scan line cannot be read; hotkeys only");
-            scan = nullptr;
-        } else {
-            LOG_INFO("ScanWatch: reading the scan line of %s (the primary display) to see when it refreshes",
-                     g_display);
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+// The primary display's output, for waiting on its vertical blanks.
+IDXGIOutput* primary_output() {
+    IDXGIFactory1* f = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&f))) || !f) return nullptr;
+    const HMONITOR primary = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    IDXGIOutput* found = nullptr;
+    IDXGIAdapter1* a = nullptr;
+    for (UINT i = 0; !found && SUCCEEDED(f->EnumAdapters1(i, &a)); ++i) {
+        IDXGIOutput* o = nullptr;
+        for (UINT k = 0; !found && SUCCEEDED(a->EnumOutputs(k, &o)); ++k) {
+            DXGI_OUTPUT_DESC d{};
+            if (SUCCEEDED(o->GetDesc(&d)) && d.Monitor == primary) {
+                found = o;
+                WideCharToMultiByte(CP_UTF8, 0, d.DeviceName, -1, g_display, sizeof(g_display), nullptr, nullptr);
+            } else {
+                o->Release();
+            }
         }
+        a->Release();
     }
-    bool was_blank = false;
-    LONGLONG last_edge = 0, next_keys = 0;
+    f->Release();
+    return found;
+}
+
+// Hotkeys every 25 ms on a thread of their own.
+DWORD WINAPI keys_main(void*) {
     for (;;) {
-        const LONGLONG t = now_qpc();
-        if (t >= next_keys) {
-            next_keys = t + g_freq / 40;
-            hotkeys();
-        }
-        if (!scan) {
-            Sleep(25);
-            continue;
-        }
-        GetScanLine s{};
-        s.hAdapter = o.hAdapter;
-        s.VidPnSourceId = o.VidPnSourceId;
-        if (scan(&s) != 0) {
-            Sleep(1);
+        hotkeys();
+        Sleep(25);
+    }
+}
+
+// The display's refreshes: the time of each vertical blank (IDXGIOutput::WaitForVBlank; nothing is polled). With
+// variable refresh the blanks follow the flips.
+DWORD WINAPI watch_main(void*) {
+    IDXGIOutput* out = primary_output();
+    if (!out) {
+        LOG_ERROR("ScanWatch: the primary display's output was not found; hotkeys only");
+        return 0;
+    }
+    LOG_INFO("ScanWatch: waiting on the vertical blanks of %s (the primary display) to see when it refreshes", g_display);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    LONGLONG last = 0;
+    for (;;) {
+        if (FAILED(out->WaitForVBlank())) {
+            Sleep(5);
+            last = 0;
             continue;
         }
         const LONGLONG now = now_qpc();
-        if (was_blank && !s.InVerticalBlank) {
-            const LONGLONG flip = g_last_flip.load();
-            std::lock_guard<std::mutex> g(g_lock);
-            if (last_edge && g_gaps < kMax) g_gap_us[g_gaps++] = to_us(now - last_edge);
-            if (flip && g_afters < kMax) g_after_flip_us[g_afters++] = to_us(now - flip);
-            last_edge = now;
-        }
-        was_blank = s.InVerticalBlank != 0;
+        const LONGLONG flip = g_last_flip.load();
+        std::lock_guard<std::mutex> g(g_lock);
+        if (last && g_gaps < kMax) g_gap_us[g_gaps++] = to_us(now - last);
+        if (flip && g_afters < kMax) g_after_flip_us[g_afters++] = to_us(now - flip);
         ++g_polls;
-        YieldProcessor();
+        last = now;
     }
 }
 
@@ -155,8 +148,12 @@ void scanwatch_start(bool monitor) {
     g_monitor = monitor;
     dxgipresent_set_flip_observer(&scanwatch_note_flip);
     mark();
-    HANDLE h = CreateThread(nullptr, 0, &watch_main, nullptr, 0, nullptr);
-    if (h) CloseHandle(h);
+    HANDLE k = CreateThread(nullptr, 0, &keys_main, nullptr, 0, nullptr);
+    if (k) CloseHandle(k);
+    if (monitor) {
+        HANDLE h = CreateThread(nullptr, 0, &watch_main, nullptr, 0, nullptr);
+        if (h) CloseHandle(h);
+    }
     LOG_INFO("Session hotkeys: Ctrl+Shift+U HUD/menu draw dump, Ctrl+Shift+P presenting mode (DXVK through DXGI), "
              "Ctrl+Shift+H scRGB swap chain");
 }
@@ -186,12 +183,12 @@ void scanwatch_report() {
     char after[200] = "";
     if (m >= 8) {
         std::sort(afters, afters + m);
-        std::snprintf(after, sizeof(after), "; refresh start after the last flip: 10%% %.2f, half %.2f, 90%% %.2f, 99%% "
+        std::snprintf(after, sizeof(after), "; vertical blank after the last flip: 10%% %.2f, half %.2f, 90%% %.2f, 99%% "
                       "%.2f ms", afters[m / 10] / 1000.0, afters[m / 2] / 1000.0, afters[m * 9 / 10] / 1000.0,
                       afters[m * 99 / 100] / 1000.0);
     }
     LOG_INFO("ScanWatch: %s refreshed %u times, %.2f ms apart on average (%.1f Hz), spread %.3f ms (1%% %.2f, 10%% %.2f, "
-             "half %.2f, 90%% %.2f, 99%% %.2f, longest %.2f ms; %u polls)%s", g_display, n, mean / 1000.0,
+             "half %.2f, 90%% %.2f, 99%% %.2f, longest %.2f ms; %u blanks)%s", g_display, n, mean / 1000.0,
              mean > 0 ? 1e6 / mean : 0.0, std::sqrt(dev / n) / 1000.0, gaps[n / 100] / 1000.0, gaps[n / 10] / 1000.0,
              gaps[n / 2] / 1000.0, gaps[n * 9 / 10] / 1000.0, gaps[n * 99 / 100] / 1000.0, gaps[n - 1] / 1000.0, polls,
              after);

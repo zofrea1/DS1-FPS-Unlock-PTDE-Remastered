@@ -94,7 +94,7 @@ struct Window {
     bool scrgb = false;        // the DXGI swap chain is FP16 scRGB (DxvkHdrSwapChain on a display in HDR)
     bool display_hdr = false;  // Windows runs the window's display in HDR (looked at every 128 frames)
     float white = 1.0f;        // its SDR brightness setting / 80 nits
-    uint32_t looks = 0;
+    LONGLONG looked = 0;       // when the display's colour mode was last read (only with DxvkHdrSwapChain)
 };
 
 struct Dev {
@@ -152,6 +152,12 @@ struct Swap {
     uint32_t count = 0;
     uint32_t next = 0;
     Image images[kMaxImages];
+    // Timed presenting: each finished frame is copied into one of these at once (DXVK has its image back) and flipped
+    // from here at its time.
+    static constexpr uint32_t kStages = 4;
+    ID3D11Texture2D* stage[kStages] = {};
+    ID3D11ShaderResourceView* stage_srv[kStages] = {};
+    std::atomic<bool> stage_busy[kStages] = {};
 };
 
 // An acquire DXVK has not submitted a wait for yet. The copy-done value to wait for is read when that submission comes
@@ -233,8 +239,21 @@ std::mutex g_job_lock;
 std::vector<Job> g_jobs;            // in order
 HANDLE g_job_event = nullptr;
 HANDLE g_presenter = nullptr;
-std::atomic<int> g_jobs_open{0};    // queued or being presented
+std::atomic<int> g_jobs_open{0};    // queued, being copied, waiting to flip or being flipped
 void drain_jobs();
+
+// A copied frame for the flipping thread.
+struct Flip {
+    Swap* swap = nullptr;
+    uint32_t stage = 0;
+    LONGLONG content = 0, ready = 0;
+    UINT sync = 0, flags = 0;
+};
+std::mutex g_flip_lock;
+std::vector<Flip> g_flips;
+HANDLE g_flip_event = nullptr;      // a frame to flip
+HANDLE g_stage_event = nullptr;     // a private texture came free
+HANDLE g_flipper = nullptr;
 
 // DxvkHdrSwapChain (dxgipresent_set_hdr_chain): 1 = on a display Windows runs in HDR (or composes in FP16 for Auto
 // Color Management) the DXGI swap chain is FP16
@@ -248,11 +267,15 @@ std::atomic<int> g_hdr_chain{0};
 std::atomic<void (*)(long long)> g_flip_observer{nullptr};
 std::atomic<LONGLONG> g_mark_until{0};
 
-// The presenting thread's timing.
+// The flipping thread's timing.
 double g_latency = 0.0;             // ticks: a frame flips this long after its boundary
 double g_latency_target = 0.0;
-uint32_t g_late_us[256];            // how long after its boundary each recent frame was ready
+uint32_t g_late_us[256];            // how long after its boundary each recent steady frame was ready
 uint32_t g_late_count = 0, g_late_next = 0;
+uint32_t g_steps_us[64];            // the recent steps (for what counts as steady)
+uint32_t g_steps_count = 0, g_steps_next = 0;
+uint32_t g_step_median_us = 0;
+LONGLONG g_late_prev_content = 0;
 LONGLONG g_prev_content = 0, g_prev_ready = 0, g_prev_flip = 0;
 
 // Flip spacing and timing since the last report (the presenting thread adds, the report takes).
@@ -375,28 +398,53 @@ LONGLONG take_content() {
     return t;
 }
 
-// When to flip a frame whose boundary was `content` and which was ready at `ready_t` (presenting thread).
+// When to flip a frame whose boundary was `content` and which was ready at `ready_t` (flipping thread). The delay
+// learns only from steady frames: a step more than 2.5 times the recent median (or over 50 ms: loading screens, hitches)
+// says nothing about how long a frame takes, and once let in it held every later frame back. It stays under three
+// median steps (40 ms at most).
 LONGLONG flip_target(LONGLONG content, LONGLONG ready_t, int mode) {
     LONGLONG target = ready_t;
     if (mode != 1) return target;
     if (content > 0) {
-        g_late_us[g_late_next] = to_us(ready_t - content);
-        g_late_next = (g_late_next + 1) & 255;
-        if (g_late_count < 256) ++g_late_count;
-        if ((g_late_next & 7) == 0 || g_late_count < 32) {
-            uint32_t tmp[256];
-            std::memcpy(tmp, g_late_us, g_late_count * sizeof(uint32_t));
-            const uint32_t k = g_late_count * 99 / 100;
-            std::nth_element(tmp, tmp + k, tmp + g_late_count);
-            g_latency_target = (tmp[k] + 250.0) * g_qpc_freq / 1e6;
+        const uint32_t step = g_late_prev_content > 0 ? to_us(content - g_late_prev_content) : 0;
+        g_late_prev_content = content;
+        if (step > 0) {
+            g_steps_us[g_steps_next] = step;
+            g_steps_next = (g_steps_next + 1) & 63;
+            if (g_steps_count < 64) ++g_steps_count;
+            if ((g_steps_next & 7) == 0 || g_steps_count < 16) {
+                uint32_t tmp[64];
+                std::memcpy(tmp, g_steps_us, g_steps_count * sizeof(uint32_t));
+                std::nth_element(tmp, tmp + g_steps_count / 2, tmp + g_steps_count);
+                g_step_median_us = tmp[g_steps_count / 2];
+            }
+        }
+        const bool steady = step > 0 && step <= 50000 && (!g_step_median_us || step * 2 <= g_step_median_us * 5);
+        if (steady) {
+            // a frame held up on its way (a hitch after its boundary) counts as three steps at most
+            uint32_t late = to_us(ready_t - content);
+            if (g_step_median_us && late > 3 * g_step_median_us) late = 3 * g_step_median_us;
+            g_late_us[g_late_next] = late;
+            g_late_next = (g_late_next + 1) & 255;
+            if (g_late_count < 256) ++g_late_count;
+            if ((g_late_next & 7) == 0 || g_late_count < 32) {
+                uint32_t tmp[256];
+                std::memcpy(tmp, g_late_us, g_late_count * sizeof(uint32_t));
+                const uint32_t k = g_late_count * 99 / 100;
+                std::nth_element(tmp, tmp + k, tmp + g_late_count);
+                double cap_us = 3.0 * g_step_median_us + 250.0;
+                if (cap_us > 40000.0 || !g_step_median_us) cap_us = 40000.0;
+                g_latency_target = ((std::min)(tmp[k] + 250.0, cap_us)) * g_qpc_freq / 1e6;
+            }
         }
         const double up = 0.25e-3 * g_qpc_freq, down = 0.01e-3 * g_qpc_freq;
         if (g_latency_target > g_latency) {
             g_latency = (std::min)(g_latency_target, g_latency + up);
         } else {
-            g_latency = (std::max)(g_latency_target, g_latency - down);
+            // falls quickly when far above (a loading screen's left-over), gently near
+            const double fall = (g_latency - g_latency_target > 2e-3 * g_qpc_freq) ? 0.25e-3 * g_qpc_freq : down;
+            g_latency = (std::max)(g_latency_target, g_latency - fall);
         }
-        if (g_latency > 0.1 * g_qpc_freq) g_latency = 0.1 * g_qpc_freq;
         const LONGLONG at = content + static_cast<LONGLONG>(g_latency);
         if (at > target) {
             target = at;
@@ -1145,6 +1193,11 @@ void destroy_images(Swap* s) {
         release(im.srv);
         release(im.tex);
     }
+    for (uint32_t k = 0; k < Swap::kStages; ++k) {
+        release(s->stage_srv[k]);
+        release(s->stage[k]);
+        s->stage_busy[k] = false;
+    }
     s->count = 0;
 }
 
@@ -1508,9 +1561,14 @@ bool make_scrgb_shaders(Dev* d) {
     return true;
 }
 
-// Under g_d3d, before a frame goes into the window's swap chain: its format for the display now.
-void fit_format(Dev* d, Window* w) {
-    if ((w->looks++ & 127) == 0) {
+// Before a frame goes into the window's swap chain, outside g_d3d: with DxvkHdrSwapChain on, the display's colour mode
+// and SDR brightness every 2 s (QueryDisplayConfig is slow and takes a lock the whole system shares).
+void look_at_display(Window* w) {
+    if (!g_hdr_chain.load()) return;
+    const LONGLONG now = qpc_now();
+    if (w->looked && now - w->looked < 2 * g_qpc_freq) return;
+    w->looked = now;
+    {
         float white = 1.0f;
         const int mode = display_hdr_white(MonitorFromWindow(w->hwnd, MONITOR_DEFAULTTOPRIMARY), &white);
         const bool hdr = mode == 1 || mode == 2;  // both composed in FP16 by Windows
@@ -1525,6 +1583,10 @@ void fit_format(Dev* d, Window* w) {
             }
         }
     }
+}
+
+// Under g_d3d, before a frame goes into the window's swap chain: its format for the display now.
+void fit_format(Dev* d, Window* w) {
     const bool want = g_hdr_chain.load() == 1 && w->display_hdr && make_scrgb_shaders(d);
     if (want == w->scrgb) return;
     d->ctx->ClearState();
@@ -1569,17 +1631,17 @@ void draw_mark(Dev* d, Window* w, ID3D11Texture2D* back) {
     rtv->Release();
 }
 
-// Under g_d3d: the frame into the back buffer.
-void copy_out(Dev* d, Window* w, Image& im, ID3D11Texture2D* back) {
+// Under g_d3d: the frame (`src`, its view made in `*srv` when needed) into the back buffer.
+void copy_out(Dev* d, Window* w, ID3D11Texture2D* src, ID3D11ShaderResourceView** srv, ID3D11Texture2D* back) {
     if (!w->scrgb) {
-        d->ctx->CopyResource(back, im.tex);
+        d->ctx->CopyResource(back, src);
         draw_mark(d, w, back);
         return;
     }
-    if (!im.srv) d->d3d->CreateShaderResourceView(im.tex, nullptr, &im.srv);
+    if (!*srv) d->d3d->CreateShaderResourceView(src, nullptr, srv);
     ID3D11RenderTargetView* rtv = nullptr;
     d->d3d->CreateRenderTargetView(back, nullptr, &rtv);
-    if (!im.srv || !rtv) {
+    if (!*srv || !rtv) {
         release(rtv);
         return;
     }
@@ -1598,7 +1660,7 @@ void copy_out(Dev* d, Window* w, Image& im, ID3D11Texture2D* back) {
     d->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     d->ctx->VSSetShader(d->scrgb_vs, nullptr, 0);
     d->ctx->PSSetShader(d->scrgb_ps, nullptr, 0);
-    d->ctx->PSSetShaderResources(0, 1, &im.srv);
+    d->ctx->PSSetShaderResources(0, 1, srv);
     d->ctx->PSSetConstantBuffers(0, 1, &d->scrgb_cb);
     d->ctx->Draw(3, 0);
     ID3D11ShaderResourceView* none = nullptr;
@@ -1637,7 +1699,36 @@ void note_present_result(HRESULT hr) {
     }
 }
 
-void run_job(const Job& j) {
+// A free private texture of the swap chain (the copying thread waits for one if the flips are behind), made on
+// first use in the frames' format.
+bool take_stage(Swap* s, uint32_t* out) {
+    for (int tries = 0; tries < 500; ++tries) {
+        for (uint32_t k = 0; k < Swap::kStages; ++k) {
+            bool expected = false;
+            if (s->stage_busy[k].compare_exchange_strong(expected, true)) {
+                if (!s->stage[k]) {
+                    D3D11_TEXTURE2D_DESC td{};
+                    s->images[0].tex->GetDesc(&td);
+                    td.MiscFlags = 0;
+                    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    std::lock_guard<std::mutex> g(g_d3d);
+                    if (FAILED(s->dev->d3d->CreateTexture2D(&td, nullptr, &s->stage[k]))) {
+                        s->stage_busy[k] = false;
+                        return false;
+                    }
+                }
+                *out = k;
+                return true;
+            }
+        }
+        WaitForSingleObject(g_stage_event, 2);
+    }
+    return false;
+}
+
+// The copying thread: each frame, in order, as soon as Vulkan has finished it: into a private texture, the image
+// handed back to DXVK (copy-done), then on to the flipping thread. Nothing here waits for a flip time.
+void copy_job(const Job& j) {
     Swap* s = j.swap;
     Dev* d = s->dev;
     Image& im = s->images[j.index < s->count ? j.index : 0];
@@ -1652,39 +1743,101 @@ void run_job(const Job& j) {
             ++g_ready_timeouts;
         }
     }
-    const LONGLONG ready_t = qpc_now();
-    // Copied out at once (the image goes back to DXVK), flipped at its time.
-    HRESULT hr;
+    Flip f;
+    f.swap = s;
+    f.content = j.content;
+    f.ready = qpc_now();
+    f.sync = j.sync;
+    f.flags = j.flags;
+    const bool staged = take_stage(s, &f.stage);
     {
         std::lock_guard<std::mutex> g(g_d3d);
         d->ctx->Wait(d->ready_fence, j.ready);
-        fit_format(d, s->window);
-        ID3D11Texture2D* back = nullptr;
-        hr = s->window->chain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back));
-        if (SUCCEEDED(hr)) {
-            copy_out(d, s->window, im, back);
-            back->Release();
+        if (staged) {
+            d->ctx->CopyResource(s->stage[f.stage], im.tex);
+        } else {
+            // no private texture: straight into the back buffer and flipped at once (as mode 2)
+            look_at_display(s->window);
+            fit_format(d, s->window);
+            ID3D11Texture2D* back = nullptr;
+            HRESULT hr = s->window->chain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back));
+            if (SUCCEEDED(hr)) {
+                copy_out(d, s->window, im.tex, &im.srv, back);
+                back->Release();
+            }
+            d->ctx->Signal(d->release_fence, j.done);
+            note_flip(qpc_now(), j.content, f.ready);
+            if (SUCCEEDED(hr)) hr = s->window->chain->Present(j.sync, j.flags);
+            sample_composition(s->window->chain);
+            note_present_result(hr);
+            g_jobs_open.fetch_sub(1);
+            return;
         }
         d->ctx->Signal(d->release_fence, j.done);
         d->ctx->Flush();
     }
+    {
+        std::lock_guard<std::mutex> g(g_flip_lock);
+        g_flips.push_back(f);
+    }
+    SetEvent(g_flip_event);
+}
+
+// The flipping thread: each copied frame at its time. Normally the next frame or two are already copied while one is
+// held (the delay is about a frame or more); with three waiting the flips have fallen behind, and it catches up
+// without holding.
+void flip_one(const Flip& f, bool behind) {
+    Swap* s = f.swap;
+    Dev* d = s->dev;
+    look_at_display(s->window);
     const double latency_before = g_latency;
-    const LONGLONG target = flip_target(j.content, ready_t, g_pacing.load());
+    LONGLONG target = flip_target(f.content, f.ready, g_pacing.load());
+    if (behind) target = 0;
     const bool held = target > qpc_now();
     if (held) pace_until(target);
+    HRESULT hr;
     {
         std::lock_guard<std::mutex> g(g_d3d);
+        fit_format(d, s->window);
+        ID3D11Texture2D* back = nullptr;
+        hr = s->window->chain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back));
+        if (SUCCEEDED(hr)) {
+            copy_out(d, s->window, s->stage[f.stage], &s->stage_srv[f.stage], back);
+            back->Release();
+        }
         const LONGLONG flip_t = qpc_now();
         {
             std::lock_guard<std::mutex> sg(g_spacing_lock);
             if (held && g_overs < kSpacingSamples) g_over_us[g_overs++] = to_us(flip_t - target);
             g_latency_moved_us += std::fabs(g_latency - latency_before) * 1e6 / g_qpc_freq;
         }
-        note_flip(flip_t, j.content, ready_t);
-        if (SUCCEEDED(hr)) hr = s->window->chain->Present(j.sync, j.flags);
+        note_flip(flip_t, f.content, f.ready);
+        if (SUCCEEDED(hr)) hr = s->window->chain->Present(f.sync, f.flags);
         sample_composition(s->window->chain);
     }
+    s->stage_busy[f.stage] = false;
+    SetEvent(g_stage_event);
     note_present_result(hr);
+}
+
+DWORD WINAPI flipper_main(void*) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    for (;;) {
+        WaitForSingleObject(g_flip_event, INFINITE);
+        for (;;) {
+            Flip f;
+            bool more = false;
+            {
+                std::lock_guard<std::mutex> g(g_flip_lock);
+                if (g_flips.empty()) break;
+                f = g_flips.front();
+                g_flips.erase(g_flips.begin());
+                more = g_flips.size() >= 3;
+            }
+            flip_one(f, more);
+            g_jobs_open.fetch_sub(1);
+        }
+    }
 }
 
 DWORD WINAPI presenter_main(void*) {
@@ -1699,22 +1852,26 @@ DWORD WINAPI presenter_main(void*) {
                 j = g_jobs.front();
                 g_jobs.erase(g_jobs.begin());
             }
-            run_job(j);
-            g_jobs_open.fetch_sub(1);
+            copy_job(j);
         }
     }
 }
 
-// False when the thread cannot be had (the caller presents the old way).
+// False when the threads cannot be had (the caller presents the old way).
 bool start_presenter() {
-    if (g_presenter) return true;
+    if (g_presenter && g_flipper) return true;
     static bool failed = false;
     if (failed) return false;
     g_job_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    g_presenter = g_job_event ? CreateThread(nullptr, 0, presenter_main, nullptr, 0, nullptr) : nullptr;
-    if (!g_presenter) {
+    g_flip_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_stage_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (g_job_event && g_flip_event && g_stage_event) {
+        g_flipper = CreateThread(nullptr, 0, flipper_main, nullptr, 0, nullptr);
+        g_presenter = g_flipper ? CreateThread(nullptr, 0, presenter_main, nullptr, 0, nullptr) : nullptr;
+    }
+    if (!g_presenter || !g_flipper) {
         failed = true;
-        LOG_ERROR("DXGI present: no presenting thread (%lu); frames flip when the GPU is done", GetLastError());
+        LOG_ERROR("DXGI present: no presenting threads (%lu); frames flip when the GPU is done", GetLastError());
         return false;
     }
     return true;
@@ -1792,6 +1949,7 @@ VKAPI_ATTR VkResult VKAPI_CALL our_present(VkQueue queue, const VkPresentInfoKHR
         SetEvent(g_job_event);
     } else {
         drain_jobs();
+        look_at_display(s->window);
         // Direct3D 11: wait for it on the GPU, copy into the DXGI back buffer, signal copy-done, present.
         HRESULT hr;
         std::lock_guard<std::mutex> g(g_d3d);
@@ -1800,7 +1958,7 @@ VKAPI_ATTR VkResult VKAPI_CALL our_present(VkQueue queue, const VkPresentInfoKHR
         ID3D11Texture2D* back = nullptr;
         hr = s->window->chain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back));
         if (SUCCEEDED(hr)) {
-            copy_out(d, s->window, im, back);
+            copy_out(d, s->window, im.tex, &im.srv, back);
             back->Release();
         }
         const uint64_t done = d->release_value.fetch_add(1) + 1;
