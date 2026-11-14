@@ -660,9 +660,17 @@ DrawIdxFn o_draw_idx = nullptr;
 int g_logged_unfit = 0;
 
 void note_unfit(const char* call, D3DPRIMITIVETYPE type, UINT prims) {
-    if (!g_layout || g_logged_unfit >= 16) return;
+    if (!g_layout || g_logged_unfit >= 24) return;
     if (g_scale >= 0.999f && g_world_scale >= 0.999f) return;
-    ++g_logged_unfit;
+    if (!player_in_world()) return;  // the title screen's own full-screen quads
+    // Each kind once: the call, the primitive type, the shader kind and the count.
+    static uint32_t seen[24] = {};
+    const uint32_t sig = (static_cast<uint32_t>(std::strlen(call)) << 24) ^ (static_cast<uint32_t>(type) << 16) ^
+                         (static_cast<uint32_t>(g_bound) << 12) ^ (prims & 0xFFF);
+    for (int i = 0; i < g_logged_unfit; ++i) {
+        if (seen[i] == sig) return;
+    }
+    seen[g_logged_unfit++] = sig;
     LOG_INFO("UIScale: a %s in the layout's pass is not refit (primitive type %d, %u primitives, shader kind %u)", call,
              static_cast<int>(type), prims, g_bound);
 }
