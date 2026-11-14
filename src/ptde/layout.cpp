@@ -81,9 +81,8 @@ DrawUpFn o_draw_up = nullptr;
 DrawIdxUpFn o_draw_idx_up = nullptr;
 SetScissorFn o_set_scissor = nullptr;
 
-// kPlain: any other shader that puts its position through the layout's rows (c0): positions in layout units, floats.
-// Another player's bar has a white outline that stayed full size with the image, text and box kinds and lines all
-// handled (2026-11-14 screenshots): it is taken to be drawn so.
+// kPlain: float positions in layout units, for the game's frames of lines whatever their shader (layout_frame; the
+// white outline of another player's bar stayed full size with the image, text and box kinds and lines handled).
 enum Kind : uint8_t { kOther = 0, kImage = 1, kText = 2, kBox = 3, kPlain = 4 };
 
 bool g_keep_shape = true;
@@ -160,7 +159,7 @@ uint8_t classify(const DWORD* code) {
     if (eighth) return kImage;
     if (frc_first) return kText;
     if (c8) return kBox;
-    return kPlain;
+    return kOther;
 }
 
 void send_rows(IDirect3DDevice9* dev, bool shaped) {
@@ -780,7 +779,42 @@ UINT vertex_count(D3DPRIMITIVETYPE type, UINT prims) {
     }
 }
 
+// The game's single-colour rectangles (0xF5A340, 0xF5B000: filled as a triangle fan, framed as a 4-segment line strip;
+// vertices of 0x20 bytes, x and y the first two floats, in layout units): another player's bar has its white outline
+// so. A line draw of that layout in the layout's pass is refit as plain positions whatever its shader's kind.
+bool layout_frame(D3DPRIMITIVETYPE type, UINT stride) {
+    return g_layout && g_bound == kOther && stride == 0x20 && (type == D3DPT_LINESTRIP || type == D3DPT_LINELIST) &&
+           (g_shaped || g_scale < 0.999f || g_world_scale < 0.999f);
+}
+
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT prims, const void* data, UINT stride) {
+#if FPSU_DIAGNOSTICS
+    // Every frame of lines of that layout, the first few in the world: in the layout's pass or not, its first corner.
+    static int frames_logged = 0;
+    if (frames_logged < 8 && data && stride == 0x20 && (type == D3DPT_LINESTRIP || type == D3DPT_LINELIST) &&
+        player_in_world()) {
+        ++frames_logged;
+        float v[4];
+        std::memcpy(v, data, sizeof(v));
+        LOG_INFO("UIScale: a frame of lines (type %d, %u segments): layout's pass %d, shader kind %u, first corner %.1f, "
+                 "%.1f, %.1f, %.1f", static_cast<int>(type), prims, g_layout ? 1 : 0, g_bound, v[0], v[1], v[2], v[3]);
+    }
+#endif
+    if (layout_frame(type, stride)) {
+        g_bound = kPlain;
+        bool rows = false;
+        float box[8];
+        std::memcpy(box, g_box, sizeof(box));
+        const bool edited = refit(data, stride, vertex_count(type, prims), box, dev, &rows);
+        g_bound = kOther;
+        static int logged = 0;
+        if (logged < 4) {
+            ++logged;
+            LOG_INFO("UIScale: a frame of lines (%u segments) in the layout's pass, with a shader of no known kind: %s",
+                     prims, edited ? "refit" : "left as it is");
+        }
+        return o_draw_up(dev, type, prims, edited ? g_copy.data() : data, stride);
+    }
 #if FPSU_DIAGNOSTICS
     if (g_bound == kOther) note_unfit("DrawPrimitiveUP", type, prims);
 #endif
