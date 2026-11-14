@@ -32,9 +32,9 @@ void resolution_set_smooth_dof(bool on);
 // DepthOfFieldStrength: the depth of field's blur weight times this (1 = the game's).
 void resolution_set_dof_strength(float strength);
 // DepthOfFieldResolution: 100 = the depth of field's blur levels made at half (and a quarter of) the render size
-// with the game's widths; other values scale those widths in percent (RemoteControl `dofhr`); 0 = the game's 512x360
-// and 256x180 levels (read smoothly).
-void resolution_set_dof_resolution(int percent);
+// (full: at the render size, level 3 at half) with the game's widths; other values scale those widths in percent
+// (RemoteControl `dofhr`); 0 = the game's 512x360 and 256x180 levels (read smoothly).
+void resolution_set_dof_resolution(int percent, bool full);
 // Diagnostics: the composite shows only blur level 1-3 everywhere (0: the game's weights).
 void resolution_force_dof_level(int level);
 

@@ -1815,9 +1815,10 @@ void run(const std::string& line) {
         resolution_set_dof_strength(static_cast<float>(num(1, 100)) / 100.0f);
         out("dofstrength %ld%%", num(1, 100));
     } else if (c == "dofhr") {
-        // dofhr PCT: the half-size depth of field with its widths at PCT percent of the game's (0: the game's levels).
-        resolution_set_dof_resolution(static_cast<int>(num(1, 100)));
-        out("dofhr %ld", num(1, 100));
+        // dofhr PCT [FULL]: DepthOfFieldResolution with its widths at PCT percent of the game's (0: the game's levels),
+        // FULL 1: levels 1 and 2 at the render size (full), else half.
+        resolution_set_dof_resolution(static_cast<int>(num(1, 100)), num(2, 0) != 0);
+        out("dofhr %ld %s", num(1, 100), num(2, 0) != 0 ? "full" : "half");
     } else if (c == "effects") {
         // effects 0/1/2/3: the game's low-resolution effects, ours at full resolution (8-bit), ours in float + dither,
         // ours at half resolution.

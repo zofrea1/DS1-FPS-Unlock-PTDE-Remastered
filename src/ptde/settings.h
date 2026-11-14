@@ -74,8 +74,9 @@ struct Settings {
     float supersampling = 1.0f;
     // Depth of field: the blur weight times this (1 = the game's, 0 = none, up to 2), with RenderResolution.
     float dof_strength = 1.0f;
-    // The depth of field's blur levels at half the render size with the game's widths (true) or the game's 512x360.
-    bool dof_half_resolution = false;
+    // The depth of field's blur levels with the game's widths at half the render size (1), at the render size (2, level 3
+    // at half) or the game's 512x360 (0).
+    int dof_resolution = 0;
     // The game's low-resolution effects (glows, mist, fog, smoke) at half the scene's size (3), its full size (2) or
     // the game's 512x360 (0) (resolution.h), with RenderResolution.
     int effects_resolution = 0;

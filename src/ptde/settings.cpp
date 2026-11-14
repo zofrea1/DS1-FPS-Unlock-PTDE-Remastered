@@ -239,7 +239,7 @@ Settings settings_load(const wchar_t* dll_path) {
             s.dof_strength = static_cast<float>(pct <= 0 ? 0.0 : (pct >= 200 ? 2.0 : pct / 100.0));
         } else if (key == "depthoffieldresolution") {
             const std::string v = lower(trim(val));
-            s.dof_half_resolution = !(v == "game" || v == "off" || v == "false" || v == "0");
+            s.dof_resolution = (v == "full") ? 2 : (v == "game" || v == "off" || v == "false" || v == "0") ? 0 : 1;
         } else if (key == "effectsresolution") {
             const std::string v = lower(trim(val));
             s.effects_resolution = (v == "full") ? 2 : (v == "game" || v == "off" || v == "false" || v == "0") ? 0 : 3;

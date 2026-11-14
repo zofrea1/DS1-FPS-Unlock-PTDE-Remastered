@@ -870,12 +870,15 @@ HRESULT area_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DVI
 // ---------------------------------------------------------------------------------------------------------------
 // DepthOfFieldResolution = half (shaders/dof_hr.hlsl says why): at the depth of field's composite (kDofSwap's draw)
 // its three blur levels are made again from the scene at half the render size (level 3 at a quarter) and the
-// composite reads those in place of the game's 512x360 and 256x180 ones. The widths are the game's, in its original
-// 1024x720 pixels (kDofSigma), times g_dofhr_scale (RemoteControl `dofhr PCT`, for comparisons; 0 = the game's levels).
+// composite reads those in place of the game's 512x360 and 256x180 ones. full: levels 1 and 2 at the render size and
+// level 3 at half; the same widths, so the same picture without the half-size levels' last softness (and about four
+// times the blur work). The widths are the game's, in its original 1024x720 pixels (kDofSigma), times g_dofhr_pct
+// (RemoteControl `dofhr PCT`, for comparisons; 0 = the game's levels).
 // Measured 2026-11-12 (Firelink, 4K, RemoteControl dofforce 1-3 against the game's levels; detail of 4x4 blocks, which
 // leaves out the pixel grain): the estimates from the game's kernels (1.0, 1.68, 3.7) times 1.30, 1.15 and 1.10.
 constexpr float kDofSigma[3] = {1.3f, 1.93f, 4.07f};
 volatile LONG g_dofhr_pct = 100;  // 0: the game's levels (smoothly read), else ours with the widths at this percent
+volatile LONG g_dofhr_full = 0;   // 1: levels 1 and 2 at the render size, level 3 at half (else half and a quarter)
 
 struct DofHr {
     IDirect3DDevice9* dev = nullptr;
@@ -885,15 +888,15 @@ struct DofHr {
     IDirect3DPixelShader9* comp = nullptr;
     IDirect3DVertexDeclaration9* decl = nullptr;
     IDirect3DStateBlock9* state = nullptr;
-    // A, B, level 1, level 2 at half size; Q, Q2, level 3 at a quarter.
-    IDirect3DTexture9* tex[7] = {};
-    IDirect3DSurface9* surf[7] = {};
+    // A, level 1, level 2 at half size (full: the render size); Q, Q2, level 3 at half of that.
+    IDirect3DTexture9* tex[6] = {};
+    IDirect3DSurface9* surf[6] = {};
     UINT hw = 0, hh = 0, qw = 0, qh = 0;
     bool failed = false;
     bool logged = false;
 };
 DofHr g_dofhr;
-enum { kHrA, kHrB, kHrL1, kHrL2, kHrQ, kHrQ2, kHrL3, kHrCount };
+enum { kHrA, kHrL1, kHrL2, kHrQ, kHrQ2, kHrL3, kHrCount };
 
 void dofhr_release_targets() {
     for (int i = 0; i < kHrCount; ++i) {
@@ -926,12 +929,14 @@ bool dofhr_ready(IDirect3DDevice9* dev, UINT scene_w, UINT scene_h) {
             FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofHrCompositePs), &g_dofhr.comp)) ||
             FAILED(dev->CreateVertexDeclaration(kDecl, &g_dofhr.decl))) {
             g_dofhr.failed = true;
-            LOG_ERROR("Resolution: the shaders for the half-size depth of field could not be made; the game's levels "
-                      "are used");
+            LOG_ERROR("Resolution: the shaders for DepthOfFieldResolution could not be made; the game's levels are "
+                      "used");
         }
     }
     if (g_dofhr.failed) return false;
-    const UINT hw = (scene_w + 1) / 2, hh = (scene_h + 1) / 2, qw = (hw + 1) / 2, qh = (hh + 1) / 2;
+    const bool full = g_dofhr_full != 0;
+    const UINT hw = full ? scene_w : (scene_w + 1) / 2, hh = full ? scene_h : (scene_h + 1) / 2;
+    const UINT qw = (hw + 1) / 2, qh = (hh + 1) / 2;
     if (g_dofhr.tex[0] && (g_dofhr.hw != hw || g_dofhr.hh != hh)) dofhr_release_targets();
     if (!g_dofhr.tex[0]) {
         const D3DFORMAT f = g_fx.float_ok == 0 ? D3DFMT_A8R8G8B8 : D3DFMT_A16B16G16R16F;
@@ -942,8 +947,8 @@ bool dofhr_ready(IDirect3DDevice9* dev, UINT scene_w, UINT scene_h) {
                 !g_dofhr.tex[i] || FAILED(g_dofhr.tex[i]->GetSurfaceLevel(0, &g_dofhr.surf[i]))) {
                 dofhr_release_targets();
                 g_dofhr.failed = true;
-                LOG_ERROR("Resolution: no %ux%u targets for the half-size depth of field; the game's levels are used",
-                          hw, hh);
+                LOG_ERROR("Resolution: no %ux%u targets for DepthOfFieldResolution; the game's levels are used", hw,
+                          hh);
                 return false;
             }
         }
@@ -1029,7 +1034,7 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
     dev->SetVertexShader(g_dofhr.vs);
     dev->SetVertexDeclaration(g_dofhr.decl);
 
-    // The widths in our texels: the original 1024x720 pixel is hw/1024 half texels wide and hh/720 high.
+    // The widths in our texels: the original 1024x720 pixel is hw/1024 of our texels wide and hh/720 high.
     const float scale = static_cast<float>(g_dofhr_pct) / 100.0f;
     const float hx = g_dofhr.hw / 1024.0f, hy = g_dofhr.hh / 720.0f, qx = g_dofhr.qw / 1024.0f, qy = g_dofhr.qh / 720.0f;
     const float s1x = kDofSigma[0] * scale * hx, s1y = kDofSigma[0] * scale * hy;
@@ -1037,9 +1042,13 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
     const float s3x = kDofSigma[2] * scale * qx, s3y = kDofSigma[2] * scale * qy;
     const float s2qx = kDofSigma[1] * scale * qx, s2qy = kDofSigma[1] * scale * qy;
     // A: the scene's 2x2 average (a half texel box, 1/12) and the composite's bilinear read (1/6) are part of level 1.
+    // At full size A is the scene as it is (the same read, at the texel centres) and the composite reads level 1 at
+    // its texel centres: nothing to take off. Level 2's target is level 1's scratch, and A level 2's.
+    const bool full = g_dofhr.hw == sd.Width;
+    const float have1 = full ? 0.0f : 0.25f;
     dofhr_pass(dev, kHrA, scene, sd.Width, sd.Height, g_dofhr.down, nullptr, nullptr);
-    dofhr_blur(dev, kHrA, kHrB, kHrL1, inc_sigma(s1x, 0.25f), inc_sigma(s1y, 0.25f), false);
-    dofhr_blur(dev, kHrL1, kHrB, kHrL2, inc_sigma(s2x, s1x * s1x), inc_sigma(s2y, s1y * s1y), true);
+    dofhr_blur(dev, kHrA, kHrL2, kHrL1, inc_sigma(s1x, have1), inc_sigma(s1y, have1), false);
+    dofhr_blur(dev, kHrL1, kHrA, kHrL2, inc_sigma(s2x, s1x * s1x), inc_sigma(s2y, s1y * s1y), true);
     // Level 3 at a quarter: level 2 averaged down (1/12), then read with a B-spline (1/3 instead of 1/6).
     dofhr_pass(dev, kHrQ, g_dofhr.tex[kHrL2], g_dofhr.hw, g_dofhr.hh, g_dofhr.down, nullptr, nullptr);
     dofhr_blur(dev, kHrQ, kHrQ2, kHrL3, inc_sigma(s3x, s2qx * s2qx + 0.25f), inc_sigma(s3y, s2qy * s2qy + 0.25f),
@@ -1420,7 +1429,10 @@ void resolution_set_present_reduce(bool on) {
 void resolution_set_smooth_dof(bool on) { g_swap_enabled = on; }
 void resolution_force_dof_level(int level) { g_dof_force = level; }
 void resolution_set_dof_strength(float strength) { g_dof_strength[0] = strength; }
-void resolution_set_dof_resolution(int percent) { g_dofhr_pct = percent < 0 ? 0 : (percent > 400 ? 400 : percent); }
+void resolution_set_dof_resolution(int percent, bool full) {
+    g_dofhr_full = full ? 1 : 0;
+    g_dofhr_pct = percent < 0 ? 0 : (percent > 400 ? 400 : percent);
+}
 
 void resolution_reset() {
     g_tex0 = nullptr;
