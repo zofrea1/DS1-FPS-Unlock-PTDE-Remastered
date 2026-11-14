@@ -155,6 +155,7 @@ struct Settings {
     // DXVK's frames go out through a DXGI flip-model swap chain instead of a Vulkan one (dxgipresent.h): HDR stays on
     // and variable refresh works without exclusive fullscreen. DxvkExclusiveFullscreen then has nothing to do.
     bool dxvk_dxgi_present = true;
+    bool dxvk_paced_present = true;  // DxvkPacedPresent: even flip spacing through DXGI (dxgipresent.h)
     // The game's brightness gamma ramp (gamma.h): 0 auto and 1 passed on (as the system Direct3D 9 does), 2 never.
     int gamma_ramp = 0;
     // Render thread CPU (see d3dperf.h): the render target the game reads back every frame is copied two frames late

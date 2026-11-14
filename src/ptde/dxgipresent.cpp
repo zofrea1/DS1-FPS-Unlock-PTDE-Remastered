@@ -9,6 +9,7 @@
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -101,6 +102,7 @@ struct Dev {
     bool tearing = false;
     ID3D11Fence* ready_fence = nullptr;    // signalled by Vulkan: frame done
     ID3D11Fence* release_fence = nullptr;  // signalled by Direct3D 11: copy done
+    HANDLE ready_event = nullptr;          // paced presenting: set when ready_fence reaches a frame's value
     VkSemaphore ready_sem = VK_NULL_HANDLE;
     VkSemaphore release_sem = VK_NULL_HANDLE;
     uint64_t ready_value = 0;
@@ -165,6 +167,178 @@ std::atomic<long> g_last_hr{0};
 std::atomic<int> g_composition{-1};  // DXGI_FRAME_PRESENTATION_MODE of the last sample, -1 none yet
 bool g_logged_fence_acquire = false;
 bool g_logged_present_error = false;
+
+// Paced presenting (dxgipresent_set_pacing). With variable refresh the display starts a refresh when a frame is
+// flipped, so the times of the flips are the times the player sees. Left to the GPU (the Direct3D 11 queue waits for
+// Vulkan's frame, copies and flips whenever that is done), frames that DXVK's threads hand over unevenly can be
+// flipped closer together than the display's fastest refresh, even under a frame rate cap below it (measured in
+// Firelink at MaxFPS 225: 17% of the flips under the 4.17 ms of a 240 Hz display, the closest 2.4 ms): the display
+// then sits at its ceiling and shows some frames late. Paced, the presenting thread itself waits for Vulkan's frame
+// and then holds the flip until the display can refresh again:
+//   - under a cap (MaxFPS) at or below the display's rate: no flip closer to the one before than the display's
+//     fastest refresh (and 1.5%). The cap still sets the rate; only the frames that came too soon are
+//     held, a fraction of a millisecond (same test, paced: none too close, the frame rate unchanged);
+//   - without a cap, or with one above the display's rate: no hold (the display cannot follow anyway, and holding
+//     would cap the game at the display's rate).
+// 0 = off (as before), 1 = wait and hold, 2 = wait only (for measuring what unpaced flips are like).
+std::atomic<int> g_pacing{0};
+int (*g_cap_fps)() = nullptr;
+std::atomic<int> g_refresh_mhz{0};  // the display under the window, in mHz (0 unknown)
+std::atomic<int> g_test_refresh_mhz{0};  // development: paced as if the display had this rate
+LONGLONG g_qpc_freq = 0;
+LONGLONG g_last_flip = 0;           // presenting thread: when the last flip was asked for
+HANDLE g_pace_timer = nullptr;      // presenting thread
+bool g_pace_timer_tried = false;
+
+// Flip spacing since the last report (the presenting thread adds, the report takes).
+std::mutex g_spacing_lock;
+constexpr uint32_t kSpacingSamples = 4096;
+uint32_t g_spacing_us[kSpacingSamples];
+uint32_t g_spacing_count = 0;
+uint32_t g_spacing_close = 0;       // flips closer together than the display's fastest refresh
+uint64_t g_ready_wait_us = 0;       // paced: waiting for Vulkan's frame
+uint64_t g_hold_us = 0;             // paced: holding a finished frame for its step
+uint32_t g_held = 0;
+uint32_t g_ready_timeouts = 0;
+
+LONGLONG qpc_now() {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+
+// The presenting thread until `target` (performance counter ticks): a high resolution timer, the last 0.3 ms spun.
+void pace_until(LONGLONG target) {
+    if (!g_pace_timer_tried) {
+        g_pace_timer_tried = true;
+        g_pace_timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* high resolution */,
+                                              SYNCHRONIZE | TIMER_MODIFY_STATE);
+    }
+    LONGLONG now = qpc_now();
+    const LONGLONG spin = g_qpc_freq * 3 / 10000;
+    while (g_pace_timer && now + spin < target) {
+        LARGE_INTEGER due{};
+        due.QuadPart = -((target - now - spin) * 10000000LL / g_qpc_freq);
+        if (due.QuadPart >= 0 || !SetWaitableTimer(g_pace_timer, &due, 0, nullptr, nullptr, FALSE)) break;
+        WaitForSingleObject(g_pace_timer, 50);
+        now = qpc_now();
+    }
+    while (now < target) {
+        YieldProcessor();
+        now = qpc_now();
+    }
+}
+
+// The refresh rate of the display the window is on.
+void sample_refresh(HWND hwnd) {
+    if (g_test_refresh_mhz.load() > 0) {
+        g_refresh_mhz = g_test_refresh_mhz.load();
+        return;
+    }
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+    if (mon && GetMonitorInfoW(mon, &mi) && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) &&
+        dm.dmDisplayFrequency > 1) {
+        g_refresh_mhz = static_cast<int>(dm.dmDisplayFrequency) * 1000;
+    }
+}
+
+// Paced presenting, on the presenting thread after the submission that signals `ready`: wait for Vulkan's frame.
+void pace_wait_ready(Dev* d, uint64_t ready) {
+    if (g_qpc_freq <= 0) return;
+    const LONGLONG t0 = qpc_now();
+    bool timed_out = false;
+    if (!d->ready_event) d->ready_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (d->ready_event && SUCCEEDED(d->ready_fence->SetEventOnCompletion(ready, d->ready_event))) {
+        // A device that stops answering must not hang the game here: the GPU-side wait that follows still holds.
+        timed_out = WaitForSingleObject(d->ready_event, 500) != WAIT_OBJECT_0;
+    }
+    const LONGLONG t1 = qpc_now();
+    std::lock_guard<std::mutex> g(g_spacing_lock);
+    g_ready_wait_us += static_cast<uint64_t>((t1 - t0) * 1000000 / g_qpc_freq);
+    if (timed_out) ++g_ready_timeouts;
+}
+
+// Paced presenting, just before the flip is asked for (the copy is already queued): hold it until the display can
+// refresh again.
+void pace_hold() {
+    if (g_qpc_freq <= 0 || !g_last_flip) return;
+    const int cap = g_cap_fps ? g_cap_fps() : 0;
+    const int mhz = g_refresh_mhz.load();
+    if (cap <= 0 || mhz <= 0 || cap * 1000 > mhz) return;
+    // 1.5% over the refresh time
+    const LONGLONG target = g_last_flip + g_qpc_freq * 1015 / mhz;
+    const LONGLONG t1 = qpc_now();
+    if (t1 >= target) return;
+    pace_until(target);
+    const LONGLONG held = qpc_now() - t1;
+    std::lock_guard<std::mutex> g(g_spacing_lock);
+    g_hold_us += static_cast<uint64_t>(held * 1000000 / g_qpc_freq);
+    ++g_held;
+}
+
+// The flip is asked for now: its spacing from the one before.
+void note_flip() {
+    if (g_qpc_freq <= 0) return;
+    const LONGLONG now = qpc_now();
+    if (g_last_flip) {
+        const uint32_t us = static_cast<uint32_t>((std::min<LONGLONG>)((now - g_last_flip) * 1000000 / g_qpc_freq,
+                                                                     60000000));
+        const int mhz = g_refresh_mhz.load();
+        std::lock_guard<std::mutex> g(g_spacing_lock);
+        if (g_spacing_count < kSpacingSamples) g_spacing_us[g_spacing_count++] = us;
+        if (mhz > 0 && us * static_cast<uint64_t>(mhz) < 1000000000ull) ++g_spacing_close;
+    }
+    g_last_flip = now;
+}
+
+// The NVIDIA driver's word on variable refresh for the display the window is on (NvAPI; nothing on other vendors).
+// "in VRR mode" is the one that says the display is following the frames right now.
+struct NvVrrInfo {
+    uint32_t version;
+    uint32_t flags;  // enabled, possible, requested, indicator, display in VRR mode
+    uint32_t reserved[4];
+};
+HWND g_last_hwnd = nullptr;
+
+bool nvidia_vrr(char* out, size_t size) {
+    using Query = void* (__cdecl*)(uint32_t);
+    using InitFn = int (__cdecl*)();
+    using ByName = int (__cdecl*)(const char*, uint32_t*);
+    using VrrFn = int (__cdecl*)(uint32_t, NvVrrInfo*);
+    static bool tried = false;
+    static ByName by_name = nullptr;
+    static VrrFn vrr = nullptr;
+    if (!tried) {
+        tried = true;
+        HMODULE nv = LoadLibraryExW(sizeof(void*) == 8 ? L"nvapi64.dll" : L"nvapi.dll", nullptr,
+                                    LOAD_LIBRARY_SEARCH_SYSTEM32);
+        Query query = nv ? reinterpret_cast<Query>(GetProcAddress(nv, "nvapi_QueryInterface")) : nullptr;
+        if (query) {
+            InitFn init = reinterpret_cast<InitFn>(query(0x0150E828));
+            if (init && init() == 0) {
+                by_name = reinterpret_cast<ByName>(query(0xAE457190));
+                vrr = reinterpret_cast<VrrFn>(query(0xDF8FDA57));
+            }
+        }
+    }
+    if (!by_name || !vrr || !g_last_hwnd) return false;
+    MONITORINFOEXA mi{};
+    mi.cbSize = sizeof(mi);
+    HMONITOR mon = MonitorFromWindow(g_last_hwnd, MONITOR_DEFAULTTOPRIMARY);
+    uint32_t id = 0;
+    if (!mon || !GetMonitorInfoA(mon, &mi) || by_name(mi.szDevice, &id) != 0) return false;
+    NvVrrInfo info{};
+    info.version = sizeof(info) | (1u << 16);
+    if (vrr(id, &info) != 0) return false;
+    std::snprintf(out, size, "G-SYNC: set up for this display %s, possible %s, asked for by the game %s, display "
+                  "following the frames now %s", (info.flags & 1) ? "yes" : "no", (info.flags & 2) ? "yes" : "no",
+                  (info.flags & 4) ? "yes" : "no", (info.flags & 16) ? "yes" : "no");
+    return true;
+}
 
 template <typename T>
 uint64_t to_handle(T* p) {
@@ -474,6 +648,8 @@ void destroy_dev_interop(Dev* d) {
         }
         release(d->ready_fence);
         release(d->release_fence);
+        if (d->ready_event) CloseHandle(d->ready_event);
+        d->ready_event = nullptr;
         release(d->ctx);
         release(d->d3d);
         release(d->factory);
@@ -1193,6 +1369,15 @@ VKAPI_ATTR VkResult VKAPI_CALL our_present(VkQueue queue, const VkPresentInfoKHR
     VkResult vr = d->fn.QueueSubmit2(queue, 1, &si, VK_NULL_HANDLE);
     if (vr != VK_SUCCESS) return vr;
 
+    if (g_qpc_freq <= 0) {
+        LARGE_INTEGER f;
+        if (QueryPerformanceFrequency(&f)) g_qpc_freq = f.QuadPart;
+    }
+    g_last_hwnd = s->window->hwnd;
+    if ((g_presents.load() & 255) == 0) sample_refresh(s->window->hwnd);
+    const int pacing = g_pacing.load();
+    if (pacing) pace_wait_ready(d, ready);
+
     // Direct3D 11: wait for it on the GPU, copy into the DXGI back buffer, signal copy-done, present.
     HRESULT hr;
     {
@@ -1214,6 +1399,8 @@ VKAPI_ATTR VkResult VKAPI_CALL our_present(VkQueue queue, const VkPresentInfoKHR
         } else if (s->mode == VK_PRESENT_MODE_MAILBOX_KHR) {
             sync = 0;
         }
+        if (pacing == 1 && sync == 0) pace_hold();  // with vertical sync DXGI spaces the flips itself
+        note_flip();
         if (SUCCEEDED(hr)) hr = s->window->chain->Present(sync, flags);
         // How Windows shows the frames (composed by the desktop window manager, or flipped straight to the display:
         // what variable refresh needs), sampled now and then.
@@ -1410,4 +1597,54 @@ void dxgipresent_report() {
     LOG_INFO("DXGI present: %u frames, present call avg %.2f ms max %.2f ms, %u acquire waits rewritten, last result "
              "%08lX, %s", n, us / 1000.0 / n, max_us / 1000.0, g_patched.exchange(0),
              static_cast<unsigned long>(g_last_hr.load()), dxgipresent_composition());
+
+    static uint32_t sorted[kSpacingSamples];
+    uint32_t count, close_count, held, timeouts;
+    uint64_t wait_us, hold_us;
+    {
+        std::lock_guard<std::mutex> g(g_spacing_lock);
+        count = g_spacing_count;
+        std::memcpy(sorted, g_spacing_us, count * sizeof(uint32_t));
+        close_count = g_spacing_close;
+        held = g_held;
+        timeouts = g_ready_timeouts;
+        wait_us = g_ready_wait_us;
+        hold_us = g_hold_us;
+        g_spacing_count = g_spacing_close = g_held = g_ready_timeouts = 0;
+        g_ready_wait_us = g_hold_us = 0;
+    }
+    if (count >= 8) {
+        std::sort(sorted, sorted + count);
+        uint64_t sum = 0;
+        for (uint32_t k = 0; k < count; ++k) sum += sorted[k];
+        const int pacing = g_pacing.load();
+        const int mhz = g_refresh_mhz.load();
+        char paced[160] = "not paced (the GPU flips each frame when it is done; these are the times they were handed over)";
+        if (pacing) {
+            std::snprintf(paced, sizeof(paced), "%s: waited for the frame avg %.2f ms, held %u frames avg %.2f ms%s",
+                          pacing == 1 ? "paced" : "waiting for each frame, not held", wait_us / 1000.0 / n, held,
+                          held ? hold_us / 1000.0 / held : 0.0, timeouts ? ", SOME WAITS TIMED OUT" : "");
+        }
+        LOG_INFO("DXGI present: flips %.2f ms apart on average (1%% %.2f, 10%% %.2f, half %.2f, 90%% %.2f, 99%% %.2f, "
+                 "longest %.2f ms); %u of %u closer than the display's fastest refresh (%.2f ms at %.0f Hz); %s",
+                 sum / 1000.0 / count, sorted[count / 100] / 1000.0, sorted[count / 10] / 1000.0,
+                 sorted[count / 2] / 1000.0, sorted[count * 9 / 10] / 1000.0, sorted[count * 99 / 100] / 1000.0,
+                 sorted[count - 1] / 1000.0, close_count, count, mhz > 0 ? 1000000.0 / mhz : 0.0, mhz / 1000.0, paced);
+    }
+    char nv[200];
+    if (nvidia_vrr(nv, sizeof(nv))) LOG_INFO("DXGI present: %s", nv);
+}
+
+void dxgipresent_set_pacing(int mode, int (*cap_fps)()) {
+    if (cap_fps) g_cap_fps = cap_fps;
+    g_pacing = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+}
+
+int dxgipresent_pacing() {
+    return g_pacing.load();
+}
+
+void dxgipresent_test_refresh(int hz) {
+    g_test_refresh_mhz = hz > 0 ? hz * 1000 : 0;
+    if (hz > 0) g_refresh_mhz = hz * 1000;
 }

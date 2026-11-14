@@ -6,7 +6,9 @@
 #include "layout.h"
 #include "d3dperf.h"
 #include "surfpool.h"
+#include "dxgipresent.h"
 #include "dxvk.h"
+#include "limiter.h"
 #include "gamma.h"
 #include "extension.h"
 #include "log.h"
@@ -294,6 +296,7 @@ void route_to_dxvk() {
     }
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s%s", dir, kDxvkFileName);
+    dxgipresent_set_pacing(settings().dxvk_paced_present ? 1 : 0, limiter_requested_fps);
     g_dxvk_active = dxvk_route(path, settings().dxvk_exclusive_fullscreen, settings().dxvk_dxgi_present);
 }
 

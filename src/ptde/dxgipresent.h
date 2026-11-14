@@ -36,8 +36,18 @@
 // GetProcAddress import was not found.
 bool dxgipresent_install(HMODULE dxvk);
 
-// One line about how frames went out since the last call (Profile / diagnostics), or nothing when unused.
+// How frames went out since the last call (Profile / diagnostics), or nothing when unused: the present calls, how
+// far apart the flips were, and on NVIDIA whether the display is following the frames (G-SYNC).
 void dxgipresent_report();
+
+// Paced presenting (INI DxvkPacedPresent): the presenting thread waits for each frame to be finished and flips it an
+// even step after the one before (dxgipresent.cpp has the rule), so under a frame rate cap just below the display's
+// refresh rate no two flips come closer together than the display can refresh. mode 0 = off, 1 = on, 2 = wait for
+// each frame without holding it (for measuring). cap_fps gives the current cap (0 = none); null keeps the last.
+void dxgipresent_set_pacing(int mode, int (*cap_fps)());
+int dxgipresent_pacing();
+// Development: pace (and count close flips) as if the display refreshed at hz; 0 = the real display again.
+void dxgipresent_test_refresh(int hz);
 
 // How Windows showed the last sampled frame (DXGI frame statistics): composed, overlay, flipped straight to the display.
 const char* dxgipresent_composition();

@@ -2,9 +2,13 @@
 // Each second prints how many refreshes the display scanned out (vertical blank -> active edges) and the share of time
 // spent in vertical blank. At a fixed 240 Hz that is 240 refreshes and a few percent; with G-SYNC / VRR following a
 // game at ~100 fps it is ~100 refreshes and over half the time in blank (the display waits for the next frame).
-// Also prints when Windows turns the display's advanced colour (HDR) on or off.
+// Also prints when Windows turns the display's advanced colour (HDR) on or off, and each second the spread of the
+// times between refreshes (10th, 50th and 90th percentile and the longest, in ms): with VRR following a steady frame
+// rate they are all one frame time; a display that refreshes at its own pace or doubles frames shows two clusters.
 #include <windows.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -67,6 +71,8 @@ int main(int argc, char** argv) {
     double next_report = 1.0, next_hdr = 0.25, last = 0.0, blank_time = 0.0;
     long long refreshes = 0, polls = 0;
     bool was_blank = false;
+    double last_edge = 0.0;
+    std::vector<double> gaps, all;
     for (;;) {
         GetScanLine s{};
         s.hAdapter = o.hAdapter;
@@ -75,7 +81,11 @@ int main(int argc, char** argv) {
         QueryPerformanceCounter(&t);
         const double now = double(t.QuadPart - t0.QuadPart) / fq.QuadPart;
         if (was_blank) blank_time += now - last;
-        if (was_blank && !s.InVerticalBlank) ++refreshes;
+        if (was_blank && !s.InVerticalBlank) {
+            ++refreshes;
+            if (last_edge > 0.0) gaps.push_back((now - last_edge) * 1000.0);
+            last_edge = now;
+        }
         was_blank = s.InVerticalBlank != 0;
         last = now;
         ++polls;
@@ -88,14 +98,31 @@ int main(int argc, char** argv) {
             }
         }
         if (now >= next_report) {
-            std::printf("%.0f s: %lld refreshes, %.0f%% of the time in vertical blank (%lld polls)\n", next_report,
-                        refreshes, 100.0 * blank_time, polls);
+            std::sort(gaps.begin(), gaps.end());
+            const size_t n = gaps.size();
+            std::printf("%.0f s: %lld refreshes, %.0f%% of the time in vertical blank (%lld polls); between refreshes "
+                        "p10 %.2f p50 %.2f p90 %.2f max %.2f ms\n", next_report, refreshes, 100.0 * blank_time, polls,
+                        n ? gaps[n / 10] : 0.0, n ? gaps[n / 2] : 0.0, n ? gaps[n * 9 / 10] : 0.0, n ? gaps[n - 1] : 0.0);
+            all.insert(all.end(), gaps.begin(), gaps.end());
+            gaps.clear();
             std::fflush(stdout);
             refreshes = polls = 0;
             blank_time = 0.0;
             next_report += 1.0;
             if (next_report > seconds + 0.5) break;
         }
+    }
+    std::sort(all.begin(), all.end());
+    if (!all.empty()) {
+        const size_t n = all.size();
+        double sum = 0;
+        for (double g : all) sum += g;
+        const double mean = sum / n;
+        double dev = 0;
+        for (double g : all) dev += (g - mean) * (g - mean);
+        std::printf("all: %zu refreshes, mean %.3f ms (%.1f Hz), spread (standard deviation) %.3f ms, p1 %.2f p10 %.2f "
+                    "p50 %.2f p90 %.2f p99 %.2f max %.2f ms\n", n, mean, 1000.0 / mean, std::sqrt(dev / n), all[n / 100],
+                    all[n / 10], all[n / 2], all[n * 9 / 10], all[n * 99 / 100], all[n - 1]);
     }
     return 0;
 }

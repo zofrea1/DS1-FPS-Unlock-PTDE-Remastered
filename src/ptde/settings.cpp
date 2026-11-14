@@ -310,6 +310,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.dxvk_exclusive_fullscreen = v == "auto" || v.empty() ? 0 : parse_bool(v) ? 1 : 2;
         } else if (key == "dxvkpresentthroughdxgi") {
             s.dxvk_dxgi_present = parse_bool(val);
+        } else if (key == "dxvkpacedpresent") {
+            s.dxvk_paced_present = parse_bool(val);
         } else if (key == "gammaramp") {
             const std::string v = lower(trim(val));
             s.gamma_ramp = v == "auto" || v.empty() ? 0 : parse_bool(v) ? 1 : 2;

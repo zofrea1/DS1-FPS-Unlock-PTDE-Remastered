@@ -5,6 +5,7 @@
 #if FPSU_DIAGNOSTICS
 
 #include "frame.h"
+#include "dxgipresent.h"
 #include "limiter.h"
 #include "profile.h"
 #include "atoc.h"
@@ -1574,6 +1575,12 @@ void run(const std::string& line) {
         out("fastmath %s %ld: %d sites", t[1].c_str(), num(2, 1), rendermath_set_table(table, num(2, 1) != 0));
     } else if (c == "cull") {
         out("cull %ld: %s", num(1, 1), rendermath_set_cull(num(1, 1) != 0) ? "done" : "not installed");
+    } else if (c == "dxgipace") {
+        // dxgipace [0|1|2] [HZ]: paced presenting through DXGI off, on, or waiting for each frame without holding
+        // it; HZ = as if the display refreshed at that rate (0 = the real display).
+        if (t.size() > 1) dxgipresent_set_pacing(static_cast<int>(num(1, 1)), nullptr);
+        if (t.size() > 2) dxgipresent_test_refresh(static_cast<int>(num(2, 0)));
+        out("dxgipace %d", dxgipresent_pacing());
     } else if (c == "limitpoint" && t.size() > 1) {
         limiter_set_point(t[1] == "present" ? kLimitPresent : kLimitEarly);
         out("limitpoint %s", limiter_point() == kLimitPresent ? "present" : "early");
