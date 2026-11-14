@@ -840,6 +840,21 @@ bool create_d3d11(Dev* d, const LUID& luid, char* why, size_t why_size) {
     IDXGIDevice1* dxgi_dev = nullptr;
     if (SUCCEEDED(d->d3d->QueryInterface(__uuidof(IDXGIDevice1), reinterpret_cast<void**>(&dxgi_dev)))) {
         dxgi_dev->SetMaximumFrameLatency(2);
+        // This device only copies finished frames out and flips them. At the GPU's normal priority that work waited
+        // behind DXVK's own (the next frame's drawing): the time from Present to the display starting the picture
+        // wandered about a millisecond, where Direct3D 9's own flips kept it within a few tenths. Ahead of it, the
+        // copy and the flip go when they are asked for. The highest priority that is granted is used.
+        INT granted = 0;
+        for (INT p = 7; p > 0; --p) {
+            if (SUCCEEDED(dxgi_dev->SetGPUThreadPriority(p))) {
+                granted = p;
+                break;
+            }
+        }
+        INT now = 0;
+        dxgi_dev->GetGPUThreadPriority(&now);
+        LOG_INFO("DXGI present: the copying and flipping device's GPU priority is %d (asked for up to 7)", now);
+        (void)granted;
         dxgi_dev->Release();
     }
     return true;
