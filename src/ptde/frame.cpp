@@ -39,6 +39,7 @@
 #include "watch.h"
 
 #define WIN32_LEAN_AND_MEAN
+#include <atomic>
 #include <windows.h>
 #include <mmsystem.h>
 #include <tlhelp32.h>
@@ -194,6 +195,8 @@ void survey_report(LONGLONG now) {
     }
 }
 
+std::atomic<long long> g_boundary_qpc{0};
+
 // Runs on the draw thread at every frame boundary.
 void frame_boundary() {
     // The cap waits on the game thread or just before Present (here only when neither could be hooked). Its wait
@@ -248,6 +251,7 @@ void frame_boundary() {
     }
 #endif
     g.last = t;
+    g_boundary_qpc.store(t, std::memory_order_release);
     survey_report(t);
 }
 
@@ -367,6 +371,8 @@ bool apply_vblank_patch() {
 }
 
 }  // namespace
+
+long long frame_boundary_qpc() { return g_boundary_qpc.load(std::memory_order_acquire); }
 
 void frame_force_step(float seconds) {
     g_forced_step = seconds > 0.0f && seconds <= kMaxStep ? seconds : 0.0f;

@@ -18,3 +18,7 @@ bool frame_install(const Settings& settings);
 // Diagnostics (RemoteControl "forcedt"): every frame steps the world by `seconds` whatever the measured frame time
 // (0 = measured again). Lets two runs differ only in the step, so code that moves by a fixed amount per frame shows.
 void frame_force_step(float seconds);
+
+// When the draw thread last began a frame (performance counter ticks; 0 before the first). The game's time step is
+// the time between two of these, so it is the time the frame's picture shows (dxgipresent.cpp paces flips by it).
+long long frame_boundary_qpc();

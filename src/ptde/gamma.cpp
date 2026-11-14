@@ -200,6 +200,54 @@ void gamma_hook_device(IDirect3DDevice9* game_device, int mode, bool dxvk) {
              dxvk ? "DXVK" : "the system Direct3D 9", state.text);
 }
 
+// DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL (Windows 10 1709): the SDR brightness setting, 1000 = 80 nits.
+struct SdrWhiteLevel {
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    ULONG level;
+};
+constexpr DISPLAYCONFIG_DEVICE_INFO_TYPE kGetSdrWhiteLevel = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(11);
+
+int display_hdr_white(HMONITOR monitor, float* white) {
+    if (white) *white = 1.0f;
+    const DisplayState state = display_state_of(monitor);
+    if (!state.known) return -1;
+    const int result = state.hdr ? 1 : state.advanced ? 2 : 0;
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    UINT32 path_count = 0, mode_count = 0;
+    if (!white || !GetMonitorInfoW(monitor, &mi) ||
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) != ERROR_SUCCESS ||
+        path_count == 0 || path_count > 64 || mode_count > 128) {
+        return result;
+    }
+    DISPLAYCONFIG_PATH_INFO paths[64];
+    DISPLAYCONFIG_MODE_INFO modes[128];
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths, &mode_count, modes, nullptr) != ERROR_SUCCESS) {
+        return result;
+    }
+    for (UINT32 i = 0; i < path_count; ++i) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source.header.size = sizeof(source);
+        source.header.adapterId = paths[i].sourceInfo.adapterId;
+        source.header.id = paths[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
+            _wcsicmp(source.viewGdiDeviceName, mi.szDevice) != 0) {
+            continue;
+        }
+        SdrWhiteLevel level{};
+        level.header.type = kGetSdrWhiteLevel;
+        level.header.size = sizeof(level);
+        level.header.adapterId = paths[i].targetInfo.adapterId;
+        level.header.id = paths[i].targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&level.header) == ERROR_SUCCESS && level.level > 0) {
+            *white = static_cast<float>(level.level) / 1000.0f;
+        }
+        break;
+    }
+    return result;
+}
+
 int primary_display_hdr(char* text, size_t size) {
     const DisplayState state = display_state_of(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
     if (text && size) std::snprintf(text, size, "%s", state.text);

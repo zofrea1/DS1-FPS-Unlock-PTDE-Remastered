@@ -40,12 +40,26 @@ bool dxgipresent_install(HMODULE dxvk);
 // far apart the flips were, and on NVIDIA whether the display is following the frames (G-SYNC).
 void dxgipresent_report();
 
-// Paced presenting (INI DxvkPacedPresent): the presenting thread waits for each frame to be finished and flips it an
-// even step after the one before (dxgipresent.cpp has the rule), so under a frame rate cap just below the display's
-// refresh rate no two flips come closer together than the display can refresh. mode 0 = off, 1 = on, 2 = wait for
-// each frame without holding it (for measuring). cap_fps gives the current cap (0 = none); null keeps the last.
+// Timed presenting (INI DxvkPacedPresent, default true): a presenting thread of ours flips each frame a steady delay
+// after the game's frame boundary for it, so the flips are spaced like the game's time steps (dxgipresent.cpp has the
+// rule). mode 0 = off (Direct3D 11 flips each frame when the GPU is done), 1 = timed, 2 = the presenting thread flips
+// each frame as soon as it is ready (for measuring). cap_fps gives the current cap (0 = none); null keeps the last.
 void dxgipresent_set_pacing(int mode, int (*cap_fps)());
 int dxgipresent_pacing();
+// The game presents a picture (its draw thread, before Direct3D 9 sees the Present): boundary_qpc is the frame
+// boundary it belongs to (frame_boundary_qpc), the time the flip is timed from.
+void dxgipresent_frame_presented(long long boundary_qpc);
+// Whether a Vulkan device of DXVK's presents through DXGI.
+bool dxgipresent_in_use();
+// DxvkHdrSwapChain: on a display Windows runs in HDR, an FP16 scRGB swap chain with the SDR picture converted the way
+// Windows composes it, so the frames can be flipped straight to the display (0 off, 1 on; RemoteControl `dxgihdr`).
+void dxgipresent_set_hdr_chain(int on);
+int dxgipresent_hdr_chain();
+// Development (scanwatch.h): told the time of each flip as it is asked for; a mark in the top right corner for
+// `seconds` showing the presenting mode (green timed, red the GPU when done, yellow when ready) and the swap chain
+// (blue scRGB, grey 8-bit).
+void dxgipresent_set_flip_observer(void (*observer)(long long qpc));
+void dxgipresent_show_mark(double seconds);
 // Development: pace (and count close flips) as if the display refreshed at hz; 0 = the real display again.
 void dxgipresent_test_refresh(int hz);
 

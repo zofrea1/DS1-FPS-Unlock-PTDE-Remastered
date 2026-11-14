@@ -1,6 +1,9 @@
 // DXVK presenting through DXGI (src/ptde/dxgipresent.cpp) outside the game:
 //   dxgitest.exe MODE [window|big] [seconds] [fps]
 //   MODE: d3d9 (system Direct3D 9), dxvk:PATH (DXVK's own Vulkan presentation), dxgi:PATH (DXVK through DXGI)
+// Environment: DXGITEST_PACE 0|1|2 (dxgipresent_set_pacing; the frames are timed from their start, as the game's are
+// from its frame boundaries), DXGITEST_HDRCHAIN 1 (scRGB swap chain), DXGITEST_JITTER MS (each frame waits a random
+// 0..MS before its Present, like the game's draw thread), DXGITEST_POS X,Y (window place), DXGITEST_REFRESH HZ.
 // A game-like borderless window (big = covering the primary monitor), a Direct3D 9 device presenting immediately.
 // 1. Colours: 256 grey levels and the red, green and blue ramps (ColorFill), then the composed desktop read through
 //    DXGI Desktop Duplication in FP16 (scRGB in HDR): what the screen shows per level, to compare the modes.
@@ -157,6 +160,16 @@ int main(int argc, char** argv) {
 
     const bool use_dxvk = std::strncmp(which, "dxvk:", 5) == 0, use_dxgi = std::strncmp(which, "dxgi:", 5) == 0;
     if (std::strcmp(which, "d3d11") == 0) return run_d3d11(big, seconds, fps);
+    const char* pace_env = std::getenv("DXGITEST_PACE");
+    const char* hdr_env = std::getenv("DXGITEST_HDRCHAIN");
+    const char* jitter_env = std::getenv("DXGITEST_JITTER");
+    const char* refresh_env = std::getenv("DXGITEST_REFRESH");
+    const double jitter_ms = jitter_env ? std::atof(jitter_env) : 0.0;
+    static double s_cap = 0;
+    s_cap = fps;
+    dxgipresent_set_pacing(pace_env ? std::atoi(pace_env) : 0, []() { return static_cast<int>(s_cap); });
+    dxgipresent_set_hdr_chain(hdr_env ? std::atoi(hdr_env) : 0);
+    if (refresh_env) dxgipresent_test_refresh(std::atoi(refresh_env));
     IDirect3D9* d3d = nullptr;
     if (use_dxvk || use_dxgi) {
         HMODULE m = LoadLibraryA(which + 5);
@@ -178,14 +191,15 @@ int main(int argc, char** argv) {
         width = mi.rcMonitor.right - mi.rcMonitor.left;
         height = mi.rcMonitor.bottom - mi.rcMonitor.top;
     }
+    if (const char* pos = std::getenv("DXGITEST_POS")) std::sscanf(pos, "%d,%d", &px, &py);
     WNDCLASSA wc{};
     wc.lpfnWndProc = wndproc;
     wc.lpszClassName = "dxgitest";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
-    HWND w = CreateWindowExA(0, "dxgitest", "dxgitest", WS_POPUP | WS_VISIBLE, px, py, width, height, nullptr,
+    HWND w = CreateWindowExA(std::getenv("DXGITEST_NOFOCUS") ? WS_EX_NOACTIVATE : 0, "dxgitest", "dxgitest", WS_POPUP | WS_VISIBLE, px, py, width, height, nullptr,
                              nullptr, nullptr, nullptr);
-    SetForegroundWindow(w);
+    if (!std::getenv("DXGITEST_NOFOCUS")) SetForegroundWindow(w);
     pump();
     RECT cr{};
     GetClientRect(w, &cr);
@@ -370,6 +384,17 @@ int main(int argc, char** argv) {
         const int x = static_cast<int>(std::fmod(t * 600.0, static_cast<double>(width)));
         RECT bar{x, 0, x + width / 24, height};
         dev->ColorFill(bb, &bar, D3DCOLOR_XRGB(230, 230, 230));
+        if (jitter_ms > 0) {
+            // the draw thread taking a different time each frame before its Present
+            const double until = t + (std::rand() % 1000) / 1000.0 * jitter_ms / 1000.0;
+            for (;;) {
+                LARGE_INTEGER q;
+                QueryPerformanceCounter(&q);
+                if (static_cast<double>(q.QuadPart - start.QuadPart) / freq.QuadPart >= until) break;
+                YieldProcessor();
+            }
+        }
+        if (use_dxgi) dxgipresent_frame_presented(start.QuadPart + static_cast<LONGLONG>(t * freq.QuadPart));
         hr = dev->Present(nullptr, nullptr, nullptr, nullptr);
         pump();
         if (frames > 0 && t - last > worst) worst = t - last;

@@ -5,6 +5,7 @@
 #include "lockwatch.h"
 #include "texpreload.h"
 #include "dxgipresent.h"
+#include "scanwatch.h"
 #include "passcull.h"
 
 #include "d3dperf.h"
@@ -1058,6 +1059,9 @@ void report() {
     if (!quiet) imports_report(frames);
     texpreload_report();
     if (!quiet) dxgipresent_report();
+#if FPSU_DIAGNOSTICS
+    if (!quiet) scanwatch_report();
+#endif
     long skipped = 0, drawn = 0, stale = 0;
     passcull_take_stats(&skipped, &drawn, &stale);
     if (!quiet && (skipped || stale)) {

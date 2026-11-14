@@ -1,15 +1,21 @@
 #include "layout.h"
 
 #include "aspect.h"
+#include "fpsu_buildcfg.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d9.h>
 
+#include <intrin.h>
+
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -41,7 +47,8 @@
 // UIScale (percent, below 100): the HUD's corner groups are drawn smaller, each scaled toward its own corner of the
 // layout: the health and stamina bars with the status icons (top left), the equipment slots (bottom left) and the
 // soul counter (bottom right). A draw belongs to a group when it lies in that group's area; everything else (prompts,
-// boss bars, subtitles) and everything while a menu or dialog is open is left at its size. Known limits: an enemy's
+// boss bars, subtitles), everything while a menu or dialog is open and everything while no character is in the world
+// (the title screen and its menus, whose copyright line and load list reach into those areas) is left at its size. Known limits: an enemy's
 // floating health bar or a boss's name that happens to lie inside a group's area is drawn with that group.
 namespace {
 
@@ -274,8 +281,23 @@ HRESULT WINAPI hk_set_vs_const(IDirect3DDevice9* dev, UINT start, const float* v
     return hr;
 }
 
-// A menu or dialog is open (MenuMan: its request, its open flags).
+// The player's character is in the world ([[[WorldChrMan] + 4]], as remote.cpp's `pos`): there is none on the title
+// screen and its menus (the load list, character creation, the settings), which MenuMan's flags do not show.
+bool player_in_world() {
+    __try {
+        const uintptr_t wcm = *reinterpret_cast<const uintptr_t*>(0x0137DC70);
+        if (wcm < 0x10000) return false;
+        const uintptr_t first = *reinterpret_cast<const uintptr_t*>(wcm + 4);
+        if (first < 0x10000) return false;
+        return *reinterpret_cast<const uintptr_t*>(first) >= 0x10000;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// A menu or dialog is open (MenuMan: its request, its open flags), or no game is loaded (the title screens).
 bool menu_open() {
+    if (!player_in_world()) return true;
     const uintptr_t mm = *reinterpret_cast<const uintptr_t*>(kMenuManVar);
     if (mm < 0x10000) return true;  // no menu manager yet: the title screens
     // +0x3C: the menu shown (0 none, 8 the start menu's tabs, 2 the inventory, ...); +0x60: a request for one
@@ -394,6 +416,75 @@ bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDi
 
 bool layout_draw() { return g_layout && g_bound != kOther && (g_shaped || g_scale < 0.999f); }
 
+#if FPSU_DIAGNOSTICS
+// RemoteControl `uidump N`: the next N draws of the layout, with their place, vertex data, texture and the game code
+// on the stack (which part of the game drew them).
+std::atomic<int> g_dump{0};
+
+bool dump_read(const uintptr_t* p, uintptr_t* v) {
+    __try {
+        *v = *p;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void dump_draw(IDirect3DDevice9* dev, const void* data, UINT stride, UINT count, const float* box_rows,
+               const void* from) {
+    if (g_dump.load() <= 0) return;
+    g_dump.fetch_sub(1);
+    const auto* src = static_cast<const uint8_t*>(data);
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (UINT i = 0; src && i < count && i < 4096; ++i) {
+        const uint8_t* v = src + i * stride;
+        float x, y;
+        if (g_bound == kImage) {
+            int16_t s[2];
+            std::memcpy(s, v, 4);
+            x = s[0] * 0.125f - 0.5f;
+            y = s[1] * 0.125f - 0.5f;
+        } else {
+            float f[3] = {0, 0, 0};
+            std::memcpy(f, v, g_bound == kBox ? 12 : 8);
+            if (g_bound == kBox) {
+                x = box_rows[0] * f[0] + box_rows[1] * f[1] + box_rows[2] * f[2] + box_rows[3];
+                y = box_rows[4] * f[0] + box_rows[5] * f[1] + box_rows[6] * f[2] + box_rows[7];
+            } else {
+                x = f[0];
+                y = f[1];
+            }
+        }
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+    }
+    IDirect3DBaseTexture9* tex = nullptr;
+    dev->GetTexture(0, &tex);
+    if (tex) tex->Release();
+    std::string st;
+    char b[16];
+    const auto* sp = static_cast<const uintptr_t*>(from);
+    int found = 0;
+    for (int i = 0; i < 600 && found < 14; ++i) {
+        uintptr_t a = 0;
+        if (!dump_read(sp + i, &a)) break;
+        if (a >= 0x00401000 && a < 0x010CC000) {
+            std::snprintf(b, sizeof(b), " %X", static_cast<unsigned>(a));
+            st += b;
+            ++found;
+        }
+    }
+    static const char* const kNames[] = {"other", "image", "text", "box"};
+    LOG_INFO("uidump %s n%u box %.1f,%.1f-%.1f,%.1f data %p tex %p menu %d | stack%s", kNames[g_bound], count, x0, y0,
+             x1, y1, data, static_cast<void*>(tex), menu_open() ? 1 : 0, st.c_str());
+}
+#define DUMP_DRAW(dev, data, stride, count, box) dump_draw(dev, data, stride, count, box, _AddressOfReturnAddress())
+#else
+#define DUMP_DRAW(dev, data, stride, count, box) ((void)0)
+#endif
+
 UINT vertex_count(D3DPRIMITIVETYPE type, UINT prims) {
     switch (type) {
         case D3DPT_TRIANGLELIST: return prims * 3;
@@ -407,6 +498,7 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT pri
     if (!layout_draw()) return o_draw_up(dev, type, prims, data, stride);
     float box[8];
     std::memcpy(box, g_box, sizeof(box));
+    DUMP_DRAW(dev, data, stride, vertex_count(type, prims), box);
     bool rows = false;
     const bool edited = refit(data, stride, vertex_count(type, prims), box, dev, &rows);
     const HRESULT hr = o_draw_up(dev, type, prims, edited ? g_copy.data() : data, stride);
@@ -421,6 +513,7 @@ HRESULT WINAPI hk_draw_idx_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT
     }
     float box[8];
     std::memcpy(box, g_box, sizeof(box));
+    DUMP_DRAW(dev, data, stride, verts, box);
     bool rows = false;
     const bool edited = refit(data, stride, verts, box, dev, &rows);
     const HRESULT hr =
@@ -457,6 +550,32 @@ void layout_configure(bool keep_shape, int scale_percent) {
 }
 
 void layout_set_scale(int scale_percent) { layout_configure(g_keep_shape, scale_percent); }
+
+void layout_dump(int draws) {
+#if FPSU_DIAGNOSTICS
+    uintptr_t wcm = 0, first = 0, chr = 0;
+    const uintptr_t* base = reinterpret_cast<const uintptr_t*>(0x0137DC70);
+    if (dump_read(base, &wcm) && wcm && dump_read(reinterpret_cast<const uintptr_t*>(wcm + 4), &first) && first) {
+        dump_read(reinterpret_cast<const uintptr_t*>(first), &chr);
+    }
+    uintptr_t mm = 0;
+    dump_read(reinterpret_cast<const uintptr_t*>(kMenuManVar), &mm);
+    char fields[400] = "";
+    if (mm >= 0x10000) {
+        int n = 0;
+        for (uint32_t off = 0; off < 0xC0 && n < 380; off += 4) {
+            uintptr_t v = 0;
+            dump_read(reinterpret_cast<const uintptr_t*>(mm + off), &v);
+            if (v) n += std::snprintf(fields + n, sizeof(fields) - n, " +%X=%X", off, static_cast<unsigned>(v));
+        }
+    }
+    LOG_INFO("uidump: WorldChrMan %X first %X player %X; MenuMan %X:%s", static_cast<unsigned>(wcm),
+             static_cast<unsigned>(first), static_cast<unsigned>(chr), static_cast<unsigned>(mm), fields);
+    g_dump = draws;
+#else
+    (void)draws;
+#endif
+}
 
 bool layout_map_scissor(IDirect3DDevice9* dev, const RECT* r, int frame_w, int frame_h, RECT* out) {
     if (!r || r->left < 0 || r->top < 0 || r->right > 1280 || r->bottom > 720) return false;

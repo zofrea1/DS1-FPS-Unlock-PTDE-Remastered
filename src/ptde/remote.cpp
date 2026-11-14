@@ -1599,11 +1599,16 @@ void run(const std::string& line) {
         if (t.size() > 1) passcull_set_mode(static_cast<int>(num(1, 1)));
         out("passcull %d (unused for %d frames)", passcull_mode(), passcull_unused_frames());
     } else if (c == "dxgipace") {
-        // dxgipace [0|1|2] [HZ]: paced presenting through DXGI off, on, or waiting for each frame without holding
-        // it; HZ = as if the display refreshed at that rate (0 = the real display).
+        // dxgipace [0|1|2] [HZ]: presenting through DXGI with the GPU flipping each frame when done (0), timed to the
+        // game's steps by our presenting thread (1), or that thread flipping each frame as soon as it is ready (2);
+        // HZ: as if the display refreshed at that rate.
         if (t.size() > 1) dxgipresent_set_pacing(static_cast<int>(num(1, 1)), nullptr);
         if (t.size() > 2) dxgipresent_test_refresh(static_cast<int>(num(2, 0)));
         out("dxgipace %d", dxgipresent_pacing());
+    } else if (c == "dxgihdr") {
+        // dxgihdr [0|1]: DxvkHdrSwapChain for this session (an FP16 scRGB swap chain on a display in HDR).
+        if (t.size() > 1) dxgipresent_set_hdr_chain(static_cast<int>(num(1, 0)));
+        out("dxgihdr %d", dxgipresent_hdr_chain());
     } else if (c == "limitpoint" && t.size() > 1) {
         limiter_set_point(t[1] == "present" ? kLimitPresent : kLimitEarly);
         out("limitpoint %s", limiter_point() == kLimitPresent ? "present" : "early");
@@ -1813,6 +1818,11 @@ void run(const std::string& line) {
         // active at start for the hooks).
         layout_set_scale(static_cast<int>(num(1, 100)));
         out("uiscale %ld", num(1, 100));
+    } else if (c == "uidump") {
+        // uidump [N]: the next N (default 300) draws of the HUD and menu layout in the log, with the game code that
+        // drew them (needs UIScale below 100 or FixAspectUI active).
+        layout_dump(t.size() > 1 ? static_cast<int>(num(1, 300)) : 300);
+        out("uidump");
     } else if (c == "shadowbias" && t.size() > 1) {
         // shadowbias B: the ShadowBias amount for this session (0 = the game's comparison; needs ShadowBias > 0 in the
         // INI at start for the hooks).

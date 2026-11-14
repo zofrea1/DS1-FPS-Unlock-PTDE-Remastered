@@ -1,5 +1,7 @@
 #pragma once
 
+#include <windows.h>
+
 #include <cstddef>
 
 struct IDirect3DDevice9;
@@ -19,6 +21,10 @@ enum GammaRampMode {
 // Windows HDR on the primary display (the one Direct3D's default adapter shows): 1 on, 0 off, -1 unknown. text gets
 // the display's name and colour mode for the log.
 int primary_display_hdr(char* text, size_t size);
+// The given monitor's colour mode: 1 Windows HDR, 2 advanced colour without HDR (Auto Color Management: the desktop is
+// composed in FP16 as in HDR, SDR white at 80 nits), 0 standard, -1 unknown; and its SDR brightness setting as a
+// multiple of 80 nits (what an SDR picture's white is shown at; 1 when unknown).
+int display_hdr_white(HMONITOR monitor, float* white);
 
 // Hooks SetGammaRamp on the device the game holds; every ramp that changes is logged (with the display's colour mode).
 void gamma_hook_device(IDirect3DDevice9* game_device, int mode, bool dxvk);

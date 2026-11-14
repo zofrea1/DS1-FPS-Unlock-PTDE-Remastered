@@ -10,6 +10,7 @@
 #include <dxgi1_6.h>
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -17,7 +18,10 @@
 #include <mutex>
 #include <vector>
 
+#include "gamma.h"
 #include "log.h"
+#include "shaders/dxgi_scrgb_ps.h"
+#include "shaders/dxgi_scrgb_vs.h"
 
 namespace {
 
@@ -85,8 +89,12 @@ struct Window {
     HWND hwnd = nullptr;
     IDXGISwapChain1* chain = nullptr;
     UINT width = 0, height = 0;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the frames' (Vulkan's) format
     UINT flags = 0;
+    bool scrgb = false;        // the DXGI swap chain is FP16 scRGB (DxvkHdrSwapChain on a display in HDR)
+    bool display_hdr = false;  // Windows runs the window's display in HDR (looked at every 128 frames)
+    float white = 1.0f;        // its SDR brightness setting / 80 nits
+    uint32_t looks = 0;
 };
 
 struct Dev {
@@ -105,10 +113,16 @@ struct Dev {
     HANDLE ready_event = nullptr;          // paced presenting: set when ready_fence reaches a frame's value
     VkSemaphore ready_sem = VK_NULL_HANDLE;
     VkSemaphore release_sem = VK_NULL_HANDLE;
-    uint64_t ready_value = 0;
-    uint64_t release_value = 0;
+    uint64_t ready_value = 0;                  // DXVK's submission thread
+    std::atomic<uint64_t> release_value{0};    // taken on DXVK's submission thread, signalled in that order
     VkCommandPool pool = VK_NULL_HANDLE;
     std::vector<Window*> windows;
+    // DxvkHdrSwapChain: the SDR picture into scRGB (shaders/dxgi_scrgb.hlsl)
+    ID3D11VertexShader* scrgb_vs = nullptr;
+    ID3D11PixelShader* scrgb_ps = nullptr;
+    ID3D11Buffer* scrgb_cb = nullptr;
+    float scrgb_cb_white = -1.0f;
+    bool scrgb_failed = false;
 };
 
 struct Surface {
@@ -124,6 +138,7 @@ struct Image {
     VkCommandBuffer release_cb = VK_NULL_HANDLE;  // ownership to the outside after DXVK's frame
     VkCommandBuffer acquire_cb = VK_NULL_HANDLE;  // back for DXVK (contents not kept)
     std::atomic<uint64_t> released{0};           // release fence value after its last copy
+    ID3D11ShaderResourceView* srv = nullptr;     // DxvkHdrSwapChain: read by the scRGB pass
 };
 
 constexpr uint32_t kMaxImages = 8;
@@ -168,37 +183,94 @@ std::atomic<int> g_composition{-1};  // DXGI_FRAME_PRESENTATION_MODE of the last
 bool g_logged_fence_acquire = false;
 bool g_logged_present_error = false;
 
-// Paced presenting (dxgipresent_set_pacing). With variable refresh the display starts a refresh when a frame is
-// flipped, so the times of the flips are the times the player sees. Left to the GPU (the Direct3D 11 queue waits for
-// Vulkan's frame, copies and flips whenever that is done), frames that DXVK's threads hand over unevenly can be
-// flipped closer together than the display's fastest refresh, even under a frame rate cap below it (measured in
-// Firelink at MaxFPS 225: 17% of the flips under the 4.17 ms of a 240 Hz display, the closest 2.4 ms): the display
-// then sits at its ceiling and shows some frames late. Paced, the presenting thread itself waits for Vulkan's frame
-// and then holds the flip until the display can refresh again:
-//   - under a cap (MaxFPS) at or below the display's rate: no flip closer to the one before than the display's
-//     fastest refresh (and 1.5%). The cap still sets the rate; only the frames that came too soon are
-//     held, a fraction of a millisecond (same test, paced: none too close, the frame rate unchanged);
-//   - without a cap, or with one above the display's rate: no hold (the display cannot follow anyway, and holding
-//     would cap the game at the display's rate).
-// 0 = off (as before), 1 = wait and hold, 2 = wait only (for measuring what unpaced flips are like).
+// Timed presenting (dxgipresent_set_pacing). With variable refresh the display starts a refresh when a frame is
+// flipped, so the times of the flips are the times the player sees the pictures, and motion is smooth when they are
+// spaced like the game's own time steps: the time between two frame boundaries of the draw thread (frame.cpp), which
+// is what each picture moved the world by. Native Direct3D 9 comes close by itself: its flip follows the game's
+// Present after a short GPU tail. Under DXVK a frame passes DXVK's command thread, its submission thread and the GPU
+// before Direct3D 11 can copy and flip it, and that takes a different time each frame (a log at MaxFPS 225: flips
+// 3.5 to 5.3 ms apart around steps of 4.44 ms, 8% of them closer than a 240 Hz display can refresh), so the
+// display's refresh rate wanders and turning the camera is not smooth.
+//
+// Mode 1 (timed): a presenting thread of ours takes each finished frame and flips it a set delay after its frame
+// boundary, so the flips are spaced exactly like the steps, whatever happened in DXVK's threads in between. The
+// delay follows how late frames are ready (99th percentile of the last 256 plus 0.25 ms; it rises by up to 0.25 ms
+// a frame and falls by at most 0.01 ms a frame, so the spacing never jumps); a frame ready after its time is
+// flipped at once. Under a frame rate cap at or below the display's refresh rate no flip comes closer to the one
+// before than the display's fastest refresh. DXVK's submission thread no longer waits for Direct3D 11.
+// Mode 2: the same thread flips each frame as soon as it is ready (the old timing, measured the same way).
+// Mode 0: no presenting thread; Direct3D 11 waits for the frame on the GPU and flips it when done (before 2.3.0).
 std::atomic<int> g_pacing{0};
 int (*g_cap_fps)() = nullptr;
 std::atomic<int> g_refresh_mhz{0};  // the display under the window, in mHz (0 unknown)
 std::atomic<int> g_test_refresh_mhz{0};  // development: paced as if the display had this rate
 LONGLONG g_qpc_freq = 0;
-LONGLONG g_last_flip = 0;           // presenting thread: when the last flip was asked for
+LONGLONG g_last_flip = 0;           // the presenting thread: when the last flip was asked for
 HANDLE g_pace_timer = nullptr;      // presenting thread
 bool g_pace_timer_tried = false;
 
-// Flip spacing since the last report (the presenting thread adds, the report takes).
+// The frame boundary of each picture the game presents (dxgipresent_frame_presented, the game's draw thread), taken
+// in order by DXVK's presents of them (one each).
+std::mutex g_content_lock;
+constexpr uint32_t kContentSlots = 8;
+LONGLONG g_content[kContentSlots];
+uint32_t g_content_first = 0, g_content_count = 0;
+uint32_t g_content_backlog = 0;     // presents in a row that found four or more queued
+uint32_t g_content_depth_sum = 0, g_content_takes = 0;  // how deep the queue was when DXVK presented
+uint32_t g_content_dropped = 0;     // entries dropped to get back in step
+uint32_t g_content_missing = 0;     // presents with none queued
+
+// A frame for the presenting thread.
+struct Job {
+    Swap* swap = nullptr;
+    uint32_t index = 0;
+    uint64_t ready = 0;     // frame-ready value Vulkan signals
+    uint64_t done = 0;      // copy-done value to signal (handed to the image's next acquire already)
+    LONGLONG content = 0;   // its frame boundary (0 not known)
+    UINT sync = 0, flags = 0;
+};
+std::mutex g_job_lock;
+std::vector<Job> g_jobs;            // in order
+HANDLE g_job_event = nullptr;
+HANDLE g_presenter = nullptr;
+std::atomic<int> g_jobs_open{0};    // queued or being presented
+void drain_jobs();
+
+// DxvkHdrSwapChain (dxgipresent_set_hdr_chain): 1 = on a display Windows runs in HDR (or composes in FP16 for Auto
+// Color Management) the DXGI swap chain is FP16
+// scRGB and our pass writes the SDR picture into it as Windows itself would compose it (sRGB decoded, scaled to the
+// SDR brightness setting). Windows composes an 8-bit swap chain on an HDR desktop, or shows it on an overlay plane
+// (the logs say "hardware overlay"); a swap chain in the display's own kind of colour can be flipped straight to it,
+// which is how variable refresh is meant to see the frames.
+std::atomic<int> g_hdr_chain{0};
+
+// Development: scanwatch's flip observer, and the mode mark (until this time).
+std::atomic<void (*)(long long)> g_flip_observer{nullptr};
+std::atomic<LONGLONG> g_mark_until{0};
+
+// The presenting thread's timing.
+double g_latency = 0.0;             // ticks: a frame flips this long after its boundary
+double g_latency_target = 0.0;
+uint32_t g_late_us[256];            // how long after its boundary each recent frame was ready
+uint32_t g_late_count = 0, g_late_next = 0;
+LONGLONG g_prev_content = 0, g_prev_ready = 0, g_prev_flip = 0;
+
+// Flip spacing and timing since the last report (the presenting thread adds, the report takes).
 std::mutex g_spacing_lock;
 constexpr uint32_t kSpacingSamples = 4096;
 uint32_t g_spacing_us[kSpacingSamples];
 uint32_t g_spacing_count = 0;
 uint32_t g_spacing_close = 0;       // flips closer together than the display's fastest refresh
-uint64_t g_ready_wait_us = 0;       // paced: waiting for Vulkan's frame
-uint64_t g_hold_us = 0;             // paced: holding a finished frame for its step
-uint32_t g_held = 0;
+uint32_t g_err_flip_us[kSpacingSamples];   // |flip spacing - step|
+uint32_t g_err_ready_us[kSpacingSamples];  // |ready spacing - step|: what flipping each frame when ready gives
+uint32_t g_step_us[kSpacingSamples];       // the steps
+uint32_t g_err_count = 0;
+uint64_t g_after_boundary_us = 0;   // flip - boundary, summed
+uint32_t g_after_count = 0;
+uint32_t g_missed = 0;              // frames ready after their time
+uint32_t g_over_us[kSpacingSamples];  // how late the presenting thread woke for a held flip
+uint32_t g_overs = 0;
+double g_latency_moved_us = 0;      // how far the delay moved (sum of changes)
 uint32_t g_ready_timeouts = 0;
 
 LONGLONG qpc_now() {
@@ -207,21 +279,39 @@ LONGLONG qpc_now() {
     return t.QuadPart;
 }
 
-// The presenting thread until `target` (performance counter ticks): a high resolution timer, the last 0.3 ms spun.
+uint32_t to_us(LONGLONG ticks) {
+    if (ticks <= 0 || g_qpc_freq <= 0) return 0;
+    const LONGLONG us = ticks * 1000000 / g_qpc_freq;
+    return us > 60000000 ? 60000000u : static_cast<uint32_t>(us);
+}
+
+// The presenting thread until `target` (performance counter ticks): a high resolution timer, then spun. The timer
+// can wake a few tenths of a millisecond late, so the spun part follows how late it has been: the latest wake seen,
+// plus 0.1 ms, easing down by 0.1% a frame (between 0.3 and 2 ms).
+double g_spin = 0.0;  // ticks
+
 void pace_until(LONGLONG target) {
     if (!g_pace_timer_tried) {
         g_pace_timer_tried = true;
         g_pace_timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* high resolution */,
                                               SYNCHRONIZE | TIMER_MODIFY_STATE);
     }
+    const double lo = 0.3e-3 * g_qpc_freq, hi = 2.0e-3 * g_qpc_freq;
+    if (g_spin < lo) g_spin = lo;
     LONGLONG now = qpc_now();
-    const LONGLONG spin = g_qpc_freq * 3 / 10000;
-    while (g_pace_timer && now + spin < target) {
+    const LONGLONG spin = static_cast<LONGLONG>(g_spin);
+    if (g_pace_timer && now + spin < target) {
+        const LONGLONG due_at = target - spin;
         LARGE_INTEGER due{};
-        due.QuadPart = -((target - now - spin) * 10000000LL / g_qpc_freq);
-        if (due.QuadPart >= 0 || !SetWaitableTimer(g_pace_timer, &due, 0, nullptr, nullptr, FALSE)) break;
-        WaitForSingleObject(g_pace_timer, 50);
-        now = qpc_now();
+        due.QuadPart = -((due_at - now) * 10000000LL / g_qpc_freq);
+        if (due.QuadPart < 0 && SetWaitableTimer(g_pace_timer, &due, 0, nullptr, nullptr, FALSE)) {
+            WaitForSingleObject(g_pace_timer, 50);
+            now = qpc_now();
+            const double want = static_cast<double>(now - due_at) + 0.1e-3 * g_qpc_freq;
+            g_spin = (std::max)(g_spin * 0.999, want);
+            if (g_spin < lo) g_spin = lo;
+            if (g_spin > hi) g_spin = hi;
+        }
     }
     while (now < target) {
         YieldProcessor();
@@ -246,53 +336,113 @@ void sample_refresh(HWND hwnd) {
     }
 }
 
-// Paced presenting, on the presenting thread after the submission that signals `ready`: wait for Vulkan's frame.
-void pace_wait_ready(Dev* d, uint64_t ready) {
-    if (g_qpc_freq <= 0) return;
-    const LONGLONG t0 = qpc_now();
-    bool timed_out = false;
-    if (!d->ready_event) d->ready_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (d->ready_event && SUCCEEDED(d->ready_fence->SetEventOnCompletion(ready, d->ready_event))) {
-        // A device that stops answering must not hang the game here: the GPU-side wait that follows still holds.
-        timed_out = WaitForSingleObject(d->ready_event, 500) != WAIT_OBJECT_0;
+void push_content(LONGLONG t) {
+    std::lock_guard<std::mutex> g(g_content_lock);
+    if (g_content_count == kContentSlots) {
+        g_content_first = (g_content_first + 1) % kContentSlots;
+        --g_content_count;
+        ++g_content_dropped;
     }
-    const LONGLONG t1 = qpc_now();
-    std::lock_guard<std::mutex> g(g_spacing_lock);
-    g_ready_wait_us += static_cast<uint64_t>((t1 - t0) * 1000000 / g_qpc_freq);
-    if (timed_out) ++g_ready_timeouts;
+    g_content[(g_content_first + g_content_count) % kContentSlots] = t;
+    ++g_content_count;
 }
 
-// Paced presenting, just before the flip is asked for (the copy is already queued): hold it until the display can
-// refresh again.
-void pace_hold() {
-    if (g_qpc_freq <= 0 || !g_last_flip) return;
-    const int cap = g_cap_fps ? g_cap_fps() : 0;
-    const int mhz = g_refresh_mhz.load();
-    if (cap <= 0 || mhz <= 0 || cap * 1000 > mhz) return;
-    // 1.5% over the refresh time
-    const LONGLONG target = g_last_flip + g_qpc_freq * 1015 / mhz;
-    const LONGLONG t1 = qpc_now();
-    if (t1 >= target) return;
-    pace_until(target);
-    const LONGLONG held = qpc_now() - t1;
-    std::lock_guard<std::mutex> g(g_spacing_lock);
-    g_hold_us += static_cast<uint64_t>(held * 1000000 / g_qpc_freq);
-    ++g_held;
+// The boundary of the picture DXVK presents now: the oldest queued. DXVK presents each of the game's Presents once,
+// in order, so the queue stays one to three deep (DXVK's threads can be a frame or two behind the game's); if it stays
+// four or more deep for a whole second (a present that never came), the oldest goes. A queue one too deep only times
+// the flips from the frame before (the spacing stays right; the delay grows by a frame).
+LONGLONG take_content() {
+    std::lock_guard<std::mutex> g(g_content_lock);
+    if (!g_content_count) {
+        ++g_content_missing;
+        return 0;
+    }
+    if (g_content_count >= 4) {
+        if (++g_content_backlog >= 240) {
+            g_content_first = (g_content_first + 1) % kContentSlots;
+            --g_content_count;
+            ++g_content_dropped;
+            g_content_backlog = 0;
+        }
+    } else {
+        g_content_backlog = 0;
+    }
+    g_content_depth_sum += g_content_count;
+    ++g_content_takes;
+    const LONGLONG t = g_content[g_content_first];
+    g_content_first = (g_content_first + 1) % kContentSlots;
+    --g_content_count;
+    return t;
 }
 
-// The flip is asked for now: its spacing from the one before.
-void note_flip() {
-    if (g_qpc_freq <= 0) return;
-    const LONGLONG now = qpc_now();
+// When to flip a frame whose boundary was `content` and which was ready at `ready_t` (presenting thread).
+LONGLONG flip_target(LONGLONG content, LONGLONG ready_t, int mode) {
+    LONGLONG target = ready_t;
+    if (mode != 1) return target;
+    if (content > 0) {
+        g_late_us[g_late_next] = to_us(ready_t - content);
+        g_late_next = (g_late_next + 1) & 255;
+        if (g_late_count < 256) ++g_late_count;
+        if ((g_late_next & 7) == 0 || g_late_count < 32) {
+            uint32_t tmp[256];
+            std::memcpy(tmp, g_late_us, g_late_count * sizeof(uint32_t));
+            const uint32_t k = g_late_count * 99 / 100;
+            std::nth_element(tmp, tmp + k, tmp + g_late_count);
+            g_latency_target = (tmp[k] + 250.0) * g_qpc_freq / 1e6;
+        }
+        const double up = 0.25e-3 * g_qpc_freq, down = 0.01e-3 * g_qpc_freq;
+        if (g_latency_target > g_latency) {
+            g_latency = (std::min)(g_latency_target, g_latency + up);
+        } else {
+            g_latency = (std::max)(g_latency_target, g_latency - down);
+        }
+        if (g_latency > 0.1 * g_qpc_freq) g_latency = 0.1 * g_qpc_freq;
+        const LONGLONG at = content + static_cast<LONGLONG>(g_latency);
+        if (at > target) {
+            target = at;
+        } else {
+            std::lock_guard<std::mutex> g(g_spacing_lock);
+            ++g_missed;
+        }
+    }
     if (g_last_flip) {
-        const uint32_t us = static_cast<uint32_t>((std::min<LONGLONG>)((now - g_last_flip) * 1000000 / g_qpc_freq,
-                                                                     60000000));
+        const int cap = g_cap_fps ? g_cap_fps() : 0;
         const int mhz = g_refresh_mhz.load();
-        std::lock_guard<std::mutex> g(g_spacing_lock);
+        if (cap > 0 && mhz > 0 && cap * 1000 <= mhz) {
+            const LONGLONG soonest = g_last_flip + g_qpc_freq * 1000 / mhz;
+            if (soonest > target) target = soonest;
+        }
+    }
+    return target;
+}
+
+// A flip asked for at `flip_t`: its spacing from the one before, and against the game's steps.
+void note_flip(LONGLONG flip_t, LONGLONG content, LONGLONG ready_t) {
+    if (g_qpc_freq <= 0) return;
+    const int mhz = g_refresh_mhz.load();
+    std::lock_guard<std::mutex> g(g_spacing_lock);
+    if (g_last_flip) {
+        const uint32_t us = to_us(flip_t - g_last_flip);
         if (g_spacing_count < kSpacingSamples) g_spacing_us[g_spacing_count++] = us;
         if (mhz > 0 && us * static_cast<uint64_t>(mhz) < 1000000000ull) ++g_spacing_close;
     }
-    g_last_flip = now;
+    if (content > 0 && g_prev_content > 0 && ready_t > 0 && g_prev_ready > 0 && g_err_count < kSpacingSamples) {
+        const LONGLONG step = content - g_prev_content;
+        const LONGLONG flip_step = flip_t - g_prev_flip, ready_step = ready_t - g_prev_ready;
+        g_step_us[g_err_count] = to_us(step);
+        g_err_flip_us[g_err_count] = to_us(flip_step > step ? flip_step - step : step - flip_step);
+        g_err_ready_us[g_err_count] = to_us(ready_step > step ? ready_step - step : step - ready_step);
+        ++g_err_count;
+    }
+    if (content > 0) {
+        g_after_boundary_us += to_us(flip_t - content);
+        ++g_after_count;
+    }
+    g_prev_content = content;
+    g_prev_ready = ready_t;
+    g_prev_flip = flip_t;
+    g_last_flip = flip_t;
+    if (auto observer = g_flip_observer.load()) observer(flip_t);
 }
 
 // The NVIDIA driver's word on variable refresh for the display the window is on (NvAPI; nothing on other vendors).
@@ -646,6 +796,9 @@ void destroy_dev_interop(Dev* d) {
             d->ctx->ClearState();
             d->ctx->Flush();
         }
+        release(d->scrgb_vs);
+        release(d->scrgb_ps);
+        release(d->scrgb_cb);
         release(d->ready_fence);
         release(d->release_fence);
         if (d->ready_event) CloseHandle(d->ready_event);
@@ -732,6 +885,7 @@ VKAPI_ATTR void VKAPI_CALL our_destroy_device(VkDevice device, const VkAllocatio
         return;
     }
     const PFN_vkDestroyDevice destroy = d->fn.DestroyDevice;
+    drain_jobs();
     destroy_dev_interop(d);
     {
         std::lock_guard<std::mutex> g(g_lock);
@@ -988,6 +1142,7 @@ void destroy_images(Swap* s) {
         im.release_cb = im.acquire_cb = VK_NULL_HANDLE;
         im.image = VK_NULL_HANDLE;
         im.memory = VK_NULL_HANDLE;
+        release(im.srv);
         release(im.tex);
     }
     s->count = 0;
@@ -1115,7 +1270,8 @@ bool fit_window(Swap* s, HWND hwnd) {
     } else if (w->width != s->extent.width || w->height != s->extent.height || w->format != fmt) {
         d->ctx->ClearState();
         d->ctx->Flush();
-        const HRESULT hr = w->chain->ResizeBuffers(0, s->extent.width, s->extent.height, fmt, w->flags);
+        const HRESULT hr = w->chain->ResizeBuffers(0, s->extent.width, s->extent.height,
+                                                   w->scrgb ? DXGI_FORMAT_R16G16B16A16_FLOAT : fmt, w->flags);
         if (FAILED(hr)) {
             LOG_ERROR("DXGI present: resizing the DXGI swap chain to %ux%u failed (%08lX)", s->extent.width,
                       s->extent.height, hr);
@@ -1144,6 +1300,7 @@ VKAPI_ATTR VkResult VKAPI_CALL our_create_swapchain(VkDevice device, const VkSwa
         !ci->imageExtent.height) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    drain_jobs();
     Swap* s = new Swap;
     s->dev = d;
     s->format = ci->imageFormat;
@@ -1177,6 +1334,7 @@ VKAPI_ATTR VkResult VKAPI_CALL our_create_swapchain(VkDevice device, const VkSwa
 VKAPI_ATTR void VKAPI_CALL our_destroy_swapchain(VkDevice device, VkSwapchainKHR sc,
                                                  const VkAllocationCallbacks* alloc) {
     Swap* s = find_swap(sc);
+    if (s) drain_jobs();
     if (!s) {
         Dev* d = find_dev(device);
         if (d && sc) d->fn.DestroySwapchainKHR(device, sc, alloc);
@@ -1203,7 +1361,7 @@ VKAPI_ATTR void VKAPI_CALL our_destroy_swapchain(VkDevice device, VkSwapchainKHR
     {
         std::lock_guard<std::mutex> g(g_d3d);
         d->ctx->Flush();
-        const uint64_t last = d->release_value;
+        const uint64_t last = d->release_value.load();
         if (d->release_fence->GetCompletedValue() < last) {
             HANDLE e = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             if (e && SUCCEEDED(d->release_fence->SetEventOnCompletion(last, e))) WaitForSingleObject(e, 2000);
@@ -1327,6 +1485,241 @@ VKAPI_ATTR VkResult VKAPI_CALL our_submit2(VkQueue queue, uint32_t count, const 
     return d->fn.QueueSubmit2(queue, count, subs.data(), fence);
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The scRGB swap chain (DxvkHdrSwapChain)
+
+bool make_scrgb_shaders(Dev* d) {
+    if (d->scrgb_ps) return true;
+    if (d->scrgb_failed) return false;
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = 16;
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(d->d3d->CreateVertexShader(kDxgiScrgbVs, sizeof(kDxgiScrgbVs), nullptr, &d->scrgb_vs)) ||
+        FAILED(d->d3d->CreatePixelShader(kDxgiScrgbPs, sizeof(kDxgiScrgbPs), nullptr, &d->scrgb_ps)) ||
+        FAILED(d->d3d->CreateBuffer(&bd, nullptr, &d->scrgb_cb))) {
+        release(d->scrgb_vs);
+        release(d->scrgb_ps);
+        release(d->scrgb_cb);
+        d->scrgb_failed = true;
+        LOG_ERROR("DxvkHdrSwapChain: the scRGB pass could not be made; the swap chain stays 8-bit");
+        return false;
+    }
+    return true;
+}
+
+// Under g_d3d, before a frame goes into the window's swap chain: its format for the display now.
+void fit_format(Dev* d, Window* w) {
+    if ((w->looks++ & 127) == 0) {
+        float white = 1.0f;
+        const int mode = display_hdr_white(MonitorFromWindow(w->hwnd, MONITOR_DEFAULTTOPRIMARY), &white);
+        const bool hdr = mode == 1 || mode == 2;  // both composed in FP16 by Windows
+        if (hdr != w->display_hdr || white != w->white) {
+            w->display_hdr = hdr;
+            w->white = white;
+            if (g_hdr_chain.load()) {
+                static const char* const kModes[] = {"in standard colour", "in HDR",
+                                                     "in advanced colour without HDR (Auto Color Management)"};
+                LOG_INFO("DxvkHdrSwapChain: the display is %s, SDR white %.0f nits",
+                         kModes[mode >= 0 && mode <= 2 ? mode : 0], white * 80.0);
+            }
+        }
+    }
+    const bool want = g_hdr_chain.load() == 1 && w->display_hdr && make_scrgb_shaders(d);
+    if (want == w->scrgb) return;
+    d->ctx->ClearState();
+    d->ctx->Flush();
+    const DXGI_FORMAT f = want ? DXGI_FORMAT_R16G16B16A16_FLOAT : w->format;
+    HRESULT hr = w->chain->ResizeBuffers(0, w->width, w->height, f, w->flags);
+    if (FAILED(hr)) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LOG_ERROR("DxvkHdrSwapChain: the swap chain could not change format (%08lX)", hr);
+        }
+        return;
+    }
+    IDXGISwapChain3* c3 = nullptr;
+    if (SUCCEEDED(w->chain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&c3)))) {
+        hr = c3->SetColorSpace1(want ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        c3->Release();
+    }
+    w->scrgb = want;
+    LOG_INFO("DxvkHdrSwapChain: the DXGI swap chain is now %s (colour space %08lX)",
+             want ? "FP16 scRGB, the SDR picture converted as Windows composes it" : "8-bit SDR", hr);
+}
+
+// Under g_d3d: the mode mark (dxgipresent_show_mark) in the top right corner of the back buffer.
+void draw_mark(Dev* d, Window* w, ID3D11Texture2D* back) {
+    const LONGLONG until = g_mark_until.load();
+    if (!until || qpc_now() > until) return;
+    ID3D11RenderTargetView* rtv = nullptr;
+    if (FAILED(d->d3d->CreateRenderTargetView(back, nullptr, &rtv)) || !rtv) return;
+    const float k = w->scrgb ? w->white : 1.0f;
+    const int pacing = g_pacing.load();
+    const float colors[3][4] = {{k, 0, 0, 1}, {0, k, 0, 1}, {k, k, 0, 1}};
+    const float* c = colors[pacing >= 0 && pacing <= 2 ? pacing : 0];
+    const float chain[4] = {w->scrgb ? 0.0f : 0.5f * k, w->scrgb ? 0.3f * k : 0.5f * k, w->scrgb ? k : 0.5f * k, 1};
+    const LONG size = static_cast<LONG>(w->height / 24 + 8);
+    const D3D11_RECT r1{static_cast<LONG>(w->width) - 2 * size - 16, 16, static_cast<LONG>(w->width) - size - 16,
+                        16 + size};
+    const D3D11_RECT r2{static_cast<LONG>(w->width) - size - 8, 16, static_cast<LONG>(w->width) - 8, 16 + size};
+    d->ctx->ClearView(rtv, c, &r1, 1);
+    d->ctx->ClearView(rtv, chain, &r2, 1);
+    rtv->Release();
+}
+
+// Under g_d3d: the frame into the back buffer.
+void copy_out(Dev* d, Window* w, Image& im, ID3D11Texture2D* back) {
+    if (!w->scrgb) {
+        d->ctx->CopyResource(back, im.tex);
+        draw_mark(d, w, back);
+        return;
+    }
+    if (!im.srv) d->d3d->CreateShaderResourceView(im.tex, nullptr, &im.srv);
+    ID3D11RenderTargetView* rtv = nullptr;
+    d->d3d->CreateRenderTargetView(back, nullptr, &rtv);
+    if (!im.srv || !rtv) {
+        release(rtv);
+        return;
+    }
+    if (d->scrgb_cb_white != w->white) {
+        const float c[4] = {w->white, 0.0f, 0.0f, 0.0f};
+        d->ctx->UpdateSubresource(d->scrgb_cb, 0, nullptr, c, 0, 0);
+        d->scrgb_cb_white = w->white;
+    }
+    D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(w->width), static_cast<float>(w->height), 0.0f, 1.0f};
+    d->ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    d->ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    d->ctx->OMSetDepthStencilState(nullptr, 0);
+    d->ctx->RSSetState(nullptr);
+    d->ctx->RSSetViewports(1, &vp);
+    d->ctx->IASetInputLayout(nullptr);
+    d->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    d->ctx->VSSetShader(d->scrgb_vs, nullptr, 0);
+    d->ctx->PSSetShader(d->scrgb_ps, nullptr, 0);
+    d->ctx->PSSetShaderResources(0, 1, &im.srv);
+    d->ctx->PSSetConstantBuffers(0, 1, &d->scrgb_cb);
+    d->ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* none = nullptr;
+    d->ctx->PSSetShaderResources(0, 1, &none);
+    d->ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    rtv->Release();
+    draw_mark(d, w, back);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The presenting thread (modes 1 and 2)
+
+// Every queued frame presented (before a swap chain or the device goes, and before mode 0 presents again: the
+// copy-done values must be signalled in order).
+void drain_jobs() {
+    for (int i = 0; g_jobs_open.load() > 0 && i < 4000; ++i) Sleep(1);
+}
+
+void sample_composition(IDXGISwapChain1* chain) {
+    // How Windows shows the frames (composed by the desktop window manager, or flipped straight to the display:
+    // what variable refresh needs), sampled now and then.
+    if ((g_presents.load() & 255) != 255) return;
+    IDXGISwapChainMedia* media = nullptr;
+    if (SUCCEEDED(chain->QueryInterface(__uuidof(IDXGISwapChainMedia), reinterpret_cast<void**>(&media)))) {
+        DXGI_FRAME_STATISTICS_MEDIA st{};
+        if (SUCCEEDED(media->GetFrameStatisticsMedia(&st))) g_composition = static_cast<int>(st.CompositionMode);
+        media->Release();
+    }
+}
+
+void note_present_result(HRESULT hr) {
+    g_last_hr = hr;
+    if (FAILED(hr) && !g_logged_present_error) {
+        g_logged_present_error = true;
+        LOG_ERROR("DXGI present: Present failed (%08lX)", hr);
+    }
+}
+
+void run_job(const Job& j) {
+    Swap* s = j.swap;
+    Dev* d = s->dev;
+    Image& im = s->images[j.index < s->count ? j.index : 0];
+    // Vulkan's frame, on the CPU (a device that stops answering must not hang the game: after half a second the
+    // GPU-side wait below still holds the copy back)
+    if (d->ready_fence->GetCompletedValue() < j.ready) {
+        if (!d->ready_event) d->ready_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        const bool ok = d->ready_event && SUCCEEDED(d->ready_fence->SetEventOnCompletion(j.ready, d->ready_event)) &&
+                        WaitForSingleObject(d->ready_event, 500) == WAIT_OBJECT_0;
+        if (!ok) {
+            std::lock_guard<std::mutex> g(g_spacing_lock);
+            ++g_ready_timeouts;
+        }
+    }
+    const LONGLONG ready_t = qpc_now();
+    // Copied out at once (the image goes back to DXVK), flipped at its time.
+    HRESULT hr;
+    {
+        std::lock_guard<std::mutex> g(g_d3d);
+        d->ctx->Wait(d->ready_fence, j.ready);
+        fit_format(d, s->window);
+        ID3D11Texture2D* back = nullptr;
+        hr = s->window->chain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back));
+        if (SUCCEEDED(hr)) {
+            copy_out(d, s->window, im, back);
+            back->Release();
+        }
+        d->ctx->Signal(d->release_fence, j.done);
+        d->ctx->Flush();
+    }
+    const double latency_before = g_latency;
+    const LONGLONG target = flip_target(j.content, ready_t, g_pacing.load());
+    const bool held = target > qpc_now();
+    if (held) pace_until(target);
+    {
+        std::lock_guard<std::mutex> g(g_d3d);
+        const LONGLONG flip_t = qpc_now();
+        {
+            std::lock_guard<std::mutex> sg(g_spacing_lock);
+            if (held && g_overs < kSpacingSamples) g_over_us[g_overs++] = to_us(flip_t - target);
+            g_latency_moved_us += std::fabs(g_latency - latency_before) * 1e6 / g_qpc_freq;
+        }
+        note_flip(flip_t, j.content, ready_t);
+        if (SUCCEEDED(hr)) hr = s->window->chain->Present(j.sync, j.flags);
+        sample_composition(s->window->chain);
+    }
+    note_present_result(hr);
+}
+
+DWORD WINAPI presenter_main(void*) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    for (;;) {
+        WaitForSingleObject(g_job_event, INFINITE);
+        for (;;) {
+            Job j;
+            {
+                std::lock_guard<std::mutex> g(g_job_lock);
+                if (g_jobs.empty()) break;
+                j = g_jobs.front();
+                g_jobs.erase(g_jobs.begin());
+            }
+            run_job(j);
+            g_jobs_open.fetch_sub(1);
+        }
+    }
+}
+
+// False when the thread cannot be had (the caller presents the old way).
+bool start_presenter() {
+    if (g_presenter) return true;
+    static bool failed = false;
+    if (failed) return false;
+    g_job_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_presenter = g_job_event ? CreateThread(nullptr, 0, presenter_main, nullptr, 0, nullptr) : nullptr;
+    if (!g_presenter) {
+        failed = true;
+        LOG_ERROR("DXGI present: no presenting thread (%lu); frames flip when the GPU is done", GetLastError());
+        return false;
+    }
+    return true;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL our_present(VkQueue queue, const VkPresentInfoKHR* pi) {
     Swap* s = pi->swapchainCount == 1 ? find_swap(pi->pSwapchains[0]) : nullptr;
     if (!s) {
@@ -1369,55 +1762,55 @@ VKAPI_ATTR VkResult VKAPI_CALL our_present(VkQueue queue, const VkPresentInfoKHR
     VkResult vr = d->fn.QueueSubmit2(queue, 1, &si, VK_NULL_HANDLE);
     if (vr != VK_SUCCESS) return vr;
 
-    if (g_qpc_freq <= 0) {
-        LARGE_INTEGER f;
-        if (QueryPerformanceFrequency(&f)) g_qpc_freq = f.QuadPart;
-    }
     g_last_hwnd = s->window->hwnd;
     if ((g_presents.load() & 255) == 0) sample_refresh(s->window->hwnd);
-    const int pacing = g_pacing.load();
-    if (pacing) pace_wait_ready(d, ready);
+    const LONGLONG content = take_content();
+    UINT sync = 1, flags = 0;
+    if (s->mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+        sync = 0;
+        flags = d->tearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
+    } else if (s->mode == VK_PRESENT_MODE_MAILBOX_KHR) {
+        sync = 0;
+    }
 
-    // Direct3D 11: wait for it on the GPU, copy into the DXGI back buffer, signal copy-done, present.
-    HRESULT hr;
-    {
+    if (g_pacing.load() != 0 && start_presenter()) {
+        // The presenting thread copies and flips it; the image's next acquire waits for this copy-done value.
+        Job j;
+        j.swap = s;
+        j.index = i < s->count ? i : 0;
+        j.ready = ready;
+        j.done = d->release_value.fetch_add(1) + 1;
+        j.content = content;
+        j.sync = sync;
+        j.flags = flags;
+        im.released = j.done;
+        {
+            std::lock_guard<std::mutex> g(g_job_lock);
+            g_jobs.push_back(j);
+        }
+        g_jobs_open.fetch_add(1);
+        SetEvent(g_job_event);
+    } else {
+        drain_jobs();
+        // Direct3D 11: wait for it on the GPU, copy into the DXGI back buffer, signal copy-done, present.
+        HRESULT hr;
         std::lock_guard<std::mutex> g(g_d3d);
         d->ctx->Wait(d->ready_fence, ready);
+        fit_format(d, s->window);
         ID3D11Texture2D* back = nullptr;
         hr = s->window->chain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back));
         if (SUCCEEDED(hr)) {
-            d->ctx->CopyResource(back, im.tex);
+            copy_out(d, s->window, im, back);
             back->Release();
         }
-        const uint64_t done = ++d->release_value;
+        const uint64_t done = d->release_value.fetch_add(1) + 1;
         d->ctx->Signal(d->release_fence, done);
         im.released = done;
-        UINT sync = 1, flags = 0;
-        if (s->mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
-            sync = 0;
-            flags = d->tearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
-        } else if (s->mode == VK_PRESENT_MODE_MAILBOX_KHR) {
-            sync = 0;
-        }
-        if (pacing == 1 && sync == 0) pace_hold();  // with vertical sync DXGI spaces the flips itself
-        note_flip();
+        const LONGLONG now = qpc_now();
+        note_flip(now, content, now);
         if (SUCCEEDED(hr)) hr = s->window->chain->Present(sync, flags);
-        // How Windows shows the frames (composed by the desktop window manager, or flipped straight to the display:
-        // what variable refresh needs), sampled now and then.
-        if ((g_presents.load() & 255) == 255) {
-            IDXGISwapChainMedia* media = nullptr;
-            if (SUCCEEDED(s->window->chain->QueryInterface(__uuidof(IDXGISwapChainMedia),
-                                                            reinterpret_cast<void**>(&media)))) {
-                DXGI_FRAME_STATISTICS_MEDIA st{};
-                if (SUCCEEDED(media->GetFrameStatisticsMedia(&st))) g_composition = static_cast<int>(st.CompositionMode);
-                media->Release();
-            }
-        }
-    }
-    g_last_hr = hr;
-    if (FAILED(hr) && !g_logged_present_error) {
-        g_logged_present_error = true;
-        LOG_ERROR("DXGI present: Present failed (%08lX)", hr);
+        sample_composition(s->window->chain);
+        note_present_result(hr);
     }
     QueryPerformanceCounter(&t1);
     QueryPerformanceFrequency(&freq);
@@ -1563,6 +1956,8 @@ void** import_slot(HMODULE module, const char* dll, const char* name) {
 }  // namespace
 
 bool dxgipresent_install(HMODULE dxvk) {
+    LARGE_INTEGER f;
+    if (QueryPerformanceFrequency(&f)) g_qpc_freq = f.QuadPart;
     void** slot = import_slot(dxvk, "KERNEL32.dll", "GetProcAddress");
     if (!slot) {
         LOG_ERROR("DXGI present: DXVK's GetProcAddress import was not found; DXVK presents through Vulkan");
@@ -1598,38 +1993,82 @@ void dxgipresent_report() {
              "%08lX, %s", n, us / 1000.0 / n, max_us / 1000.0, g_patched.exchange(0),
              static_cast<unsigned long>(g_last_hr.load()), dxgipresent_composition());
 
-    static uint32_t sorted[kSpacingSamples];
-    uint32_t count, close_count, held, timeouts;
-    uint64_t wait_us, hold_us;
+    static uint32_t sorted[kSpacingSamples], step[kSpacingSamples], err_flip[kSpacingSamples],
+        err_ready[kSpacingSamples];
+    uint32_t count, close_count, errs, after_n, missed, timeouts, missing, dropped, depth_sum, takes;
+    uint64_t after_us;
     {
         std::lock_guard<std::mutex> g(g_spacing_lock);
         count = g_spacing_count;
         std::memcpy(sorted, g_spacing_us, count * sizeof(uint32_t));
         close_count = g_spacing_close;
-        held = g_held;
+        errs = g_err_count;
+        std::memcpy(step, g_step_us, errs * sizeof(uint32_t));
+        std::memcpy(err_flip, g_err_flip_us, errs * sizeof(uint32_t));
+        std::memcpy(err_ready, g_err_ready_us, errs * sizeof(uint32_t));
+        after_us = g_after_boundary_us;
+        after_n = g_after_count;
+        missed = g_missed;
         timeouts = g_ready_timeouts;
-        wait_us = g_ready_wait_us;
-        hold_us = g_hold_us;
-        g_spacing_count = g_spacing_close = g_held = g_ready_timeouts = 0;
-        g_ready_wait_us = g_hold_us = 0;
+        g_spacing_count = g_spacing_close = g_err_count = g_after_count = g_missed = g_ready_timeouts = 0;
+        g_after_boundary_us = 0;
+        if (g_overs >= 8) {
+            std::sort(g_over_us, g_over_us + g_overs);
+            LOG_INFO("DXGI present: held flips went out late by half %.3f, 90%% %.3f, 99%% %.3f ms (%u held, the "
+                     "last %.2f ms spun); the delay moved %.2f ms in all, now %.2f ms", g_over_us[g_overs / 2] / 1000.0,
+                     g_over_us[g_overs * 9 / 10] / 1000.0, g_over_us[g_overs * 99 / 100] / 1000.0, g_overs,
+                     g_spin * 1000.0 / g_qpc_freq, g_latency_moved_us / 1000.0, g_latency * 1000.0 / g_qpc_freq);
+        }
+        g_overs = 0;
+        g_latency_moved_us = 0;
     }
+    {
+        std::lock_guard<std::mutex> g(g_content_lock);
+        missing = g_content_missing;
+        dropped = g_content_dropped;
+        depth_sum = g_content_depth_sum;
+        takes = g_content_takes;
+        g_content_missing = g_content_dropped = g_content_depth_sum = g_content_takes = 0;
+    }
+    const int pacing = g_pacing.load();
     if (count >= 8) {
         std::sort(sorted, sorted + count);
         uint64_t sum = 0;
         for (uint32_t k = 0; k < count; ++k) sum += sorted[k];
-        const int pacing = g_pacing.load();
         const int mhz = g_refresh_mhz.load();
-        char paced[160] = "not paced (the GPU flips each frame when it is done; these are the times they were handed over)";
-        if (pacing) {
-            std::snprintf(paced, sizeof(paced), "%s: waited for the frame avg %.2f ms, held %u frames avg %.2f ms%s",
-                          pacing == 1 ? "paced" : "waiting for each frame, not held", wait_us / 1000.0 / n, held,
-                          held ? hold_us / 1000.0 / held : 0.0, timeouts ? ", SOME WAITS TIMED OUT" : "");
-        }
+        static const char* const kModes[] = {"flipped by the GPU when done (DxvkPacedPresent off)",
+                                             "timed to the game's steps (DxvkPacedPresent)",
+                                             "flipped as soon as ready (dxgipace 2)"};
         LOG_INFO("DXGI present: flips %.2f ms apart on average (1%% %.2f, 10%% %.2f, half %.2f, 90%% %.2f, 99%% %.2f, "
                  "longest %.2f ms); %u of %u closer than the display's fastest refresh (%.2f ms at %.0f Hz); %s",
                  sum / 1000.0 / count, sorted[count / 100] / 1000.0, sorted[count / 10] / 1000.0,
                  sorted[count / 2] / 1000.0, sorted[count * 9 / 10] / 1000.0, sorted[count * 99 / 100] / 1000.0,
-                 sorted[count - 1] / 1000.0, close_count, count, mhz > 0 ? 1000000.0 / mhz : 0.0, mhz / 1000.0, paced);
+                 sorted[count - 1] / 1000.0, close_count, count, mhz > 0 ? 1000000.0 / mhz : 0.0, mhz / 1000.0,
+                 kModes[pacing >= 0 && pacing <= 2 ? pacing : 0]);
+    }
+    if (errs >= 8) {
+        // How far each flip's spacing is from the game's step for that picture (what judders), and what flipping
+        // each frame the moment it is ready would have given (in mode 0 the flip times are when the frames were
+        // handed to Direct3D 11, which flips them later, when the GPU is done).
+        std::sort(step, step + errs);
+        std::sort(err_flip, err_flip + errs);
+        std::sort(err_ready, err_ready + errs);
+        char timing[200] = "";
+        if (pacing == 1) {
+            std::snprintf(timing, sizeof(timing), "; flips %.2f ms after their frame's boundary on average, %u of %u "
+                          "frames ready after their time%s", after_n ? after_us / 1000.0 / after_n : 0.0, missed, errs,
+                          timeouts ? ", SOME WAITS FOR A FRAME TIMED OUT" : "");
+        }
+        LOG_INFO("DXGI present: the game's steps half %.2f ms (1%% %.2f, 99%% %.2f); flip spacing off the steps by half "
+                 "%.3f, 90%% %.3f, 99%% %.3f, most %.2f ms; flipping when ready would be off by half %.3f, 90%% %.3f, "
+                 "99%% %.3f, most %.2f ms%s%s", step[errs / 2] / 1000.0, step[errs / 100] / 1000.0,
+                 step[errs * 99 / 100] / 1000.0, err_flip[errs / 2] / 1000.0, err_flip[errs * 9 / 10] / 1000.0,
+                 err_flip[errs * 99 / 100] / 1000.0, err_flip[errs - 1] / 1000.0, err_ready[errs / 2] / 1000.0,
+                 err_ready[errs * 9 / 10] / 1000.0, err_ready[errs * 99 / 100] / 1000.0, err_ready[errs - 1] / 1000.0,
+                 timing, "");
+        LOG_INFO("DXGI present: frame boundaries queued %.2f deep on average when DXVK presented; %u presents found "
+                 "none, %u dropped to get back in step", takes ? static_cast<double>(depth_sum) / takes : 0.0, missing,
+                 dropped);
     }
     char nv[200];
     if (nvidia_vrr(nv, sizeof(nv))) LOG_INFO("DXGI present: %s", nv);
@@ -1638,6 +2077,38 @@ void dxgipresent_report() {
 void dxgipresent_set_pacing(int mode, int (*cap_fps)()) {
     if (cap_fps) g_cap_fps = cap_fps;
     g_pacing = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+}
+
+void dxgipresent_set_flip_observer(void (*observer)(long long qpc)) {
+    g_flip_observer = observer;
+}
+
+void dxgipresent_show_mark(double seconds) {
+    LARGE_INTEGER t, f;
+    QueryPerformanceCounter(&t);
+    QueryPerformanceFrequency(&f);
+    g_mark_until = t.QuadPart + static_cast<LONGLONG>(seconds * f.QuadPart);
+}
+
+void dxgipresent_set_hdr_chain(int on) {
+    g_hdr_chain = on ? 1 : 0;
+}
+
+int dxgipresent_hdr_chain() {
+    return g_hdr_chain.load();
+}
+
+void dxgipresent_frame_presented(long long boundary_qpc) {
+
+    push_content(boundary_qpc > 0 ? boundary_qpc : qpc_now());
+}
+
+bool dxgipresent_in_use() {
+    std::lock_guard<std::mutex> g(g_lock);
+    for (const Dev* d : g_devs) {
+        if (d->dxgi) return true;
+    }
+    return false;
 }
 
 int dxgipresent_pacing() {

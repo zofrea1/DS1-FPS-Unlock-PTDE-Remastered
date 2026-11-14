@@ -9,6 +9,9 @@
 #include "surfpool.h"
 #include "dxgipresent.h"
 #include "dxvk.h"
+#include "frame.h"
+#include "fpsu_buildcfg.h"
+#include "scanwatch.h"
 #include "limiter.h"
 #include "gamma.h"
 #include "extension.h"
@@ -43,9 +46,30 @@ CreateFn g_create = nullptr;
 bool g_dxvk_active = false;  // Direct3DCreate9 leads to DXVK
 CreateDeviceFn g_create_device = nullptr;
 ResetFn g_reset = nullptr;
+using PresentFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
+PresentFn g_present = nullptr;
+
+// DXVK through DXGI: each picture the game presents, with the frame boundary its flip is timed from.
+bool g_present_dxgi = false;
+bool g_present_watch = false;  // the system Direct3D 9: ScanWatch is told when the game presents
+
+HRESULT WINAPI hook_present(IDirect3DDevice9* device, const RECT* src, const RECT* dst, HWND window,
+                            const RGNDATA* dirty) {
+    if (g_present_dxgi) dxgipresent_frame_presented(frame_boundary_qpc());
+    const HRESULT hr = g_present(device, src, dst, window, dirty);
+#if FPSU_DIAGNOSTICS
+    if (g_present_watch) {
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        scanwatch_note_flip(t.QuadPart);
+    }
+#endif
+    return hr;
+}
 
 constexpr int kCreateDeviceSlot = 16;  // IDirect3D9::CreateDevice
 constexpr int kResetSlot = 16;         // IDirect3DDevice9::Reset
+constexpr int kPresentSlot = 17;       // IDirect3DDevice9::Present
 constexpr int kSetVsConstSlot = 94;    // IDirect3DDevice9::SetVertexShaderConstantF
 
 using SetVsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
@@ -237,6 +261,17 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             g_reset = reinterpret_cast<ResetFn>(original);
             LOG_INFO("Device Reset hooked");
         }
+        g_present_dxgi = g_dxvk_active && dxgipresent_in_use();
+#if FPSU_DIAGNOSTICS
+        if (settings().scan_watch) {
+            scanwatch_start(true);
+            g_present_watch = !g_present_dxgi;
+        }
+#endif
+        if (g_present_dxgi || g_present_watch) {
+            void* present = patch_slot(*out, kPresentSlot, reinterpret_cast<void*>(&hook_present));
+            if (present && !g_present) g_present = reinterpret_cast<PresentFn>(present);
+        }
         // Aspect rewrites the projection on the way through this hook. The content probe only hashes.
         g_probe = settings().content_probe;
         void* vs = (g_probe || aspect_is_active())
@@ -312,6 +347,7 @@ void route_to_dxvk() {
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s%s", dir, kDxvkFileName);
     dxgipresent_set_pacing(settings().dxvk_paced_present ? 1 : 0, limiter_requested_fps);
+    dxgipresent_set_hdr_chain(settings().dxvk_hdr_swap_chain ? 1 : 0);
     g_dxvk_active = dxvk_route(path, settings().dxvk_exclusive_fullscreen, settings().dxvk_dxgi_present);
 }
 

@@ -33,4 +33,8 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main_ps /O3 /Vn kPresentReducePs /Fh src\ptde\shaders\present_reduce_ps.h src\ptde\shaders\present_reduce.hlsl
 if errorlevel 1 exit /b 1
+%FXC% /nologo /T vs_4_0 /E main_vs /O3 /Vn kDxgiScrgbVs /Fh src\ptde\shaders\dxgi_scrgb_vs.h src\ptde\shaders\dxgi_scrgb.hlsl
+if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_4_0 /E main_ps /O3 /Vn kDxgiScrgbPs /Fh src\ptde\shaders\dxgi_scrgb_ps.h src\ptde\shaders\dxgi_scrgb.hlsl
+if errorlevel 1 exit /b 1
 echo Built src\ptde\shaders\dof_composite_ps.h, hdr_coladj_ps.h, area_reduce_ps.h, dof_near_rate_ps.h and present_reduce_vs/ps.h

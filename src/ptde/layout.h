@@ -11,6 +11,8 @@ struct IDirect3DDevice9;
 void layout_configure(bool keep_shape, int scale_percent);
 // RemoteControl `uiscale N`.
 void layout_set_scale(int scale_percent);
+// RemoteControl `uidump N` (diagnostics builds): the next N draws of the layout in the log, and the game's state.
+void layout_dump(int draws);
 // own_scissor: no render-resolution hooks in front, so the menus' clipping rectangles are mapped here.
 void layout_hook_device(IDirect3DDevice9* dev, bool own_scissor);
 // A clipping rectangle the menus set in 1280x720 units, mapped onto the frame buffer (frame_w x frame_h) as the layout
