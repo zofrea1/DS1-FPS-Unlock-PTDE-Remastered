@@ -22,6 +22,7 @@
 #include <intrin.h>
 
 #include <cctype>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -1173,6 +1174,74 @@ volatile bool g_god = false;
 float g_hold_pos[3] = {};
 ULONGLONG g_hold_until = 0;
 
+// The game's own lookups of a map entity (an MSB entity id): a character (0xD6C360) or a map object (0xD6B830), eax =
+// the entity; 0 when it is not loaded.
+uintptr_t entity_lookup(uint32_t fn, int entity) {
+    uintptr_t r = 0;
+    __try {
+        __asm {
+            mov eax, entity
+            mov edx, fn
+            call edx
+            mov r, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        r = 0;
+    }
+    return r;
+}
+
+// track: entities followed every game frame (track MS ENTITY..), and where a map object keeps its position
+// (objpath OFF [OFF2]: the float triple at obj+OFF, or at [obj+OFF]+OFF2).
+struct Tracked {
+    int entity;
+    uintptr_t chr, obj;
+};
+std::vector<Tracked> g_tracked;
+ULONGLONG g_track_until = 0;
+LARGE_INTEGER g_track_t0{};
+long g_obj_off = -1, g_obj_off2 = -1;
+
+void track_frame() {
+    if (g_tracked.empty()) return;
+    if (GetTickCount64() >= g_track_until) {
+        out("track: done");
+        g_tracked.clear();
+        return;
+    }
+    LARGE_INTEGER t, f;
+    QueryPerformanceCounter(&t);
+    QueryPerformanceFrequency(&f);
+    char line[600];
+    int n = std::snprintf(line, sizeof(line), "trk %8.4f", static_cast<double>(t.QuadPart - g_track_t0.QuadPart) /
+                                                           static_cast<double>(f.QuadPart));
+    for (const Tracked& e : g_tracked) {
+        float p[3] = {0, 0, 0};
+        if (e.chr) {
+            uint32_t ctrl = 0, phys = 0, anim = 0;
+            int hp = -1;
+            safe_read(e.chr + 0x28, &ctrl, 4);
+            if (ctrl) safe_read(ctrl + 0x1C, &phys, 4);
+            if (phys) safe_read(phys + 0x10, p, 12);
+            if (ctrl) safe_read(ctrl + 0x350, &anim, 4);
+            safe_read(e.chr + 0x2D4, &hp, 4);
+            n += std::snprintf(line + n, sizeof(line) - n, " | %d %.3f %.3f %.3f hp %d anim %d", e.entity, p[0], p[1],
+                               p[2], hp, static_cast<int>(anim));
+        } else if (e.obj && g_obj_off >= 0) {
+            uintptr_t at = e.obj + g_obj_off;
+            if (g_obj_off2 >= 0) {
+                uint32_t q = 0;
+                safe_read(at, &q, 4);
+                at = q ? q + g_obj_off2 : 0;
+            }
+            if (at) safe_read(at, p, 12);
+            n += std::snprintf(line + n, sizeof(line) - n, " | %d %.3f %.3f %.3f", e.entity, p[0], p[1], p[2]);
+        }
+        if (n >= static_cast<int>(sizeof(line)) - 80) break;
+    }
+    out("%s", line);
+}
+
 // memsnap NAME N: the game's writable memory (private regions and the exe's data sections) written to
 // NAME_f0.bin .. NAME_f<N-1>.bin at the start of N consecutive game frames, with the region list in NAME.regions
 // ("base size offset", hex). With "forcedt" the world steps by a fixed time per frame, so two runs that differ only in
@@ -1538,6 +1607,56 @@ void run_game(const std::vector<std::string>& t) {
         std::memcpy(g_hold_pos, p, sizeof(p));
         g_hold_until = GetTickCount64() + static_cast<ULONGLONG>(num(4, 0));
         out("tp %.2f %.2f %.2f (held %ld ms)", p[0], p[1], p[2], num(4, 0));
+    } else if (c == "ent") {
+        // ent ENTITY: the character or map object with that MSB entity id.
+        const int id = static_cast<int>(num(1, 0));
+        const uintptr_t chr = entity_lookup(0x00D6C360, id), obj = chr ? 0 : entity_lookup(0x00D6B830, id);
+        out("ent %d: character %08X object %08X", id, static_cast<unsigned>(chr), static_cast<unsigned>(obj));
+    } else if (c == "objscan") {
+        // objscan ENTITY X Y Z: where the map object keeps a float triple within 1 of X Y Z (its own 0x400 bytes and
+        // one pointer deep, 0x200 bytes each), for objpath.
+        const uintptr_t obj = entity_lookup(0x00D6B830, static_cast<int>(num(1, 0)));
+        const float want[3] = {fnum(2), fnum(3), fnum(4)};
+        int found = 0;
+        auto near3 = [&](uintptr_t a) {
+            float v[3];
+            if (!safe_read(a, v, 12)) return false;
+            for (int k = 0; k < 3; ++k) {
+                if (!(v[k] == v[k]) || std::fabs(v[k] - want[k]) > 1.0f) return false;
+            }
+            return true;
+        };
+        for (uint32_t off = 0; obj && off < 0x400 && found < 16; off += 4) {
+            if (near3(obj + off)) {
+                out("  objscan: obj+0x%X", off);
+                ++found;
+            }
+            uint32_t q = 0;
+            if (!safe_read(obj + off, &q, 4) || q < 0x10000) continue;
+            for (uint32_t o2 = 0; o2 < 0x200 && found < 16; o2 += 4) {
+                if (near3(q + o2)) {
+                    out("  objscan: [obj+0x%X]+0x%X", off, o2);
+                    ++found;
+                }
+            }
+        }
+        out("objscan: object %08X, %d places", static_cast<unsigned>(obj), found);
+    } else if (c == "objpath") {
+        g_obj_off = num(1, -1);
+        g_obj_off2 = num(2, -1);
+        out("objpath %ld %ld", g_obj_off, g_obj_off2);
+    } else if (c == "track") {
+        // track MS ENTITY..: every game frame for MS ms, each entity's place (a character's physics position, HP and
+        // animation; a map object's position at objpath), as "trk" lines.
+        g_tracked.clear();
+        for (size_t k = 2; k < t.size(); ++k) {
+            const int id = static_cast<int>(std::strtol(t[k].c_str(), nullptr, 0));
+            const uintptr_t chr = entity_lookup(0x00D6C360, id), obj = chr ? 0 : entity_lookup(0x00D6B830, id);
+            g_tracked.push_back(Tracked{id, chr, obj});
+        }
+        QueryPerformanceCounter(&g_track_t0);
+        g_track_until = GetTickCount64() + static_cast<ULONGLONG>(num(1, 5000));
+        out("track %ld ms, %u entities", num(1, 5000), static_cast<unsigned>(g_tracked.size()));
     } else if (c == "warp") {
         uint32_t gm = 0;
         if (!safe_read(kGameMan, &gm, 4) || !gm) {
@@ -1915,7 +2034,7 @@ void run(const std::string& line) {
             out("hp: no player");
         }
     } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp" || c == "speffect" ||
-               c == "anim") {
+               c == "anim" || c == "ent" || c == "objscan" || c == "objpath" || c == "track") {
         std::lock_guard<std::mutex> lock(g_game_lock);
         g_game_cmds.push_back(t);
     } else if (c == "queries") {
@@ -2041,6 +2160,7 @@ void remote_game_frame() {
     memsnap_frame();
     probe_frame();
     if (g_god) god_tick();
+    track_frame();
     if (g_hold_until && GetTickCount64() < g_hold_until) {
         const uintptr_t phys = player_physics();
         if (phys) std::memcpy(reinterpret_cast<void*>(phys + 0x10), g_hold_pos, sizeof(g_hold_pos));
