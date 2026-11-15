@@ -576,11 +576,14 @@ bool frame_install(const Settings& settings) {
             if (resolution_install(rw, rh, settings.render_scale_post) && dsfix_loaded()) {
                 resolution_bypass_dsfix(!settings.render_scale_post);
             }
-        } else if (dsfix_changes_resolution() && settings.fix_sun_with_dsfix) {
-            // DSfix's own resolution in use (ours is off): the sun and moon fix for it.
+        }
+        if (dsfix_changes_resolution() && settings.fix_sun_with_dsfix) {
+            // The sun and moon beside DSfix's resolution: the probe grows with DSfix's resolution when ours is off;
+            // DSfix 3.0 divides the counts by its resolution either way (checked at the first count).
             int dw = 0, dh = 0;
             dsfix_render_size(&dw, &dh);
-            resolution_dsfix_sun(dw, dh);
+            const double dsfix_factor = (static_cast<double>(dw) * dh) / (1024.0 * 720.0);
+            resolution_dsfix_sun(resolution_is_active() ? 1.0 : dsfix_factor, dsfix_factor);
         }
         if (settings.fix_slide_contact) {
             slidecontact_install();

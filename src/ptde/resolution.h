@@ -56,4 +56,13 @@ void resolution_set_high_precision_color(bool on);
 // that limit and is never taken, and the sun or moon stays hidden until it leaves the screen and comes back. Here the
 // expected area grows by DSfix's enlargement too. (Our own RenderResolution needs nothing: the game sizes its frame
 // buffer and viewports itself and the probe stays 24x24.)
-bool resolution_dsfix_sun(int render_width, int render_height);
+// DSfix 3.0 (since 2026-10-09) corrects this itself: it wraps the game's occlusion queries and divides every count by
+// its renderWidth x renderHeight / (1024 x 720), whether or not it makes the resolution. On top of that, the change
+// here would leave the sun and moon that many times too faint, and beside our RenderResolution DSfix's division alone
+// does. So the expected area becomes 0.8 x probe_factor / (DSfix's factor when it divides, else 1), decided at the
+// game's first count by who asks the real query for it (resolution_sun_hook_device).
+// probe_factor: how much larger the probe comes out (DSfix's factor when DSfix makes the resolution, 1 when ours does);
+// dsfix_factor: DSfix's renderWidth x renderHeight / (1024 x 720).
+bool resolution_dsfix_sun(double probe_factor, double dsfix_factor);
+// From device creation, on the real device (under DSfix's wrapper): watches the first occlusion count for the above.
+void resolution_sun_hook_device(IDirect3DDevice9* dev);

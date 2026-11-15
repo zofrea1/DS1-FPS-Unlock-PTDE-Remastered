@@ -27,6 +27,9 @@
 #include <mutex>
 #include <unordered_set>
 
+#include <intrin.h>
+#pragma intrinsic(_ReturnAddress)
+
 namespace {
 
 // Where RenderTargetManImp's constructor (0x100A1E0..0x100BB81) writes its target sizes: the address of each 32-bit
@@ -1446,19 +1449,74 @@ namespace {
 // fld qword ptr [0x011E7DE8] (0.8) in the lens flare's visibility function; the address operand is at +2.
 constexpr uint32_t kSunScaleLoad = 0x00FD3A52;
 constexpr uint8_t kSunScaleBytes[] = {0xDD, 0x05, 0xE8, 0x7D, 0x1E, 0x01};
-double g_sun_scale = 0.8;
+constexpr double kSunScaleGame = 0.8;
+constexpr int kQueryGetDataSlot = 7;  // IDirect3DQuery9::GetData (the game calls [vtable+0x1C])
+double g_sun_scale = kSunScaleGame;   // read by the patched fld
+double g_sun_probe = 1.0;             // how much larger the probe's count comes out than the game expects
+double g_sun_dsfix = 1.0;             // DSfix's renderWidth x renderHeight / (1024 x 720)
+bool g_sun_patched = false;
+volatile LONG g_sun_checked = 0;
+using QueryGetDataFn = HRESULT(WINAPI*)(IDirect3DQuery9*, void*, DWORD, DWORD);
+QueryGetDataFn o_query_get_data = nullptr;
+
+// The first occlusion count the game asks for: who asks the real query for it. DSfix 2.x passes the game's queries
+// through, so the game itself asks; DSfix 3.0 (since 2026-10-09) wraps them and divides each count by its renderWidth x
+// renderHeight / (1024 x 720), so the call comes from DSfix's module. With DSfix's division the probe's count already
+// matches the game's expectation when DSfix makes the resolution, and comes out too small by that much when ours does.
+void sun_check_caller(void* from) {
+    HMODULE caller = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(from), &caller);
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&sun_check_caller), &self);
+    if (caller && caller == self) {
+        // Only in diagnostics builds: RemoteControl's or the profiler's query hook sits in front of this one.
+        LOG_INFO("Sun and moon: another hook of this mod sits in front of the query; cannot tell whether DSfix corrects "
+                 "the count itself (assuming it does not: the expected count is %.2f times the game's)", g_sun_probe);
+        return;
+    }
+    // DSfix is DINPUT8.dll beside the game (the system's dinput8.dll, which DSfix loads too, never asks a query).
+    wchar_t name[MAX_PATH] = L"?";
+    if (caller) GetModuleFileNameW(caller, name, MAX_PATH);
+    const wchar_t* slash = wcsrchr(name, L'\\');
+    const wchar_t* base = slash ? slash + 1 : name;
+    const bool divides = _wcsicmp(base, L"dinput8.dll") == 0;
+    const double scale = kSunScaleGame * g_sun_probe / (divides ? g_sun_dsfix : 1.0);
+    g_sun_scale = scale;
+    if (divides) {
+        LOG_INFO("Sun and moon: DSfix divides the lens flare's visibility count by %.2f itself (DSfix 3.0); the "
+                 "expected count is now %.2f times the game's%s", g_sun_dsfix, scale / kSunScaleGame,
+                 scale == kSunScaleGame ? " (unchanged: DSfix's correction is enough)" : "");
+    } else {
+        LOG_INFO("Sun and moon: the visibility count is read without DSfix's correction (by %ls); the expected count "
+                 "is %.2f times the game's", base, scale / kSunScaleGame);
+    }
+}
+
+HRESULT WINAPI hk_query_get_data(IDirect3DQuery9* q, void* data, DWORD size, DWORD flags) {
+    void* from = _ReturnAddress();
+    if (q->GetType() == D3DQUERYTYPE_OCCLUSION && InterlockedExchange(&g_sun_checked, 1) == 0) {
+        sun_check_caller(from);
+        // Decided: the original back, unless another hook has been put in front of this one since.
+        if ((*reinterpret_cast<void***>(q))[kQueryGetDataSlot] == reinterpret_cast<void*>(&hk_query_get_data)) {
+            patch_slot(q, kQueryGetDataSlot, reinterpret_cast<void*>(o_query_get_data));
+        }
+    }
+    return o_query_get_data(q, data, size, flags);
+}
 }  // namespace
 
-bool resolution_dsfix_sun(int render_width, int render_height) {
-    if (render_width <= 0 || render_height <= 0) return false;
+bool resolution_dsfix_sun(double probe_factor, double dsfix_factor) {
+    if (probe_factor <= 0.0 || dsfix_factor <= 0.0) return false;
     auto* p = reinterpret_cast<uint8_t*>(kSunScaleLoad);
     if (std::memcmp(p, kSunScaleBytes, sizeof(kSunScaleBytes)) != 0) {
         LOG_ERROR("Sun and moon: the lens flare code at %08X does not match this build. Not patching.", kSunScaleLoad);
         return false;
     }
-    const double factor = (static_cast<double>(render_width) * render_height) / (1024.0 * 720.0);
-    if (factor <= 1.0) return false;
-    g_sun_scale = 0.8 * factor;
+    g_sun_probe = probe_factor;
+    g_sun_dsfix = dsfix_factor > 0.01 ? dsfix_factor : 1.0;  // DSfix 3.0's own floor
+    g_sun_scale = kSunScaleGame * g_sun_probe;  // until the first count shows whether DSfix divides
     DWORD old = 0;
     if (!VirtualProtect(p + 2, 4, PAGE_EXECUTE_READWRITE, &old)) return false;
     const uint32_t addr = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_sun_scale));
@@ -1466,9 +1524,24 @@ bool resolution_dsfix_sun(int render_width, int render_height) {
     DWORD ignored = 0;
     VirtualProtect(p + 2, 4, old, &ignored);
     FlushInstructionCache(GetCurrentProcess(), p, sizeof(kSunScaleBytes));
-    LOG_INFO("Sun and moon: DSfix renders at %dx%d, so the lens flare's visibility probe is expected %.2f times larger "
-             "(they no longer stay hidden after something passes in front)", render_width, render_height, factor);
+    g_sun_patched = true;
+    LOG_INFO("Sun and moon: the lens flare's visibility probe comes out %.2f times the game's size (DSfix's renderWidth "
+             "x renderHeight is %.2f times 1024x720); checking whether DSfix corrects the count itself", g_sun_probe,
+             g_sun_dsfix);
     return true;
+}
+
+void resolution_sun_hook_device(IDirect3DDevice9* dev) {
+    if (!g_sun_patched || !dev || o_query_get_data) return;
+    // A query of the real device shares its method table with the game's; DSfix's wrapper (if any) sits above.
+    IDirect3DQuery9* q = nullptr;
+    if (FAILED(dev->CreateQuery(D3DQUERYTYPE_OCCLUSION, &q)) || !q) {
+        LOG_INFO("Sun and moon: no occlusion query to look at; assuming DSfix leaves the counts alone");
+        return;
+    }
+    void* original = patch_slot(q, kQueryGetDataSlot, reinterpret_cast<void*>(&hk_query_get_data));
+    if (original) o_query_get_data = reinterpret_cast<QueryGetDataFn>(original);
+    q->Release();
 }
 
 void resolution_bypass_dsfix(bool on) { g_bypass_dsfix = on; }

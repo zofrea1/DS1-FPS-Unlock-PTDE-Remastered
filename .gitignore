@@ -8,3 +8,6 @@ build/
 *.user
 # Nexus Mods page texts, kept locally
 nexus/
+# test_sunquery stand-in DLLs (tools/test_rendermath/build_sunquery.bat)
+tools/test_rendermath/sunquery_dll/
+tools/test_rendermath/sunquery_game/
