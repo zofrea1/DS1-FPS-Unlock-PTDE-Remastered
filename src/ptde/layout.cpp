@@ -1191,16 +1191,26 @@ bool layout_map_scissor(IDirect3DDevice9* dev, const RECT* r, int frame_w, int f
     if (!r || r->left < 0 || r->top < 0 || r->right > 1280 || r->bottom > 720) return false;
     shape_now();
     const bool shaped = g_kx != 1.0f || g_ky != 1.0f;
-    // A window over the HUD drawn smaller (UIScale, window_for): a clipping rectangle inside it goes with it. A
-    // message's text is drawn through one; the rectangle stayed where it was and cut the shrunk text away
-    // (2026-11-14: "Need humanity" was gone, its rating left).
+    // A window over the HUD drawn smaller (UIScale, window_for): a clipping rectangle in it goes with it. A message's
+    // text is drawn through one; the rectangle stayed where it was and cut the shrunk text away (2026-11-14: "Need
+    // humanity" was gone, its rating left). The game's text rectangles reach past the window across (181..1169 for a
+    // line), so one whose height lies within a window's and that overlaps it is that window's.
     double l = r->left, t = r->top, rr = r->right, b = r->bottom;
     bool fitted = false;
     for (int i = 0; i < g_window_count; ++i) {
         const Window& w = g_windows[i];
-        if (!inside(w, static_cast<float>(l), static_cast<float>(t), static_cast<float>(rr), static_cast<float>(b))) {
-            continue;
+        const bool in_height = t >= w.y0 - 2.0f && b <= w.y1 + 2.0f;
+        const bool overlaps = l < w.x1 && rr > w.x0;
+#if FPSU_DIAGNOSTICS
+        static int logged_seen = 0;  // which rectangles come while a window is open (the first few)
+        if (logged_seen < 16) {
+            ++logged_seen;
+            LOG_INFO("UIScale: a clipping rectangle %ld,%ld-%ld,%ld while a window %.1f,%.1f-%.1f,%.1f is open: %s",
+                     r->left, r->top, r->right, r->bottom, w.x0, w.y0, w.x1, w.y1,
+                     in_height && overlaps ? "its" : "not its");
         }
+#endif
+        if (!in_height || !overlaps) continue;
         const double s = g_scale, mid = kLayoutW * 0.5;
         l = mid + (l - mid) * s;
         rr = mid + (rr - mid) * s;
