@@ -1,7 +1,12 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set VERSION=2.3.0
+rem The version from src\common\fpsu_version.h (it was typed here, and 2.4.0 nearly shipped named 2.3.0).
+for /f "tokens=3 delims= " %%v in ('findstr /c:"#define FPSU_VERSION_STR" src\common\fpsu_version.h') do set VERSION=%%~v
+if "%VERSION%"=="" (
+    echo No FPSU_VERSION_STR in src\common\fpsu_version.h
+    exit /b 1
+)
 set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
 
 rem Release builds of both DLLs: the [Diagnostics] tools compiled out (src\common\fpsu_buildcfg.h).
