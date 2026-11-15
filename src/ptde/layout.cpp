@@ -596,7 +596,8 @@ Fit group_fit(float x0, float y0, float x1, float y1) {
 // The game's windows over the HUD, drawn after it each frame (dumps in the world, 2026-11-14), each a frame with its
 // contents drawn after it inside:
 //   - a prompt ("A: Talk", "A: Pick up item", "A: OK" under an item): 329.5..950.5 in two pieces (y 562.5..608.5 and
-//     608.5..638.5), the inner box 352.5..926.5 x 572.5..622.5, the text in 585..613;
+//     608.5..638.5), the inner box 352.5..926.5 x 572.5..622.5, the text in 585..613; with two lines ("A: Rest at
+//     bonfire" over "Y: Toggle") one piece 329.5..947.5 x 562.5..663.5, the lines in 584..612 and 615..643;
 //   - an item picked up: 353.5..904.5 x 462.5..564.5 in two pieces split at 820.1, the icon 387..458, the name from
 //     473, the count at 850; with more than one item the windows stack upward;
 //   - a message being read (players' and the game's own): 200.5..1075.5 x 123.5..226.5 in two pieces split at 761.5
@@ -642,7 +643,7 @@ const Window* window_for(float x0, float y0, float x1, float y1) {
     if (g_bound != kImage) return nullptr;
     const float h = y1 - y0;
     uint8_t kind;
-    if (near_f(x0, 329.5f, 1.5f) && near_f(x1, 950.5f, 1.5f) && y0 >= 380.0f && y1 <= 700.0f) {
+    if (near_f(x0, 329.5f, 1.5f) && x1 >= 930.0f && x1 <= 960.0f && y0 >= 380.0f && y1 <= 700.0f) {
         kind = kPromptWindow;
     } else if (near_f(x0, 353.5f, 1.5f) && near_f(h, 102.0f, 3.0f) && y0 >= 60.0f && y1 <= 600.0f && x1 <= 960.0f) {
         kind = kItemWindow;
