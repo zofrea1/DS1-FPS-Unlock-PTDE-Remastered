@@ -1191,6 +1191,23 @@ uintptr_t entity_lookup(uint32_t fn, int entity) {
     return r;
 }
 
+// The event command Warp Character to a region (2004[41], target type 1): eax = the character's entity,
+// stdcall(region, 1) at 0xD71A90.
+bool warp_chr(int who, int region) {
+    __try {
+        __asm {
+            push 1
+            push region
+            mov eax, who
+            mov edx, 0x00D71A90
+            call edx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
 // track: entities followed every game frame (track MS ENTITY..), and where a map object keeps its position
 // (objpath OFF [OFF2]: the float triple at obj+OFF, or at [obj+OFF]+OFF2).
 struct Tracked {
@@ -1607,6 +1624,11 @@ void run_game(const std::vector<std::string>& t) {
         std::memcpy(g_hold_pos, p, sizeof(p));
         g_hold_until = GetTickCount64() + static_cast<ULONGLONG>(num(4, 0));
         out("tp %.2f %.2f %.2f (held %ld ms)", p[0], p[1], p[2], num(4, 0));
+    } else if (c == "warpchr") {
+        // warpchr ENTITY REGION: the event command Warp Character to a region (2004[41], target type 1: eax = the
+        // character's entity, stdcall(region, 1) at 0xD71A90), within the loaded map. 10000 = the player.
+        const int who = static_cast<int>(num(1, 10000)), region = static_cast<int>(num(2, 0));
+        out("warpchr %d -> region %d: %s", who, region, warp_chr(who, region) ? "done" : "exception");
     } else if (c == "ent") {
         // ent ENTITY: the character or map object with that MSB entity id.
         const int id = static_cast<int>(num(1, 0));
@@ -2034,7 +2056,8 @@ void run(const std::string& line) {
             out("hp: no player");
         }
     } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp" || c == "speffect" ||
-               c == "anim" || c == "ent" || c == "objscan" || c == "objpath" || c == "track") {
+               c == "anim" || c == "ent" || c == "objscan" || c == "objpath" || c == "track" ||
+               c == "warpchr") {
         std::lock_guard<std::mutex> lock(g_game_lock);
         g_game_cmds.push_back(t);
     } else if (c == "queries") {
