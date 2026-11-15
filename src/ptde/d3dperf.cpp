@@ -335,6 +335,14 @@ volatile bool g_quick = true;
 
 }  // namespace
 
+int d3dperf_set_filter(int on) {
+    if (on >= 0) {
+        g_ss_enabled = on != 0;
+        forget_samplers();
+    }
+    return g_ss_enabled ? 1 : 0;
+}
+
 int d3dperf_set_quick(int on) {
     if (on >= 0) g_quick = on != 0;
     return g_quick ? 1 : 0;

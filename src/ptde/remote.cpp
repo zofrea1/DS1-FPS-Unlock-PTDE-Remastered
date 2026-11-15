@@ -1908,6 +1908,8 @@ void run(const std::string& line) {
         inputcache_stats(&cached, &passed);
         out("inputcache %d (cached %lu, passed %lu)", inputcache_set(t.size() > 1 ? static_cast<int>(num(1, 1)) : -1),
             cached, passed);
+    } else if (c == "ssfilter") {
+        out("ssfilter %d", d3dperf_set_filter(t.size() > 1 ? static_cast<int>(num(1, 1)) : -1));
     } else if (c == "d3dfast") {
         out("d3dfast %d", d3dperf_set_quick(t.size() > 1 ? static_cast<int>(num(1, 1)) : -1));
     } else if (c == "surfpool") {

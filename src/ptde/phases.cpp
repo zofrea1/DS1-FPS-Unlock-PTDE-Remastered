@@ -37,7 +37,8 @@ Site g_sites[kMaxSites];
 int g_count = 0;
 uint8_t* g_code = nullptr;  // stubs (executable)
 size_t g_code_used = 0;
-constexpr size_t kCodeSize = 200 * 96;
+constexpr size_t kCodeSize = 200 * 128;
+uint32_t g_stub_tid = 0;  // the game thread (set by `phases on`)
 
 bool g_active = false;
 uint64_t g_frame_ticks = 0;
@@ -61,9 +62,18 @@ uint8_t* build_stub(Site& s) {
         g_code = static_cast<uint8_t*>(VirtualAlloc(nullptr, kCodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
         if (!g_code) return nullptr;
     }
-    if (g_code_used + 96 > kCodeSize) return nullptr;
+    if (g_code_used + 128 > kCodeSize) return nullptr;
     uint8_t* stub = g_code + g_code_used;
     uint8_t* p = stub;
+    // Another thread than the game's goes straight to the callee (the stub keeps one return address per site, so only
+    // the game thread is timed): push eax / mov eax, fs:[0x24] / cmp eax, [g_stub_tid] / pop eax / jne other.
+    put8(p, 0x50);
+    put8(p, 0x64); put8(p, 0xA1); put32(p, 0x24);
+    put8(p, 0x3B); put8(p, 0x05); put32(p, reinterpret_cast<uint32_t>(&g_stub_tid));
+    put8(p, 0x58);
+    put8(p, 0x0F); put8(p, 0x85);
+    uint8_t* jne_rel = p;
+    put32(p, 0);
     const uint32_t ret = reinterpret_cast<uint32_t>(&s.ret);
     const uint32_t start = reinterpret_cast<uint32_t>(&s.start);
     const uint32_t ticks = reinterpret_cast<uint32_t>(&s.ticks);
@@ -88,7 +98,16 @@ uint8_t* build_stub(Site& s) {
     put8(p, 0xFF); put8(p, 0x05); put32(p, calls);                      // inc dword [calls]
     put8(p, 0x5A); put8(p, 0x58);                                       // pop edx; pop eax
     put8(p, 0xFF); put8(p, 0x25); put32(p, ret);                        // jmp [ret]
-    g_code_used += 96;
+    // other: the callee, with the caller's return address still on the stack
+    const uint32_t other = reinterpret_cast<uint32_t>(p);
+    const uint32_t rel = other - (reinterpret_cast<uint32_t>(jne_rel) + 4);
+    std::memcpy(jne_rel, &rel, 4);
+    if (s.vt) {
+        put8(p, 0xFF); put8(p, 0x25); put32(p, reinterpret_cast<uint32_t>(&s.target));  // jmp [target]
+    } else {
+        put8(p, 0xE9); put32(p, s.target - (reinterpret_cast<uint32_t>(p) + 4));       // jmp target
+    }
+    g_code_used += 128;
     return stub;
 }
 
@@ -469,6 +488,7 @@ bool phases_active() { return g_active; }
 
 const char* phases_command(const char* verb, uint32_t address) {
     if (std::strcmp(verb, "on") == 0) {
+        g_stub_tid = GetCurrentThreadId();
         if (!g_active) {
             for (uint32_t a : kFrameSites) add_site(a);
             QueryPerformanceCounter(&g_qpc0);
