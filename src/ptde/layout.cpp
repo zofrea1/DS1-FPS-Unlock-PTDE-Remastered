@@ -614,7 +614,7 @@ struct Window {
 };
 Window g_windows[8];
 int g_window_count = 0;  // the render thread's; none at the start of each frame
-int g_logged_windows = 0;
+int g_logged_windows[3] = {};  // each kind's first two, for the log
 
 // The frame's order of draws (the render thread's): the game draws its whole HUD first in each frame, the equipment
 // slots' backdrop (86.4,406.5-375.5,643.5) its first piece, then whatever lies over it (prompts, windows, menus).
@@ -677,8 +677,8 @@ const Window* window_for(float x0, float y0, float x1, float y1) {
     }
     if (g_window_count >= 8) return nullptr;
     g_windows[g_window_count] = Window{x0, y0, x1, y1, kind == kMessageWindow ? 0.0f : kLayoutH, kind};
-    if (g_logged_windows < 12) {
-        ++g_logged_windows;
+    if (g_logged_windows[kind] < 2) {
+        ++g_logged_windows[kind];
         static const char* const kNames[] = {"a prompt", "an item picked up", "a message"};
         LOG_INFO("UIScale: %s (a frame %.1f,%.1f-%.1f,%.1f) is drawn at %.0f%%", kNames[kind], x0, y0, x1, y1,
                  g_scale * 100.0);
@@ -723,8 +723,12 @@ Fit fit_for(float x0, float y0, float x1, float y1, const MenuNow& menu) {
     const bool off_layout = x1 <= 0.0f || x0 >= kLayoutW || y1 <= 0.0f || y0 >= kLayoutH;
     if (g_run == kRunHud && !g.any && !off_layout) {
         g_run = kRunOver;
-        if (menu.open && g_logged_runs < 8) {
+        // Where it ended under a menu, when that changes (the first few).
+        static float last_x0 = -1.0f, last_y0 = -1.0f;
+        if (menu.open && g_logged_runs < 8 && (x0 != last_x0 || y0 != last_y0)) {
             ++g_logged_runs;
+            last_x0 = x0;
+            last_y0 = y0;
             LOG_INFO("UIScale: under a menu the HUD's draws end at a draw %.1f,%.1f-%.1f,%.1f (kept at its size, as "
                      "everything after it)", x0, y0, x1, y1);
         }
