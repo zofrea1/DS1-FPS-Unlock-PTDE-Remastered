@@ -408,7 +408,8 @@ Settings settings_load(const wchar_t* dll_path) {
     // effects library (whose particle draws the RTX mod hooks for its lights) step back, and so do the window and HUD
     // shape, the mouse pointer and the intro skip, which the RTX mod handles. The frame rate, every gameplay fix and
     // FixController stay (a pad the game does not know needs FixController; checked 2026-11-15 with Dark Souls PTDE
-    // RTX: with all of these off the picture was right).
+    // RTX: with all of these off the picture was right), and so does FullscreenRefreshRate, which reaches the display
+    // mode the bridge sets itself (remixdisplay.h).
     if (s.yield_to_rtx_remix != 2) {
         std::wstring dir(dll_path);
         const size_t slash = dir.find_last_of(L"\\/");
@@ -423,7 +424,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"highprecisioncolor", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
                 {"shadowbias", "0"}, {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
                 {"fixsun", "false"}, {"fixwater", "false"}, {"gammaramp", "false"}, {"dxvk", "false"},
-                {"dpiaware", "false"}, {"fullscreenrefreshrate", "-1"}, {"borderlessfullscreen", "false"},
+                {"dpiaware", "false"}, {"borderlessfullscreen", "false"},
                 // The screen's shape and the HUD.
                 {"fixaspect", "false"}, {"fixaspectui", "false"}, {"uiscale", "100"}, {"uiscaleworld", "100"},
                 // Direct3D-level and render-code speed-ups.
@@ -446,7 +447,7 @@ Settings settings_load(const wchar_t* dll_path) {
                          "(FastEffects, FastRenderMath, AsyncReadback, ReuseSurfaces, PreloadTextures, "
                          "FilterSamplerStates, SkipUnusedReflection), DXVK, FixSfxSpawnRate, FixSfxActions, "
                          "FixSfxDistortion, FixCutsceneCamera, HideMouseCursor, CacheInputReads and SkipIntro are off; "
-                         "the frame rate, every gameplay fix and FixController stay on",
+                         "the frame rate, FullscreenRefreshRate, every gameplay fix and FixController stay on",
                          remix ? "RTX Remix found beside the game (d3d9.dll, .trex\\NvRemixBridge.exe)"
                                : "YieldToRtxRemix = true");
             }

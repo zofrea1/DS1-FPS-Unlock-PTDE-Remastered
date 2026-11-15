@@ -58,6 +58,7 @@ src\ptde\intro.cpp
 src\ptde\framekick.cpp
 src\ptde\focus.cpp
 src\ptde\drivetype.cpp
+src\ptde\remixdisplay.cpp
 src\ptde\flick.cpp
 src\ptde\speffect.cpp
 src\ptde\eventwaits.cpp

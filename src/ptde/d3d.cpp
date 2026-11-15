@@ -18,6 +18,7 @@
 #include "log.h"
 #include "profile.h"
 #include "remote.h"
+#include "remixdisplay.h"
 #include "dsfix.h"
 #include "resolution.h"
 #include "settings.h"
@@ -230,6 +231,8 @@ void* patch_slot(void* object, int slot, void* replacement) {
 
 HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type, HWND window, DWORD flags,
                                   D3DPRESENT_PARAMETERS* pp, IDirect3DDevice9** out) {
+    // RTX Remix's bridge sets the fullscreen display mode itself (at 60 Hz): its call takes FullscreenRefreshRate.
+    if (settings().rtx_remix_applied) remix_display_install(settings().fps_unlock ? settings().fullscreen_refresh : -1);
     aspect_set_enabled(settings().fps_unlock && settings().fix_aspect);
     if (aspect_is_enabled()) {
         aspect_adjust_present(d3d, adapter, pp, "CreateDevice");
