@@ -79,6 +79,12 @@ struct Settings {
     // Bullet hit records run out on native frames (src/common/effectlife.h), so Poison and Toxic Mist clouds and
     // other lingering attacks hit a target standing in them at the native rate (frames of BulletPtdeSpeed's rate).
     bool fix_bullet_hit_timing = true;
+    // Event script waits last as at the native rate (src/common/eventwait.h): each ends on the frame nearest to the
+    // native countdown's end, so scripted sequences keep their timing. event_wait_ptde_speed (INI EventWaitPtdeSpeed):
+    // the original game's 30 FPS (its waits run a frame long where its rounding left them: 0.5 s lasts 0.533 s);
+    // false: Remastered's own 60 FPS.
+    bool fix_event_waits = true;
+    bool event_wait_ptde_speed = true;
     // Heat haze (distortion effects) scrolls on the native frame grid (patch_sfx_distortion): the original game's 30 FPS
     // with SfxDistortionPtdeSpeed, else Remastered's 60.
     bool fix_sfx_distortion = true;

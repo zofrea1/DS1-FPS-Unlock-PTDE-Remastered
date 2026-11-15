@@ -32,6 +32,7 @@
 #include "roll.h"
 #include "switchback.h"
 #include "speffect.h"
+#include "eventwaits.h"
 #include "hitrecord.h"
 #include "trace.h"
 #include "turn.h"
@@ -586,6 +587,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_bullet_hit_timing) {
             hitrecord_install();
+        }
+        if (settings.fix_event_waits) {
+            eventwaits_install();
         }
         if (settings.fix_roll_direction) {
             roll_install();

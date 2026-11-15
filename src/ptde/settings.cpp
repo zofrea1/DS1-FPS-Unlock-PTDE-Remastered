@@ -272,6 +272,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_speffect_timing = parse_bool(val);
         } else if (key == "fixbullethittiming") {
             s.fix_bullet_hit_timing = parse_bool(val);
+        } else if (key == "fixeventwaits") {
+            s.fix_event_waits = parse_bool(val);
         } else if (key == "fixui") {
             s.fix_ui = parse_bool(val);
         } else if (key == "bonfireunstick") {

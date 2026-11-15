@@ -4,6 +4,7 @@
 #include "log.h"
 #include "profile.h"
 #include "effectlife.h"
+#include "eventwait.h"
 #include "rollhistory.h"
 #include "state.h"
 #include "stickflick.h"
@@ -4291,6 +4292,40 @@ bool patch_bullet_hit_timing() {
     return true;
 }
 
+// Event script waits on native frames (src/common/eventwait.h). Remastered's EcTestPassTime (vtable RVA 0x1400390)
+// counts a wait down in slot 1 (fn 0x7E8D00: rcx = the condition, xmm1 = the frame time; remaining at +0x28, done
+// bit 0 of +0x10). The slot points to ours, which counts the wait in game time and ends it on the frame nearest to
+// the native countdown's end.
+constexpr uint32_t kPassTimeVtableRva = 0x1400390;
+constexpr uint32_t kPassTimeTestRva = 0x7E8D00;
+std::atomic<int> g_eventwait_state{0};
+
+void hook_pass_time(uint8_t* self, float dt) {
+    const double rate = g_event_wait_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+    const bool done = eventwait::step(self, reinterpret_cast<float*>(self + 0x28), dt, rate, GetTickCount64());
+    self[0x10] = static_cast<uint8_t>(done ? (self[0x10] | 1) : (self[0x10] & 0xFE));
+}
+
+bool patch_event_waits() {
+    static const uint8_t kExpect[8] = {0xF3, 0x0F, 0x10, 0x51, 0x28, 0x0F, 0x57, 0xC0};
+    auto** slot = reinterpret_cast<void**>(image_rva(kPassTimeVtableRva + 8));
+    uint8_t* test = image_rva(kPassTimeTestRva);
+    if (*slot != test || std::memcmp(test, kExpect, sizeof(kExpect)) != 0) {
+        LOG_ERROR("FixEventWaits: the event wait test (vtable 0x%08X) does not match this build. Not patching.",
+                  kPassTimeVtableRva);
+        return false;
+    }
+    if (!patch_pointer(slot, reinterpret_cast<void*>(&hook_pass_time))) {
+        LOG_ERROR("FixEventWaits: could not patch the event wait test (Win32=%lu)", GetLastError());
+        return false;
+    }
+    LOG_INFO("FixEventWaits: event script waits last as at %s (the wait test, vtable 0x%08X)",
+             g_event_wait_ptde_speed.load(std::memory_order_relaxed) != 0 ? "the original game's 30 FPS"
+                                                                           : "Remastered's 60 FPS",
+             kPassTimeVtableRva);
+    return true;
+}
+
 void try_delayed_patches() {
     // Arxan rejects .text writes during the protected startup path. Wait until
     // the scheduler switch has stuck and the process has been up for a few seconds.
@@ -4398,6 +4433,11 @@ void try_delayed_patches() {
     if (g_roll_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_roll_direction.load(std::memory_order_relaxed) == 0 || patch_roll_direction();
         g_roll_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_eventwait_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_event_waits.load(std::memory_order_relaxed) == 0 || patch_event_waits();
+        g_eventwait_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_speffect_state.compare_exchange_strong(expected, 1)) {

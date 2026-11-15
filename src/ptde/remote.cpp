@@ -11,6 +11,7 @@
 #include "atoc.h"
 #include "shadowbias.h"
 #include "layout.h"
+#include "eventwaits.h"
 #include "passcull.h"
 #include "resolution.h"
 #include "rendermath.h"
@@ -2110,6 +2111,9 @@ void run(const std::string& line) {
         // ours at half resolution.
         resolution_set_effects(static_cast<int>(num(1, 3)));
         out("effects %ld", num(1, 3));
+    } else if (c == "eventwaits" && t.size() > 1) {
+        eventwaits_set(num(1, 1) != 0);
+        out("eventwaits %s", num(1, 1) != 0 ? "fixed" : "the game's own");
     } else if (c == "uiscale" && t.size() > 1) {
         // uiscale N: the HUD's corner groups at N percent for this session (needs UIScale below 100 or FixAspectUI
         // active at start for the hooks).

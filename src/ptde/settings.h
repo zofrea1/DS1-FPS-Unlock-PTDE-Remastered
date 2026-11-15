@@ -135,6 +135,10 @@ struct Settings {
     // Bullet hit records run out on the original game's 30 FPS frames (see hitrecord.h and effectlife.h): Poison
     // and Toxic Mist clouds and other lingering attacks hit a target standing in them at the original rate.
     bool fix_bullet_hit_timing = true;
+    // Event script waits last as in the original game at 30 FPS (see eventwaits.h and src/common/eventwait.h): each
+    // ends on the frame nearest to the original's, so scripted sequences keep their timing (the Undead Burg's barrel
+    // thrower is no longer hit by his own barrel at a high frame rate).
+    bool fix_event_waits = true;
     // Stand the character up if it stays seated at a bonfire with no menu open (reverse hollowing bug).
     bool bonfire_unstick = true;
     // Diagnostic: log the HUD shortcut (D-pad) actions with timestamps.
