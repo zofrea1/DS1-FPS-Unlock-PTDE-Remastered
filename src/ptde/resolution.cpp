@@ -495,6 +495,97 @@ void water_forget() {
     g_water.c164_ours = false;
 }
 
+// The water's reflection at the render resolution (with WaterResolution). The game draws the scene mirrored at the
+// water's plane into a 256x180 colour target (T27 in the frame log, one of the two the post-processing later uses for
+// its blurs) with a 256x180 depth, cleared to grey 0x404040 with depth and stencil, and the water reads it where its
+// ripples bend the view. At 4K each of its pixels covered 15x12 of the screen (the game: 4x4 at 1024x720), so the
+// mirrored scene crawled and danced as soon as the camera moved. Here that pass goes into a target of ours, a quarter of
+// the scene's size per side (the game's ratio; half with full), with a depth of ours and its viewport and clipping
+// rectangle scaled. Ours is read in the game's place from the end of the pass until the post-processing takes the
+// game's target for its blurs (bindings put back then), and the game's copy of it (a StretchRect into another 256x180
+// target) is made from ours. SkipUnusedReflection (passcull.cpp, in front of these hooks) still skips the pass where
+// nothing reads it; its kept copy is made from ours (resolution_reflection_source).
+struct Refl {
+    IDirect3DTexture9* tex = nullptr;
+    IDirect3DSurface9* surf = nullptr;
+    IDirect3DSurface9* ds = nullptr;
+    UINT w = 0, h = 0;
+    IDirect3DBaseTexture9* game_tex = nullptr;  // the game's target (identity only)
+    IDirect3DSurface9* game_surf = nullptr;
+    IDirect3DSurface9* game_ds = nullptr;
+    bool bound = false;   // ours is render target 0 (the pass)
+    bool window = false;  // after the pass, until the game's target is drawn into again
+    DWORD stages = 0;     // texture stages where ours stands in for the game's
+    bool failed = false;
+    bool logged = false;
+};
+Refl g_refl;
+constexpr UINT kReflW = 256, kReflH = 180;
+constexpr D3DCOLOR kReflClear = 0x00404040;
+
+void refl_release() {
+    if (g_refl.surf) g_refl.surf->Release();
+    if (g_refl.tex) g_refl.tex->Release();
+    if (g_refl.ds) g_refl.ds->Release();
+    g_refl.surf = nullptr;
+    g_refl.tex = nullptr;
+    g_refl.ds = nullptr;
+    g_refl.w = g_refl.h = 0;
+}
+
+bool refl_ready(IDirect3DDevice9* dev) {
+    const bool full = g_water.mode == 2;
+    const UINT w = full ? (g_render_w + 1) / 2 : (g_render_w + 3) / 4;
+    const UINT h = full ? (g_render_h + 1) / 2 : (g_render_h + 3) / 4;
+    if (g_refl.tex && g_refl.w == w && g_refl.h == h) return true;
+    refl_release();
+    if (g_refl.failed) return false;
+    if (FAILED(dev->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_refl.tex,
+                                  nullptr)) ||
+        FAILED(g_refl.tex->GetSurfaceLevel(0, &g_refl.surf)) ||
+        FAILED(dev->CreateDepthStencilSurface(w, h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &g_refl.ds,
+                                              nullptr))) {
+        LOG_ERROR("Resolution: could not make the water reflection's %ux%u target; the game's 256x180 one is kept", w,
+                  h);
+        refl_release();
+        g_refl.failed = true;
+        return false;
+    }
+    g_refl.w = w;
+    g_refl.h = h;
+    if (!g_refl.logged) {
+        g_refl.logged = true;
+        LOG_INFO("Resolution: the water's reflection is drawn at %ux%u (was 256x180; first reflection in view)", w, h);
+    }
+    return true;
+}
+
+bool refl_pass_clear(DWORD count, DWORD flags, D3DCOLOR color) {
+    if (!g_water.mode || g_fx.phase || count != 0 || (color & 0x00FFFFFF) != kReflClear ||
+        flags != (D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL)) {
+        return false;
+    }
+    return surface_is(g_fx.rt0, kReflW, kReflH, D3DFMT_A8R8G8B8) && surface_is(g_fx.ds, kReflW, kReflH, D3DFMT_D24S8);
+}
+
+// The window ends: stages still holding ours get the game's target back (it is about to hold a blur).
+void refl_close(IDirect3DDevice9* dev) {
+    if (!g_refl.window) return;
+    g_refl.window = false;
+    for (DWORD s = 0; s < 16; ++s) {
+        if (g_refl.stages & (1u << s)) o_set_texture(dev, s, g_refl.game_tex);
+    }
+    g_refl.stages = 0;
+}
+
+void refl_forget() {
+    g_refl.game_tex = nullptr;
+    g_refl.game_surf = nullptr;
+    g_refl.game_ds = nullptr;
+    g_refl.bound = g_refl.window = false;
+    g_refl.stages = 0;
+}
+
 void fx_forget_sequence() {
     g_fx.rt0 = g_fx.ds = nullptr;
     g_fx.depth_full = g_fx.depth_small = nullptr;
@@ -717,6 +808,12 @@ HRESULT fx_composite(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, c
 HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt) {
     if (index == 0) {
         g_water.bound = false;
+        if (g_refl.bound) {
+            g_refl.bound = false;  // the pass is over: ours is read from here
+            g_refl.window = true;
+        } else if (g_refl.window && rt && rt == g_refl.game_surf) {
+            refl_close(dev);  // the post-processing takes the game's target
+        }
         if (g_fx.phase) fx_end(dev);
         g_fx.rt0 = rt;
     }
@@ -726,6 +823,7 @@ HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* 
 HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
     g_fx.ds = ds;
     if (g_water.bound && ds && ds == g_water.game_ds) return o_set_ds(dev, g_water.ds);
+    if (g_refl.bound && ds && ds == g_refl.game_ds) return o_set_ds(dev, g_refl.ds);
     if (g_fx.phase && ds && ds == g_fx.depth_small_ds) return o_set_ds(dev, g_fx.hdepth ? g_fx.hdepth_surf : g_fx.scene_ds);
     // 2: the scene's colour and depth bound together, both the scene's size and not multisampled.
     if (!g_fx.phase && g_fx_mode && ds && render_size(ds) && render_size(g_fx.rt0)) g_fx.scene_ds = ds;
@@ -734,6 +832,19 @@ HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
 
 HRESULT WINAPI hk_clear(IDirect3DDevice9* dev, DWORD count, const D3DRECT* rects, DWORD flags, D3DCOLOR color, float z,
                         DWORD stencil) {
+    if (refl_pass_clear(count, flags, color)) {
+        refl_close(dev);  // a frame without the blurs
+        IDirect3DBaseTexture9* t = container_of(g_fx.rt0);
+        if (t && refl_ready(dev)) {
+            g_refl.game_tex = t;
+            g_refl.game_surf = g_fx.rt0;
+            g_refl.game_ds = g_fx.ds;
+            o_set_rt(dev, 0, g_refl.surf);
+            o_set_ds(dev, g_refl.ds);
+            g_refl.bound = true;
+            return o_clear(dev, count, rects, flags, color, z, stencil);
+        }
+    }
     if (water_pass_clear(count, flags, color)) {
         IDirect3DBaseTexture9* t = container_of(g_fx.rt0);
         if (t && water_ready(dev)) {
@@ -766,12 +877,14 @@ HRESULT WINAPI hk_clear(IDirect3DDevice9* dev, DWORD count, const D3DRECT* rects
 }
 
 HRESULT WINAPI hk_set_viewport(IDirect3DDevice9* dev, const D3DVIEWPORT9* vp) {
-    if (g_water.bound && vp) {
+    if ((g_water.bound || g_refl.bound) && vp) {
+        const UINT w = g_water.bound ? g_water.w : g_refl.w, h = g_water.bound ? g_water.h : g_refl.h;
+        const UINT gw = g_water.bound ? kSmallW : kReflW, gh = g_water.bound ? kSmallH : kReflH;
         D3DVIEWPORT9 v = *vp;
-        v.X = vp->X * g_water.w / kSmallW;
-        v.Y = vp->Y * g_water.h / kSmallH;
-        v.Width = vp->Width * g_water.w / kSmallW;
-        v.Height = vp->Height * g_water.h / kSmallH;
+        v.X = vp->X * w / gw;
+        v.Y = vp->Y * h / gh;
+        v.Width = vp->Width * w / gw;
+        v.Height = vp->Height * h / gh;
         return o_set_viewport(dev, &v);
     }
     if (g_fx.phase && vp) {
@@ -957,6 +1070,14 @@ HRESULT swap_draw(IDirect3DDevice9* dev, int swap, D3DPRIMITIVETYPE type, UINT c
 
 HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex) {
     if (stage == 0) g_tex0 = tex;
+    if (stage < 16 && (g_refl.stages || (tex && tex == g_refl.game_tex))) {
+        // The water's reflection read from ours while it holds this frame's.
+        if (tex && tex == g_refl.game_tex && g_refl.window && g_refl.tex) {
+            g_refl.stages |= 1u << stage;
+            return o_set_texture(dev, stage, g_refl.tex);
+        }
+        g_refl.stages &= ~(1u << stage);
+    }
     if (stage < 16 && (g_water.stages || (tex && tex == g_water.game_tex))) {
         // The water's ripples read from ours, with c164 holding its size while it is bound.
         if (tex && tex == g_water.game_tex && g_water.mode && g_water.tex) {
@@ -1339,9 +1460,11 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
 // sits in the middle of a frame of another shape, and the rectangle goes with it.
 
 HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
-    if (g_water.bound && r) {
-        const LONG w = static_cast<LONG>(g_water.w), h = static_cast<LONG>(g_water.h);
-        const LONG sw = static_cast<LONG>(kSmallW), sh = static_cast<LONG>(kSmallH);
+    if ((g_water.bound || g_refl.bound) && r) {
+        const LONG w = static_cast<LONG>(g_water.bound ? g_water.w : g_refl.w);
+        const LONG h = static_cast<LONG>(g_water.bound ? g_water.h : g_refl.h);
+        const LONG sw = static_cast<LONG>(g_water.bound ? kSmallW : kReflW);
+        const LONG sh = static_cast<LONG>(g_water.bound ? kSmallH : kReflH);
         const RECT m{r->left * w / sw, r->top * h / sh, r->right * w / sw, r->bottom * h / sh};
         return o_set_scissor(dev, &m);
     }
@@ -1477,6 +1600,10 @@ HRESULT reduce_draw(IDirect3DDevice9* dev, IDirect3DTexture9* tex, const D3DSURF
 
 HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst,
                           const RECT* dr, D3DTEXTUREFILTERTYPE filter) {
+    // The game's copy of its reflection target: made from ours (scaled down).
+    if (src && g_refl.window && src == g_refl.game_surf && g_refl.surf && !sr) {
+        return o_stretch(dev, g_refl.surf, nullptr, dst, dr, D3DTEXF_LINEAR);
+    }
     D3DSURFACE_DESC sd{}, dd{};
     if (g_reduce_enabled && src && dst && g_frame_w > 0 && SUCCEEDED(src->GetDesc(&sd)) &&
         static_cast<int>(sd.Width) == g_frame_w && static_cast<int>(sd.Height) == g_frame_h &&
@@ -1596,6 +1723,14 @@ void resolution_reset() {
     fx_forget_sequence();
     water_release();
     water_forget();
+    refl_release();
+    refl_forget();
+}
+
+IDirect3DSurface9* resolution_reflection_source(IDirect3DSurface9* game_surface) {
+    return (game_surface && game_surface == g_refl.game_surf && (g_refl.bound || g_refl.window) && g_refl.surf)
+               ? g_refl.surf
+               : game_surface;
 }
 
 void resolution_set_water(int mode) {

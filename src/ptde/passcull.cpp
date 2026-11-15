@@ -1,6 +1,7 @@
 #include "passcull.h"
 
 #include "log.h"
+#include "resolution.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -136,7 +137,10 @@ void keep_copy(IDirect3DDevice9* dev) {
     }
     IDirect3DSurface9* dst = nullptr;
     if (SUCCEEDED(g_copy->GetSurfaceLevel(0, &dst)) && dst) {
-        g_copy_valid = SUCCEEDED(dev->StretchRect(g_pass_surface, nullptr, dst, nullptr, D3DTEXF_NONE));
+        // With WaterResolution the pass went into a larger target of the resolution code's: copied from that one.
+        IDirect3DSurface9* src = resolution_reflection_source(g_pass_surface);
+        g_copy_valid = SUCCEEDED(dev->StretchRect(src, nullptr, dst, nullptr,
+                                                  src == g_pass_surface ? D3DTEXF_NONE : D3DTEXF_LINEAR));
         dst->Release();
     }
 }

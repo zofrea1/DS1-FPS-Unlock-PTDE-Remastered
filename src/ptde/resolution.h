@@ -10,6 +10,7 @@
 bool resolution_install(int width, int height, bool scale_post = false);
 
 struct IDirect3DDevice9;
+struct IDirect3DSurface9;
 // From CreateDevice: the hooks that hand the post-processing copies a 1024x720 version of the scene.
 void resolution_hook_device(IDirect3DDevice9* device);
 // The render resolution is in use (its device hooks are in place).
@@ -47,6 +48,8 @@ void resolution_set_effects(int mode);
 // WaterResolution: the water's ripples at 0 the game's 512x360, 1 half the scene's size, 2 the scene's size (set before
 // the device is made; RemoteControl `water N` switches between 1 and 2, or 0, later).
 void resolution_set_water(int mode);
+// The surface the water's reflection pass was really drawn into this frame (ours with WaterResolution), for a copy of it.
+IDirect3DSurface9* resolution_reflection_source(IDirect3DSurface9* game_surface);
 
 // HighPrecisionColor: the scene's colour targets in 16-bit float and the final picture dithered into 8 bits (smooth
 // fog, smoke and glows). Before resolution_install; not with RenderScalePost or DSfix.
