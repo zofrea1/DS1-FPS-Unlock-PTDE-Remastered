@@ -34,7 +34,10 @@ void describe(HWND h, char* out, size_t n) {
     wchar_t cls[64] = L"";
     wchar_t title[64] = L"";
     GetClassNameW(h, cls, 64);
-    GetWindowTextW(h, title, 64);
+    // Not GetWindowTextW: for a window of this process it sends WM_GETTEXT and waits for the window's thread. Under
+    // RTX Remix the game's window belongs to a thread that waits on this one, and the game hung before its first
+    // frame (2026-11-15). InternalGetWindowText reads the stored title without a message.
+    InternalGetWindowText(h, title, 64);
     DWORD pid = 0;
     GetWindowThreadProcessId(h, &pid);
     std::snprintf(out, n, "window %p class \"%ls\" title \"%ls\" %s", static_cast<void*>(h), cls, title,
