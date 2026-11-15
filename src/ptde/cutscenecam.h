@@ -1,5 +1,8 @@
 #pragma once
 
+// First published by DDTM in DSfix 3.0 (https://www.nexusmods.com/darksouls/mods/1985, GPL-3.0): the problem, the
+// patch site and the approach. This code was written separately.
+//
 // In-engine cutscene camera. Real-time cutscenes advance the clock and the characters every frame, but the
 // camera reader 0xD09DA0 (called from 0xFC2084) copies the nearest key and never blends: key A when the
 // amount is below 0.5, key B otherwise. Keys sit on whole 30 FPS frames, so at 60 FPS the camera holds for

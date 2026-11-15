@@ -3421,7 +3421,9 @@ bool patch_foot_ik() {
 // The three Prepare to Die Edition fixes of 1.9.0 that Remastered shares (src/ptde/slidecontact.cpp,
 // slidesteer.cpp, soulcounter.cpp). Remastered's code is the same FromSoftware code, so each site is the
 // twin of the PTDE one. The cutscene camera is not ported: Remastered's cutscenes already run at the frame
-// rate.
+// rate. The three were first published for Prepare to Die Edition by DDTM in DSfix 3.0
+// (https://github.com/DDTM-bit/DSfix-3.0---Dark-Souls-PTDE, GPL-3.0): the problems and the approach. This code
+// was written separately.
 
 double qpc_seconds() {
     static LARGE_INTEGER freq{};

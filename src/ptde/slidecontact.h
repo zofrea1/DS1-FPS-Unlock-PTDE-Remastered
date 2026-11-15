@@ -1,5 +1,8 @@
 #pragma once
 
+// First published by DDTM in DSfix 3.0 (https://www.nexusmods.com/darksouls/mods/1985, GPL-3.0): the problem, the
+// patch site and the approach. This code was written separately.
+//
 // Steep-slide contact. Once a frame, 0xE29870 latches the physics contact bit into bit 0 of the byte at
 // [action+0x43C] (the store at 0xE298BB; eax there is the block at [action+0x78]). Script condition 296,
 // animation 7060, cancels into 7062 ("walking in the air") when that bit is clear for a frame. On a steep

@@ -1,5 +1,8 @@
 #pragma once
 
+// First published by DDTM in DSfix 3.0 (https://www.nexusmods.com/darksouls/mods/1985, GPL-3.0): the problem, the
+// patch site and the approach. This code was written separately.
+//
 // Slide steering. 0xD98580 asks Havok (0x7BF200, the only caller, at 0xD98623) for blended root motion.
 // While the live layer weight is not above the skeleton threshold at [skeleton+0x20] (0.1, constant
 // 0x110B1D8), 0x7BF5D5 divides the motion by that threshold. A slide's turn (animations 7063 and 7064)

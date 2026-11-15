@@ -1,5 +1,8 @@
 #pragma once
 
+// First published by DDTM in DSfix 3.0 (https://www.nexusmods.com/darksouls/mods/1985, GPL-3.0): the problem, the
+// patch site and the approach. This code was written separately.
+//
 // HUD soul counter (FrpgMenuDlgFEGetSoul::update, 0xFADA70). Once a frame, 0xFADCB1 adds the whole step in
 // ecx to the shown value at [dialog+0x108]. The step grows with the amount still left (+1, then more above
 // 10, +10 above 100, and so on). The frame time is an argument and the game uses it only for the pause after
