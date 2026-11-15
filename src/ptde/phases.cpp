@@ -41,6 +41,10 @@ size_t g_code_used = 0;
 constexpr size_t kCodeSize = 200 * 128;
 volatile uint32_t g_stub_tid = 0;    // the game thread (set by `phases on`)
 volatile uint32_t g_render_tid = 0;  // the render thread (phases_render_frame)
+// Render-thread call sites wait here until the render thread's next frame start patches them (it is then outside them).
+SRWLOCK g_sites_lock = SRWLOCK_INIT;
+uint32_t g_pending_radd[64];
+volatile LONG g_pending_n = 0;
 
 bool g_active = false;
 uint64_t g_frame_ticks = 0;
@@ -114,7 +118,7 @@ uint8_t* build_stub(Site& s) {
 }
 
 // Times the call at `address`. Game thread only, at a frame start (no other thread runs the sites).
-const char* add_site(uint32_t address) {
+const char* add_site(uint32_t address, const volatile uint32_t* tid = nullptr) {
     for (int i = 0; i < g_count; ++i) {
         if (g_sites[i].address == address) return "already timed";
     }
@@ -132,6 +136,7 @@ const char* add_site(uint32_t address) {
     s = Site{};
     s.address = address;
     s.target = address + 5 + static_cast<uint32_t>(rel);
+    s.tid = tid;
     s.stub = build_stub(s);
     if (!s.stub) return "no room for the stub";
     DWORD old = 0;
@@ -492,6 +497,13 @@ bool phases_active() { return g_active; }
 void phases_render_frame() {
     const uint32_t t = GetCurrentThreadId();
     if (g_render_tid != t) g_render_tid = t;
+    if (g_pending_n == 0) return;
+    AcquireSRWLockExclusive(&g_sites_lock);
+    for (LONG i = 0; i < g_pending_n; ++i) {
+        LOG_INFO("[phases] render-thread call at %08X: %s", g_pending_radd[i], add_site(g_pending_radd[i], &g_render_tid));
+    }
+    g_pending_n = 0;
+    ReleaseSRWLockExclusive(&g_sites_lock);
 }
 
 const char* phases_command(const char* verb, uint32_t address) {
@@ -541,8 +553,17 @@ const char* phases_command(const char* verb, uint32_t address) {
         LOG_INFO("[phases] method %d of table %08X: %s", std::atoi(verb + 3), address, r);
         return r;
     }
+    if (std::strcmp(verb, "radd") == 0) {
+        // A call site the render thread runs: patched by the render thread at its next frame start.
+        AcquireSRWLockExclusive(&g_sites_lock);
+        if (g_pending_n < 64) g_pending_radd[g_pending_n++] = address;
+        ReleaseSRWLockExclusive(&g_sites_lock);
+        return "queued for the render thread";
+    }
     if (std::strcmp(verb, "add") == 0) {
+        AcquireSRWLockExclusive(&g_sites_lock);
         const char* r = add_site(address);
+        ReleaseSRWLockExclusive(&g_sites_lock);
         LOG_INFO("[phases] call at %08X: %s", address, r);
         return r;
     }
