@@ -1291,6 +1291,25 @@ void track_frame() {
             safe_read(e.chr + 0x2D4, &hp, 4);
             n += std::snprintf(line + n, sizeof(line) - n, " | %d %.3f %.3f %.3f hp %d anim %d", e.entity, p[0], p[1],
                                p[2], hp, static_cast<int>(anim));
+        } else if (e.obj && g_obj_off < 0) {
+            // A map object: its model (ObjIns+0x90, made when the player comes near) keeps its placement as a 3x4
+            // matrix at +0x20 and its bones' world matrices from +0xB0 (0x30 each); bone 0's place, and three floats
+            // of its animation events (ObjIns+0xA4: +0x30, +0x12C, +0x14C, for its clock).
+            uint32_t model = 0, tae = 0;
+            safe_read(e.obj + 0x90, &model, 4);
+            safe_read(e.obj + 0xA4, &tae, 4);
+            float m[12] = {}, b[12] = {}, a[3] = {};
+            if (model) {
+                safe_read(model + 0x20, m, sizeof(m));
+                safe_read(model + 0xB0, b, sizeof(b));
+            }
+            if (tae) {
+                safe_read(tae + 0x30, &a[0], 4);
+                safe_read(tae + 0x12C, &a[1], 4);
+                safe_read(tae + 0x14C, &a[2], 4);
+            }
+            n += std::snprintf(line + n, sizeof(line) - n, " | %d model %d bone0 %.3f %.3f %.3f place %.3f %.3f %.3f tae %.4f %.4f %.4f",
+                               e.entity, model ? 1 : 0, b[3], b[7], b[11], m[3], m[7], m[11], a[0], a[1], a[2]);
         } else if (e.obj && g_obj_off >= 0) {
             uintptr_t at = e.obj + g_obj_off;
             if (g_obj_off2 >= 0) {
