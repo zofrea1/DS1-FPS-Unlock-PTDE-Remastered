@@ -313,6 +313,7 @@ int __fastcall hook_getcmd(void* self, void* edx) {
             g.t_cmd2 = stamp.QuadPart;
             d3dperf_frame();
             rendermath_render_frame();
+            phases_render_frame();
             gamma_frame();
         }
     } else if (cmd == 4 && g.t_cmd2 != 0) {

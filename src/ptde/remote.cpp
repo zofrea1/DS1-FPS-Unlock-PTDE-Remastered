@@ -1675,7 +1675,8 @@ void run_game(const std::vector<std::string>& t) {
     auto fnum = [&](size_t k) { return k < t.size() ? static_cast<float>(std::atof(t[k].c_str())) : 0.0f; };
     const std::string& c = t[0];
     if (c == "phases" && t.size() > 1) {
-        const uint32_t at = t.size() > 2 ? static_cast<uint32_t>(std::strtoul(t[2].c_str(), nullptr, 16)) : 0;
+        uint32_t at = t.size() > 2 ? static_cast<uint32_t>(std::strtoul(t[2].c_str(), nullptr, 16)) : 0;
+        if (t[1] == "d3d" && !at) at = d3dperf_device_table();
         out("phases %s: %s", t[1].c_str(), phases_command(t[1].c_str(), at));
     } else if (c == "speffect") {
         // speffect ID: apply SpEffectParam row ID to the player (diagnostics: ticking effects, SpEffect timing).

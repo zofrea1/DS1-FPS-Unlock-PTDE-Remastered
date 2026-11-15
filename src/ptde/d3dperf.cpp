@@ -335,6 +335,10 @@ volatile bool g_quick = true;
 
 }  // namespace
 
+uint32_t d3dperf_device_table() {
+    return g_filter_device ? reinterpret_cast<uint32_t>(*reinterpret_cast<void***>(g_filter_device)) : 0;
+}
+
 int d3dperf_set_filter(int on) {
     if (on >= 0) {
         g_ss_enabled = on != 0;

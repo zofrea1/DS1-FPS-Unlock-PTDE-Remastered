@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 struct IDirect3DDevice9;
 
 // Render thread CPU savings on the game's Direct3D 9 device (INI AsyncReadback, FilterSamplerStates).
@@ -47,3 +49,5 @@ void d3dperf_constant_stats(unsigned long* calls, unsigned long* regs, unsigned 
 int d3dperf_set_quick(int on);
 // Diagnostics: FilterSamplerStates (sampler and render states) on (1) or off (0) for comparisons; -1 only reads.
 int d3dperf_set_filter(int on);
+// Diagnostics: the method table the game's device calls through now (0 before the device exists).
+uint32_t d3dperf_device_table();

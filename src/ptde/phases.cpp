@@ -31,6 +31,7 @@ struct Site {
     uint8_t* stub;
     uint32_t vt;       // a method table's slot instead of a call site: the table
     int slot;
+    const volatile uint32_t* tid;  // the thread timed (others go straight through)
 };
 constexpr int kMaxSites = 200;
 Site g_sites[kMaxSites];
@@ -38,7 +39,8 @@ int g_count = 0;
 uint8_t* g_code = nullptr;  // stubs (executable)
 size_t g_code_used = 0;
 constexpr size_t kCodeSize = 200 * 128;
-uint32_t g_stub_tid = 0;  // the game thread (set by `phases on`)
+volatile uint32_t g_stub_tid = 0;    // the game thread (set by `phases on`)
+volatile uint32_t g_render_tid = 0;  // the render thread (phases_render_frame)
 
 bool g_active = false;
 uint64_t g_frame_ticks = 0;
@@ -69,7 +71,7 @@ uint8_t* build_stub(Site& s) {
     // the game thread is timed): push eax / mov eax, fs:[0x24] / cmp eax, [g_stub_tid] / pop eax / jne other.
     put8(p, 0x50);
     put8(p, 0x64); put8(p, 0xA1); put32(p, 0x24);
-    put8(p, 0x3B); put8(p, 0x05); put32(p, reinterpret_cast<uint32_t>(&g_stub_tid));
+    put8(p, 0x3B); put8(p, 0x05); put32(p, reinterpret_cast<uint32_t>(s.tid ? s.tid : &g_stub_tid));
     put8(p, 0x58);
     put8(p, 0x0F); put8(p, 0x85);
     uint8_t* jne_rel = p;
@@ -148,7 +150,7 @@ void report_groups(double tsc_per_ms, uint32_t frames);
 // Times every call of method `slot` of the class whose method table is `vt` (all its objects): the table's entry
 // goes to a stub that calls the original. For methods only the game thread calls (the stub keeps one return
 // address per site).
-const char* add_vt(uint32_t vt, int slot) {
+const char* add_vt(uint32_t vt, int slot, const volatile uint32_t* tid = nullptr) {
     for (int i = 0; i < g_count; ++i) {
         if (g_sites[i].vt == vt && g_sites[i].slot == slot) return "already timed";
     }
@@ -160,6 +162,7 @@ const char* add_vt(uint32_t vt, int slot) {
     s = Site{};
     s.vt = vt;
     s.slot = slot;
+    s.tid = tid;
     s.address = vt + 4 * slot;
     s.target = *entry;
     s.stub = build_stub(s);
@@ -486,6 +489,11 @@ void phases_frame_ticks(uint64_t ticks) {
 
 bool phases_active() { return g_active; }
 
+void phases_render_frame() {
+    const uint32_t t = GetCurrentThreadId();
+    if (g_render_tid != t) g_render_tid = t;
+}
+
 const char* phases_command(const char* verb, uint32_t address) {
     if (std::strcmp(verb, "on") == 0) {
         g_stub_tid = GetCurrentThreadId();
@@ -499,6 +507,18 @@ const char* phases_command(const char* verb, uint32_t address) {
             LOG_INFO("[phases] timing %d calls of the frame function", g_count);
         }
         return "on";
+    }
+    if (std::strcmp(verb, "d3d") == 0) {
+        // Every method of the game's Direct3D device on the render thread, but SetSamplerState (69: the filter checks
+        // that slot every frame) and the IUnknown three.
+        if (!address) return "no device table";
+        int n = 0;
+        for (int slot = 3; slot < 119; ++slot) {
+            if (slot == 69) continue;
+            if (std::strcmp(add_vt(address, slot, &g_render_tid), "timed") == 0) ++n;
+        }
+        LOG_INFO("[phases] Direct3D device table %08X: %d methods timed on the render thread", address, n);
+        return n ? "timed" : "none";
     }
     if (std::strcmp(verb, "steps") == 0) {
         const char* r = steps_on();

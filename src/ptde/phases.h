@@ -13,6 +13,8 @@ void phases_game_frame();
 // Game thread, around the frame function: the whole frame's counter ticks (for the part no site covers).
 void phases_frame_ticks(uint64_t ticks);
 bool phases_active();
+// Render thread, at each frame's start (names the thread `phases d3d` times).
+void phases_render_frame();
 // RemoteControl (runs on the game thread at the start of a frame): `phases on` times the frame function's own call
 // sites; `phases add ADDR` also times the call at ADDR (an E8 call that only the game thread runs). Returns a short
 // status for the remote output.
