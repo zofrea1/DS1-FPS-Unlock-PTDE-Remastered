@@ -2273,6 +2273,12 @@ std::string remote_shader_name(void* shader) { return shader_name(shader); }
 
 void remote_set_shader_dumps(bool on) { g_shader_dumps = on; }
 
+// RemoteDeviceHooks = false: the device's methods are left alone (no frame logs, screenshots, resource or shader
+// tracking), so speed measurements see the game's render thread without this layer. Under DXVK the hooks share the
+// method table with FilterSamplerStates' and its per-frame check would also start its cache over every frame.
+bool g_device_hooks = true;
+void remote_set_device_hooks(bool on) { g_device_hooks = on; }
+
 bool remote_start() {
     GetModuleFileNameW(nullptr, g_dir, MAX_PATH);
     wchar_t* slash = wcsrchr(g_dir, L'\\');
@@ -2289,7 +2295,7 @@ bool remote_start() {
 bool remote_enabled() { return g_on; }
 
 void remote_hook_device(IDirect3DDevice9* dev) {
-    if (!g_on || !dev) return;
+    if (!g_on || !dev || !g_device_hooks) return;
     HMODULE x = GetModuleHandleW(L"d3dx9_43.dll");
     if (!x) x = LoadLibraryW(L"d3dx9_43.dll");
     if (x) {
@@ -2378,6 +2384,7 @@ std::string remote_shader_name(void*) { return "none"; }
 void remote_game_frame() {}
 bool remote_start() { return false; }
 void remote_set_shader_dumps(bool) {}
+void remote_set_device_hooks(bool) {}
 bool remote_enabled() { return false; }
 void remote_hook_device(IDirect3DDevice9*) {}
 void remote_pad(DWORD, void*, DWORD*) {}

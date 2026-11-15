@@ -623,6 +623,7 @@ bool frame_install(const Settings& settings) {
     }
     if (settings.remote_control) {
         remote_set_shader_dumps(settings.remote_shader_dumps);
+        remote_set_device_hooks(settings.remote_device_hooks);
         remote_start();
     }
     return true;

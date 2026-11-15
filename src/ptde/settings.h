@@ -40,6 +40,8 @@ struct Settings {
     bool remote_control = false;
     // With RemoteControl: every new shader written to fpsu-shaders (slow on an SD card).
     bool remote_shader_dumps = true;
+    // With RemoteControl: false leaves the Direct3D device unhooked (no frame logs or screenshots; for measurements).
+    bool remote_device_hooks = true;
     // Frame-rate independence fixes for constants tuned for 30 FPS (see fixes.h).
     bool fix_slide = true;
     bool fix_damping = true;

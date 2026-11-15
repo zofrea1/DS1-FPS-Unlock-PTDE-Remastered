@@ -9,6 +9,7 @@
 #include <intrin.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -28,6 +29,8 @@ struct Site {
     uint32_t target;   // the callee
     uint32_t calls;    // since the last report
     uint8_t* stub;
+    uint32_t vt;       // a method table's slot instead of a call site: the table
+    int slot;
 };
 constexpr int kMaxSites = 64;
 Site g_sites[kMaxSites];
@@ -71,7 +74,11 @@ uint8_t* build_stub(Site& s) {
     put8(p, 0xA3); put32(p, start);                                     // mov [start], eax
     put8(p, 0x89); put8(p, 0x15); put32(p, start + 4);                  // mov [start+4], edx
     put8(p, 0x5A); put8(p, 0x58);                                       // pop edx; pop eax
-    put8(p, 0xE8); put32(p, s.target - (reinterpret_cast<uint32_t>(p) + 4));  // call target
+    if (s.vt) {
+        put8(p, 0xFF); put8(p, 0x15); put32(p, reinterpret_cast<uint32_t>(&s.target));  // call [target]
+    } else {
+        put8(p, 0xE8); put32(p, s.target - (reinterpret_cast<uint32_t>(p) + 4));  // call target
+    }
     put8(p, 0x50); put8(p, 0x52);                                       // push eax; push edx
     put8(p, 0x0F); put8(p, 0x31);                                       // rdtsc
     put8(p, 0x2B); put8(p, 0x05); put32(p, start);                      // sub eax, [start]
@@ -117,6 +124,36 @@ const char* add_site(uint32_t address) {
     return "timed";
 }
 
+void report_groups(double tsc_per_ms, uint32_t frames);
+
+// Times every call of method `slot` of the class whose method table is `vt` (all its objects): the table's entry
+// goes to a stub that calls the original. For methods only the game thread calls (the stub keeps one return
+// address per site).
+const char* add_vt(uint32_t vt, int slot) {
+    for (int i = 0; i < g_count; ++i) {
+        if (g_sites[i].vt == vt && g_sites[i].slot == slot) return "already timed";
+    }
+    if (g_count >= kMaxSites || slot < 0 || slot > 200) return "no";
+    auto* entry = reinterpret_cast<uint32_t*>(vt + 4 * slot);
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(entry, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return "not mapped";
+    Site& s = g_sites[g_count];
+    s = Site{};
+    s.vt = vt;
+    s.slot = slot;
+    s.address = vt + 4 * slot;
+    s.target = *entry;
+    s.stub = build_stub(s);
+    if (!s.stub) return "no room for the stub";
+    DWORD old = 0;
+    if (!VirtualProtect(entry, 4, PAGE_READWRITE, &old)) return "could not unprotect";
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(entry), static_cast<LONG>(reinterpret_cast<uint32_t>(s.stub)));
+    DWORD ignored = 0;
+    VirtualProtect(entry, 4, old, &ignored);
+    ++g_count;
+    return "timed";
+}
+
 void report() {
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
@@ -133,16 +170,216 @@ void report() {
     for (int i = 0; i < g_count && n > 0 && n < static_cast<int>(sizeof(line)) - 40; ++i) {
         Site& s = g_sites[i];
         sum += s.ticks;
-        n += std::snprintf(line + n, sizeof(line) - n, " %X %.3f%s", s.target,
-                           static_cast<double>(s.ticks) / g_tsc_per_ms / g_frames, s.calls > g_frames ? "+" : "");
+        if (s.vt) {
+            n += std::snprintf(line + n, sizeof(line) - n, " vt%X/%d %.3f (%.1f/f)", s.vt, s.slot,
+                               static_cast<double>(s.ticks) / g_tsc_per_ms / g_frames,
+                               static_cast<double>(s.calls) / g_frames);
+        } else {
+            n += std::snprintf(line + n, sizeof(line) - n, " %X %.3f%s", s.target,
+                               static_cast<double>(s.ticks) / g_tsc_per_ms / g_frames, s.calls > g_frames ? "+" : "");
+        }
         s.ticks = 0;
         s.calls = 0;
     }
     LOG_INFO("%s", line);
+    report_groups(g_tsc_per_ms, g_frames);
     g_frame_ticks = 0;
     g_frames = 0;
     g_tsc0 = tsc;
     g_qpc0 = now;
+}
+
+// The task manager (0xEFF320, most of the frame) calls its six task groups in a loop: mov edx, [eax+8] / push ecx /
+// fstp dword [esp] / call edx at 0xEFF371..0xEFF379 (a group's update with the frame time). Those nine bytes (no branch
+// lands inside them; the loop's skip goes to 0xEFF37A) become a call to group_stub and four nops: the stub does the
+// same three steps, times the call by group (6 - edi: edi counts the groups down from 6, kept by the callee) and goes
+// on at 0xEFF37A.
+constexpr uint32_t kGroupPatch = 0xEFF371;
+uint32_t g_group_ret = 0;
+uint32_t g_group_back = 0xEFF37A;
+uint64_t g_group_start = 0;
+uint64_t g_group_ticks[8] = {};
+uint32_t g_group_target[8] = {};
+bool g_groups_on = false;
+
+__declspec(naked) void group_stub() {
+    __asm {
+        pop dword ptr [g_group_ret]
+        mov edx, dword ptr [eax + 8]
+        push ecx
+        fstp dword ptr [esp]
+        push eax
+        push edx
+        rdtsc
+        mov dword ptr [g_group_start], eax
+        mov dword ptr [g_group_start + 4], edx
+        pop edx
+        pop eax
+        mov ecx, 6
+        sub ecx, edi
+        mov dword ptr [g_group_target + ecx * 4], edx
+        mov ecx, dword ptr [esi]  // the group object (ecx at the original call)
+        call edx
+        push eax
+        push edx
+        rdtsc
+        sub eax, dword ptr [g_group_start]
+        sbb edx, dword ptr [g_group_start + 4]
+        mov ecx, 6
+        sub ecx, edi
+        add dword ptr [g_group_ticks + ecx * 8], eax
+        adc dword ptr [g_group_ticks + ecx * 8 + 4], edx
+        pop edx
+        pop eax
+        jmp dword ptr [g_group_back]
+    }
+}
+
+const char* groups_on() {
+    if (g_groups_on) return "already timed";
+    auto* at = reinterpret_cast<uint8_t*>(kGroupPatch);
+    static const uint8_t kExpect[9] = {0x8B, 0x50, 0x08, 0x51, 0xD9, 0x1C, 0x24, 0xFF, 0xD2};
+    if (std::memcmp(at, kExpect, 9) != 0) return "unexpected bytes";
+    DWORD old = 0;
+    if (!VirtualProtect(at, 9, PAGE_EXECUTE_READWRITE, &old)) return "could not unprotect";
+    at[0] = 0xE8;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&group_stub) - (kGroupPatch + 5));
+    std::memcpy(at + 1, &rel, 4);
+    std::memset(at + 5, 0x90, 4);
+    DWORD ignored = 0;
+    VirtualProtect(at, 9, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), at, 9);
+    g_groups_on = true;
+    return "timed";
+}
+
+// Each task of a group (0xEFF540's loop): mov edx, [esi] / mov eax, [edx+8] / push ecx / mov ecx, esi /
+// fstp dword [esp] / call eax at 0xEFF5C9..0xEFF5D5 (the loop's branches land at 0xEFF5C3 and after 0xEFF5D6, none
+// inside) become a call to task_stub and nops; the stub times each task's update by its class (method table).
+constexpr uint32_t kTaskPatch = 0xEFF5C9;
+uint32_t g_task_ret = 0;
+uint32_t g_task_back = 0xEFF5D6;
+uint32_t g_task_vt = 0;
+uint64_t g_task_start = 0;
+bool g_tasks_on = false;
+struct TaskStat {
+    uint32_t vt;
+    uint32_t calls;
+    uint64_t ticks;
+};
+TaskStat g_task_stats[256];
+
+void __cdecl task_add(uint32_t vt, uint32_t lo, uint32_t hi) {
+    const uint64_t t = (static_cast<uint64_t>(hi) << 32) | lo;
+    uint32_t h = (vt >> 3) & 255;
+    for (int i = 0; i < 256; ++i, h = (h + 1) & 255) {
+        TaskStat& e = g_task_stats[h];
+        if (e.vt == vt || e.vt == 0) {
+            e.vt = vt;
+            e.calls++;
+            e.ticks += t;
+            return;
+        }
+    }
+}
+
+__declspec(naked) void task_stub() {
+    __asm {
+        pop dword ptr [g_task_ret]
+        mov edx, dword ptr [esi]
+        mov eax, dword ptr [edx + 8]
+        push ecx
+        mov ecx, esi
+        fstp dword ptr [esp]
+        mov dword ptr [g_task_vt], edx
+        push eax
+        push edx
+        rdtsc
+        mov dword ptr [g_task_start], eax
+        mov dword ptr [g_task_start + 4], edx
+        pop edx
+        pop eax
+        call eax
+        rdtsc
+        sub eax, dword ptr [g_task_start]
+        sbb edx, dword ptr [g_task_start + 4]
+        push edx
+        push eax
+        push dword ptr [g_task_vt]
+        call task_add
+        add esp, 12
+        jmp dword ptr [g_task_back]
+    }
+}
+
+const char* tasks_on() {
+    if (g_tasks_on) return "already timed";
+    auto* at = reinterpret_cast<uint8_t*>(kTaskPatch);
+    static const uint8_t kExpect[13] = {0x8B, 0x16, 0x8B, 0x42, 0x08, 0x51, 0x8B, 0xCE, 0xD9, 0x1C, 0x24, 0xFF, 0xD0};
+    if (std::memcmp(at, kExpect, 13) != 0) return "unexpected bytes";
+    DWORD old = 0;
+    if (!VirtualProtect(at, 13, PAGE_EXECUTE_READWRITE, &old)) return "could not unprotect";
+    at[0] = 0xE8;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&task_stub) - (kTaskPatch + 5));
+    std::memcpy(at + 1, &rel, 4);
+    std::memset(at + 5, 0x90, 8);
+    DWORD ignored = 0;
+    VirtualProtect(at, 13, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), at, 13);
+    g_tasks_on = true;
+    return "timed";
+}
+
+// The class name of a method table from the game's run-time type information (vtable[-1] = complete object
+// locator, +12 = type descriptor, name at +8, ".?AV...@@").
+bool rtti_name_raw(uint32_t vt, char* out, size_t n) {
+    __try {
+        const uint32_t col = *reinterpret_cast<const uint32_t*>(vt - 4);
+        const uint32_t td = *reinterpret_cast<const uint32_t*>(col + 12);
+        const char* name = reinterpret_cast<const char*>(td + 8);
+        size_t i = 0;
+        for (; i + 1 < n && name[i] && i < 80; ++i) out[i] = name[i];
+        out[i] = 0;
+        return i > 0;
+    } __except (1) {
+        return false;
+    }
+}
+
+void report_tasks(double tsc_per_ms, uint32_t frames) {
+    if (!g_tasks_on || frames == 0) return;
+    // top 14 by time
+    for (int k = 0; k < 14; ++k) {
+        int best = -1;
+        for (int i = 0; i < 256; ++i) {
+            if (g_task_stats[i].vt && g_task_stats[i].ticks && (best < 0 || g_task_stats[i].ticks > g_task_stats[best].ticks)) best = i;
+        }
+        if (best < 0) break;
+        TaskStat& e = g_task_stats[best];
+        char name[96] = "?";
+        rtti_name_raw(e.vt, name, sizeof(name));
+        LOG_INFO("[phases]   task %-60s vt %08X %.3f ms per frame, %.1f calls", name, e.vt,
+                 static_cast<double>(e.ticks) / tsc_per_ms / frames, static_cast<double>(e.calls) / frames);
+        e.ticks = 0;
+        e.calls = 0;
+    }
+    for (auto& e : g_task_stats) {
+        e.ticks = 0;
+        e.calls = 0;
+    }
+}
+
+void report_groups(double tsc_per_ms, uint32_t frames) {
+    report_tasks(tsc_per_ms, frames);
+    if (!g_groups_on || frames == 0) return;
+    char line[512];
+    int n = std::snprintf(line, sizeof(line), "[phases] task groups (ms per frame):");
+    for (int i = 0; i < 6; ++i) {
+        n += std::snprintf(line + n, sizeof(line) - n, " %d:%X %.3f", i, g_group_target[i],
+                           static_cast<double>(g_group_ticks[i]) / tsc_per_ms / frames);
+        g_group_ticks[i] = 0;
+    }
+    LOG_INFO("%s", line);
 }
 
 }  // namespace
@@ -175,6 +412,22 @@ const char* phases_command(const char* verb, uint32_t address) {
             LOG_INFO("[phases] timing %d calls of the frame function", g_count);
         }
         return "on";
+    }
+    if (std::strcmp(verb, "tasks") == 0) {
+        const char* r = tasks_on();
+        LOG_INFO("[phases] tasks: %s", r);
+        return r;
+    }
+    if (std::strcmp(verb, "groups") == 0) {
+        const char* r = groups_on();
+        LOG_INFO("[phases] task groups: %s", r);
+        return r;
+    }
+    if (std::strncmp(verb, "vt", 2) == 0 && verb[2] == ':') {
+        // phases vt:SLOT VTABLE
+        const char* r = add_vt(address, std::atoi(verb + 3));
+        LOG_INFO("[phases] method %d of table %08X: %s", std::atoi(verb + 3), address, r);
+        return r;
     }
     if (std::strcmp(verb, "add") == 0) {
         const char* r = add_site(address);

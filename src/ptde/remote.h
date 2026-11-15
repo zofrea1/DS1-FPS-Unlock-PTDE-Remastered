@@ -27,6 +27,8 @@ bool remote_start();
 // Every new shader's bytecode and disassembly written to fpsu-shaders\ (default on). Off where the disk is slow (an
 // SD card under Android): RemoteShaderDumps = false.
 void remote_set_shader_dumps(bool on);
+// RemoteDeviceHooks (default true): false leaves the Direct3D device's methods unhooked (for speed measurements).
+void remote_set_device_hooks(bool on);
 bool remote_enabled();
 
 // The name a created shader was saved under (vs_/ps_<hash>), "none" or "unknown".
