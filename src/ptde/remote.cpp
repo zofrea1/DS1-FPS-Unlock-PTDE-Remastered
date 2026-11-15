@@ -1208,6 +1208,9 @@ bool warp_chr(int who, int region) {
     return true;
 }
 
+int g_warp_who = 0, g_warp_region = 0;
+ULONGLONG g_warp_until = 0;
+
 // track: entities followed every game frame (track MS ENTITY..), and where a map object keeps its position
 // (objpath OFF [OFF2]: the float triple at obj+OFF, or at [obj+OFF]+OFF2).
 struct Tracked {
@@ -1627,8 +1630,12 @@ void run_game(const std::vector<std::string>& t) {
     } else if (c == "warpchr") {
         // warpchr ENTITY REGION: the event command Warp Character to a region (2004[41], target type 1: eax = the
         // character's entity, stdcall(region, 1) at 0xD71A90), within the loaded map. 10000 = the player.
+        // warpchr ENTITY REGION [MS]: again every game frame for MS ms, while the ground there loads.
         const int who = static_cast<int>(num(1, 10000)), region = static_cast<int>(num(2, 0));
         out("warpchr %d -> region %d: %s", who, region, warp_chr(who, region) ? "done" : "exception");
+        g_warp_who = who;
+        g_warp_region = region;
+        g_warp_until = GetTickCount64() + static_cast<ULONGLONG>(num(3, 0));
     } else if (c == "ent") {
         // ent ENTITY: the character or map object with that MSB entity id.
         const int id = static_cast<int>(num(1, 0));
@@ -2184,6 +2191,7 @@ void remote_game_frame() {
     probe_frame();
     if (g_god) god_tick();
     track_frame();
+    if (g_warp_until && GetTickCount64() < g_warp_until) warp_chr(g_warp_who, g_warp_region);
     if (g_hold_until && GetTickCount64() < g_hold_until) {
         const uintptr_t phys = player_physics();
         if (phys) std::memcpy(reinterpret_cast<void*>(phys + 0x10), g_hold_pos, sizeof(g_hold_pos));
