@@ -25,6 +25,9 @@ volatile bool g_fused = true;
 // draw commands run on (set at each frame's start); every other thread keeps the exact paths.
 volatile uint32_t g_relaxed_tid = 0;
 bool g_relaxed_wanted = false;
+// The relaxed paths of the particle loops and the four-lane keyframe curve (RemoteControl `fastmath rxloops 0|1`, for
+// measuring them alone; on by default, and only with the relaxed precision itself).
+volatile bool g_rx_loops = true;
 inline bool relaxed_here() { return g_relaxed_tid != 0 && __readfsdword(0x24) == g_relaxed_tid; }
 
 // True when the n bytes at p and the m bytes at q share no byte.
@@ -1044,8 +1047,44 @@ inline uint32_t sub_dbl(uint32_t a, uint32_t b) {
 }
 }  // namespace
 
+// Relaxed (render thread): the same keys and segments and the same reciprocal, masks and products on four lanes in
+// registers; only the last step, (v1 - v0) * w + v0, rounds twice in float instead of once from double (and keys and
+// values are read as they are, a signaling NaN not quieted on the way).
+namespace {
+inline uint64_t curve4_relaxed(uint32_t* out, const uint32_t* t, const CurveKeys& c) {
+    alignas(16) float t0[4], t1[4], v0[4], v1[4], tl[4];
+    std::memcpy(tl, t, 16);
+    const float* keys = reinterpret_cast<const float*>(c.keys);
+    const float* vals = reinterpret_cast<const float*>(c.vals);
+    for (int i = 0; i < 4; ++i) {
+        int j = c.n - 1;
+        while (j > 0 && !(keys[j] <= tl[i])) --j;
+        v0[i] = vals[j];
+        t0[i] = keys[j];
+        if (j + 1 < c.n) {
+            v1[i] = vals[j + 1];
+            t1[i] = keys[j + 1];
+        } else {
+            v1[i] = vals[j];
+            t1[i] = tl[i];
+        }
+    }
+    const __m128 T0 = _mm_load_ps(t0), V0 = _mm_load_ps(v0);
+    const __m128 d = _mm_sub_ps(_mm_load_ps(tl), T0);
+    const __m128 r = _mm_div_ps(_mm_set1_ps(1.0f), _mm_sub_ps(_mm_load_ps(t1), T0));
+    const __m128i ri = _mm_and_si128(_mm_castps_si128(r), _mm_set1_epi32(0x7FFFFFFF));
+    const __m128 inf = _mm_castsi128_ps(_mm_cmpeq_epi32(ri, _mm_set1_epi32(0x7F800000)));
+    const __m128 w = _mm_mul_ps(d, _mm_andnot_ps(inf, r));
+    alignas(16) uint32_t res[4];
+    _mm_store_ps(reinterpret_cast<float*>(res), _mm_add_ps(_mm_mul_ps(_mm_sub_ps(_mm_load_ps(v1), V0), w), V0));
+    std::memcpy(out, res, 16);
+    return reinterpret_cast<uintptr_t>(out) | static_cast<uint64_t>(res[2]) << 32;
+}
+}  // namespace
+
 uint64_t __cdecl ffx_curve4(uint32_t* out, const uint32_t* t, uintptr_t* stream) {
     const CurveKeys c = curve_open(stream);
+    if (g_rx_loops && relaxed_here()) return curve4_relaxed(out, t, c);
     alignas(16) uint32_t tl[4], t0[4], t1[4], v0[4], v1[4];
     std::memcpy(tl, t, 16);
     for (int i = 0; i < 4; ++i) curve_segment(c, tl[i], t0[i], t1[i], v0[i], v1[i]);
@@ -1527,11 +1566,17 @@ uint64_t __cdecl ffx_pack_colors(uint32_t* out, const uint32_t* p2, const uint32
     ffx_to_int_256(ib, mb);
     ffx_to_int_65536(ic, mc);
     ffx_to_int_2p24(id, md);
-    const auto sel = reinterpret_cast<Fn4>(0x403B10);
+    // 0x403B10, select (out, a, b, m) = (a & ~m) | (b & m) lane by lane; here on this function's own temporaries,
+    // which nothing else can overlap, so all at once.
+    const auto sel = [](const uint32_t* a, const uint32_t* b, const uint32_t* m) {
+        const __m128i mm = _mm_load_si128(reinterpret_cast<const __m128i*>(m));
+        return _mm_or_si128(_mm_andnot_si128(mm, _mm_load_si128(reinterpret_cast<const __m128i*>(a))),
+                            _mm_and_si128(mm, _mm_load_si128(reinterpret_cast<const __m128i*>(b))));
+    };
     alignas(16) uint32_t q1[4], q2[4], r[4];
-    sel(q1, ib, ia, m8);
-    sel(q2, id, ic, m24);
-    sel(r, q2, q1, m16);
+    _mm_store_si128(reinterpret_cast<__m128i*>(q1), sel(ib, ia, m8));
+    _mm_store_si128(reinterpret_cast<__m128i*>(q2), sel(id, ic, m24));
+    _mm_store_si128(reinterpret_cast<__m128i*>(r), sel(q2, q1, m16));
     std::memcpy(out, r, 16);
     return reinterpret_cast<uintptr_t>(out) | static_cast<uint64_t>(r[3]) << 32;
 }
@@ -1868,6 +1913,69 @@ uint32_t __cdecl ffx_bounds3(uint32_t* out_min, uint32_t* out_max, uint32_t n, c
 // test): every frame cell and register the function goes on with is as before.
 volatile long g_ploop_calls = 0, g_ploop_iters = 0;
 
+// Shared by the relaxed paths below (render thread only).
+namespace {
+inline __m128 ld16(const void* p) { return _mm_loadu_ps(static_cast<const float*>(p)); }
+inline __m128 rx_madd(__m128 a, __m128 b, __m128 c) { return _mm_add_ps(_mm_mul_ps(a, b), c); }
+inline __m128 rx_rsqrt(__m128 x) { return _mm_div_ps(_mm_set1_ps(1.0f), _mm_sqrt_ps(x)); }
+inline __m128 rx_dot3sq(__m128 a, __m128 b, __m128 c) {  // 0x9B2EC0: a*a, then b*b + that, then c*c + that
+    return rx_madd(c, c, rx_madd(b, b, _mm_mul_ps(a, a)));
+}
+inline __m128 rx_infmask(__m128 x) {  // 0x4193E0
+    const __m128i v = _mm_and_si128(_mm_castps_si128(x), _mm_set1_epi32(0x7FFFFFFF));
+    return _mm_castsi128_ps(_mm_cmpeq_epi32(v, _mm_set1_epi32(0x7F800000)));
+}
+inline __m128 rx_nanmask(__m128 x) {  // 0x4129B0
+    const __m128i v = _mm_and_si128(_mm_castps_si128(x), _mm_set1_epi32(0x7FFFFFFF));
+    return _mm_castsi128_ps(_mm_cmpgt_epi32(v, _mm_set1_epi32(0x7F800000)));
+}
+inline uint8_t* arr_at(const uint8_t* ebx, uint32_t slot, uint32_t off) {
+    return reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + slot)) + off;
+}
+using EvalFn = void*(__fastcall*)(uint32_t, uint32_t, void*, const void*, uint32_t, const void*);
+}  // namespace
+
+// Relaxed (render thread): the same particle in registers, the multiply-adds rounding twice in float (the
+// three-row one and the two below it, as the helpers do there already), the products as before, the colour packing
+// and its integers as before, and the three transposed-row writes inline (all inputs read first, as there).
+namespace {
+inline void rows_t_store(uint8_t* base, int offset, int stride, __m128 a, __m128 b, __m128 c, __m128 d) {
+    _MM_TRANSPOSE4_PS(a, b, c, d);
+    _mm_storeu_ps(reinterpret_cast<float*>(base + offset), a);
+    _mm_storeu_ps(reinterpret_cast<float*>(base + offset + stride), b);
+    _mm_storeu_ps(reinterpret_cast<float*>(base + offset + stride * 2), c);
+    _mm_storeu_ps(reinterpret_cast<float*>(base + stride * 3 + offset), d);
+}
+void particle_loop_relaxed(uint8_t* ebp, uint32_t parts, uint32_t outs, uint32_t n) {
+    const auto F = [ebp](uint32_t off) { return _mm_loadu_ps(reinterpret_cast<const float*>(ebp - off)); };
+    const float* m = reinterpret_cast<const float*>(ebp - 0x12C0);
+    const auto M = [m](int k) { return _mm_loadu_ps(m + 4 * k); };
+    const int stride = *reinterpret_cast<const int*>(ebp - 0x668);
+    for (uint32_t i = 0; i + 1 < n; ++i) {
+        const float* p = reinterpret_cast<const float*>(parts + 72 * i);
+        const __m128 a = _mm_set1_ps(p[0]), b = _mm_set1_ps(p[1]), c = _mm_set1_ps(p[2]);
+        const __m128 row0 = rx_madd(c, M(6), rx_madd(b, M(3), rx_madd(a, M(0), M(9))));
+        const __m128 row1 = rx_madd(c, M(7), rx_madd(b, M(4), rx_madd(a, M(1), M(10))));
+        const __m128 row2 = rx_madd(c, M(8), rx_madd(b, M(5), rx_madd(a, M(2), M(11))));
+        const __m128 r7 = rx_madd(_mm_set1_ps(p[3]), F(0x4E0), F(0x890));
+        const __m128 r8 = rx_madd(_mm_set1_ps(p[4]), F(0x500), F(0x8B0));
+        alignas(16) float r13[4], r14[4], r15[4], r16[4];
+        alignas(16) uint32_t r17[4];
+        _mm_store_ps(r13, _mm_mul_ps(_mm_set1_ps(p[14]), F(0x8F0)));
+        _mm_store_ps(r14, _mm_mul_ps(_mm_set1_ps(p[15]), F(0x910)));
+        _mm_store_ps(r15, _mm_mul_ps(_mm_set1_ps(p[16]), F(0x930)));
+        _mm_store_ps(r16, _mm_mul_ps(_mm_set1_ps(p[17]), F(0x8D0)));
+        ffx_pack_colors(r17, reinterpret_cast<const uint32_t*>(r13), reinterpret_cast<const uint32_t*>(r14),
+                        reinterpret_cast<const uint32_t*>(r15), reinterpret_cast<const uint32_t*>(r16));
+        auto* o = reinterpret_cast<uint8_t*>(outs + 48 * i);
+        const __m128 k540 = F(0x540);
+        rows_t_store(o, 0, stride, row0, row1, row2, k540);
+        rows_t_store(o, 16, stride, k540, k540, _mm_load_ps(reinterpret_cast<const float*>(r17)), r7);
+        rows_t_store(o, 32, stride, r8, k540, F(0x1430), k540);
+    }
+}
+}  // namespace
+
 uint32_t __cdecl ffx_particle_loop(uint8_t* ebp, const uint8_t* ebx) {
     const uint32_t n = *reinterpret_cast<const uint32_t*>(ebx + 0x10);
     ++g_ploop_calls;
@@ -1875,6 +1983,10 @@ uint32_t __cdecl ffx_particle_loop(uint8_t* ebp, const uint8_t* ebx) {
     if (n < 2) return 0;
     const uint32_t parts = *reinterpret_cast<const uint32_t*>(ebx + 0xC);
     const uint32_t outs = *reinterpret_cast<const uint32_t*>(ebx + 8);
+    if (g_rx_loops && relaxed_here()) {
+        particle_loop_relaxed(ebp, parts, outs, n);
+        return n - 1;
+    }
     const auto F = [ebp](uint32_t off) { return reinterpret_cast<const float*>(ebp - off); };
     const auto U = [ebp](uint32_t off) { return reinterpret_cast<const uint32_t*>(ebp - off); };
     for (uint32_t i = 0; i + 1 < n; ++i) {
@@ -2160,6 +2272,70 @@ static void a4_iter_full(uint8_t* ebp, const uint8_t* ebx, uint32_t off) {
     std::memcpy(reinterpret_cast<uint8_t*>(*reinterpret_cast<const uint32_t*>(ebx + 0x1c)) + off, r63, 16);  // 00A4FB85
 }
 
+// Relaxed (render thread, RenderMathPrecision = relaxed): the same chain on four lanes in registers, with no calls
+// but the two parameter evaluations (in the same order, with the same inputs). Adds, subtracts and multiplies give
+// the same bits as the helpers'; each multiply-add rounds twice in float (the helpers round once from double) and the
+// reciprocal square root is sqrtps then divps (the helper's special cases: its zero, negative and infinite lanes end
+// up masked out below, as there). The masks keep the helpers' tests: less-than and less-or-equal by comisd and jb /
+// jbe, so a NaN lane counts as below (cmpnge / cmpngt), the infinity and NaN masks by the bits, and-not as a & ~b.
+// Only particle positions and velocities change (by a unit or so in the last place), which only the effects read.
+namespace {
+
+void a4_iter_relaxed(uint8_t* ebp, const uint8_t* ebx, uint32_t off, bool full) {
+    const auto F = [ebp](uint32_t o) { return ld16(ebp - o); };
+    const __m128 p1 = ld16(arr_at(ebx, 0x8, off)), p2 = ld16(arr_at(ebx, 0xC, off)), p3 = ld16(arr_at(ebx, 0x10, off));
+    const __m128 v4 = ld16(arr_at(ebx, 0x14, off)), v5 = ld16(arr_at(ebx, 0x18, off)), v6 = ld16(arr_at(ebx, 0x1C, off));
+    alignas(16) float a7[4], a8[4], a9[4], e42[4], e43[4];
+    std::memcpy(a7, arr_at(ebx, 0x24, off), 16);
+    std::memcpy(a8, arr_at(ebx, 0x28, off), 16);
+    const __m128 r7 = _mm_load_ps(a7);
+    _mm_store_ps(a9, _mm_sub_ps(F(0xD0), r7));
+    const __m128 dt = F(0x2F0);
+    const __m128 r13 = rx_madd(_mm_add_ps(v4, F(0x370)), dt, p1);
+    const __m128 r14 = rx_madd(_mm_add_ps(v5, F(0x390)), dt, p2);
+    const __m128 r15 = rx_madd(_mm_add_ps(v6, F(0x3B0)), dt, p3);
+    __m128 w4, w5, w6;  // the velocities going on
+    if (full) {
+        const __m128 r16 = _mm_set1_ps(bits_f(x87_pass(*reinterpret_cast<const uint32_t*>(0x110B414))));
+        const __m128 r22 = _mm_sub_ps(F(0x640), r13), r23 = _mm_sub_ps(F(0x660), r14), r24 = _mm_sub_ps(F(0x680), r15);
+        const __m128 r25 = rx_dot3sq(r22, r23, r24);
+        const __m128 r26 = _mm_cmpngt_ps(r25, F(0x6A0));  // 0x416B80 (a <= b, NaN counts)
+        const __m128 r27 = _mm_cmpngt_ps(r16, r25);
+        const __m128 r28 = _mm_andnot_ps(r27, r26);       // 0x985020: a & ~b
+        const __m128 r29 = rx_rsqrt(r25);
+        const __m128 r34 = _mm_mul_ps(F(0x6C0), _mm_mul_ps(r29, r29));
+        const __m128 r35 = _mm_and_ps(r34, r28);          // 0x416C20
+        w4 = rx_madd(rx_madd(r35, _mm_mul_ps(r22, r29), F(0x4D0)), dt, v4);
+        w5 = rx_madd(rx_madd(r35, _mm_mul_ps(r23, r29), F(0x4F0)), dt, v5);
+        w6 = rx_madd(rx_madd(r35, _mm_mul_ps(r24, r29), F(0x510)), dt, v6);
+    } else {
+        w4 = rx_madd(F(0x4D0), dt, v4);
+        w5 = rx_madd(F(0x4F0), dt, v5);
+        w6 = rx_madd(F(0x510), dt, v6);
+    }
+    const uint32_t stream = *reinterpret_cast<const uint32_t*>(ebx + 0x2C);
+    reinterpret_cast<EvalFn>(0x9B4650)(*reinterpret_cast<const uint32_t*>(ebx + 0x44), 0, e42, a9, stream, a8);
+    reinterpret_cast<EvalFn>(0x9B4650)(*reinterpret_cast<const uint32_t*>(ebx + 0x48), 0, e43, a7, stream, a8);
+    const __m128 r45 = _mm_mul_ps(_mm_mul_ps(_mm_load_ps(e42), dt), _mm_load_ps(e43));
+    const __m128 r46 = _mm_sub_ps(F(0x330), r45);
+    const __m128 r47 = _mm_mul_ps(r46, r46);
+    const __m128 r48 = rx_dot3sq(w4, w5, w6);
+    const __m128 r49 = rx_rsqrt(r48);
+    const __m128 r52 = _mm_or_ps(rx_infmask(r49), rx_nanmask(r49));  // 0x44E290
+    const __m128 r53 = _mm_cmpnge_ps(r48, r47);                      // 0x434FC0 (a < b, NaN counts)
+    const __m128 r54 = _mm_andnot_ps(r52, r49);
+    const __m128 o4 = _mm_andnot_ps(r53, rx_madd(_mm_mul_ps(w4, r54), r45, w4));
+    const __m128 o5 = _mm_andnot_ps(r53, rx_madd(_mm_mul_ps(w5, r54), r45, w5));
+    const __m128 o6 = _mm_andnot_ps(r53, rx_madd(_mm_mul_ps(w6, r54), r45, w6));
+    _mm_storeu_ps(reinterpret_cast<float*>(arr_at(ebx, 0x8, off)), r13);
+    _mm_storeu_ps(reinterpret_cast<float*>(arr_at(ebx, 0xC, off)), r14);
+    _mm_storeu_ps(reinterpret_cast<float*>(arr_at(ebx, 0x10, off)), r15);
+    _mm_storeu_ps(reinterpret_cast<float*>(arr_at(ebx, 0x14, off)), o4);
+    _mm_storeu_ps(reinterpret_cast<float*>(arr_at(ebx, 0x18, off)), o5);
+    _mm_storeu_ps(reinterpret_cast<float*>(arr_at(ebx, 0x1C, off)), o6);
+}
+}  // namespace
+
 volatile long g_a4_calls = 0, g_a4_iters = 0;
 
 uint32_t __cdecl ffx_update_loop(uint8_t* ebp, const uint8_t* ebx) {
@@ -2168,9 +2344,13 @@ uint32_t __cdecl ffx_update_loop(uint8_t* ebp, const uint8_t* ebx) {
     g_a4_iters += count;
     uint32_t off = count << 4;
     if (count < 2) return off;
+    const bool relaxed = g_rx_loops && relaxed_here();
     while (off > 16) {
         off -= 16;
-        if (*reinterpret_cast<const uint32_t*>(ebx + 0x4C)) {
+        const bool full = *reinterpret_cast<const uint32_t*>(ebx + 0x4C) != 0;
+        if (relaxed) {
+            a4_iter_relaxed(ebp, ebx, off, full);
+        } else if (full) {
             a4_iter_full(ebp, ebx, off);
         } else {
             a4_iter_skip(ebp, ebx, off);
@@ -3067,6 +3247,11 @@ void rendermath_render_frame() {
     // Render thread, at each frame's start: the relaxed tier follows the thread the draws run on.
     const uint32_t want = g_relaxed_wanted ? static_cast<uint32_t>(GetCurrentThreadId()) : 0;
     if (g_relaxed_tid != want) g_relaxed_tid = want;
+}
+
+bool rendermath_set_rx_loops(bool on) {
+    g_rx_loops = on;
+    return g_rx_loops;
 }
 
 bool rendermath_set_relaxed(bool on) {

@@ -1088,6 +1088,128 @@ static void test_particle_loop() {
     std::printf("particle loop: 30000 runs, %ld particles, %d mismatches so far\n", iters, g_fail);
 }
 
+// The relaxed quad loop (render thread) against the exact one, both through ffx_particle_loop_entry, on finite frames
+// and particles: the frame, the particles and eax/ecx/edx exactly, the output within a tolerance (its packed colours
+// then exactly too, as their bits would differ by far more).
+// The relaxed four-lane keyframe curve against the exact one (both ffx_curve4) on finite streams: within a tolerance
+// relative to max(|result|, 1) (before the first key the curve extrapolates, far past the values), and the stream
+// moved on the same.
+static float rnd_unit(float scale);
+static void test_curve_relaxed() {
+    const uint32_t tid = GetCurrentThreadId();
+    alignas(16) uint32_t buf[1 + 16], t[4], o1[4], o2[4];
+    long lanes = 0, identical = 0;
+    double worst = 0.0;
+    for (int it = 0; it < 300000; ++it) {
+        const int n = 1 + rng() % 8;
+        buf[0] = n;
+        float key = rnd_unit(2.0f);
+        for (int i = 0; i < n; ++i) {
+            key += static_cast<float>(rng() % 100) / 37.0f;
+            std::memcpy(&buf[1 + i], &key, 4);
+            const float v = rnd_unit(50.0f);
+            std::memcpy(&buf[1 + n + i], &v, 4);
+        }
+        for (int i = 0; i < 4; ++i) { const float f = rnd_unit(1.0f) * (key + 3.0f); std::memcpy(&t[i], &f, 4); }
+        uintptr_t s1 = reinterpret_cast<uintptr_t>(buf), s2 = s1;
+        g_relaxed_tid = 0;
+        ffx_curve4(o1, t, &s1);
+        g_relaxed_tid = tid;
+        ffx_curve4(o2, t, &s2);
+        g_relaxed_tid = 0;
+        if (s1 != s2) { if (g_fail < 20) std::printf("relaxed curve stream differs at %d\n", it); ++g_fail; }
+        for (int i = 0; i < 4; ++i) {
+            ++lanes;
+            if (o1[i] == o2[i]) { ++identical; continue; }
+            float a, b;
+            std::memcpy(&a, &o1[i], 4);
+            std::memcpy(&b, &o2[i], 4);
+            if (!(a == a) || !(b == b)) { if (g_fail < 20) std::printf("relaxed curve NaN at %d\n", it); ++g_fail; continue; }
+            const double e = std::fabs(static_cast<double>(a) - b) / (std::max)(1.0, (std::max)(std::fabs(static_cast<double>(a)), std::fabs(static_cast<double>(b))));
+            if (e > worst) worst = e;
+        }
+    }
+    std::printf("relaxed keyframe curve: %ld lanes, %.1f%% identical, worst %.3g relative (%.1f units of 2^-23); "
+                "%d mismatches so far\n", lanes, 100.0 * identical / lanes, worst, worst * 8388608.0, g_fail);
+    if (worst * 8388608.0 > 64.0) { std::printf("relaxed keyframe curve: worst difference above 64 units\n"); ++g_fail; }
+}
+
+static float rnd_unit(float scale);
+static void test_particle_relaxed() {
+    static uint8_t orig_site[12];
+    std::memcpy(orig_site, reinterpret_cast<void*>(0x99E9B0), 12);
+    put_jump(0x99F1EA, reinterpret_cast<const void*>(&loop_back));
+    put_jump(0x99E9B0, reinterpret_cast<const void*>(&ffx_particle_loop_entry));
+    alignas(16) static uint8_t stack1[0x10000], stack2[0x10000], parts1[9 * 72], parts2[9 * 72], out1[0x10000], out2[0x10000];
+    alignas(16) static uint32_t args1[8], args2[8];
+    const uint32_t tid = GetCurrentThreadId();
+    long iters = 0, values = 0, identical = 0;
+    double worst = 0.0;
+    for (int it = 0; it < 30000; ++it) {
+        const uint32_t n = rng() % 10;
+        for (int o = 0; o < 0x2400; o += 4) {
+            const float f = rnd_unit(4.0f);
+            std::memcpy(stack1 + 0xE000 - 0x2400 + o, &f, 4);
+        }
+        for (size_t i = 0; i < sizeof(parts1) / 4; ++i) { float f = rnd_unit(16.0f); std::memcpy(parts1 + 4 * i, &f, 4); }
+        const int strides[4] = {0, 16, 48, static_cast<int>(48 * n)};
+        const int stride = strides[rng() % 4];
+        std::memcpy(stack1 + 0xE000 - 0x668, &stride, 4);
+        std::memset(out1, 0xA5, sizeof(out1));
+        std::memcpy(stack2, stack1, sizeof(stack1));
+        std::memcpy(parts2, parts1, sizeof(parts1));
+        std::memcpy(out2, out1, sizeof(out1));
+        uint32_t r1[3];
+        for (int pass = 0; pass < 2; ++pass) {
+            uint8_t* st = pass ? stack2 : stack1;
+            uint32_t* a = pass ? args2 : args1;
+            a[2] = reinterpret_cast<uint32_t>(pass ? out2 : out1);
+            a[3] = reinterpret_cast<uint32_t>(pass ? parts2 : parts1);
+            a[4] = n;
+            g_loop_ebx = reinterpret_cast<uint32_t>(a);
+            g_loop_ebp = reinterpret_cast<uint32_t>(st + 0xE000);
+            g_loop_esp = reinterpret_cast<uint32_t>(st + 0xE000 - 0x2400);
+            g_relaxed_tid = pass ? tid : 0;
+            run_loop_at(0x99E980);
+            g_relaxed_tid = 0;
+            if (!pass) std::memcpy(r1, g_loop_regs, 12);
+        }
+        iters += n;
+        {
+            uint32_t q;
+            std::memcpy(&q, stack1 + 0xE000 - 0x1488, 4);
+            const uint32_t b1 = reinterpret_cast<uint32_t>(parts1), b2 = reinterpret_cast<uint32_t>(parts2);
+            if (q >= b1 && q < b1 + sizeof(parts1)) { q += b2 - b1; std::memcpy(stack1 + 0xE000 - 0x1488, &q, 4); }
+        }
+        same(stack1 + 0xE000 - 0x2400, stack2 + 0xE000 - 0x2400, 0x2400, "relaxed particle loop frame", it);
+        same(parts1, parts2, sizeof(parts1), "relaxed particle loop particles", it);
+        for (int k = 0; k < 3; ++k) {
+            const uint32_t d1 = reinterpret_cast<uint32_t>(out1), d2 = reinterpret_cast<uint32_t>(out2);
+            const uint32_t s1 = reinterpret_cast<uint32_t>(stack1), s2 = reinterpret_cast<uint32_t>(stack2);
+            if (r1[k] >= d1 && r1[k] < d1 + sizeof(out1)) r1[k] += d2 - d1;
+            else if (r1[k] >= s1 && r1[k] < s1 + sizeof(stack1)) r1[k] += s2 - s1;
+        }
+        if (std::memcmp(r1, g_loop_regs, 12) != 0) { if (g_fail < 20) std::printf("relaxed particle loop registers differ at %d\n", it); ++g_fail; }
+        for (size_t o = 0; o < sizeof(out1); o += 4) {
+            uint32_t x, y;
+            std::memcpy(&x, out1 + o, 4);
+            std::memcpy(&y, out2 + o, 4);
+            if (x == 0xA5A5A5A5u && y == 0xA5A5A5A5u) continue;
+            ++values;
+            if (x == y) { ++identical; continue; }
+            float fx, fy;
+            std::memcpy(&fx, &x, 4);
+            std::memcpy(&fy, &y, 4);
+            const double e = std::fabs(static_cast<double>(fx) - fy) / (std::max)(1.0, (std::max)(std::fabs(static_cast<double>(fx)), std::fabs(static_cast<double>(fy))));
+            if (!(e == e) || e > worst) worst = e == e ? e : 1.0;
+        }
+    }
+    std::memcpy(reinterpret_cast<void*>(0x99E9B0), orig_site, 12);
+    std::printf("relaxed particle loop: %ld particles, %.1f%% of output values identical, worst %.3g (%.1f units of 2^-23); "
+                "%d mismatches so far\n", iters, 100.0 * identical / (values ? values : 1), worst, worst * 8388608.0, g_fail);
+    if (worst * 8388608.0 > 64.0) { std::printf("relaxed particle loop: worst difference above 64 units\n"); ++g_fail; }
+}
+
 // 0xA4D420's particle update loop (entered at 0xA4DEE1, the loop's exit 0xA4FB9A comes back here) on a fake frame:
 // the original, and with 0xA4DEE8 jumping to ffx_update_loop_entry. Arrays of 1..8 groups of four; the branch flag
 // [ebx+0x4C] and the second array [ebx+0x28] (zero: the first array) both ways; the parameter objects of type 4 (the
@@ -1197,6 +1319,128 @@ static void test_update_loop() {
         }
     }
     std::printf("update loop: 20000 runs, %ld groups of four, %d mismatches so far\n", groups, g_fail);
+}
+
+// The relaxed update loop (render thread) against the exact one, both through ffx_update_loop_entry, on finite inputs
+// in the ranges particles have (positions and frame rows to a few dozen units, rows of small rates), parameter objects
+// of type 4 (finite keys and values) or the probe. The frame, the argument block, eax/ecx/edx and the evaluator calls
+// must match exactly; the arrays within a tolerance (relative to max(|a|, |b|, 1)), NaN and infinity lanes alike.
+static float rnd_unit(float scale) {
+    return static_cast<float>(static_cast<int>(rng() % 20001) - 10000) / 10000.0f * scale;
+}
+static void test_update_relaxed() {
+    static uint8_t pre[58];
+    std::memcpy(pre, reinterpret_cast<void*>(0xA4DEE8), sizeof(pre));
+    put_jump(0xA4FB9A, reinterpret_cast<const void*>(&loop_back));
+    put_jump(0xA4DEE8, reinterpret_cast<const void*>(&ffx_update_loop_entry));
+    *reinterpret_cast<uint32_t*>(0x112D618 + 29 * 4) = reinterpret_cast<uint32_t>(&probe_eval);
+    alignas(16) static uint8_t stack1[0x10000], stack2[0x10000];
+    alignas(16) static float arr1[9][8 * 4], arr2[9][8 * 4];
+    alignas(16) static uint32_t args1[0x20], args2[0x20], pobj1[2][4], pobj2[2][4], stream[64];
+    const int rows[] = {0xD0, 0x370, 0x390, 0x3B0, 0x2F0, 0x4D0, 0x4F0, 0x510, 0x330, 0x640, 0x660, 0x680, 0x6A0, 0x6C0};
+    const uint32_t tid = GetCurrentThreadId();
+    long groups = 0, lanes = 0, identical = 0, odd = 0;
+    double worst = 0.0;
+    for (int it = 0; it < 20000; ++it) {
+        const uint32_t count = 1 + rng() % 8;
+        fill(reinterpret_cast<uint32_t*>(stack1 + 0xE000 - 0x1A00), 0x1A00 / 4);
+        for (int r : rows) {
+            for (int i = 0; i < 4; ++i) {
+                float f = r == 0x2F0 ? 1.0f / 30 + rnd_unit(0.02f) : r == 0x6A0 ? 50.0f + rnd_unit(40.0f) : rnd_unit(r >= 0x640 ? 30.0f : 4.0f);
+                if (r == 0x2F0 && (rng() & 1)) f = 1.0f / 30;
+                std::memcpy(stack1 + 0xE000 - r + 4 * i, &f, 4);
+            }
+        }
+        for (int k = 0; k < 9; ++k) for (int i = 0; i < 32; ++i) arr1[k][i] = rnd_unit(k < 3 ? 30.0f : 5.0f);
+        const uint32_t nk = 1 + rng() % 5;
+        stream[0] = nk;
+        float key = -2.0f;
+        for (uint32_t i = 0; i < nk; ++i) {
+            key += static_cast<float>(rng() % 40) / 10.0f;
+            std::memcpy(&stream[1 + i], &key, 4);
+            const float v = rnd_unit(3.0f);
+            std::memcpy(&stream[1 + nk + i], &v, 4);
+        }
+        for (int k = 0; k < 2; ++k) {
+            pobj1[k][0] = (rng() % 4) ? 4u : 29u;
+            pobj1[k][1] = reinterpret_cast<uint32_t>(stream);
+            pobj1[k][2] = rng();
+            pobj1[k][3] = 0;
+        }
+        fill(args1, 0x20);
+        std::memcpy(stack2, stack1, sizeof(stack1));
+        std::memcpy(arr2, arr1, sizeof(arr1));
+        std::memcpy(pobj2, pobj1, sizeof(pobj1));
+        const bool flag = (rng() & 1) != 0, second = (rng() & 1) != 0;
+        uint32_t r1[3];
+        uint32_t calls1 = 0;
+        for (int pass = 0; pass < 2; ++pass) {
+            uint8_t* st = pass ? stack2 : stack1;
+            uint32_t* a = pass ? args2 : args1;
+            auto& arr = pass ? arr2 : arr1;
+            auto& po = pass ? pobj2 : pobj1;
+            if (pass) std::memcpy(args2, args1, sizeof(args1));
+            const int slots[8] = {2, 3, 4, 5, 6, 7, 9, 10};
+            for (int k = 0; k < 8; ++k) a[slots[k]] = reinterpret_cast<uint32_t>(arr[k]);
+            if (!second) a[10] = 0;
+            a[8] = count;
+            a[17] = reinterpret_cast<uint32_t>(po[0]);
+            a[18] = reinterpret_cast<uint32_t>(po[1]);
+            a[19] = flag ? 1u : 0u;
+            g_loop_ebx = reinterpret_cast<uint32_t>(a);
+            g_loop_ebp = reinterpret_cast<uint32_t>(st + 0xE000);
+            g_loop_esp = reinterpret_cast<uint32_t>(st + 0xE000 - 0x1A00);
+            g_relaxed_tid = pass ? tid : 0;
+            g_probe_calls = 0;
+            run_loop_at(0xA4DEE1);
+            g_relaxed_tid = 0;
+            if (!pass) { std::memcpy(r1, g_loop_regs, 12); calls1 = g_probe_calls; }
+        }
+        groups += count;
+        const uint32_t lo1[4] = {reinterpret_cast<uint32_t>(stack1), reinterpret_cast<uint32_t>(arr1), reinterpret_cast<uint32_t>(pobj1), reinterpret_cast<uint32_t>(args1)};
+        const uint32_t lo2[4] = {reinterpret_cast<uint32_t>(stack2), reinterpret_cast<uint32_t>(arr2), reinterpret_cast<uint32_t>(pobj2), reinterpret_cast<uint32_t>(args2)};
+        const uint32_t len[4] = {sizeof(stack1), sizeof(arr1), sizeof(pobj1), sizeof(args1)};
+        auto map = [&](uint32_t v) {
+            for (int b = 0; b < 4; ++b) if (v >= lo1[b] && v < lo1[b] + len[b]) return v - lo1[b] + lo2[b];
+            return v;
+        };
+        for (int o = 0; o < 0x1A00; o += 4) {
+            uint32_t v, w;
+            std::memcpy(&v, stack1 + 0xE000 - 0x1A00 + o, 4);
+            std::memcpy(&w, stack2 + 0xE000 - 0x1A00 + o, 4);
+            if (v != w && map(v) == w) std::memcpy(stack1 + 0xE000 - 0x1A00 + o, &w, 4);
+        }
+        for (int k = 0; k < 0x20; ++k) if (args1[k] != args2[k] && map(args1[k]) == args2[k]) args1[k] = args2[k];
+        for (int k = 0; k < 3; ++k) if (r1[k] != g_loop_regs[k] && map(r1[k]) == g_loop_regs[k]) r1[k] = g_loop_regs[k];
+        same(stack1 + 0xE000 - 0x1A00, stack2 + 0xE000 - 0x1A00, 0x1A00, "relaxed update loop frame", it);
+        same(args1, args2, sizeof(args1), "relaxed update loop arguments", it);
+        if (calls1 != g_probe_calls) { if (g_fail < 20) std::printf("relaxed update loop probe calls %u vs %u\n", calls1, g_probe_calls); ++g_fail; }
+        if (std::memcmp(r1, g_loop_regs, 12) != 0) { if (g_fail < 20) std::printf("relaxed update loop registers differ at %d\n", it); ++g_fail; }
+        for (int k = 0; k < 9; ++k) {
+            for (int i = 0; i < 32; ++i) {
+                const float x = arr1[k][i], y = arr2[k][i];
+                ++lanes;
+                uint32_t bx, by;
+                std::memcpy(&bx, &x, 4);
+                std::memcpy(&by, &y, 4);
+                if (bx == by) { ++identical; continue; }
+                if (std::isnan(x) || std::isnan(y) || std::isinf(x) || std::isinf(y)) {
+                    if (!(std::isnan(x) && std::isnan(y)) && !(x == y)) {
+                        ++odd;
+                        if (g_fail < 20) std::printf("relaxed update loop: class differs, array %d lane %d: %g vs %g\n", k, i, x, y);
+                        ++g_fail;
+                    }
+                    continue;
+                }
+                const double e = std::fabs(static_cast<double>(x) - y) / (std::max)(1.0, (std::max)(std::fabs(static_cast<double>(x)), std::fabs(static_cast<double>(y))));
+                if (e > worst) worst = e;
+            }
+        }
+    }
+    std::memcpy(reinterpret_cast<void*>(0xA4DEE8), pre, sizeof(pre));
+    std::printf("relaxed update loop: %ld groups of four, %.1f%% of array values identical, worst %.3g (%.1f units of 2^-23), "
+                "%ld class mismatches; %d mismatches so far\n", groups, 100.0 * identical / lanes, worst, worst * 8388608.0, odd, g_fail);
+    if (worst * 8388608.0 > 64.0) { std::printf("relaxed update loop: worst difference above 64 units\n"); ++g_fail; }
 }
 
 // _CIsqrt (0xAC1800) vs crt_cisqrt: st(0) = a float, double or extended value (positive, zero, denormal, huge, tiny
@@ -1590,5 +1834,8 @@ int main(int argc, char** argv) {
         test_cisqrt();
     }
     test_relaxed();
+    test_update_relaxed();
+    test_particle_relaxed();
+    test_curve_relaxed();
     return g_fail ? 1 : 0;
 }

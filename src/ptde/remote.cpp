@@ -1888,6 +1888,8 @@ void run(const std::string& line) {
         out("fastmath at %X %ld: %d sites", static_cast<unsigned>(at), num(3, 1), rendermath_set_site(at, num(3, 1) != 0));
     } else if (c == "fastmath" && t.size() > 2 && t[1] == "relaxed") {
         out("fastmath relaxed %d", rendermath_set_relaxed(num(2, 1) != 0) ? 1 : 0);
+    } else if (c == "fastmath" && t.size() > 2 && t[1] == "rxloops") {
+        out("fastmath rxloops %d", rendermath_set_rx_loops(num(2, 1) != 0) ? 1 : 0);
     } else if (c == "fastmath" && t.size() > 2 && t[1] == "fused") {
         out("fastmath fused %d", rendermath_set_fused(num(2, 1) != 0) ? 1 : 0);
     } else if (c == "fastmath" && t.size() > 2) {

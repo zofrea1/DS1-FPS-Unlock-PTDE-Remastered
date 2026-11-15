@@ -47,6 +47,8 @@ bool rendermath_set_fused(bool on);
 // Relaxed precision for the render thread's matrix multiplies and multiply-adds (see rendermath.cpp g_relaxed_tid):
 // on/off, and the render thread's per-frame call that names the thread.
 bool rendermath_set_relaxed(bool on);
+// Diagnostics: the particle loops' relaxed paths alone (with relaxed on).
+bool rendermath_set_rx_loops(bool on);
 void rendermath_render_frame();
 // RemoteControl `fastmath at ADDR 0|1`: one site (by its game address) off or on; returns sites switched (0 or 1).
 int rendermath_set_site(uintptr_t at, bool on);
