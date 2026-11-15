@@ -57,12 +57,13 @@
 //
 // UIScale (percent, below 100): the HUD's corner groups are drawn smaller, each scaled toward its own corner of the
 // layout: the health and stamina bars with the status icons (top left), the equipment slots (bottom left) and the
-// soul counter (bottom right); a boss's health bar toward the bottom edge. A draw belongs to a group when it lies
-// where that group's pieces are (fit_for); everything else (prompts, subtitles, the item pickup window) is left at
-// its size, and so is everything
-// while a menu or a dialog with buttons is open or for half a second after it closes (its fade), and while no
-// character is in the world (the title screen and its menus, whose copyright line and load list reach into those
-// areas).
+// soul counter with the souls just gained (bottom right); a boss's health bar toward the bottom edge. A draw belongs
+// to a group when it lies where that group's pieces are (group_fit). The game's windows over the HUD (the prompts,
+// the item pickup window, a message being read) are drawn smaller toward the bottom or top edge (window_for).
+// Everything else (subtitles, the banners such as YOU DIED, area names) is left at its size. While a menu or a dialog
+// with buttons is open, or for half a second after it closes (its fade), only the HUD drawn before it is (the game
+// draws the HUD first: g_run); the menus themselves keep their size and place. While no character is in the world
+// (the title screen and its menus, whose copyright line and load list reach into those areas) nothing is.
 namespace {
 
 using CreateVsFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const DWORD*, IDirect3DVertexShader9**);
@@ -74,12 +75,14 @@ using DrawIdxFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UIN
 using DrawIdxUpFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void*, D3DFORMAT,
                                      const void*, UINT);
 using SetScissorFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*);
+using PresentFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
 CreateVsFn o_create_vs = nullptr;
 SetVsFn o_set_vs = nullptr;
 SetVsConstFn o_set_vs_const = nullptr;
 DrawUpFn o_draw_up = nullptr;
 DrawIdxUpFn o_draw_idx_up = nullptr;
 SetScissorFn o_set_scissor = nullptr;
+PresentFn o_present = nullptr;
 
 // kPlain: float positions in layout units, for the game's frames of lines whatever their shader (layout_frame; the
 // white outline of another player's bar stayed full size with the image, text and box kinds and lines handled).
@@ -327,19 +330,56 @@ bool player_in_world() {
     }
 }
 
-// A menu is open (MenuMan: its request, its open flags) or a dialog with buttons ([MenuMan+0x9E8]: +0 its text, +0xC
-// 7 or 8; 9 is a message without buttons, whose text stays behind after it, as co-op's world::menu_open reads it).
+// The game's own menu state (0xC2ABE0, its fields read here one by one): a bit for each menu and dialog of MenuMan
+// that is up (the start menu +0x3C, the talk list +0x40 = 1..3, the shop +0x48, a request +0x60, the bonfire's menus,
+// ...) and for a few static flags beside it. The game's own "a menu is up" checks (0xF78D00 and its neighbours) take
+// it with the mask 0x7FFFF77F, which leaves out +0x40 = 4 (an NPC speaking, its subtitle on screen) and +0x98 (a
+// message being read): the HUD stays as it is in both. Before 2026-11-14 only the bonfire menus' flags were read here
+// and the shop was missed: its rows in the lower left were pulled into the equipment slots' group.
+struct MenuField {
+    uint16_t off;
+    uint32_t bit;
+};
+constexpr MenuField kMenuFields[] = {
+    {0x24, 0x200},        {0x28, 0x1},         {0x60, 0x8},          {0xC4, 0x8000000},  {0x68, 0x8000000},
+    {0x108, 0x8000000},   {0x2E0, 0x8000000},  {0x64, 0x4},          {0x98, 0x800},      {0xE8, 0x40000000},
+    {0xA0, 0x20},         {0x9C, 0x10},        {0x88, 0x400},        {0x3C, 0x40},       {0xEC, 0x100000},
+    {0x48, 0x1000},       {0x4C, 0x2000},      {0x50, 0x4000},       {0x11C, 0x2},       {0xFC, 0x2000000},
+    {0x120, 0x8000},      {0xAC, 0x10000},     {0xBC, 0x40000},      {0x70, 0x400000},   {0x78, 0x200000},
+    {0x80, 0x800000},     {0x84, 0x1000000},   {0x5C, 0x4000000},    {0xD8, 0x10000000}, {0x2C4, 0x100}};
+constexpr uint32_t kGameMenuMask = 0x7FFFF77Fu;
+
+uint32_t game_menu_state(uintptr_t mm) {
+    uint32_t s = 0;
+    for (const MenuField& f : kMenuFields) {
+        if (*reinterpret_cast<const int32_t*>(mm + f.off) != 0) s |= f.bit;
+    }
+    const int32_t talk = *reinterpret_cast<const int32_t*>(mm + 0x40);
+    if (talk == 4) s |= 0x80;
+    if (talk >= 1 && talk <= 3) s |= 0x80000;
+    if (*reinterpret_cast<const uint8_t*>(0x01378622)) s |= 0x8;
+    if (*reinterpret_cast<const uint8_t*>(0x013786E1)) s |= 0x8000000;
+    if (*reinterpret_cast<const int32_t*>(mm + 0x2DC) && *reinterpret_cast<const uint8_t*>(0x013786F4)) s |= 0x8000000;
+    if (*reinterpret_cast<const uint8_t*>(0x013786C8)) s |= 0x10000000;
+    return s;
+}
+
+// A menu is open (the game's own state above) or a dialog with buttons ([MenuMan+0x9E8]: +0 its text, +0xC 7 or 8; 9
+// is a message without buttons, whose text stays behind after it, as co-op's world::menu_open reads it).
 bool menu_flags() {
+    static uint32_t logged_state = 0;
+    static int state_logs = 0;
     __try {
         const uintptr_t mm = *reinterpret_cast<const uintptr_t*>(kMenuManVar);
         if (mm < 0x10000) return true;  // no menu manager yet: the title screens
-        // +0x3C: the menu shown (0 none, 8 the start menu's tabs, 2 the inventory, ...); +0x60: a request for one
-        if (*reinterpret_cast<const int32_t*>(mm + 0x3C) != 0) return true;
-        if (*reinterpret_cast<const int32_t*>(mm + 0x60) != 0) return true;
-        static const uint32_t kOpen[] = {0x40, 0x4C, 0x78, 0x84, 0x80, 0x50, 0xAC};
-        for (uint32_t off : kOpen) {
-            if (*reinterpret_cast<const uint8_t*>(mm + off) != 0) return true;
+        const uint32_t state = game_menu_state(mm);
+        if (state != logged_state && state_logs < 24) {  // what the game's menus set, for the log (the first few)
+            ++state_logs;
+            logged_state = state;
+            LOG_INFO("UIScale: the game's menu state is %08X (%s)", state,
+                     state & kGameMenuMask ? "a menu is up" : "no menu");
         }
+        if (state & kGameMenuMask) return true;
         const uintptr_t dialog = *reinterpret_cast<const uintptr_t*>(mm + 0x9E8);
         if (dialog > 0x10000 && *reinterpret_cast<const uint32_t*>(dialog) != 0) {
             const uint32_t kind = *reinterpret_cast<const uint32_t*>(dialog + 0xC);
@@ -351,18 +391,27 @@ bool menu_flags() {
     }
 }
 
-// A menu or dialog is open, or closed less than half a second ago (its last frames fade out after the flags clear:
-// the start menu's tabs were pulled into the top left group as it closed), or no game is loaded (the title screens).
-bool menu_open() {
-    if (!player_in_world()) return true;
+// The menus as one draw sees them.
+struct MenuNow {
+    bool open;   // a menu or dialog is open, or closed less than half a second ago (its last frames fade out after
+                 // the flags clear: the start menu's tabs were pulled into the top left group as it closed), or no
+                 // game is loaded (the title screens)
+    bool flags;  // a menu or dialog is open this moment (no fade)
+    bool world;  // a character is in the world
+};
+
+MenuNow menu_now() {
+    if (!player_in_world()) return MenuNow{true, true, false};
     static ULONGLONG open_until = 0;
     const ULONGLONG now = GetTickCount64();
     if (menu_flags()) {
         open_until = now + 500;
-        return true;
+        return MenuNow{true, true, true};
     }
-    return now < open_until;
+    return MenuNow{now < open_until, false, true};
 }
+
+bool menu_open() { return menu_now().open; }
 
 bool sane(float v, float lo, float hi) { return v == v && v > lo && v < hi; }
 
@@ -505,51 +554,30 @@ struct Fit {  // x' = ax + (x - ax) * sx, the same in y
 // The middle of a boss's health bar across (its ends at 375.5 and 1099.1).
 constexpr float kBossMiddle = 737.3f;
 
-// What to do with a draw whose corners in the layout are x0..x1, y0..y1.
-Fit fit_for(float x0, float y0, float x1, float y1, bool menu) {
+// The HUD's corner groups (UIScale): which a draw whose corners in the layout are x0..x1, y0..y1 belongs to, if any.
+// From where the HUD's own pieces are (dumps in the world, 2026-11-14): the humanity counter, the bars and the status
+// icons start at the left (x 70..330, y 30..210) and a long bar's end caps lie further right in the bars' two rows
+// (hud_top_left_piece); the equipment slots, their counts and the item and spell names start at x 86..336 and lie
+// within y 375..677; the soul counter's box is x 1028..1186, y 631..672, and the souls just gained show above it
+// ("+60" at 1137..1173 x 608..632, right-aligned with the count; it was left out of the group before 2026-11-14 and
+// stayed at its place over the shrunk counter). A wider band took the start menu's tab icons as it closed (y 60..110
+// at x 850); a looser bottom left area took the item pickup window's icon (x 395..453, y 497..550). The prompts and
+// windows over the HUD are the game's windows (window_for); marks over things in the world are taken out before.
+Fit group_fit(float x0, float y0, float x1, float y1) {
     Fit f{0, 0, 1, 1, false};
-    if (g_shaped && x0 <= 2.0f && y0 <= 2.0f && x1 >= kLayoutW - 2.0f && y1 >= kLayoutH - 2.0f) {
-        // the whole layout: over the whole screen
-        f = Fit{kLayoutW * 0.5f, kLayoutH * 0.5f, 1.0f / g_kx, 1.0f / g_ky, true};
-        if (!g_logged_full) {
-            g_logged_full = true;
-            LOG_INFO("FixAspectUI: a box over the whole layout (a fade or a background) is drawn over the whole screen");
-        }
-        return f;
-    }
-    if (const Anchor* a = world_mark(x0, y0, x1, y1)) {
-        if (g_logged_world < 12) {
-            ++g_logged_world;
-            static const char* const kKinds[] = {"the lock-on point", "another player's gauge", "an enemy's gauge"};
-            LOG_INFO("UIScale: a draw %.1f,%.1f-%.1f,%.1f is a mark of %s at %.1f,%.1f (middle %+.1f, %+.1f from it)%s",
-                     x0, y0, x1, y1, kKinds[a->kind < 3 ? a->kind : 0], a->x, a->y, (x0 + x1) * 0.5f - a->x,
-                     (y0 + y1) * 0.5f - a->y, g_world_scale < 0.999f ? ", drawn at UIScaleWorld about it" : "");
-        }
-        if (g_world_scale < 0.999f) f = Fit{a->x, a->y, g_world_scale, g_world_scale, true};
-        return f;
-    }
-    if (g_scale >= 0.999f || menu) return f;
-    // The groups, from where the HUD's own pieces are (a dump in the world, 2026-11-14): the humanity counter, the
-    // bars and the status icons start at the left (x 70..330, y 30..210) and a long bar's end caps lie further right
-    // in the bars' two rows (hud_top_left_piece); the equipment slots, their counts and the item and spell names start
-    // at x 86..336 and lie within y 375..677; the soul counter's box is x 1028..1186, y 631..672. A wider band took the
-    // start menu's tab icons as it closed (y 60..110 at x 850); a looser bottom left area took the item pickup window's
-    // icon (x 395..453, y 497..550). Prompts, boss bars and the pickup window are outside; marks over things in the
-    // world are taken out above.
     if (hud_top_left_piece(x0, y0, x1, y1) ||
         (x0 >= 70.0f && x0 <= 330.0f && y0 >= 30.0f && y1 <= 210.0f && x1 <= 1000.0f)) {
         f = Fit{0.0f, 0.0f, g_scale, g_scale, true};
     } else if (x0 >= 80.0f && x0 <= 345.0f && y0 >= 370.0f && y1 <= 685.0f && x1 <= 520.0f) {
         f = Fit{0.0f, kLayoutH, g_scale, g_scale, true};
-    } else if (x0 >= 1015.0f && y0 >= 620.0f && y1 <= 685.0f) {
+    } else if (x0 >= 1015.0f && x1 <= 1200.0f && y0 >= 600.0f && y1 <= 685.0f) {
         f = Fit{kLayoutW, kLayoutH, g_scale, g_scale, true};
     } else if (g_boss_up && x0 >= 370.0f && x1 <= 1105.0f && y0 >= 440.0f && y1 <= 632.0f) {
         // A boss's health bar (a dump on the Steam Deck, 2026-11-14): its left end with the name 375..452 x 551..611,
         // the name 400.. x 555..581, the frame 452..1009 x 581..604, the fills from 393 in 586..598, the right end
-        // 1007..1099 x 571..626; a second boss's bar above it (not seen yet; the band reaches up to 440). Toward the
-        // bottom edge below the bar's middle (x 737), as the bottom groups go toward their corners. Only while a boss
-        // gauge is up: the item pickup window and the prompts use the same area (they shrink too if they come up
-        // during a boss fight).
+        // 1007..1099 x 571..626; a second boss's bar above it (the band reaches up to 440). Toward the bottom edge
+        // below the bar's middle (x 737), as the bottom groups go toward their corners. Only while a boss gauge is up.
+        // The bar is drawn with the HUD, before any prompt or window in the same place (those are window_for's).
         f = Fit{kBossMiddle, kLayoutH, g_scale, g_scale, true};
         if (!g_logged_boss) {
             g_logged_boss = true;
@@ -563,6 +591,148 @@ Fit fit_for(float x0, float y0, float x1, float y1, bool menu) {
                  g_scale * 100.0);
     }
     return f;
+}
+
+// The game's windows over the HUD, drawn after it each frame (dumps in the world, 2026-11-14), each a frame with its
+// contents drawn after it inside:
+//   - a prompt ("A: Talk", "A: Pick up item", "A: OK" under an item): 329.5..950.5 in two pieces (y 562.5..608.5 and
+//     608.5..638.5), the inner box 352.5..926.5 x 572.5..622.5, the text in 585..613;
+//   - an item picked up: 353.5..904.5 x 462.5..564.5 in two pieces split at 820.1, the icon 387..458, the name from
+//     473, the count at 850; with more than one item the windows stack upward;
+//   - a message being read (players' and the game's own): 200.5..1075.5 x 123.5..226.5 in two pieces split at 761.5
+//     (the right one first), the portrait 295.5..389.5, the text from 394, the rating at 683..836.
+// A draw that is a piece of one of these frames opens that window (or widens it) for the rest of the frame; a draw
+// lying in a window opened before it is that window's. UIScale draws them smaller toward the edge they stand by, below
+// or above the layout's middle (x 640): the prompts and items toward the bottom, the messages toward the top. They
+// were left at their size before 2026-11-14. The windows are opened only while no menu is open: a menu's own pieces
+// are never taken for them.
+enum WindowKind : uint8_t { kPromptWindow = 0, kItemWindow = 1, kMessageWindow = 2 };
+struct Window {
+    float x0, y0, x1, y1;
+    float ay;  // the edge it goes toward
+    uint8_t kind;
+};
+Window g_windows[8];
+int g_window_count = 0;  // the render thread's; none at the start of each frame
+int g_logged_windows = 0;
+
+// The frame's order of draws (the render thread's): the game draws its whole HUD first in each frame, the equipment
+// slots' backdrop (86.4,406.5-375.5,643.5) its first piece, then whatever lies over it (prompts, windows, menus).
+// While a menu is open the corner groups' pieces are drawn smaller only within that first run (the HUD stays at its
+// size behind the start menu, a talk list or the shop instead of growing back to full size for as long as they are
+// open), and nothing after it: the first draw that is no HUD piece ends the run (pieces off the layout and marks over
+// things in the world do not). A frame that does not start with that backdrop (the HUD switched off) has no run.
+enum Run : uint8_t { kRunWaiting = 0, kRunHud = 1, kRunOver = 2 };
+Run g_run = kRunWaiting;
+int g_logged_runs = 0;
+
+void layout_new_frame() {
+    g_run = kRunWaiting;
+    g_window_count = 0;
+}
+
+bool inside(const Window& w, float x0, float y0, float x1, float y1) {
+    return x0 >= w.x0 - 2.0f && x1 <= w.x1 + 2.0f && y0 >= w.y0 - 2.0f && y1 <= w.y1 + 2.0f;
+}
+
+const Window* window_for(float x0, float y0, float x1, float y1) {
+    for (int i = 0; i < g_window_count; ++i) {
+        if (inside(g_windows[i], x0, y0, x1, y1)) return &g_windows[i];
+    }
+    if (g_bound != kImage) return nullptr;
+    const float h = y1 - y0;
+    uint8_t kind;
+    if (near_f(x0, 329.5f, 1.5f) && near_f(x1, 950.5f, 1.5f) && y0 >= 380.0f && y1 <= 700.0f) {
+        kind = kPromptWindow;
+    } else if (near_f(x0, 353.5f, 1.5f) && near_f(h, 102.0f, 3.0f) && y0 >= 60.0f && y1 <= 600.0f && x1 <= 960.0f) {
+        kind = kItemWindow;
+    } else if ((near_f(x0, 200.5f, 1.5f) || near_f(x1, 1075.5f, 1.5f)) && near_f(h, 102.0f, 3.0f) && y0 >= 20.0f &&
+               y1 <= 360.0f && x1 - x0 >= 200.0f) {
+        kind = kMessageWindow;
+    } else {
+        // The other piece of a frame drawn in two side by side (the item window's right end, the message's left
+        // part): the same row, touching the window.
+        for (int i = 0; i < g_window_count; ++i) {
+            Window& w = g_windows[i];
+            if (w.kind == kPromptWindow || !near_f(y0, w.y0, 1.5f) || !near_f(y1, w.y1, 1.5f)) continue;
+            if (near_f(x0, w.x1, 2.0f) || near_f(x1, w.x0, 2.0f)) {
+                w.x0 = x0 < w.x0 ? x0 : w.x0;
+                w.x1 = x1 > w.x1 ? x1 : w.x1;
+                return &w;
+            }
+        }
+        return nullptr;
+    }
+    // A piece of a frame: it widens a window of its kind that it touches (the prompt's pieces one above the other,
+    // the message's two halves, items stacked), or opens one.
+    for (int i = 0; i < g_window_count; ++i) {
+        Window& w = g_windows[i];
+        if (w.kind == kind && x0 <= w.x1 + 2.0f && x1 >= w.x0 - 2.0f && y0 <= w.y1 + 2.0f && y1 >= w.y0 - 2.0f) {
+            w.x0 = x0 < w.x0 ? x0 : w.x0;
+            w.y0 = y0 < w.y0 ? y0 : w.y0;
+            w.x1 = x1 > w.x1 ? x1 : w.x1;
+            w.y1 = y1 > w.y1 ? y1 : w.y1;
+            return &w;
+        }
+    }
+    if (g_window_count >= 8) return nullptr;
+    g_windows[g_window_count] = Window{x0, y0, x1, y1, kind == kMessageWindow ? 0.0f : kLayoutH, kind};
+    if (g_logged_windows < 12) {
+        ++g_logged_windows;
+        static const char* const kNames[] = {"a prompt", "an item picked up", "a message"};
+        LOG_INFO("UIScale: %s (a frame %.1f,%.1f-%.1f,%.1f) is drawn at %.0f%%", kNames[kind], x0, y0, x1, y1,
+                 g_scale * 100.0);
+    }
+    return &g_windows[g_window_count++];
+}
+
+// What to do with a draw whose corners in the layout are x0..x1, y0..y1.
+Fit fit_for(float x0, float y0, float x1, float y1, const MenuNow& menu) {
+    Fit f{0, 0, 1, 1, false};
+    if (g_shaped && x0 <= 2.0f && y0 <= 2.0f && x1 >= kLayoutW - 2.0f && y1 >= kLayoutH - 2.0f) {
+        // the whole layout: over the whole screen
+        f = Fit{kLayoutW * 0.5f, kLayoutH * 0.5f, 1.0f / g_kx, 1.0f / g_ky, true};
+        if (!g_logged_full) {
+            g_logged_full = true;
+            LOG_INFO("FixAspectUI: a box over the whole layout (a fade or a background) is drawn over the whole screen");
+        }
+        return f;
+    }
+    // The HUD's first piece: a new frame's HUD (also when the frame's Present was not seen).
+    if (g_bound == kImage && near_f(x0, 86.4f, 1.0f) && near_f(y0, 406.5f, 1.0f) && near_f(x1, 375.5f, 1.0f) &&
+        near_f(y1, 643.5f, 1.0f)) {
+        g_run = kRunHud;
+        g_window_count = 0;
+    }
+    if (!menu.flags && g_scale < 0.999f) {
+        if (const Window* w = window_for(x0, y0, x1, y1)) return Fit{kLayoutW * 0.5f, w->ay, g_scale, g_scale, true};
+    }
+    if (const Anchor* a = world_mark(x0, y0, x1, y1)) {
+        if (g_logged_world < 12) {
+            ++g_logged_world;
+            static const char* const kKinds[] = {"the lock-on point", "another player's gauge", "an enemy's gauge"};
+            LOG_INFO("UIScale: a draw %.1f,%.1f-%.1f,%.1f is a mark of %s at %.1f,%.1f (middle %+.1f, %+.1f from it)%s",
+                     x0, y0, x1, y1, kKinds[a->kind < 3 ? a->kind : 0], a->x, a->y, (x0 + x1) * 0.5f - a->x,
+                     (y0 + y1) * 0.5f - a->y, g_world_scale < 0.999f ? ", drawn at UIScaleWorld about it" : "");
+        }
+        if (g_world_scale < 0.999f) f = Fit{a->x, a->y, g_world_scale, g_world_scale, true};
+        return f;
+    }
+    if (g_scale >= 0.999f || !menu.world) return f;
+    const Fit g = group_fit(x0, y0, x1, y1);
+    const bool off_layout = x1 <= 0.0f || x0 >= kLayoutW || y1 <= 0.0f || y0 >= kLayoutH;
+    if (g_run == kRunHud && !g.any && !off_layout) {
+        g_run = kRunOver;
+        if (menu.open && g_logged_runs < 8) {
+            ++g_logged_runs;
+            LOG_INFO("UIScale: under a menu the HUD's draws end at a draw %.1f,%.1f-%.1f,%.1f (kept at its size, as "
+                     "everything after it)", x0, y0, x1, y1);
+        }
+    } else if (g_run == kRunWaiting && !off_layout) {
+        g_run = kRunOver;
+    }
+    if (menu.open && g_run != kRunHud) return f;
+    return g;
 }
 
 // The draw's vertices with the fit applied, in g_copy; false when nothing changes (the game's data is drawn).
@@ -611,7 +781,7 @@ bool refit(const void* data, UINT stride, UINT count, const float* box_rows, IDi
         if (y > y1) y1 = y;
     }
     if (placed == 0) return false;
-    const Fit f = fit_for(x0, y0, x1, y1, menu_open());
+    const Fit f = fit_for(x0, y0, x1, y1, menu_now());
 #if FPSU_DIAGNOSTICS
     // The plain kind's draws, for the record (what the outline turned out to be).
     static int plain_logged = 0;
@@ -877,6 +1047,12 @@ HRESULT WINAPI hk_draw_idx_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT
     return hr;
 }
 
+// The end of a frame: the next frame's draws start with no windows and wait for the HUD's first piece.
+HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* src, const RECT* dst, HWND window, const RGNDATA* dirty) {
+    layout_new_frame();
+    return o_present(dev, src, dst, window, dirty);
+}
+
 HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
     RECT m;
     if (g_own_scissor && r && !g_premapped && layout_map_scissor(dev, r, 1280, 720, &m)) return o_set_scissor(dev, &m);
@@ -1063,6 +1239,8 @@ void layout_hook_device(IDirect3DDevice9* dev, bool own_scissor) {
     if (p && !o_draw_up) o_draw_up = reinterpret_cast<DrawUpFn>(p);
     p = patch_slot(dev, 84, reinterpret_cast<void*>(&hk_draw_idx_up));
     if (p && !o_draw_idx_up) o_draw_idx_up = reinterpret_cast<DrawIdxUpFn>(p);
+    p = patch_slot(dev, 17, reinterpret_cast<void*>(&hk_present));
+    if (p && !o_present) o_present = reinterpret_cast<PresentFn>(p);
 #if FPSU_DIAGNOSTICS
     p = patch_slot(dev, 81, reinterpret_cast<void*>(&hk_draw_prim));
     if (p && !o_draw_prim) o_draw_prim = reinterpret_cast<DrawPrimFn>(p);
