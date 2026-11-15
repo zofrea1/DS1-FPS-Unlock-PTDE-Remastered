@@ -245,6 +245,10 @@ HideMouseCursor = false
 
 DSfix 3.0 then decides the resolution, anti-aliasing, HUD scale and the other picture settings it has, and fixes the sun and moon itself; its controls look after the controller and the mouse pointer. The frame rate unlock, every fix and the speed-ups stay this mod's.
 
+## Prepare to Die Edition and RTX Remix
+
+RTX Remix replaces the game's renderer with a path tracer (for example the Dark Souls PTDE RTX mod: its `d3d9.dll` converts the game's draws for Remix, whose bridge is `.trex\NvRemixBridge.exe`). It expects the game's own render passes, so with `YieldToRtxRemix = auto` (the default) this mod leaves the picture to it when Remix is installed beside the game: its resolution, depth of field, effects, water, colour, shadow, filtering, aspect and HUD scale settings, DXVK, the Direct3D-level speed-ups (`FastEffects`, `FastRenderMath`, `AsyncReadback`, `ReuseSurfaces`, `PreloadTextures`, `FilterSamplerStates`, `SkipUnusedReflection`), the effects fixes (`FixSfxSpawnRate`, `FixSfxActions`, `FixSfxDistortion`, whose code the RTX mod hooks for its lights), `FixCutsceneCamera`, `HideMouseCursor`, `CacheInputReads` and `SkipIntro` are off, whatever the INI says, and the log says so. The frame rate, every gameplay fix and `FixController` stay this mod's. Turn off the RTX mod's own frame rate unlock (`[FPSUnlock] Enabled=0` in its `rtx_comp\settings\remix-comp-proxy.ini`), so that only one drives the frame rate. Remix sets a 60 Hz display mode in exclusive fullscreen, and path tracing is the limit well before this mod's cap. `YieldToRtxRemix = true` applies the same anywhere, `false` never.
+
 ## Install
 
 Copy the files from the release for your game next to the game's exe (see the table above; PTDE's `dxvk_d3d9.dll` is DXVK, which `DXVK = true` uses). To uninstall, delete them. `FPSUnlock` is the master switch: `false` turns every part of the mod off and leaves the game unchanged, except `SkipIntro` and Remastered's `StartOffline`, which have their own switches.

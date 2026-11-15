@@ -113,6 +113,10 @@ struct Settings {
     // YieldToDSFix: with DSfix loaded, DSfix's own settings decide the resolution (and what rides on it), the
     // texture filtering and the HUD's size; ours step back (dsfix.h).
     bool yield_to_dsfix = false;
+    // YieldToRtxRemix: 0 auto (when RTX Remix is installed beside the game), 1 always, 2 never. rtx_remix_applied: it
+    // applies (settings.cpp sets the picture, Direct3D-level and effects-code settings it lists).
+    int yield_to_rtx_remix = 0;
+    bool rtx_remix_applied = false;
     // HUD gauge fill speed (HP, stamina, boss bars) and the loading screen swirl.
     bool fix_ui = true;
     // Sprint stamina drain takes one point every 0.1 s on average at any frame rate (the game rounded each

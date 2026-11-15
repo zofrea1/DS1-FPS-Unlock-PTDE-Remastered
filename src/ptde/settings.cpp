@@ -203,6 +203,11 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_sfx_distortion = parse_bool(val);
         } else if (key == "yieldtodsfix") {
             s.yield_to_dsfix = parse_bool(val);
+        } else if (key == "yieldtortxremix") {
+            const std::string v = trim(val);
+            s.yield_to_rtx_remix = (v == "true" || v == "on" || v == "1")     ? 1
+                                   : (v == "false" || v == "off" || v == "0") ? 2
+                                                                               : 0;
         } else if (key == "fixsun") {
             s.fix_sun_with_dsfix = parse_bool(val);
         } else if (key == "fixwater") {
@@ -395,6 +400,57 @@ Settings settings_load(const wchar_t* dll_path) {
     } else if (translated) {
         static int logged_off = 0;
         if (!logged_off++) LOG_INFO("Phone profile: off (PhoneProfile = false); the game runs translated for %s", cpu);
+    }
+    // YieldToRtxRemix. RTX Remix replaces the game's renderer: its d3d9.dll beside the game hands every draw to a
+    // path tracer (through its bridge, .trex\NvRemixBridge.exe), and a mod that converts the game's draws for it may
+    // sit in front (Dark Souls PTDE RTX's d3d9.dll does, with d3d9_remix.dll as the bridge). The game's own render
+    // passes are what those expect, so this mod's picture settings, its Direct3D-level speed-ups and its fixes in the
+    // effects library (whose particle draws the RTX mod hooks for its lights) step back, and so do the window and HUD
+    // shape, the mouse pointer and the intro skip, which the RTX mod handles. The frame rate, every gameplay fix and
+    // FixController stay (a pad the game does not know needs FixController; checked 2026-11-15 with Dark Souls PTDE
+    // RTX: with all of these off the picture was right).
+    if (s.yield_to_rtx_remix != 2) {
+        std::wstring dir(dll_path);
+        const size_t slash = dir.find_last_of(L"\\/");
+        dir = slash == std::wstring::npos ? std::wstring() : dir.substr(0, slash + 1);
+        const bool remix = GetFileAttributesW((dir + L"d3d9.dll").c_str()) != INVALID_FILE_ATTRIBUTES &&
+                           GetFileAttributesW((dir + L".trex\\NvRemixBridge.exe").c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (s.yield_to_rtx_remix == 1 || remix) {
+            static const char* const kYield[][2] = {
+                // The picture: the game's own render path.
+                {"renderresolution", "off"}, {"supersampling", "1"}, {"depthoffieldstrength", "100"},
+                {"depthoffieldresolution", "game"}, {"effectsresolution", "game"}, {"waterresolution", "game"},
+                {"highprecisioncolor", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
+                {"shadowbias", "0"}, {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
+                {"fixsun", "false"}, {"fixwater", "false"}, {"gammaramp", "false"}, {"dxvk", "false"},
+                {"dpiaware", "false"}, {"fullscreenrefreshrate", "-1"}, {"borderlessfullscreen", "false"},
+                // The screen's shape and the HUD.
+                {"fixaspect", "false"}, {"fixaspectui", "false"}, {"uiscale", "100"}, {"uiscaleworld", "100"},
+                // Direct3D-level and render-code speed-ups.
+                {"asyncreadback", "false"}, {"filtersamplerstates", "false"}, {"filtershaderconstants", "false"},
+                {"skipunusedreflection", "false"}, {"reusesurfaces", "false"}, {"preloadtextures", "false"},
+                {"fasteffects", "false"}, {"fastrendermath", "false"}, {"rendermathprecision", "exact"},
+                // Fixes in the effects library and the cutscene camera, which the RTX mod hooks too.
+                {"fixsfxspawnrate", "false"}, {"fixsfxactions", "false"}, {"fixsfxdistortion", "false"},
+                {"fixcutscenecamera", "false"},
+                // The mouse and keyboard, and the start-up.
+                {"hidemousecursor", "false"}, {"cacheinputreads", "false"}, {"skipintro", "false"},
+            };
+            for (const auto& kv : kYield) apply(kv[0], kv[1]);
+            s.rtx_remix_applied = true;
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                LOG_INFO("YieldToRtxRemix: %s: the picture is RTX Remix's. This mod's resolution, depth of field, effects, "
+                         "water, colour, shadow, filtering, aspect and HUD scale settings, its Direct3D-level speed-ups "
+                         "(FastEffects, FastRenderMath, AsyncReadback, ReuseSurfaces, PreloadTextures, "
+                         "FilterSamplerStates, SkipUnusedReflection), DXVK, FixSfxSpawnRate, FixSfxActions, "
+                         "FixSfxDistortion, FixCutsceneCamera, HideMouseCursor, CacheInputReads and SkipIntro are off; "
+                         "the frame rate, every gameplay fix and FixController stay on",
+                         remix ? "RTX Remix found beside the game (d3d9.dll, .trex\\NvRemixBridge.exe)"
+                               : "YieldToRtxRemix = true");
+            }
+        }
     }
     return s;
 }

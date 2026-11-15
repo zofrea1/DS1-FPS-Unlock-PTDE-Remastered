@@ -196,6 +196,12 @@ int pick_gamepad(int skip) {
 int __stdcall hook_match(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
     const int idx = g_match(a, b, c, d);
     if (idx >= 0 && read_slot(idx, nullptr)) {
+        // One of the game's own controller ids, connected: kept as it is (logged once a slot, for reports).
+        static bool logged[4] = {};
+        if (idx < 4 && !logged[idx]) {
+            logged[idx] = true;
+            LOG_INFO("Controller: the game bound XInput slot %d (one of its own controller ids)", idx);
+        }
         return idx;
     }
     const int picked = pick_gamepad(-1);
@@ -222,6 +228,19 @@ int __stdcall adopt_pad(uint8_t* self) {
 DWORD __stdcall poll_get_state(DWORD index, void* state) {
     DWORD result = xinput_get_state(index, state);
     uint8_t* self = g_poll_device;
+    // For reports: that the game's poll runs at all, and the first input it reads (another mod or overlay that keeps the
+    // pad from the game shows as a poll that runs with no input, or none at all).
+    static bool first_read = true, first_input = true;
+    if (first_read) {
+        first_read = false;
+        LOG_INFO("Controller: the game reads the pad on slot %lu (first read: %s)", static_cast<unsigned long>(index),
+                 result == 0 ? "connected" : "not connected");
+    }
+    if (first_input && result == 0 && state && !idle_pad(*static_cast<PadState*>(state))) {
+        first_input = false;
+        LOG_INFO("Controller: first input the game read from slot %lu (buttons %04X)", static_cast<unsigned long>(index),
+                 static_cast<unsigned>(static_cast<PadState*>(state)->buttons));
+    }
     if (index < 4) {
         if (result != 0) {
             note_disconnected(static_cast<int>(index), GetTickCount64());

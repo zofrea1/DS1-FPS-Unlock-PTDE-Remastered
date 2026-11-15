@@ -43,6 +43,17 @@ void describe(HWND h, char* out, size_t n) {
 
 HWND WINAPI watched_foreground() {
     const HWND h = g_real();
+    // The first answer, whatever it is (a game that is in front from the start logs no change at all).
+    static bool first = true;
+    if (first) {
+        if (const HWND game = game_window()) {
+            first = false;
+            char who[200];
+            describe(h, who, sizeof(who));
+            LOG_INFO("Focus: at the game's first input check its window is %s (in front: %s)",
+                     h == game ? "in front" : "NOT in front; the game ignores the keyboard, mouse and gamepads", who);
+        }
+    }
     if (h == g_last) return h;
     g_last = h;
     const HWND game = game_window();
