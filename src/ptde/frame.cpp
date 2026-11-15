@@ -17,6 +17,7 @@
 #include "profile.h"
 #include "remote.h"
 #include "phases.h"
+#include "inputcache.h"
 #include "rendermath.h"
 
 #include <intrin.h>
@@ -334,6 +335,7 @@ char hook_game_frame() {
     limiter_wait_early();
     remote_game_frame();
     phases_game_frame();
+    inputcache_game_frame();
     if (!profile_enabled()) {
         if (!phases_active()) return g_game_frame();
         const uint64_t t = __rdtsc();

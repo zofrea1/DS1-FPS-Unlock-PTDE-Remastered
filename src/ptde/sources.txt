@@ -22,6 +22,7 @@ src\ptde\rwlock.cpp
 src\ptde\surfpool.cpp
 src\ptde\passcull.cpp
 src\ptde\phases.cpp
+src\ptde\inputcache.cpp
 src\ptde\gamma.cpp
 src\ptde\aspect.cpp
 src\ptde\profile.cpp

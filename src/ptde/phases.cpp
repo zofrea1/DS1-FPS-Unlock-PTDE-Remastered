@@ -253,15 +253,13 @@ const char* groups_on() {
     return "timed";
 }
 
-// Each task of a group (0xEFF540's loop): mov edx, [esi] / mov eax, [edx+8] / push ecx / mov ecx, esi /
-// fstp dword [esp] / call eax at 0xEFF5C9..0xEFF5D5 (the loop's branches land at 0xEFF5C3 and after 0xEFF5D6, none
-// inside) become a call to task_stub and nops; the stub times each task's update by its class (method table).
-constexpr uint32_t kTaskPatch = 0xEFF5C9;
-uint32_t g_task_ret = 0;
-uint32_t g_task_back = 0xEFF5D6;
-uint32_t g_task_vt = 0;
-uint64_t g_task_start = 0;
+// Each task: TaskItem::Run (0xEFF670) hands the frame to its delegate object: mov edx, [ecx] / push eax / mov eax,
+// [edx+8] / push ecx / fstp dword [esp] / call eax at 0xEFF68C..0xEFF697, then ret 4 at 0xEFF698 (the branches go to
+// 0xEFF685 and 0xEFF698, none inside). Those twelve bytes become a call to task_stub and a jump to the ret; the stub
+// keeps everything on the stack (any thread may run it) and times the delegate's call by its class (method table).
+constexpr uint32_t kTaskPatch = 0xEFF68C;
 bool g_tasks_on = false;
+uint32_t g_game_tid = 0;
 struct TaskStat {
     uint32_t vt;
     uint32_t calls;
@@ -270,6 +268,7 @@ struct TaskStat {
 TaskStat g_task_stats[256];
 
 void __cdecl task_add(uint32_t vt, uint32_t lo, uint32_t hi) {
+    if (GetCurrentThreadId() != g_game_tid) return;
     const uint64_t t = (static_cast<uint64_t>(hi) << 32) | lo;
     uint32_t h = (vt >> 3) & 255;
     for (int i = 0; i < 256; ++i, h = (h + 1) & 255) {
@@ -283,49 +282,54 @@ void __cdecl task_add(uint32_t vt, uint32_t lo, uint32_t hi) {
     }
 }
 
+// In: eax = the TaskItem, ecx = its delegate, st0 = the frame time, [esp] = the return to the patch site + 5.
 __declspec(naked) void task_stub() {
     __asm {
-        pop dword ptr [g_task_ret]
-        mov edx, dword ptr [esi]
+        push eax                    // the TaskItem
+        mov edx, dword ptr [ecx]
+        push edx                    // the delegate's method table (the key)
+        push ecx                    // the delegate
+        rdtsc
+        push edx
+        push eax                    // [esp] start lo, +4 hi, +8 delegate, +12 table, +16 TaskItem, +20 return
+        mov ecx, dword ptr [esp + 8]
+        mov edx, dword ptr [esp + 12]
+        push dword ptr [esp + 16]   // the TaskItem (second argument)
         mov eax, dword ptr [edx + 8]
-        push ecx
-        mov ecx, esi
+        push ecx                    // first argument: the frame time
         fstp dword ptr [esp]
-        mov dword ptr [g_task_vt], edx
-        push eax
-        push edx
+        call eax                    // pops its two arguments
         rdtsc
-        mov dword ptr [g_task_start], eax
-        mov dword ptr [g_task_start + 4], edx
-        pop edx
-        pop eax
-        call eax
-        rdtsc
-        sub eax, dword ptr [g_task_start]
-        sbb edx, dword ptr [g_task_start + 4]
+        sub eax, dword ptr [esp]
+        sbb edx, dword ptr [esp + 4]
         push edx
         push eax
-        push dword ptr [g_task_vt]
+        push dword ptr [esp + 20]   // the table
         call task_add
-        add esp, 12
-        jmp dword ptr [g_task_back]
+        add esp, 12 + 20
+        ret
     }
 }
 
 const char* tasks_on() {
     if (g_tasks_on) return "already timed";
+    g_game_tid = GetCurrentThreadId();
     auto* at = reinterpret_cast<uint8_t*>(kTaskPatch);
-    static const uint8_t kExpect[13] = {0x8B, 0x16, 0x8B, 0x42, 0x08, 0x51, 0x8B, 0xCE, 0xD9, 0x1C, 0x24, 0xFF, 0xD0};
-    if (std::memcmp(at, kExpect, 13) != 0) return "unexpected bytes";
+    static const uint8_t kExpect[12] = {0x8B, 0x11, 0x50, 0x8B, 0x42, 0x08, 0x51, 0xD9, 0x1C, 0x24, 0xFF, 0xD0};
+    if (std::memcmp(at, kExpect, 12) != 0) return "unexpected bytes";
     DWORD old = 0;
-    if (!VirtualProtect(at, 13, PAGE_EXECUTE_READWRITE, &old)) return "could not unprotect";
-    at[0] = 0xE8;
+    if (!VirtualProtect(at, 12, PAGE_EXECUTE_READWRITE, &old)) return "could not unprotect";
+    uint8_t code[12];
+    code[0] = 0xE8;
     const int32_t rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&task_stub) - (kTaskPatch + 5));
-    std::memcpy(at + 1, &rel, 4);
-    std::memset(at + 5, 0x90, 8);
+    std::memcpy(code + 1, &rel, 4);
+    code[5] = 0xEB;  // jmp 0xEFF698
+    code[6] = 0x05;
+    std::memset(code + 7, 0x90, 5);
+    std::memcpy(at, code, 12);
     DWORD ignored = 0;
-    VirtualProtect(at, 13, old, &ignored);
-    FlushInstructionCache(GetCurrentProcess(), at, 13);
+    VirtualProtect(at, 12, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), at, 12);
     g_tasks_on = true;
     return "timed";
 }

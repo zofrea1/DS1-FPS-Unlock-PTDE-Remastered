@@ -16,6 +16,7 @@
 #include "framekick.h"
 #include "focus.h"
 #include "drivetype.h"
+#include "inputcache.h"
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
@@ -84,6 +85,7 @@ DWORD WINAPI worker(void*) {
     intro_install(settings.skip_intro);
     framekick_install(settings.fix_framerate_kick);
     drivetype_install(settings.cache_drive_type, settings.profile);
+    inputcache_configure(settings.cache_input_reads);
 
     wchar_t game_dir[MAX_PATH];
     lstrcpynW(game_dir, exe_path, MAX_PATH);

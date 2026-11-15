@@ -346,6 +346,9 @@ Settings settings_load(const wchar_t* dll_path) {
             s.preload_textures = parse_bool(val);
         } else if (key == "cachedrivetype") {
             s.cache_drive_type = parse_bool(val);
+        } else if (key == "cacheinputreads") {
+            const std::string v = lower(trim(val));
+            s.cache_input_reads = v == "auto" ? 2 : parse_bool(val) ? 1 : 0;
         } else if (key == "fasteffects") {
             s.fast_effects = parse_bool(val);
         } else if (key == "fastrendermath") {

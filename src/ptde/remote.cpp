@@ -16,6 +16,7 @@
 #include "surfpool.h"
 #include "d3dperf.h"
 #include "phases.h"
+#include "inputcache.h"
 #include "resolution.h"
 #include "rendermath.h"
 #include "watch.h"
@@ -1673,7 +1674,10 @@ void run_game(const std::vector<std::string>& t) {
     auto num = [&](size_t k, long dflt) { return k < t.size() ? std::strtol(t[k].c_str(), nullptr, 0) : dflt; };
     auto fnum = [&](size_t k) { return k < t.size() ? static_cast<float>(std::atof(t[k].c_str())) : 0.0f; };
     const std::string& c = t[0];
-    if (c == "speffect") {
+    if (c == "phases" && t.size() > 1) {
+        const uint32_t at = t.size() > 2 ? static_cast<uint32_t>(std::strtoul(t[2].c_str(), nullptr, 16)) : 0;
+        out("phases %s: %s", t[1].c_str(), phases_command(t[1].c_str(), at));
+    } else if (c == "speffect") {
         // speffect ID: apply SpEffectParam row ID to the player (diagnostics: ticking effects, SpEffect timing).
         out("speffect %ld: %s", num(1, 0), apply_speffect(player_chr(), static_cast<int>(num(1, 0))) ? "applied" :
             "refused");
@@ -1895,9 +1899,15 @@ void run(const std::string& line) {
         g_passdump_name = t[1];
         g_passdump_requested = true;
     } else if (c == "phases" && t.size() > 1) {
-        // phases on | phases add ADDR: subsystem times of the frame function ([phases] lines every 5 s).
-        const uint32_t at = t.size() > 2 ? static_cast<uint32_t>(std::strtoul(t[2].c_str(), nullptr, 16)) : 0;
-        out("phases %s: %s", t[1].c_str(), phases_command(t[1].c_str(), at));
+        // phases on | add ADDR | groups | tasks | vt:SLOT TABLE: subsystem times of the frame function ([phases] lines
+        // every 5 s). Patched on the game thread at a frame start.
+        std::lock_guard<std::mutex> lock(g_game_lock);
+        g_game_cmds.push_back(t);
+    } else if (c == "inputcache") {
+        unsigned long cached = 0, passed = 0;
+        inputcache_stats(&cached, &passed);
+        out("inputcache %d (cached %lu, passed %lu)", inputcache_set(t.size() > 1 ? static_cast<int>(num(1, 1)) : -1),
+            cached, passed);
     } else if (c == "d3dfast") {
         out("d3dfast %d", d3dperf_set_quick(t.size() > 1 ? static_cast<int>(num(1, 1)) : -1));
     } else if (c == "surfpool") {

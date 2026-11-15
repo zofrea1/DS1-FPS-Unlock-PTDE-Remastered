@@ -190,6 +190,8 @@ struct Settings {
     // The loader's drive type question (GetDriveTypeW for every file, asked while it holds the locks the game thread
     // waits on) is answered once per drive (drivetype.h). Independent of FPSUnlock.
     bool cache_drive_type = true;
+    // CacheInputReads (inputcache.h): 0 false, 1 true, 2 auto (under Wine).
+    int cache_input_reads = 2;
     // The effects library's debug checks (stack fills and guard checks, see ffx.h) are skipped.
     bool fast_effects = true;
     // Two hot render-thread math helpers run as SSE with identical results (see rendermath.h).
