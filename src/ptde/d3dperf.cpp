@@ -332,6 +332,7 @@ HRESULT set_sampler_cached(IDirect3DDevice9* device, DWORD sampler, int index, D
 // read from the thread block (fs:[0x24], what GetCurrentThreadId returns) and nothing else done. A call it does not
 // answer goes the full way. RemoteControl `d3dfast 0|1` turns it off and on for comparisons.
 volatile bool g_quick = true;
+volatile int g_wrap_quick = 2;  // the sampler wrappers' own quick answer (see ss_wrapper)
 
 }  // namespace
 
@@ -348,8 +349,11 @@ int d3dperf_set_filter(int on) {
 }
 
 int d3dperf_set_quick(int on) {
-    if (on >= 0) g_quick = on != 0;
-    return g_quick ? 1 : 0;
+    if (on >= 0) {
+        g_quick = on != 0;
+        g_wrap_quick = on;
+    }
+    return g_wrap_quick;
 }
 
 namespace {
@@ -430,6 +434,90 @@ HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMP
         }
     }
     return set_sampler_cached(device, sampler, index, type, value);
+}
+
+// The game's sampler-state wrappers (0x4022D0 .. 0x402450: cdecl (device, sampler, value or an index into the
+// engine's filter/address tables); each calls the device's SetSamplerState through its method table with a fixed
+// type) answer a repeat themselves: the same test as hook_set_sampler's quick answer, on the device the filter sits on
+// (not when another wrapper, DSfix, stands between), else the device call exactly as the original makes it.
+// RemoteControl `d3dfast 2` (default) / 1 (the hook's quick answer only) / 0.
+
+template <DWORD Type, uint32_t Table>
+HRESULT __cdecl ss_wrapper(IDirect3DDevice9* device, DWORD sampler, DWORD arg) {
+    const DWORD value = Table ? reinterpret_cast<const DWORD*>(Table)[arg] : arg;
+    if (g_wrap_quick >= 2 && device == g_filter_device && sampler < 16 && ((g_known[sampler] >> Type) & 1) &&
+        g_value[sampler][Type] == value && __readfsdword(0x24) == g_owner && !g_recording && g_ss_enabled &&
+        !(g_aniso > 1 && (Type == D3DSAMP_MINFILTER || Type == D3DSAMP_MIPFILTER || Type == D3DSAMP_MAXANISOTROPY))) {
+        g_seen = g_seen + 1;
+        g_filtered = g_filtered + 1;
+        return D3D_OK;
+    }
+    using Fn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, D3DSAMPLERSTATETYPE, DWORD);
+    return reinterpret_cast<Fn>((*reinterpret_cast<void***>(device))[kSetSamplerSlot])(
+        device, sampler, static_cast<D3DSAMPLERSTATETYPE>(Type), value);
+}
+
+struct Wrapper {
+    uint32_t address;
+    DWORD type;
+    uint32_t table;  // 0: the value is passed as is
+    const void* replacement;
+};
+const Wrapper kWrappers[] = {
+    {0x4022D0, 1, 0x10D3308, reinterpret_cast<const void*>(&ss_wrapper<1, 0x10D3308>)},
+    {0x402300, 2, 0x10D3308, reinterpret_cast<const void*>(&ss_wrapper<2, 0x10D3308>)},
+    {0x402330, 3, 0x10D3308, reinterpret_cast<const void*>(&ss_wrapper<3, 0x10D3308>)},
+    {0x402380, 5, 0x10D331C, reinterpret_cast<const void*>(&ss_wrapper<5, 0x10D331C>)},
+    {0x4023B0, 6, 0x10D331C, reinterpret_cast<const void*>(&ss_wrapper<6, 0x10D331C>)},
+    {0x4023E0, 7, 0x10D331C, reinterpret_cast<const void*>(&ss_wrapper<7, 0x10D331C>)},
+    {0x402410, 8, 0, reinterpret_cast<const void*>(&ss_wrapper<8, 0>)},
+    {0x402430, 9, 0, reinterpret_cast<const void*>(&ss_wrapper<9, 0>)},
+    {0x402450, 10, 0, reinterpret_cast<const void*>(&ss_wrapper<10, 0>)},
+};
+
+// The original bodies, byte for byte (type byte at +0x16 / +0x0F, table at +7), checked before each is replaced.
+bool wrapper_matches(const Wrapper& w) {
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(w.address);
+    if (w.table) {
+        static const uint8_t kHead[] = {0x8B, 0x54, 0x24, 0x0C, 0x8B, 0x14, 0x95};
+        static const uint8_t kTail[] = {0x8B, 0x44, 0x24, 0x04, 0x8B, 0x08, 0x52, 0x8B, 0x54, 0x24, 0x0C, 0x6A};
+        static const uint8_t kEnd[] = {0x52, 0x50, 0x8B, 0x81, 0x14, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0xC3};
+        uint32_t table = 0;
+        std::memcpy(&table, p + 7, 4);
+        return std::memcmp(p, kHead, sizeof(kHead)) == 0 && table == w.table &&
+               std::memcmp(p + 11, kTail, sizeof(kTail)) == 0 && p[23] == w.type &&
+               std::memcmp(p + 24, kEnd, sizeof(kEnd)) == 0;
+    }
+    static const uint8_t kHead[] = {0x8B, 0x54, 0x24, 0x0C, 0x8B, 0x44, 0x24, 0x04, 0x8B, 0x08, 0x52, 0x8B, 0x54, 0x24,
+                                    0x0C, 0x6A};
+    static const uint8_t kEnd[] = {0x52, 0x50, 0x8B, 0x81, 0x14, 0x01, 0x00, 0x00, 0xFF, 0xD0, 0xC3};
+    return std::memcmp(p, kHead, sizeof(kHead)) == 0 && p[16] == w.type && std::memcmp(p + 17, kEnd, sizeof(kEnd)) == 0;
+}
+
+int install_sampler_wrappers() {
+    for (const Wrapper& w : kWrappers) {
+        if (!wrapper_matches(w)) {
+            LOG_INFO("FilterSamplerStates: the sampler wrapper at %08X is not the expected code; the wrappers are left "
+                     "alone",
+                     w.address);
+            return 0;
+        }
+    }
+    int n = 0;
+    for (const Wrapper& w : kWrappers) {
+        auto* at = reinterpret_cast<uint8_t*>(w.address);
+        DWORD old = 0;
+        if (!VirtualProtect(at, 5, PAGE_EXECUTE_READWRITE, &old)) continue;
+        uint8_t jmp[5] = {0xE9};
+        const int32_t rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(w.replacement) - (w.address + 5));
+        std::memcpy(jmp + 1, &rel, 4);
+        std::memcpy(at, jmp, 5);
+        DWORD ignored = 0;
+        VirtualProtect(at, 5, old, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), at, 5);
+        ++n;
+    }
+    return n;
 }
 
 HRESULT set_sampler_cached(IDirect3DDevice9* device, DWORD sampler, int index, D3DSAMPLERSTATETYPE type, DWORD value) {
@@ -729,6 +817,10 @@ void d3dperf_hook_device(IDirect3DDevice9* game_device, bool readback, bool filt
         g_vsc_enabled = constants;
         g_ss_enabled = filter;
         install_filter(game_device);
+        if (filter && g_set_sampler) {
+            const int n = install_sampler_wrappers();
+            if (n) LOG_INFO("FilterSamplerStates: the game's %d sampler-state wrappers answer repeats themselves", n);
+        }
         if (g_aniso > 1 && g_set_sampler) {
             LOG_INFO("AnisotropicFiltering: %dx on mipmapped textures (render target reads keep their filter)", g_aniso);
         }
