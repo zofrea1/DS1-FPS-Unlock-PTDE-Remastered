@@ -1192,9 +1192,18 @@ uintptr_t entity_lookup(uint32_t fn, int entity) {
 }
 
 // The event command Warp Character to a region (2004[41], target type 1): eax = the character's entity,
-// stdcall(region, 1) at 0xD71A90.
-bool warp_chr(int who, int region) {
+// stdcall(region, 1) at 0xD71A90. With `floor` (not 0) first the copy of that entity's floor (2004[42]: eax = the
+// character's entity, stdcall(floor) at 0xD61950), so the ground there is loaded.
+bool warp_chr(int who, int region, int floor = 0) {
     __try {
+        if (floor) {
+            __asm {
+                push floor
+                mov eax, who
+                mov edx, 0x00D61950
+                call edx
+            }
+        }
         __asm {
             push 1
             push region
@@ -1630,9 +1639,12 @@ void run_game(const std::vector<std::string>& t) {
     } else if (c == "warpchr") {
         // warpchr ENTITY REGION: the event command Warp Character to a region (2004[41], target type 1: eax = the
         // character's entity, stdcall(region, 1) at 0xD71A90), within the loaded map. 10000 = the player.
-        // warpchr ENTITY REGION [MS]: again every game frame for MS ms, while the ground there loads.
+        // warpchr ENTITY REGION [MS [FLOOR]]: again every game frame for MS ms, while the ground there loads; FLOOR:
+        // first take that entity's floor (a character standing near the region).
         const int who = static_cast<int>(num(1, 10000)), region = static_cast<int>(num(2, 0));
-        out("warpchr %d -> region %d: %s", who, region, warp_chr(who, region) ? "done" : "exception");
+        const int floor = static_cast<int>(num(4, 0));
+        out("warpchr %d -> region %d (floor of %d): %s", who, region, floor,
+            warp_chr(who, region, floor) ? "done" : "exception");
         g_warp_who = who;
         g_warp_region = region;
         g_warp_until = GetTickCount64() + static_cast<ULONGLONG>(num(3, 0));
