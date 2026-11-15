@@ -21,6 +21,10 @@ struct PtdeExtension {
     bool (*wants_device)();
     // Each device the game creates, before this mod hooks the device itself.
     void (*device_created)(IDirect3DDevice9* device);
+    // True when the bundled mod hooks the game's Steam imports itself (SteamAPI_RunCallbacks, SteamMatchmaking,
+    // SteamNetworking) and asks SteamPauseGuard (steamguard.h); false when it is off, and then this mod hooks them as
+    // it does on its own. Asked from the start-up thread, after attach. Left out (nullptr): the bundled mod hooks them.
+    bool (*hooks_steam_imports)();
 };
 
 // nullptr when nothing is bundled.

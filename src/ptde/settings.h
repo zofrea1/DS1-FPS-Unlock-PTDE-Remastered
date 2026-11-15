@@ -164,7 +164,7 @@ struct Settings {
     // Disable the game's catch-up loop that re-presents a frame until the display's
     // vblank counter reaches its 30 FPS schedule.
     bool skip_present_repeat = false;
-    // Run Direct3D 9 on Vulkan through DXVK (dxvk_d3d9.dll beside this DLL). Off by default.
+    // Run Direct3D 9 on Vulkan through DXVK (dxvk_d3d9.dll beside this DLL). On by default since 2.3.0.
     bool dxvk = true;
     // DXVK may take exclusive fullscreen (dxvk.allowFse), which G-SYNC / variable refresh needs under DXVK (dxvk.h):
     // 0 auto (only while Windows HDR is off for the display), 1 always, 2 never.

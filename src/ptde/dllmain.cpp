@@ -150,8 +150,12 @@ DWORD WINAPI worker(void*) {
         if (settings.fix_controller) {
             controller_install(settings);
         }
-        // Prepare to Co-op hooks SteamAPI_RunCallbacks itself and asks the guard (steamguard.h).
-        steamguard_start(settings.steam_pause_guard, ptde_extension() == nullptr);
+        // Prepare to Co-op hooks SteamAPI_RunCallbacks itself and asks the guard (steamguard.h), but only while the
+        // co-op is on: with it off the guard hooks the game's own Steam imports, as on its own.
+        const PtdeExtension* steam_ext = ptde_extension();
+        const bool ext_hooks_steam =
+            steam_ext && (!steam_ext->hooks_steam_imports || steam_ext->hooks_steam_imports());
+        steamguard_start(settings.steam_pause_guard, !ext_hooks_steam);
         frame_install(settings);
         // Last: it looks for the library's exact debug prologues (see ffx.h).
         if (settings.fast_effects) {

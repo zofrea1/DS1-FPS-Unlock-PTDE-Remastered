@@ -31,7 +31,11 @@ struct Table {
     GetStateFn original;
 };
 Table g_tables[4];
-int g_table_n = 0;
+// How many entries of g_tables are complete. Published with an interlocked increment after the entry is written and
+// before the method table points at the hook, and read with an interlocked read before the entries are used, so a
+// thread that comes in through a hooked table always finds its entry (under Box64 and FEX a plain count could be seen
+// late, review 2026-11-15).
+volatile LONG g_table_n = 0;
 
 struct Cached {
     uint32_t frame;
@@ -43,15 +47,23 @@ volatile LONG g_cached = 0, g_passed = 0;
 
 GetStateFn original_for(void* self) {
     void** vt = *reinterpret_cast<void***>(self);
-    for (int i = 0; i < g_table_n; ++i) {
+    const LONG n = InterlockedCompareExchange(&g_table_n, 0, 0);  // acquire: the entries below n are complete
+    for (LONG i = 0; i < n; ++i) {
         if (g_tables[i].vt == vt) return g_tables[i].original;
     }
-    return nullptr;
+    // Only tables we hooked lead here, and each entry is complete before the count includes it. Should one still be
+    // missing, the saved original when every hooked table has the same one (DirectInput's devices and current Wine's
+    // share one GetDeviceState; older Wine had one per kind), rather than failing the read.
+    if (n <= 0) return nullptr;
+    for (LONG i = 1; i < n; ++i) {
+        if (g_tables[i].original != g_tables[0].original) return nullptr;
+    }
+    return g_tables[0].original;
 }
 
 HRESULT WINAPI hook_get_state(void* self, DWORD size, void* data) {
     const GetStateFn original = original_for(self);
-    if (!original) return E_FAIL;  // cannot happen: only tables we hooked lead here
+    if (!original) return E_FAIL;  // cannot happen: only complete entries' tables lead here
     const int k = size == 20 ? 0 : size == 256 ? 1 : -1;
     if (!g_on || k < 0 || !data || GetCurrentThreadId() != g_game_tid) return original(self, size, data);
     Cached& c = g_cache[k];
@@ -90,8 +102,7 @@ bool hook_table(void** vt) {
     // The original first (other threads may call through the table as soon as the entry changes).
     g_tables[g_table_n].vt = vt;
     g_tables[g_table_n].original = reinterpret_cast<GetStateFn>(*entry);
-    MemoryBarrier();
-    ++g_table_n;
+    InterlockedIncrement(&g_table_n);  // release: the entry is complete before the count and the table say so
     InterlockedExchange(reinterpret_cast<volatile LONG*>(entry), static_cast<LONG>(reinterpret_cast<uintptr_t>(&hook_get_state)));
     DWORD ignored = 0;
     VirtualProtect(entry, sizeof(void*), old, &ignored);
@@ -138,7 +149,7 @@ void inputcache_game_frame() {
         g_hooked = true;
         LOG_INFO("CacheInputReads: %s; the keyboard and mouse are read once a frame for the game's four input users "
                  "(%d DirectInput devices, %d method table(s))",
-                 g_on ? "on" : "off for now", n, g_table_n);
+                 g_on ? "on" : "off for now", n, static_cast<int>(g_table_n));
     } else if (g_tries == 200) {
         LOG_INFO("CacheInputReads: the game's keyboard and mouse devices were not found; left alone");
     }
