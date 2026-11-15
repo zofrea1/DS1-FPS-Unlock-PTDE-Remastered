@@ -1323,6 +1323,42 @@ void track_frame() {
         if (n >= static_cast<int>(sizeof(line)) - 80) break;
     }
     out("%s", line);
+    // The attacks alive now (the list of 0x137D6AC's manager, linked at +0x1D0): every float triple in their first
+    // 0x1D0 bytes within 3 m of the tracked map object's bone 0 (what the hit test of an event's damaging object uses).
+    float near_to[3] = {0, 0, 0};
+    bool have = false;
+    for (const Tracked& e : g_tracked) {
+        uint32_t model = 0;
+        if (e.obj && safe_read(e.obj + 0x90, &model, 4) && model) {
+            float b[12] = {};
+            safe_read(model + 0xB0, b, sizeof(b));
+            near_to[0] = b[3];
+            near_to[1] = b[7];
+            near_to[2] = b[11];
+            have = b[3] != 0.0f || b[11] != 0.0f;
+        }
+    }
+    uint32_t mgr = 0, atk = 0;
+    if (!have || !safe_read(0x0137D6AC, &mgr, 4) || !mgr || !safe_read(mgr, &atk, 4)) return;
+    for (int k = 0; atk && k < 16; ++k) {
+        float f[0x1D0 / 4];
+        if (!safe_read(atk, f, sizeof(f))) break;
+        char al[600];
+        int an = std::snprintf(al, sizeof(al), "atk %08X", static_cast<unsigned>(atk));
+        int hits = 0;
+        for (int i = 0; i + 2 < static_cast<int>(sizeof(f) / 4) && hits < 10; ++i) {
+            const float dx = f[i] - near_to[0], dy = f[i + 1] - near_to[1], dz = f[i + 2] - near_to[2];
+            if (f[i] == f[i] && dx * dx + dy * dy + dz * dz < 9.0f) {
+                an += std::snprintf(al + an, sizeof(al) - an, " +%X %.3f %.3f %.3f", i * 4, f[i], f[i + 1], f[i + 2]);
+                ++hits;
+                i += 2;
+            }
+        }
+        if (hits) out("%s", al);
+        uint32_t next = 0;
+        if (!safe_read(atk + 0x1D0, &next, 4)) break;
+        atk = next;
+    }
 }
 
 // memsnap NAME N: the game's writable memory (private regions and the exe's data sections) written to
