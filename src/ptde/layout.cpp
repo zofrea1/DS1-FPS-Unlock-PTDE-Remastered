@@ -1191,7 +1191,31 @@ bool layout_map_scissor(IDirect3DDevice9* dev, const RECT* r, int frame_w, int f
     if (!r || r->left < 0 || r->top < 0 || r->right > 1280 || r->bottom > 720) return false;
     shape_now();
     const bool shaped = g_kx != 1.0f || g_ky != 1.0f;
-    if (!shaped && frame_w == 1280 && frame_h == 720) return false;
+    // A window over the HUD drawn smaller (UIScale, window_for): a clipping rectangle inside it goes with it. A
+    // message's text is drawn through one; the rectangle stayed where it was and cut the shrunk text away
+    // (2026-11-14: "Need humanity" was gone, its rating left).
+    double l = r->left, t = r->top, rr = r->right, b = r->bottom;
+    bool fitted = false;
+    for (int i = 0; i < g_window_count; ++i) {
+        const Window& w = g_windows[i];
+        if (!inside(w, static_cast<float>(l), static_cast<float>(t), static_cast<float>(rr), static_cast<float>(b))) {
+            continue;
+        }
+        const double s = g_scale, mid = kLayoutW * 0.5;
+        l = mid + (l - mid) * s;
+        rr = mid + (rr - mid) * s;
+        t = w.ay + (t - w.ay) * s;
+        b = w.ay + (b - w.ay) * s;
+        fitted = true;
+        static int logged_fit = 0;  // the first few, for the log
+        if (logged_fit < 3) {
+            ++logged_fit;
+            LOG_INFO("UIScale: a clipping rectangle (%ld,%ld-%ld,%ld) in a window over the HUD is drawn at %.0f%% with "
+                     "it", r->left, r->top, r->right, r->bottom, s * 100.0);
+        }
+        break;
+    }
+    if (!shaped && frame_w == 1280 && frame_h == 720 && !fitted) return false;
     IDirect3DSurface9* rt = nullptr;
     D3DSURFACE_DESC d{};
     const bool frame = SUCCEEDED(dev->GetRenderTarget(0, &rt)) && rt && SUCCEEDED(rt->GetDesc(&d)) &&
@@ -1217,10 +1241,10 @@ bool layout_map_scissor(IDirect3DDevice9* dev, const RECT* r, int frame_w, int f
     // 1280x720 onto the viewport, about its middle by kx and ky
     const double sx = vp.Width / 1280.0 * g_kx, sy = vp.Height / 720.0 * g_ky;
     const double ox = vp.X + vp.Width * (1.0 - g_kx) * 0.5, oy = vp.Y + vp.Height * (1.0 - g_ky) * 0.5;
-    out->left = static_cast<LONG>(ox + r->left * sx);
-    out->top = static_cast<LONG>(oy + r->top * sy);
-    out->right = static_cast<LONG>(ox + r->right * sx + 0.999);
-    out->bottom = static_cast<LONG>(oy + r->bottom * sy + 0.999);
+    out->left = static_cast<LONG>(ox + l * sx);
+    out->top = static_cast<LONG>(oy + t * sy);
+    out->right = static_cast<LONG>(ox + rr * sx + 0.999);
+    out->bottom = static_cast<LONG>(oy + b * sy + 0.999);
     static int logged = 0;  // the first few, for the log
     if (logged < 6) {
         ++logged;
