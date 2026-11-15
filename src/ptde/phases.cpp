@@ -32,12 +32,12 @@ struct Site {
     uint32_t vt;       // a method table's slot instead of a call site: the table
     int slot;
 };
-constexpr int kMaxSites = 64;
+constexpr int kMaxSites = 200;
 Site g_sites[kMaxSites];
 int g_count = 0;
 uint8_t* g_code = nullptr;  // stubs (executable)
 size_t g_code_used = 0;
-constexpr size_t kCodeSize = 64 * 96;
+constexpr size_t kCodeSize = 200 * 96;
 
 bool g_active = false;
 uint64_t g_frame_ticks = 0;
@@ -166,10 +166,19 @@ void report() {
     char line[2048];
     int n = std::snprintf(line, sizeof(line), "[phases] %.1fs %u frames, ms per frame: frame %.3f |", ms / 1000.0,
                           g_frames, static_cast<double>(g_frame_ticks) / g_tsc_per_ms / g_frames);
-    uint64_t sum = 0;
-    for (int i = 0; i < g_count && n > 0 && n < static_cast<int>(sizeof(line)) - 40; ++i) {
+    for (int i = 0; i < g_count; ++i) {
         Site& s = g_sites[i];
-        sum += s.ticks;
+        if (n > static_cast<int>(sizeof(line)) - 60) {
+            LOG_INFO("%s", line);
+            n = std::snprintf(line, sizeof(line), "[phases]   ...");
+        }
+        // Past the frame function's own sites, only those that take some time (0.002 ms a frame or more).
+        if (i >= static_cast<int>(sizeof(kFrameSites) / sizeof(kFrameSites[0])) &&
+            static_cast<double>(s.ticks) / g_tsc_per_ms / g_frames < 0.002) {
+            s.ticks = 0;
+            s.calls = 0;
+            continue;
+        }
         if (s.vt) {
             n += std::snprintf(line + n, sizeof(line) - n, " vt%X/%d %.3f (%.1f/f)", s.vt, s.slot,
                                static_cast<double>(s.ticks) / g_tsc_per_ms / g_frames,
@@ -334,6 +343,60 @@ const char* tasks_on() {
     return "timed";
 }
 
+// Step state calls (0x4557C0, the step dispatcher every *Step task runs through: MoveMapStep's world update and the
+// rest): push ebp / push ecx / mov ecx, esi / fstp dword [esp] / call eax at 0x4557DE..0x4557E6 (no branch lands
+// inside). The nine bytes become a call to step_stub and a short jump to 0x4557E7; timed by the state function.
+constexpr uint32_t kStepPatch = 0x4557DE;
+bool g_steps_on = false;
+
+__declspec(naked) void step_stub() {
+    __asm {
+        push eax                    // the state function (the key)
+        rdtsc
+        push edx
+        push eax                    // [esp] start lo, +4 hi, +8 function, +12 return
+        mov eax, dword ptr [esp + 8]
+        push ebp
+        push ecx
+        mov ecx, esi
+        fstp dword ptr [esp]
+        call eax                    // pops its two arguments
+        rdtsc
+        sub eax, dword ptr [esp]
+        sbb edx, dword ptr [esp + 4]
+        push edx
+        push eax
+        push dword ptr [esp + 16]
+        call task_add
+        add esp, 12 + 12
+        ret
+    }
+}
+
+const char* steps_on() {
+    if (g_steps_on) return "already timed";
+    if (!g_game_tid) g_game_tid = GetCurrentThreadId();
+    auto* at = reinterpret_cast<uint8_t*>(kStepPatch);
+    static const uint8_t kExpect[9] = {0x55, 0x51, 0x8B, 0xCE, 0xD9, 0x1C, 0x24, 0xFF, 0xD0};
+    if (std::memcmp(at, kExpect, 9) != 0) return "unexpected bytes";
+    DWORD old = 0;
+    if (!VirtualProtect(at, 9, PAGE_EXECUTE_READWRITE, &old)) return "could not unprotect";
+    uint8_t code[9];
+    code[0] = 0xE8;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uint32_t>(&step_stub) - (kStepPatch + 5));
+    std::memcpy(code + 1, &rel, 4);
+    code[5] = 0xEB;  // jmp 0x4557E7
+    code[6] = 0x02;
+    code[7] = 0x90;
+    code[8] = 0x90;
+    std::memcpy(at, code, 9);
+    DWORD ignored = 0;
+    VirtualProtect(at, 9, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), at, 9);
+    g_steps_on = true;
+    return "timed";
+}
+
 // The class name of a method table from the game's run-time type information (vtable[-1] = complete object
 // locator, +12 = type descriptor, name at +8, ".?AV...@@").
 bool rtti_name_raw(uint32_t vt, char* out, size_t n) {
@@ -351,7 +414,7 @@ bool rtti_name_raw(uint32_t vt, char* out, size_t n) {
 }
 
 void report_tasks(double tsc_per_ms, uint32_t frames) {
-    if (!g_tasks_on || frames == 0) return;
+    if ((!g_tasks_on && !g_steps_on) || frames == 0) return;
     // top 14 by time
     for (int k = 0; k < 14; ++k) {
         int best = -1;
@@ -416,6 +479,11 @@ const char* phases_command(const char* verb, uint32_t address) {
             LOG_INFO("[phases] timing %d calls of the frame function", g_count);
         }
         return "on";
+    }
+    if (std::strcmp(verb, "steps") == 0) {
+        const char* r = steps_on();
+        LOG_INFO("[phases] step states: %s", r);
+        return r;
     }
     if (std::strcmp(verb, "tasks") == 0) {
         const char* r = tasks_on();
