@@ -295,6 +295,9 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         gamma_hook_device(*out, settings().gamma_ramp, g_dxvk_active);
         resolution_hook_device(*out);
         resolution_sun_hook_device(*out);
+        if (settings().fix_water_with_dsfix && dsfix_dof_override() > 0 && !resolution_is_active()) {
+            resolution_water_hook_device(*out, dsfix_dof_override());
+        }
         if (settings().alpha_to_coverage) {
             atoc_hook_device(*out, settings().alpha_to_coverage_force);
         }

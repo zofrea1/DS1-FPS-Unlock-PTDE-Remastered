@@ -106,6 +106,8 @@ struct Settings {
     bool hide_mouse_cursor = true;
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.
     bool fix_sun_with_dsfix = true;
+    // With DSfix 2.x's dofOverrideResolution and its resolution: the water surfaces no longer break into blocks.
+    bool fix_water_with_dsfix = true;
     // YieldToDSFix: with DSfix loaded, DSfix's own settings decide the resolution (and what rides on it), the
     // texture filtering and the HUD's size; ours step back (dsfix.h).
     bool yield_to_dsfix = false;

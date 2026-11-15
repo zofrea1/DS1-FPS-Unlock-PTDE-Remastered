@@ -205,6 +205,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.yield_to_dsfix = parse_bool(val);
         } else if (key == "fixsun") {
             s.fix_sun_with_dsfix = parse_bool(val);
+        } else if (key == "fixwater") {
+            s.fix_water_with_dsfix = parse_bool(val);
         } else if (key == "hidemousecursor") {
             s.hide_mouse_cursor = parse_bool(val);
         } else if (key == "shadowmapresolution") {

@@ -55,6 +55,8 @@ void dsfix_render_size(int* width, int* height) {
     *height = g_last.render_height;
 }
 
+int dsfix_dof_override() { return dsfix_loaded() ? g_last.dof_override : 0; }
+
 DsfixInfo dsfix_probe_impl(const wchar_t* game_dir);
 
 DsfixInfo dsfix_probe(const wchar_t* game_dir) {
@@ -90,6 +92,8 @@ DsfixInfo dsfix_probe_impl(const wchar_t* game_dir) {
                 info.render_width = std::atoi(value.c_str());
             } else if (key == "renderHeight") {
                 info.render_height = std::atoi(value.c_str());
+            } else if (key == "dofOverrideResolution") {
+                info.dof_override = std::atoi(value.c_str());
             } else if (key == "skipIntro") {
                 info.skip_intro = std::atoi(value.c_str()) != 0;
             }

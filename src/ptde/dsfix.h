@@ -14,6 +14,7 @@ struct DsfixInfo {
     int filtering_override = 0;  // DSfix.ini "filteringOverride" (0 off, 1 trilinear, 2 anisotropic)
     int render_width = 1024;     // DSfix.ini "renderWidth" / "renderHeight" (1024x720 = the game's own)
     int render_height = 720;
+    int dof_override = 0;        // DSfix.ini "dofOverrideResolution" (0: its 512x360 targets keep their size)
 };
 
 DsfixInfo dsfix_probe(const wchar_t* game_dir);
@@ -25,6 +26,8 @@ bool dsfix_changes_resolution();
 bool dsfix_loaded();
 // DSfix's render size from the last probe (1024x720 when it does not change it).
 void dsfix_render_size(int* width, int* height);
+// DSfix's dofOverrideResolution from the last probe (0 when unset or DSfix is not loaded).
+int dsfix_dof_override();
 // YieldToDSFix: with DSfix loaded, this mod's picture settings that DSfix has its own of step back (the resolution with
 // what rides on it, anisotropic filtering, the HUD's size). dsfix_yields() is true only with both. Set from DllMain.
 void dsfix_set_yield(bool on);

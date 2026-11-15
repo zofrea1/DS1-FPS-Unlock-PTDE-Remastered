@@ -1544,6 +1544,50 @@ void resolution_sun_hook_device(IDirect3DDevice9* dev) {
     q->Release();
 }
 
+namespace {
+// The water's ripples (ps_9c053ad3 and the other water shaders): a 512x360 screen-space buffer of the surface's
+// normals (drawn first, T40 in RemoteControl's frame log) read back with taps one texel apart, the texel being
+// DL_FREG_164 = c164 = (512, 360, 1/512, 1/360), set once a frame with the game's other globals (163..176).
+constexpr UINT kWaterReg = 164;
+constexpr int kSetPsConstSlot = 109;
+using SetPsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
+SetPsConstFn o_set_ps_const_water = nullptr;
+float g_water_size[4] = {};
+volatile LONG g_water_logged = 0;
+
+HRESULT WINAPI hk_set_ps_const_water(IDirect3DDevice9* dev, UINT start, const float* data, UINT count) {
+    if (data && start <= kWaterReg && kWaterReg < start + count && count <= 64) {
+        const float* c = data + (kWaterReg - start) * 4;
+        if (c[0] == 512.0f && c[1] == 360.0f && c[2] == 1.0f / 512 && c[3] == 1.0f / 360) {
+            float copy[64 * 4];
+            std::memcpy(copy, data, count * 4 * sizeof(float));
+            std::memcpy(copy + (kWaterReg - start) * 4, g_water_size, sizeof(g_water_size));
+            if (InterlockedExchange(&g_water_logged, 1) == 0) {
+                LOG_INFO("Water: the ripples' texel (c164) set to DSfix's %gx%g in place of 512x360 (first frame)",
+                         g_water_size[0], g_water_size[1]);
+            }
+            return o_set_ps_const_water(dev, start, copy, count);
+        }
+    }
+    return o_set_ps_const_water(dev, start, data, count);
+}
+}  // namespace
+
+void resolution_water_hook_device(IDirect3DDevice9* dev, int dof_override) {
+    if (!dev || dof_override <= 0 || o_set_ps_const_water) return;
+    // DSfix's size for the game's 512x360 targets (getDofRes: the override's 16:9 width and its height).
+    const UINT w = static_cast<UINT>(dof_override) * 16 / 9, h = static_cast<UINT>(dof_override);
+    const float size[4] = {static_cast<float>(w), static_cast<float>(h), 1.0f / w, 1.0f / h};
+    std::memcpy(g_water_size, size, sizeof(size));
+    void* p = patch_slot(dev, kSetPsConstSlot, reinterpret_cast<void*>(&hk_set_ps_const_water));
+    if (p) {
+        o_set_ps_const_water = reinterpret_cast<SetPsConstFn>(p);
+        LOG_INFO("Water: DSfix's dofOverrideResolution %d makes the game's 512x360 targets %ux%u, the water's normals "
+                 "among them; the ripples are read with that texel (DSfix 3.0 sets it itself: then nothing changes)",
+                 dof_override, w, h);
+    }
+}
+
 void resolution_bypass_dsfix(bool on) { g_bypass_dsfix = on; }
 
 // HighPrecisionColor. The scene's colour targets are 8-bit (A8R8G8B8): every layer of fog, smoke or glow blended into

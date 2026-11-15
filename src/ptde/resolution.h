@@ -66,3 +66,10 @@ void resolution_set_high_precision_color(bool on);
 bool resolution_dsfix_sun(double probe_factor, double dsfix_factor);
 // From device creation, on the real device (under DSfix's wrapper): watches the first occlusion count for the above.
 void resolution_sun_hook_device(IDirect3DDevice9* dev);
+
+// Water beside DSfix 2.x's dofOverrideResolution (FixWater). DSfix makes every 512x360 texture the game asks for
+// (override x 16/9) x override, among them the water's buffer of surface normals, but the game still reads that buffer
+// with a 512x360 texel (c164), so the ripples break into blocks. DSfix 3.0 (and Durante's repository since 2016, after
+// the 2.4 release) sets c164 itself; here it is set the same way when it still holds 512x360. Only while DSfix makes
+// the resolution: with our RenderResolution the game's 512x360 targets are made beside DSfix and keep their size.
+void resolution_water_hook_device(IDirect3DDevice9* dev, int dof_override);
