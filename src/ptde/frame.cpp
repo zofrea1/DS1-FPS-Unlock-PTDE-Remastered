@@ -568,6 +568,7 @@ bool frame_install(const Settings& settings) {
             resolution_set_dof_strength(settings.dof_strength);
             resolution_set_dof_resolution(settings.dof_resolution != 0 ? 100 : 0, settings.dof_resolution == 2);
             resolution_set_effects(settings.effects_resolution);
+            resolution_set_water(settings.water_resolution);
             // DSfix's own post-processing expects the game's 8-bit scene.
             resolution_set_high_precision_color(settings.high_precision_color && !dsfix_loaded());
             if (settings.high_precision_color && dsfix_loaded()) {

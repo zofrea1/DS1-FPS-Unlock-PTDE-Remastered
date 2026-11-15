@@ -388,6 +388,113 @@ void fx_release_target() {
     g_fx.hdepth_filled = false;
 }
 
+// The water's ripples at the render resolution (WaterResolution). The game draws the water's surface normals into a
+// 512x360 colour target (T40 in RemoteControl's frame log, made the first time water is drawn) over the effects'
+// 512x360 depth, cleared first to transparent black with its depth and stencil, then reads that target back in the
+// water's own draws, stepping one texel at a time with c164 = (512, 360, 1/512, 1/360), which it sets once a frame
+// with its other globals: at 4K each texel of the ripples covered 7.5x6 pixels, where the game drew them over 2x2 at
+// its 1024x720. Here that pass goes into a target of ours (half the scene's size, the game's own ratio, or the
+// scene's size) with a depth of ours and its viewport and clipping rectangle scaled; ours is read wherever the game
+// reads its, and while it is bound c164 holds its size (the game's value is put back when it is unbound). The pass is
+// recognized each frame by that clear, so a target the game makes again (after an area change) is followed.
+struct Water {
+    volatile LONG mode = 0;  // 0 the game's, 1 half the scene's size, 2 the scene's size
+    IDirect3DTexture9* tex = nullptr;
+    IDirect3DSurface9* surf = nullptr;
+    IDirect3DSurface9* ds = nullptr;
+    UINT w = 0, h = 0;
+    IDirect3DBaseTexture9* game_tex = nullptr;  // the game's target as found at the last clear (identity only)
+    IDirect3DSurface9* game_ds = nullptr;       // the depth the game had with it
+    bool bound = false;        // our target is render target 0, from the clear to the game's next target
+    DWORD stages = 0;          // texture stages where ours stands in for the game's
+    bool c164_ours = false;    // c164 holds our size (while ours is bound to a stage)
+    float game_c164[4] = {512.0f, 360.0f, 1.0f / 512, 1.0f / 360};
+    bool failed = false;
+    bool logged = false;
+};
+Water g_water;
+using WaterPsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
+WaterPsConstFn o_set_ps_const_water = nullptr;
+constexpr UINT kWaterReg = 164;
+
+void water_release() {
+    if (g_water.surf) g_water.surf->Release();
+    if (g_water.tex) g_water.tex->Release();
+    if (g_water.ds) g_water.ds->Release();
+    g_water.surf = nullptr;
+    g_water.tex = nullptr;
+    g_water.ds = nullptr;
+    g_water.w = g_water.h = 0;
+}
+
+bool water_ready(IDirect3DDevice9* dev) {
+    const bool full = g_water.mode == 2;
+    const UINT w = full ? g_render_w : (g_render_w + 1) / 2, h = full ? g_render_h : (g_render_h + 1) / 2;
+    if (g_water.tex && g_water.w == w && g_water.h == h) return true;
+    water_release();
+    if (g_water.failed) return false;
+    if (FAILED(dev->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_water.tex,
+                                  nullptr)) ||
+        FAILED(g_water.tex->GetSurfaceLevel(0, &g_water.surf)) ||
+        FAILED(dev->CreateDepthStencilSurface(w, h, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &g_water.ds,
+                                              nullptr))) {
+        LOG_ERROR("Resolution: could not make the water's %ux%u target; the game's 512x360 one is kept", w, h);
+        water_release();
+        g_water.failed = true;
+        return false;
+    }
+    g_water.w = w;
+    g_water.h = h;
+    if (!g_water.logged) {
+        g_water.logged = true;
+        LOG_INFO("Resolution: the water's ripples are drawn at %ux%u (were 512x360; first water in view)", w, h);
+    }
+    return true;
+}
+
+// c164 to our target's size (ours = true) or back to the game's last value.
+void water_c164(IDirect3DDevice9* dev, bool ours) {
+    if (g_water.c164_ours == ours || !o_set_ps_const_water) return;
+    g_water.c164_ours = ours;
+    const float mine[4] = {static_cast<float>(g_water.w), static_cast<float>(g_water.h), 1.0f / g_water.w,
+                           1.0f / g_water.h};
+    o_set_ps_const_water(dev, kWaterReg, ours ? mine : g_water.game_c164, 1);
+}
+
+HRESULT WINAPI hk_set_ps_const_water(IDirect3DDevice9* dev, UINT start, const float* data, UINT count) {
+    if (data && start <= kWaterReg && kWaterReg < start + count) {
+        std::memcpy(g_water.game_c164, data + (kWaterReg - start) * 4, sizeof(g_water.game_c164));
+        if (g_water.c164_ours && count <= 64) {
+            float copy[64 * 4];
+            std::memcpy(copy, data, count * 4 * sizeof(float));
+            const float mine[4] = {static_cast<float>(g_water.w), static_cast<float>(g_water.h), 1.0f / g_water.w,
+                                   1.0f / g_water.h};
+            std::memcpy(copy + (kWaterReg - start) * 4, mine, sizeof(mine));
+            return o_set_ps_const_water(dev, start, copy, count);
+        }
+    }
+    return o_set_ps_const_water(dev, start, data, count);
+}
+
+// The water's pass: a clear of colour, depth and stencil to transparent black on a 512x360 colour target with a
+// 512x360 depth (the effects' pass clears its target alone, to opaque black; the depth of field's, depth and stencil).
+bool water_pass_clear(DWORD count, DWORD flags, D3DCOLOR color) {
+    if (!g_water.mode || g_fx.phase || count != 0 || color != 0 ||
+        flags != (D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL)) {
+        return false;
+    }
+    return surface_is(g_fx.rt0, kSmallW, kSmallH, D3DFMT_A8R8G8B8) &&
+           surface_is(g_fx.ds, kSmallW, kSmallH, D3DFMT_D24S8);
+}
+
+void water_forget() {
+    g_water.game_tex = nullptr;
+    g_water.game_ds = nullptr;
+    g_water.bound = false;
+    g_water.stages = 0;
+    g_water.c164_ours = false;
+}
+
 void fx_forget_sequence() {
     g_fx.rt0 = g_fx.ds = nullptr;
     g_fx.depth_full = g_fx.depth_small = nullptr;
@@ -609,6 +716,7 @@ HRESULT fx_composite(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, c
 
 HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt) {
     if (index == 0) {
+        g_water.bound = false;
         if (g_fx.phase) fx_end(dev);
         g_fx.rt0 = rt;
     }
@@ -617,6 +725,7 @@ HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* 
 
 HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
     g_fx.ds = ds;
+    if (g_water.bound && ds && ds == g_water.game_ds) return o_set_ds(dev, g_water.ds);
     if (g_fx.phase && ds && ds == g_fx.depth_small_ds) return o_set_ds(dev, g_fx.hdepth ? g_fx.hdepth_surf : g_fx.scene_ds);
     // 2: the scene's colour and depth bound together, both the scene's size and not multisampled.
     if (!g_fx.phase && g_fx_mode && ds && render_size(ds) && render_size(g_fx.rt0)) g_fx.scene_ds = ds;
@@ -625,6 +734,17 @@ HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
 
 HRESULT WINAPI hk_clear(IDirect3DDevice9* dev, DWORD count, const D3DRECT* rects, DWORD flags, D3DCOLOR color, float z,
                         DWORD stencil) {
+    if (water_pass_clear(count, flags, color)) {
+        IDirect3DBaseTexture9* t = container_of(g_fx.rt0);
+        if (t && water_ready(dev)) {
+            g_water.game_tex = t;
+            g_water.game_ds = g_fx.ds;
+            o_set_rt(dev, 0, g_water.surf);
+            o_set_ds(dev, g_water.ds);
+            g_water.bound = true;
+            return o_clear(dev, count, rects, flags, color, z, stencil);
+        }
+    }
     const HRESULT hr = o_clear(dev, count, rects, flags, color, z, stencil);
     // 3: the effects target cleared to black with alpha 1, over the 512x360 depth from 1.
     if (g_fx_mode && !g_fx.phase && count == 0 && flags == D3DCLEAR_TARGET && color == 0xFF000000 && g_fx.ds &&
@@ -646,6 +766,14 @@ HRESULT WINAPI hk_clear(IDirect3DDevice9* dev, DWORD count, const D3DRECT* rects
 }
 
 HRESULT WINAPI hk_set_viewport(IDirect3DDevice9* dev, const D3DVIEWPORT9* vp) {
+    if (g_water.bound && vp) {
+        D3DVIEWPORT9 v = *vp;
+        v.X = vp->X * g_water.w / kSmallW;
+        v.Y = vp->Y * g_water.h / kSmallH;
+        v.Width = vp->Width * g_water.w / kSmallW;
+        v.Height = vp->Height * g_water.h / kSmallH;
+        return o_set_viewport(dev, &v);
+    }
     if (g_fx.phase && vp) {
         D3DVIEWPORT9 full = *vp;
         full.X = full.Y = 0;
@@ -829,6 +957,18 @@ HRESULT swap_draw(IDirect3DDevice9* dev, int swap, D3DPRIMITIVETYPE type, UINT c
 
 HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex) {
     if (stage == 0) g_tex0 = tex;
+    if (stage < 16 && (g_water.stages || (tex && tex == g_water.game_tex))) {
+        // The water's ripples read from ours, with c164 holding its size while it is bound.
+        if (tex && tex == g_water.game_tex && g_water.mode && g_water.tex) {
+            g_water.stages |= 1u << stage;
+            water_c164(dev, true);
+            return o_set_texture(dev, stage, g_water.tex);
+        }
+        if (g_water.stages & (1u << stage)) {
+            g_water.stages &= ~(1u << stage);
+            if (!g_water.stages) water_c164(dev, false);
+        }
+    }
     if (g_fx.phase && stage < 16) {
         // The effects' soft edges read the scene's own depth in place of its 512x360 copy.
         if (tex && tex == g_fx.depth_small) {
@@ -1199,6 +1339,12 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
 // sits in the middle of a frame of another shape, and the rectangle goes with it.
 
 HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
+    if (g_water.bound && r) {
+        const LONG w = static_cast<LONG>(g_water.w), h = static_cast<LONG>(g_water.h);
+        const LONG sw = static_cast<LONG>(kSmallW), sh = static_cast<LONG>(kSmallH);
+        const RECT m{r->left * w / sw, r->top * h / sh, r->right * w / sw, r->bottom * h / sh};
+        return o_set_scissor(dev, &m);
+    }
     if (g_fx.phase && r) {
         const RECT full{0, 0, static_cast<LONG>(g_fx.w), static_cast<LONG>(g_fx.h)};
         return o_set_scissor(dev, &full);
@@ -1416,6 +1562,11 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
     if (p && !o_clear) o_clear = reinterpret_cast<ClearFn>(p);
     p = patch_slot(dev, 47, reinterpret_cast<void*>(&hk_set_viewport));
     if (p && !o_set_viewport) o_set_viewport = reinterpret_cast<SetViewportFn>(p);
+    // The water's ripples: c164 follows our target while it is bound.
+    if (g_water.mode) {
+        p = patch_slot(dev, 109, reinterpret_cast<void*>(&hk_set_ps_const_water));
+        if (p && !o_set_ps_const_water) o_set_ps_const_water = reinterpret_cast<WaterPsConstFn>(p);
+    }
 }
 
 void resolution_set_effects(int mode) {
@@ -1443,6 +1594,12 @@ void resolution_reset() {
     fx_release_target();          // the default pool goes before a Reset; made again on the next use
     dofhr_release_targets();
     fx_forget_sequence();
+    water_release();
+    water_forget();
+}
+
+void resolution_set_water(int mode) {
+    g_water.mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
 }
 
 namespace {
@@ -1548,14 +1705,12 @@ namespace {
 // The water's ripples (ps_9c053ad3 and the other water shaders): a 512x360 screen-space buffer of the surface's
 // normals (drawn first, T40 in RemoteControl's frame log) read back with taps one texel apart, the texel being
 // DL_FREG_164 = c164 = (512, 360, 1/512, 1/360), set once a frame with the game's other globals (163..176).
-constexpr UINT kWaterReg = 164;
 constexpr int kSetPsConstSlot = 109;
-using SetPsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
-SetPsConstFn o_set_ps_const_water = nullptr;
+WaterPsConstFn o_set_ps_const_dsfix_water = nullptr;
 float g_water_size[4] = {};
 volatile LONG g_water_logged = 0;
 
-HRESULT WINAPI hk_set_ps_const_water(IDirect3DDevice9* dev, UINT start, const float* data, UINT count) {
+HRESULT WINAPI hk_set_ps_const_dsfix_water(IDirect3DDevice9* dev, UINT start, const float* data, UINT count) {
     if (data && start <= kWaterReg && kWaterReg < start + count && count <= 64) {
         const float* c = data + (kWaterReg - start) * 4;
         if (c[0] == 512.0f && c[1] == 360.0f && c[2] == 1.0f / 512 && c[3] == 1.0f / 360) {
@@ -1566,22 +1721,22 @@ HRESULT WINAPI hk_set_ps_const_water(IDirect3DDevice9* dev, UINT start, const fl
                 LOG_INFO("Water: the ripples' texel (c164) set to DSfix's %gx%g in place of 512x360 (first frame)",
                          g_water_size[0], g_water_size[1]);
             }
-            return o_set_ps_const_water(dev, start, copy, count);
+            return o_set_ps_const_dsfix_water(dev, start, copy, count);
         }
     }
-    return o_set_ps_const_water(dev, start, data, count);
+    return o_set_ps_const_dsfix_water(dev, start, data, count);
 }
 }  // namespace
 
 void resolution_water_hook_device(IDirect3DDevice9* dev, int dof_override) {
-    if (!dev || dof_override <= 0 || o_set_ps_const_water) return;
+    if (!dev || dof_override <= 0 || o_set_ps_const_dsfix_water) return;
     // DSfix's size for the game's 512x360 targets (getDofRes: the override's 16:9 width and its height).
     const UINT w = static_cast<UINT>(dof_override) * 16 / 9, h = static_cast<UINT>(dof_override);
     const float size[4] = {static_cast<float>(w), static_cast<float>(h), 1.0f / w, 1.0f / h};
     std::memcpy(g_water_size, size, sizeof(size));
-    void* p = patch_slot(dev, kSetPsConstSlot, reinterpret_cast<void*>(&hk_set_ps_const_water));
+    void* p = patch_slot(dev, kSetPsConstSlot, reinterpret_cast<void*>(&hk_set_ps_const_dsfix_water));
     if (p) {
-        o_set_ps_const_water = reinterpret_cast<SetPsConstFn>(p);
+        o_set_ps_const_dsfix_water = reinterpret_cast<WaterPsConstFn>(p);
         LOG_INFO("Water: DSfix's dofOverrideResolution %d makes the game's 512x360 targets %ux%u, the water's normals "
                  "among them; the ripples are read with that texel (DSfix 3.0 sets it itself: then nothing changes)",
                  dof_override, w, h);

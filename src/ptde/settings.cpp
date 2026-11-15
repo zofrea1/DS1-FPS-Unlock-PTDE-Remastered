@@ -247,6 +247,9 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "effectsresolution") {
             const std::string v = lower(trim(val));
             s.effects_resolution = (v == "full") ? 2 : (v == "game" || v == "off" || v == "false" || v == "0") ? 0 : 3;
+        } else if (key == "waterresolution") {
+            const std::string v = lower(trim(val));
+            s.water_resolution = (v == "full") ? 2 : (v == "game" || v == "off" || v == "false" || v == "0") ? 0 : 1;
         } else if (key == "highprecisioncolor") {
             s.high_precision_color = parse_bool(val);
         } else if (key == "antialiasingsamples") {

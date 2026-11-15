@@ -111,7 +111,7 @@ DWORD WINAPI worker(void*) {
     dsfix_set_yield(settings.yield_to_dsfix);
     if (dsfix_yields()) {
         LOG_INFO("YieldToDSFix: DSfix decides the picture where it has settings of its own: RenderResolution, "
-                 "Supersampling, DepthOfFieldStrength, DepthOfFieldResolution, EffectsResolution, HighPrecisionColor, "
+                 "Supersampling, DepthOfFieldStrength, DepthOfFieldResolution, EffectsResolution, WaterResolution, HighPrecisionColor, "
                  "AnisotropicFiltering and UIScale are off (DSfix's renderWidth/renderHeight, presentWidth/presentHeight, "
                  "dof settings, filteringOverride and HUD mod apply)");
     } else if (settings.yield_to_dsfix) {

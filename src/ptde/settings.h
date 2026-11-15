@@ -82,6 +82,8 @@ struct Settings {
     // The game's low-resolution effects (glows, mist, fog, smoke) at half the scene's size (3), its full size (2) or
     // the game's 512x360 (0) (resolution.h), with RenderResolution.
     int effects_resolution = 3;
+    // WaterResolution: the water's ripples at 0 the game's 512x360, 1 half the render size (default), 2 the render size.
+    int water_resolution = 1;
     // The scene's colour targets in 16-bit float, dithered into the 8-bit picture (resolution.h), with RenderResolution.
     bool high_precision_color = true;
     int ui_scale_world = 100;      // UIScaleWorld: marks over things in the world (layout.h)

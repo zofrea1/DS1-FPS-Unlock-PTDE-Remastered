@@ -44,6 +44,9 @@ void resolution_force_dof_level(int level);
 // the scene's size in float, over a half-size depth, laid over by the game's own upsample (the default). Before
 // resolution_install (which turns it off with RenderScalePost); RemoteControl `effects` any time.
 void resolution_set_effects(int mode);
+// WaterResolution: the water's ripples at 0 the game's 512x360, 1 half the scene's size, 2 the scene's size (set before
+// the device is made; RemoteControl `water N` switches between 1 and 2, or 0, later).
+void resolution_set_water(int mode);
 
 // HighPrecisionColor: the scene's colour targets in 16-bit float and the final picture dithered into 8 bits (smooth
 // fog, smoke and glows). Before resolution_install; not with RenderScalePost or DSfix.

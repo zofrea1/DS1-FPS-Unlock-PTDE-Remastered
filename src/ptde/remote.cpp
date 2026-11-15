@@ -685,7 +685,7 @@ void track(void* p, char kind, UINT w, UINT h, D3DFORMAT f, DWORD usage, const c
         return;
     }
     char fb[16];
-    const std::string st = game_stack(_AddressOfReturnAddress(), (w >= 2048 && w == h) ? 28 : 6);
+    const std::string st = game_stack(_AddressOfReturnAddress(), (w >= 2048 && w == h) || (w == 512 && h == 360) ? 28 : 6);
     out("create %c%d %s %ux%u %s usage 0x%lX caller %p game%s", kind, id, what, w, h, fmt_name(f, fb),
         static_cast<unsigned long>(usage), caller, st.c_str());
 }
@@ -2146,6 +2146,11 @@ void run(const std::string& line) {
         // FULL 1: levels 1 and 2 at the render size (full), else half.
         resolution_set_dof_resolution(static_cast<int>(num(1, 100)), num(2, 0) != 0);
         out("dofhr %ld %s", num(1, 100), num(2, 0) != 0 ? "full" : "half");
+    } else if (c == "water" && t.size() > 1) {
+        // water 0/1/2: the water's ripples at the game's 512x360, half the scene's size, the scene's size (needs
+        // WaterResolution on at start for the hooks).
+        resolution_set_water(static_cast<int>(num(1, 1)));
+        out("water %ld", num(1, 1));
     } else if (c == "effects") {
         // effects 0/1/2/3: the game's low-resolution effects, ours at full resolution (8-bit), ours in float + dither,
         // ours at half resolution.
