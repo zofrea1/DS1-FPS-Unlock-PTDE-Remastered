@@ -6,6 +6,8 @@ The mods are proxy DLLs. The game's files on disk are never modified, and each m
 
 Looking for co-op in Prepare to Die Edition? [Prepare to Co-op Edition](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE) plays the whole game with up to seven friends and includes this mod.
 
+Looking for quality-of-life features in Prepare to Die Edition? [DSfix 3.0](https://www.nexusmods.com/darksouls/mods/1985) by DDTM adds them (item sorting, a bonfire map, keyboard and mouse controls and more) and works together with this mod: see [DSfix 3.0](#dsfix-30).
+
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
@@ -13,7 +15,7 @@ Looking for co-op in Prepare to Die Edition? [Prepare to Co-op Edition](https://
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini`, `dxvk_d3d9.dll` (DXVK) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
-| Works with DSfix | n/a | yes (set `unlockFPS 0` in `DSfix.ini`; `YieldToDSFix` lets DSfix's picture settings decide) |
+| Works with DSfix | n/a | yes, DSfix 2.x and [DSfix 3.0](#dsfix-30) (set `unlockFPS 0` in `DSfix.ini`; `YieldToDSFix` lets DSfix's picture settings decide) |
 
 ## What is fixed
 
@@ -218,7 +220,24 @@ Where this README compares this mod with DSfix, it means Durante's DSfix 2.x (2.
 
 **Using DSfix.** This mod loads beside it (this mod is `xinput1_3.dll`, DSfix `DINPUT8.dll`) and drives the frame rate: set `unlockFPS 0` in `DSfix.ini`. By default this mod's picture settings take precedence where both have one. To let DSfix decide those instead, set `YieldToDSFix = true`: `RenderResolution`, `Supersampling`, `DepthOfFieldStrength`, `DepthOfFieldResolution`, `EffectsResolution`, `HighPrecisionColor`, `AnisotropicFiltering` and `UIScale` then do nothing, and DSfix's resolution, anti-aliasing, SSAO, depth of field, texture filtering and HUD scale apply. The rest of this mod stays on either way: the frame rate unlock and every fix, the speed-ups, the refresh rate and borderless options, `FixAspect`, `FixAspectUI`, `UIScaleWorld`, the shadow settings, `AlphaToCoverage` and `FixSun`. Without DSfix installed, `YieldToDSFix` does nothing. DSfix's resolution needs the game's own anti-aliasing off (`Antialiasing = 0` under `[DisplaySettingFilter]` in `DarkSouls.ini`, or the game's option): with it on, the 3D picture fills only a corner of the screen, and the log says so.
 
-**Give it a try.** If you play with DSfix, try this mod's own resolution, depth of field, effects, colour and shadows, and tell us what you see: reports and comparisons with screenshots are welcome.
+**Reports welcome.** If you play with DSfix, 2.x or 3.0, reports and comparisons with screenshots are welcome.
+
+### DSfix 3.0
+
+[DSfix 3.0](https://www.nexusmods.com/darksouls/mods/1985) by DDTM continues DSfix with quality-of-life features, controls and graphics of its own: keyboard and mouse together with a controller (DDTM Controller Fix), item sorting, a bonfire map, using many items or covenant offerings at once, changing covenant at a bonfire, quick save and load, HUD, camera and sharpening options, and more. This mod leaves quality of life to DSfix 3.0 and sticks to the frame rate, its fixes, performance and the picture, and we recommend DSfix 3.0 for those features. Its page recommends this mod in turn, with a guide for using both. The settings:
+
+```ini
+# DSfix.ini
+unlockFPS 0
+
+# PTDE-FPS-Unlock.ini
+YieldToDSFix = true
+FixSun = false
+FixController = false
+HideMouseCursor = false
+```
+
+DSfix 3.0 then decides the resolution, anti-aliasing, HUD scale and the other picture settings it has, and fixes the sun and moon itself; its controls look after the controller and the mouse pointer. The frame rate unlock, every fix and the speed-ups stay this mod's.
 
 ## Install
 
@@ -230,7 +249,7 @@ Copy the files from the release for your game next to the game's exe (see the ta
 
 **PTDE.** The mod loads as `xinput1_3.dll` so it can sit beside DSfix. In exclusive fullscreen it can ask for your display's highest refresh rate instead of the 60 Hz the game offers (`FullscreenRefreshRate`), and it has an optional borderless mode (`BorderlessFullscreen`; set the game to windowed first). With Windows display scaling above 100%, `DpiAware` (on by default) has the game draw at the monitor's real pixels; otherwise Windows has it draw a smaller picture and stretches it up, which blurs it and, in borderless, rules out G-SYNC / FreeSync.
 
-**PTDE: DSfix.** Supported and optional: see [Prepare to Die Edition and DSfix](#prepare-to-die-edition-and-dsfix) (set `unlockFPS 0` in `DSfix.ini`; `YieldToDSFix = true` lets DSfix decide the picture settings it has).
+**PTDE: DSfix.** Supported and optional: see [Prepare to Die Edition and DSfix](#prepare-to-die-edition-and-dsfix) (set `unlockFPS 0` in `DSfix.ini`; `YieldToDSFix = true` lets DSfix decide the picture settings it has). For quality-of-life features, use [DSfix 3.0](#dsfix-30) with the settings there.
 
 **PTDE: DXVK.** `DXVK = true` (the default since 2.3.0) runs the game's Direct3D 9 on Vulkan through [DXVK](https://github.com/doitsujin/dxvk) (version 3.1.1, included as `dxvk_d3d9.dll`; keep it next to `xinput1_3.dll`). It helps most where the draw thread limits the frame rate (Blighttown: 96 FPS on Direct3D 9, 129 with DXVK on the PC above); where the GPU is the limit the difference can be small. DSfix keeps working on top of it. **HDR and G-SYNC / FreeSync under DXVK:** DXVK draws with Vulkan, but by default (`DxvkPresentThroughDxgi = true`) the mod shows its frames through DXGI, the way Direct3D 11 and 12 games do: Windows HDR stays on with the same picture as Direct3D 9, and variable refresh works in fullscreen and borderless windows alike. With `DxvkPacedPresent` (the default), each frame is flipped a steady delay after the moment the game made it (about a frame), so the frames reach the display spaced exactly like the game's time steps: DXVK's threads and the GPU finish frames unevenly, and flipped when done they went out 1-2 ms early or late, which showed as the refresh rate wandering and uneven camera motion. `EvenFrameSteps` (the default) makes those steps even: while the game keeps to `MaxFPS`, every frame advances the game by exactly the cap's step (the time measured on the draw thread also carried how long each game update took, a millisecond or two either side). On an AW3225QF (240 Hz, HDR, G-SYNC) in Quelaag's Domain at a 120 cap, the display then refreshed as evenly as on Direct3D 9 (spread 0.47-0.68 ms against 0.51 ms). **For the best variable refresh, set `MaxFPS` to a frame rate your PC holds in most areas** (watch a busy place) and below the display's refresh rate: where the game cannot keep up, its frames come unevenly again. (A Vulkan swap chain on Windows only gets variable refresh in exclusive fullscreen, and there Windows switches HDR off while the game runs.) It needs a driver that shares textures between Direct3D 11 and Vulkan, which current NVIDIA, AMD and Intel drivers do; otherwise the log says so and DXVK shows its frames itself. With `DxvkPresentThroughDxgi = false`, DXVK presents through Vulkan and `DxvkExclusiveFullscreen = auto` (the default) takes exclusive fullscreen, and with it variable refresh, only while HDR is off. **NVIDIA with Windows HDR on:** if RTX HDR is on for the game in the NVIDIA app, it applies only under DXVK, never under Direct3D 9, and changes the picture a lot (crushed shadows, brighter highlights, other colors); turn it off for the game for the same picture as Direct3D 9. The log says when it is active. It needs a graphics driver with Vulkan 1.3. If DXVK cannot start, the game runs on Direct3D 9 as usual and the log says why. The first time an area loads, DXVK compiles its shaders, which can cause brief hitches; they are cached for later runs. DXVK writes its own log, `DARKSOULS_d3d9.log`, next to the game, and reads an optional `dxvk.conf` from there. If the game folder already has a `d3d9.dll` (DXVK or ReShade installed by hand), that one stays in charge and `DXVK` does nothing. On the Steam Deck and Linux, Proton already runs the game on its own DXVK, so `DXVK` does nothing there either. With `DXVK = false` or `FPSUnlock = false`, DXVK is not loaded at all.
 
