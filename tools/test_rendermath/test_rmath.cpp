@@ -1338,6 +1338,32 @@ static void test_relaxed() {
                 100.0 * same44 / n44, worst44);
     std::printf("relaxed 3x4 multiply: %.1f%% identical, worst %.2f units\n", 100.0 * same34 / n34, worst34);
     std::printf("relaxed multiply-add: %.1f%% identical, worst %.2f units\n", 100.0 * samem / nm, worstm);
+    // the engine's sine and cosine polynomials, the originals run at the render thread's x87 precision (24 bits)
+    double worst_s = 0.0, worst_c = 0.0;
+    long same_s = 0, same_c = 0, nt = 0;
+    std::uniform_real_distribution<float> ang(-60.0f, 60.0f);
+    for (int it = 0; it < 400000; ++it) {
+        const float x = (it & 3) == 0 ? ang(rng) * 0.05f : ang(rng);
+        unsigned int cw = 0;
+        _controlfp_s(&cw, _PC_24, _MCW_PC);
+        const float so = reinterpret_cast<float(__cdecl*)(float)>(0x56AA50)(x);
+        const float co = reinterpret_cast<float(__cdecl*)(float)>(0x56AC40)(x);
+        _controlfp_s(&cw, _PC_53, _MCW_PC);
+        const float sr = sin_relaxed(x), cr = cos_relaxed(x);
+        const double es = std::fabs(static_cast<double>(so) - sr) * 8388608.0;
+        const double ec = std::fabs(static_cast<double>(co) - cr) * 8388608.0;
+        if (es > worst_s) worst_s = es;
+        if (ec > worst_c) worst_c = ec;
+        same_s += so == sr;
+        same_c += co == cr;
+        ++nt;
+    }
+    std::printf("relaxed sine: %.1f%% identical, worst %.2f units of 2^-23; cosine: %.1f%% identical, worst %.2f\n",
+                100.0 * same_s / nt, worst_s, 100.0 * same_c / nt, worst_c);
+    if (worst_s > 8.0 || worst_c > 8.0) {
+        std::printf("RELAXED TRIG TOLERANCE EXCEEDED\n");
+        ++g_fail;
+    }
     if (worst44 > 8.0 || worst34 > 8.0 || worstm > 2.0) {
         std::printf("RELAXED TOLERANCE EXCEEDED\n");
         ++g_fail;

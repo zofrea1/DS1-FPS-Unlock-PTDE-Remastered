@@ -8,6 +8,7 @@
 #include <emmintrin.h>
 
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 
 namespace {
@@ -2827,6 +2828,115 @@ int replaced(const Site* sites, size_t count) {
 
 }  // namespace
 
+// The engine's polynomial sine and cosine (0x56AA50, 0x56AC40; cdecl float, result in st0): x reduced by
+// n = trunc((x + copysign(pi, x)) / 2pi) to r = x - n * 2pi (as a float), then the Taylor series of sin r (odd powers to
+// r^23, coefficients at 0x10D5B40) or cos r (even powers to r^22, at 0x10D5B70), each power formed and rounded as a
+// float through a long x87 chain. Relaxed (render thread only, RenderMathPrecision = relaxed): the same reduction and
+// coefficients by Horner's rule in SSE floats, a unit or two in the last place from the original. Every other thread,
+// and |x| beyond 10^5 or not finite, goes to the original code through a trampoline (its first six bytes, then a jump
+// back), as before.
+uint8_t* g_sin_tramp = nullptr;
+uint8_t* g_cos_tramp = nullptr;
+bool g_trig_installed = false;
+
+inline float trig_reduce(float x) {
+    const float pi = 3.14159274f;
+    const float q = (x + (x < 0.0f ? -pi : pi)) / 6.28318548f;
+    const int n = static_cast<int>(q);  // toward zero, as the engine's conversion (cvttsd2si)
+    // n * 2pi and the difference each rounded to a float, as the original's fimul and fsubp at the render thread's
+    // 24-bit x87 precision (2pi here is a float value)
+    const float nd = static_cast<float>(n) * 6.28318548f;
+    return x - nd;
+}
+
+float __cdecl sin_relaxed(float x) {
+    if (!(std::fabs(x) < 1.0e5f)) return reinterpret_cast<float(__cdecl*)(float)>(g_sin_tramp)(x);
+    const float* k = reinterpret_cast<const float*>(0x10D5B40);
+    const float r = trig_reduce(x);
+    const float r2 = r * r;
+    float p = k[11];
+    for (int i = 10; i >= 0; --i) p = p * r2 + k[i];
+    return p * r;
+}
+
+float __cdecl cos_relaxed(float x) {
+    if (!(std::fabs(x) < 1.0e5f)) return reinterpret_cast<float(__cdecl*)(float)>(g_cos_tramp)(x);
+    const float* k = reinterpret_cast<const float*>(0x10D5B70);
+    const float r = trig_reduce(x);
+    const float r2 = r * r;
+    float p = k[11];
+    for (int i = 10; i >= 0; --i) p = p * r2 + k[i];
+    return p;
+}
+
+__declspec(naked) void sin_entry() {
+    __asm {
+        mov eax, g_relaxed_tid
+        test eax, eax
+        jz orig
+        cmp eax, fs:[0x24]
+        jne orig
+        jmp sin_relaxed
+    orig:
+        jmp dword ptr [g_sin_tramp]
+    }
+}
+
+__declspec(naked) void cos_entry() {
+    __asm {
+        mov eax, g_relaxed_tid
+        test eax, eax
+        jz orig
+        cmp eax, fs:[0x24]
+        jne orig
+        jmp cos_relaxed
+    orig:
+        jmp dword ptr [g_cos_tramp]
+    }
+}
+
+bool install_trig() {
+    static const uint8_t kSinHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x50, 0xD9, 0x45, 0x08};
+    static const uint8_t kCosHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x40, 0xD9, 0x45, 0x08};
+    auto* sin_at = reinterpret_cast<uint8_t*>(0x56AA50);
+    auto* cos_at = reinterpret_cast<uint8_t*>(0x56AC40);
+    if (std::memcmp(sin_at, kSinHead, sizeof(kSinHead)) != 0 || std::memcmp(cos_at, kCosHead, sizeof(kCosHead)) != 0) {
+        return false;
+    }
+    auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!code) return false;
+    // trampolines: the six bytes (push ebp / mov ebp, esp / and esp, -16), then jmp to the seventh
+    struct T {
+        uint8_t* at;
+        uint8_t* tramp;
+        const void* entry;
+    } t[2] = {{sin_at, code, reinterpret_cast<const void*>(&sin_entry)},
+              {cos_at, code + 32, reinterpret_cast<const void*>(&cos_entry)}};
+    for (auto& e : t) {
+        std::memcpy(e.tramp, e.at, 6);
+        e.tramp[6] = 0xE9;
+        const int32_t back = static_cast<int32_t>(reinterpret_cast<uintptr_t>(e.at + 6) -
+                                                  (reinterpret_cast<uintptr_t>(e.tramp) + 11));
+        std::memcpy(e.tramp + 7, &back, 4);
+    }
+    g_sin_tramp = code;
+    g_cos_tramp = code + 32;
+    FlushInstructionCache(GetCurrentProcess(), code, 64);
+    for (auto& e : t) {
+        DWORD old = 0;
+        if (!VirtualProtect(e.at, 6, PAGE_EXECUTE_READWRITE, &old)) return false;
+        uint8_t b[6] = {0xE9, 0, 0, 0, 0, 0x90};
+        const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(e.entry) -
+                                                 (reinterpret_cast<uintptr_t>(e.at) + 5));
+        std::memcpy(b + 1, &rel, 4);
+        std::memcpy(e.at, b, 6);
+        DWORD ignored = 0;
+        VirtualProtect(e.at, 6, old, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), e.at, 6);
+    }
+    return true;
+}
+
 bool rendermath_install(bool core, bool effects) {
     if (reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) != kImageBase) {
         LOG_ERROR("FastRenderMath needs the game at its preferred base. Not patching.");
@@ -2850,6 +2960,11 @@ bool rendermath_install(bool core, bool effects) {
                      "and write the shader constants and their dirty bits inline, the two shader constant flushes find "
                      "the dirty runs by bit scans) with the same results and device calls",
                      nb);
+        }
+        if (install_trig()) {
+            g_trig_installed = true;
+            LOG_INFO("FastRenderMath: the engine's polynomial sine and cosine (0x56AA50, 0x56AC40) take the relaxed "
+                     "path on the render thread when RenderMathPrecision = relaxed (the original code everywhere else)");
         }
         if (install_cull()) {
             g_cull_installed = true;
