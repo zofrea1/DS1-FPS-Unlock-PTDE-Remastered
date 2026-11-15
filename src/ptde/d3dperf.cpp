@@ -328,14 +328,38 @@ int sampler_index(DWORD sampler) {
 
 HRESULT set_sampler_cached(IDirect3DDevice9* device, DWORD sampler, int index, D3DSAMPLERSTATETYPE type, DWORD value);
 
+// The quick answer for a repeat (most calls): the same test as the full paths below, ahead of them, with the thread
+// read from the thread block (fs:[0x24], what GetCurrentThreadId returns) and nothing else done. A call it does not
+// answer goes the full way. RemoteControl `d3dfast 0|1` turns it off and on for comparisons.
+volatile bool g_quick = true;
+
+}  // namespace
+
+int d3dperf_set_quick(int on) {
+    if (on >= 0) g_quick = on != 0;
+    return g_quick ? 1 : 0;
+}
+
+namespace {
+
+inline bool rs_always(DWORD s) {
+    return s == D3DRS_POINTSIZE || (s >= D3DRS_ADAPTIVETESS_X && s <= D3DRS_ADAPTIVETESS_W);
+}
+
 HRESULT WINAPI hook_set_rs(IDirect3DDevice9* device, D3DRENDERSTATETYPE state, DWORD value) {
     const DWORD s = static_cast<DWORD>(state);
+    if (g_quick && s < kRsCount && g_rs_known[s] && g_rs_value[s] == value && __readfsdword(0x24) == g_owner &&
+        !g_recording && g_ss_enabled && !rs_always(s)) {
+        g_rs_seen = g_rs_seen + 1;
+        g_rs_filtered = g_rs_filtered + 1;
+        return D3D_OK;
+    }
     if (g_recording || s >= kRsCount || GetCurrentThreadId() != g_owner) {
         if (s < kRsCount) g_rs_known[s] = 0;
         return g_set_rs(device, state, value);
     }
     g_rs_seen = g_rs_seen + 1;
-    const bool always = s == D3DRS_POINTSIZE || (s >= D3DRS_ADAPTIVETESS_X && s <= D3DRS_ADAPTIVETESS_W);
+    const bool always = rs_always(s);
     if (g_ss_enabled && !always && g_rs_known[s] && g_rs_value[s] == value) {
         g_rs_filtered = g_rs_filtered + 1;
         return D3D_OK;
@@ -347,6 +371,16 @@ HRESULT WINAPI hook_set_rs(IDirect3DDevice9* device, D3DRENDERSTATETYPE state, D
 }
 
 HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMPLERSTATETYPE type, DWORD value) {
+    // Quick answer: a pixel sampler's state set again to what it holds, outside the anisotropic filtering upgrade
+    // (whose states the full path below works out).
+    const DWORD t = static_cast<DWORD>(type);
+    if (g_quick && sampler < 16 && t - 1 < static_cast<DWORD>(kTypes - 1) && ((g_known[sampler] >> t) & 1) &&
+        g_value[sampler][t] == value && __readfsdword(0x24) == g_owner && !g_recording && g_ss_enabled &&
+        !(g_aniso > 1 && (t == D3DSAMP_MINFILTER || t == D3DSAMP_MIPFILTER || t == D3DSAMP_MAXANISOTROPY))) {
+        g_seen = g_seen + 1;
+        g_filtered = g_filtered + 1;
+        return D3D_OK;
+    }
     g_seen = g_seen + 1;
     const int index = sampler_index(sampler);
     const DWORD self = GetCurrentThreadId();

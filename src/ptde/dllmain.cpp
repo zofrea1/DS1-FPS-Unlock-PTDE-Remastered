@@ -159,6 +159,11 @@ DWORD WINAPI worker(void*) {
         }
         if (settings.fast_render_math || settings.fast_effects) {
             rendermath_install(settings.fast_render_math, settings.fast_effects);
+            if (settings.fast_render_math && settings.render_math_relaxed) {
+                rendermath_set_relaxed(true);
+                LOG_INFO("RenderMathPrecision: relaxed (the render thread's matrix multiplies and multiply-adds round "
+                         "in float)");
+            }
         }
     }
     rwlock_log(settings.fps_unlock && settings.fast_read_locks);

@@ -42,6 +42,12 @@ bool rendermath_set_cull(bool on);
 // RemoteControl `fastmath core|effects|new|bone 0|1` (diagnostic A/B): table 0 core, 1 effects, 2 the newer effects
 // sites, 3 bone palettes; returns sites switched.
 int rendermath_set_table(int table, bool on);
+// Diagnostics: the register-only matrix paths (multiplies, transpose) on or off.
+bool rendermath_set_fused(bool on);
+// Relaxed precision for the render thread's matrix multiplies and multiply-adds (see rendermath.cpp g_relaxed_tid):
+// on/off, and the render thread's per-frame call that names the thread.
+bool rendermath_set_relaxed(bool on);
+void rendermath_render_frame();
 // RemoteControl `fastmath at ADDR 0|1`: one site (by its game address) off or on; returns sites switched (0 or 1).
 int rendermath_set_site(uintptr_t at, bool on);
 // RemoteControl `fastmath stats`: calls and particles through the particle quad loop, and calls and groups of four

@@ -348,6 +348,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fast_effects = parse_bool(val);
         } else if (key == "fastrendermath") {
             s.fast_render_math = parse_bool(val);
+        } else if (key == "rendermathprecision") {
+            s.render_math_relaxed = lower(trim(val)) != "exact";
         } else if (key == "dpiaware") {
             s.dpi_aware = parse_bool(val);
         } else if (key == "borderlessfullscreen") {

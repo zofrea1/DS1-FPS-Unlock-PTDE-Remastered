@@ -1277,6 +1277,73 @@ static void test_cisqrt() {
     std::printf("runtime square root: 400000 cases (%ld on the fast path's terms), %d mismatches so far\n", fast, g_fail);
 }
 
+// The relaxed tier (render thread only) is not bit-exact: its float results are compared with the originals'
+// within a tolerance measured in units of the last place of the terms' magnitude (sum of |product| for each output),
+// on finite inputs in the ranges the game's matrices have (rotations and scales near 1, translations to a few
+// thousand). It must also keep NaN/inf classes for finite inputs (none appear) and be exact where all products are
+// exact integers.
+static float rnd_game(int kind) {
+    std::normal_distribution<float> n1(0.0f, 1.0f), n2(0.0f, 2000.0f);
+    return kind == 3 ? n2(rng) : n1(rng);
+}
+static double term_ulp(double mag) { return mag == 0.0 ? 1e-45 : mag * (1.0 / 8388608.0); }
+
+static void test_relaxed() {
+    const uint32_t tid = GetCurrentThreadId();
+    double worst44 = 0.0, worst34 = 0.0, worstm = 0.0;
+    long same44 = 0, same34 = 0, samem = 0, n44 = 0, n34 = 0, nm = 0;
+    alignas(16) float a[16], b[16], c[4], o1[16], o2[16];
+    for (int it = 0; it < 300000; ++it) {
+        for (int i = 0; i < 16; ++i) { a[i] = rnd_game(i & 3); b[i] = rnd_game(i >> 2); }
+        for (int i = 0; i < 4; ++i) c[i] = rnd_game(3);
+        reinterpret_cast<F3>(0x4144D0)(o1, a, b);
+        mat44_mul_relaxed(o2, a, b);
+        for (int r = 0; r < 4; ++r) for (int l = 0; l < 4; ++l) {
+            double mag = 0.0;
+            for (int k = 0; k < 4; ++k) mag += std::fabs(static_cast<double>(a[r * 4 + k]) * b[k * 4 + l]);
+            const double e = std::fabs(static_cast<double>(o1[r * 4 + l]) - o2[r * 4 + l]) / term_ulp(mag);
+            if (e > worst44) worst44 = e;
+            same44 += o1[r * 4 + l] == o2[r * 4 + l];
+            ++n44;
+        }
+        reinterpret_cast<F3>(0x416100)(o1, b, a);
+        mat34_mul_relaxed(o2, b, a);
+        const float w[4] = {0, 0, 0, 1};
+        for (int r = 0; r < 3; ++r) for (int l = 0; l < 4; ++l) {
+            double mag = 0.0;
+            for (int k = 0; k < 4; ++k) mag += std::fabs(static_cast<double>(a[r * 4 + k]) * (k < 3 ? b[k * 4 + l] : w[l]));
+            const double e = std::fabs(static_cast<double>(o1[r * 4 + l]) - o2[r * 4 + l]) / term_ulp(mag);
+            if (e > worst34) worst34 = e;
+            same34 += o1[r * 4 + l] == o2[r * 4 + l];
+            ++n34;
+        }
+        reinterpret_cast<F4>(0x553700)(o1, a, b, c);
+        g_relaxed_tid = tid;
+        vec4_madd(o2, a, b, c);
+        g_relaxed_tid = 0;
+        for (int l = 0; l < 4; ++l) {
+            const double mag = std::fabs(static_cast<double>(a[l]) * b[l]) + std::fabs(static_cast<double>(c[l]));
+            const double e = std::fabs(static_cast<double>(o1[l]) - o2[l]) / term_ulp(mag);
+            if (e > worstm) worstm = e;
+            samem += o1[l] == o2[l];
+            ++nm;
+        }
+        // another thread's id set: the exact path
+        g_relaxed_tid = tid + 1;
+        vec4_madd(o2, a, b, c);
+        g_relaxed_tid = 0;
+        same(o1, o2, 16, "madd exact with another thread relaxed", it);
+    }
+    std::printf("relaxed 4x4 multiply: %.1f%% of results identical, worst %.2f units in the last place of the terms\n",
+                100.0 * same44 / n44, worst44);
+    std::printf("relaxed 3x4 multiply: %.1f%% identical, worst %.2f units\n", 100.0 * same34 / n34, worst34);
+    std::printf("relaxed multiply-add: %.1f%% identical, worst %.2f units\n", 100.0 * samem / nm, worstm);
+    if (worst44 > 8.0 || worst34 > 8.0 || worstm > 2.0) {
+        std::printf("RELAXED TOLERANCE EXCEEDED\n");
+        ++g_fail;
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "child") != 0) return run_parent(argv[0]);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -1496,5 +1563,6 @@ int main(int argc, char** argv) {
         test_update_loop();
         test_cisqrt();
     }
+    test_relaxed();
     return g_fail ? 1 : 0;
 }

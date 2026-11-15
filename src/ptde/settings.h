@@ -192,6 +192,9 @@ struct Settings {
     bool fast_effects = true;
     // Two hot render-thread math helpers run as SSE with identical results (see rendermath.h).
     bool fast_render_math = true;
+    // RenderMathPrecision: relaxed (true) lets the render thread's matrix multiplies and multiply-adds round in float
+    // (rendermath.cpp g_relaxed_tid); exact (false) keeps every result identical to the original's.
+    bool render_math_relaxed = true;
     // Make the game window borderless and cover its monitor. Needs the game set to
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
     bool borderless = false;

@@ -16,6 +16,10 @@
 #include "gamma.h"
 #include "profile.h"
 #include "remote.h"
+#include "phases.h"
+#include "rendermath.h"
+
+#include <intrin.h>
 #include "atoc.h"
 #include "shadowbias.h"
 #include "dsfix.h"
@@ -307,6 +311,7 @@ int __fastcall hook_getcmd(void* self, void* edx) {
             QueryPerformanceCounter(&stamp);
             g.t_cmd2 = stamp.QuadPart;
             d3dperf_frame();
+            rendermath_render_frame();
             gamma_frame();
         }
     } else if (cmd == 4 && g.t_cmd2 != 0) {
@@ -328,13 +333,20 @@ bool make_writable(void* address, size_t size);
 char hook_game_frame() {
     limiter_wait_early();
     remote_game_frame();
+    phases_game_frame();
     if (!profile_enabled()) {
-        return g_game_frame();
+        if (!phases_active()) return g_game_frame();
+        const uint64_t t = __rdtsc();
+        const char r = g_game_frame();
+        phases_frame_ticks(__rdtsc() - t);
+        return r;
     }
     LARGE_INTEGER a{}, b{};
     profile_game_frame_begin();
     QueryPerformanceCounter(&a);
+    const uint64_t t = __rdtsc();
     const char result = g_game_frame();
+    phases_frame_ticks(__rdtsc() - t);
     QueryPerformanceCounter(&b);
     profile_game_frame(1000.0 * static_cast<double>(b.QuadPart - a.QuadPart) / static_cast<double>(g.freq.QuadPart));
     return result;

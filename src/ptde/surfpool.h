@@ -2,7 +2,8 @@
 
 struct IDirect3DDevice9;
 
-// ReuseSurfaces: the game creates five depth-stencil surfaces and one system-memory offscreen surface every frame (the
+// ReuseSurfaces: the game creates five depth-stencil surfaces, one system-memory offscreen surface and (with some
+// settings) a render target every frame (the
 // draw plan's target surfaces, 0x590920 from HGSurfaceEntity 0xBAD310, and the readback's temporary) and releases them
 // again. Cheap in Direct3D 9 (under 1% of the render thread), about 9% under DXVK, which allocates GPU memory for each.
 // Surfaces created through the device the game holds are kept (one reference of our own) when the game releases them,
@@ -12,4 +13,6 @@ void surfpool_hook_device(IDirect3DDevice9* game_device);
 // Before IDirect3DDevice9::Reset: every kept surface is let go.
 void surfpool_reset();
 // For the profiler: creations answered from the pool and creations passed on, since the start.
+// Diagnostics: which kinds are pooled from now on (bit 0 depth-stencil, 1 offscreen, 2 render target; -1 only reads).
+int surfpool_set_kinds(int mask);
 void surfpool_stats(unsigned long* reused, unsigned long* created);

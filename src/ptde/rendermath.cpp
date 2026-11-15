@@ -14,6 +14,24 @@ namespace {
 
 constexpr uintptr_t kImageBase = 0x400000;
 
+// The register-only paths for calls whose output overlaps no input (RemoteControl `fastmath fused 0|1`).
+volatile bool g_fused = true;
+
+// Relaxed precision on the render thread (RenderMathPrecision = relaxed; RemoteControl `fastmath relaxed 0|1`). The
+// render thread's results only go to the GPU (vertices, matrices and colours for this frame's draws), never back into
+// the game's state, so there a multiply-add may round once in float instead of through double as the original does:
+// a difference of a unit or so in a float's last place, far below what a pixel can show. The thread is the one the
+// draw commands run on (set at each frame's start); every other thread keeps the exact paths.
+volatile uint32_t g_relaxed_tid = 0;
+bool g_relaxed_wanted = false;
+inline bool relaxed_here() { return g_relaxed_tid != 0 && __readfsdword(0x24) == g_relaxed_tid; }
+
+// True when the n bytes at p and the m bytes at q share no byte.
+inline bool apart(const void* p, size_t n, const void* q, size_t m) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p), b = reinterpret_cast<uintptr_t>(q);
+    return a + n <= b || b + m <= a;
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The engine's four-float helpers (ported Xbox 360 vector code compiled as scalar SSE through double). A double sum,
 // difference or product of two floats rounds to the same float as the float operation (double has more than twice
@@ -72,6 +90,16 @@ __declspec(naked) float* __cdecl vec4_madd(float*, const float*, const float*, c
         movups xmm1, [edx]      // b
         mov edx, [esp + 16]
         movups xmm4, [edx]      // c (read before anything is written, as the original)
+        mov ecx, g_relaxed_tid  // relaxed on the render thread: a*b+c in float
+        test ecx, ecx
+        jz exact
+        cmp ecx, fs:[0x24]
+        jne exact
+        mulps xmm0, xmm1
+        addps xmm0, xmm4
+        movups [eax], xmm0
+        ret
+    exact:
         cvtps2pd xmm2, xmm0
         cvtps2pd xmm3, xmm1
         mulpd xmm2, xmm3        // a*b, lanes 0 1
@@ -134,6 +162,19 @@ __declspec(naked) void vec4_not_equal() {
 // 4x4 transpose (cdecl: out, in). The original reads and writes in this exact order (through stack temporaries it
 // reloads 8 bytes at a time, which stalls), so a call with out overlapping in gives the same result as before.
 uint32_t* __cdecl mat44_transpose(uint32_t* out, const uint32_t* in) {
+    if (g_fused && apart(out, 64, in, 64)) {
+        // Moves only (no arithmetic touches the bits): four rows in, four columns out.
+        __m128 r0 = _mm_loadu_ps(reinterpret_cast<const float*>(in));
+        __m128 r1 = _mm_loadu_ps(reinterpret_cast<const float*>(in + 4));
+        __m128 r2 = _mm_loadu_ps(reinterpret_cast<const float*>(in + 8));
+        __m128 r3 = _mm_loadu_ps(reinterpret_cast<const float*>(in + 12));
+        _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
+        _mm_storeu_ps(reinterpret_cast<float*>(out), r0);
+        _mm_storeu_ps(reinterpret_cast<float*>(out + 4), r1);
+        _mm_storeu_ps(reinterpret_cast<float*>(out + 8), r2);
+        _mm_storeu_ps(reinterpret_cast<float*>(out + 12), r3);
+        return out;
+    }
     const uint32_t a8 = in[8], a0 = in[0], a12 = in[12], a9 = in[9], a1 = in[1], a5 = in[5], a13 = in[13], a4 = in[4],
                    a15 = in[15];
     out[0] = a0;
@@ -522,8 +563,235 @@ __declspec(naked) void __cdecl row_madd(float*, const float*, float) {
     }
 }
 
+// The same multiplies when out shares no byte with A or B (nearly every call): the same steps, operations and operand
+// order per lane, with each row kept in registers between its steps (rounded to float after each, as the memory
+// round trip did) and no calls. Inputs that overlap the output take the step-by-step path below, which reads them
+// back from memory between steps exactly as the originals do.
+
+// cdecl (out, A, B); eax, ecx, edx and xmm0-7 are scratch.
+__declspec(naked) void __cdecl mat44_mul_regs(float*, const float*, const float*) {
+    __asm {
+        push esi
+        push edi
+        push ebx
+        mov edi, [esp + 16]     // out
+        mov esi, [esp + 20]     // A (the factors s, row by row)
+        mov ebx, [esp + 24]     // B
+        mov ecx, 4
+    row:
+        cvtss2sd xmm2, dword ptr [esi]
+        unpcklpd xmm2, xmm2
+        movups xmm0, [ebx]
+        cvtps2pd xmm1, xmm0
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0
+        mulpd xmm1, xmm2        // b*s
+        mulpd xmm0, xmm2
+        cvtpd2ps xmm6, xmm1     // the row, lanes 0 1 (as float)
+        cvtpd2ps xmm7, xmm0     // lanes 2 3
+        cvtss2sd xmm2, dword ptr [esi + 4]
+        unpcklpd xmm2, xmm2     // s s
+        movups xmm0, [ebx + 16]
+        cvtps2pd xmm1, xmm0     // b0 b1
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0     // b2 b3
+        movapd xmm4, xmm1
+        mulpd xmm4, xmm2        // b*s
+        movapd xmm5, xmm2
+        mulpd xmm5, xmm1        // s*b
+        movsd xmm5, xmm4        // lane 0 b*s, lane 1 s*b
+        movapd xmm3, xmm2
+        mulpd xmm3, xmm0        // lanes 2 3: s*b
+        cvtps2pd xmm6, xmm6     // the row so far (rounded to float), lanes 0 1
+        addpd xmm5, xmm6        // product + row
+        cvtps2pd xmm7, xmm7
+        addpd xmm3, xmm7
+        cvtpd2ps xmm6, xmm5
+        cvtpd2ps xmm7, xmm3
+        cvtss2sd xmm2, dword ptr [esi + 8]
+        unpcklpd xmm2, xmm2     // s s
+        movups xmm0, [ebx + 32]
+        cvtps2pd xmm1, xmm0     // b0 b1
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0     // b2 b3
+        movapd xmm4, xmm1
+        mulpd xmm4, xmm2        // b*s
+        movapd xmm5, xmm2
+        mulpd xmm5, xmm1        // s*b
+        movsd xmm5, xmm4        // lane 0 b*s, lane 1 s*b
+        movapd xmm3, xmm2
+        mulpd xmm3, xmm0        // lanes 2 3: s*b
+        cvtps2pd xmm6, xmm6     // the row so far (rounded to float), lanes 0 1
+        addpd xmm5, xmm6        // product + row
+        cvtps2pd xmm7, xmm7
+        addpd xmm3, xmm7
+        cvtpd2ps xmm6, xmm5
+        cvtpd2ps xmm7, xmm3
+        cvtss2sd xmm2, dword ptr [esi + 12]
+        unpcklpd xmm2, xmm2     // s s
+        movups xmm0, [ebx + 48]
+        cvtps2pd xmm1, xmm0     // b0 b1
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0     // b2 b3
+        movapd xmm4, xmm1
+        mulpd xmm4, xmm2        // b*s
+        movapd xmm5, xmm2
+        mulpd xmm5, xmm1        // s*b
+        movsd xmm5, xmm4        // lane 0 b*s, lane 1 s*b
+        movapd xmm3, xmm2
+        mulpd xmm3, xmm0        // lanes 2 3: s*b
+        cvtps2pd xmm6, xmm6     // the row so far (rounded to float), lanes 0 1
+        addpd xmm5, xmm6        // product + row
+        cvtps2pd xmm7, xmm7
+        addpd xmm3, xmm7
+        cvtpd2ps xmm6, xmm5
+        cvtpd2ps xmm7, xmm3
+        movlhps xmm6, xmm7
+        movups [edi], xmm6
+        add esi, 16
+        add edi, 16
+        dec ecx
+        jnz row
+        pop ebx
+        pop edi
+        pop esi
+        ret
+    }
+}
+
+// cdecl (out, B, A): three rows, the fourth B row being the engine's constant 0 0 0 1 (0x10D52D0).
+__declspec(naked) void __cdecl mat34_mul_regs(float*, const float*, const float*) {
+    __asm {
+        push esi
+        push edi
+        push ebx
+        mov edi, [esp + 16]     // out
+        mov ebx, [esp + 20]     // B
+        mov esi, [esp + 24]     // A
+        mov edx, 0x10D52D0
+        mov ecx, 3
+    row:
+        cvtss2sd xmm2, dword ptr [esi]
+        unpcklpd xmm2, xmm2
+        movups xmm0, [ebx]
+        cvtps2pd xmm1, xmm0
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0
+        mulpd xmm1, xmm2        // b*s
+        mulpd xmm0, xmm2
+        cvtpd2ps xmm6, xmm1     // the row, lanes 0 1 (as float)
+        cvtpd2ps xmm7, xmm0     // lanes 2 3
+        cvtss2sd xmm2, dword ptr [esi + 4]
+        unpcklpd xmm2, xmm2     // s s
+        movups xmm0, [ebx + 16]
+        cvtps2pd xmm1, xmm0     // b0 b1
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0     // b2 b3
+        movapd xmm4, xmm1
+        mulpd xmm4, xmm2        // b*s
+        movapd xmm5, xmm2
+        mulpd xmm5, xmm1        // s*b
+        movsd xmm5, xmm4        // lane 0 b*s, lane 1 s*b
+        movapd xmm3, xmm2
+        mulpd xmm3, xmm0        // lanes 2 3: s*b
+        cvtps2pd xmm6, xmm6     // the row so far (rounded to float), lanes 0 1
+        addpd xmm5, xmm6        // product + row
+        cvtps2pd xmm7, xmm7
+        addpd xmm3, xmm7
+        cvtpd2ps xmm6, xmm5
+        cvtpd2ps xmm7, xmm3
+        cvtss2sd xmm2, dword ptr [esi + 8]
+        unpcklpd xmm2, xmm2     // s s
+        movups xmm0, [ebx + 32]
+        cvtps2pd xmm1, xmm0     // b0 b1
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0     // b2 b3
+        movapd xmm4, xmm1
+        mulpd xmm4, xmm2        // b*s
+        movapd xmm5, xmm2
+        mulpd xmm5, xmm1        // s*b
+        movsd xmm5, xmm4        // lane 0 b*s, lane 1 s*b
+        movapd xmm3, xmm2
+        mulpd xmm3, xmm0        // lanes 2 3: s*b
+        cvtps2pd xmm6, xmm6     // the row so far (rounded to float), lanes 0 1
+        addpd xmm5, xmm6        // product + row
+        cvtps2pd xmm7, xmm7
+        addpd xmm3, xmm7
+        cvtpd2ps xmm6, xmm5
+        cvtpd2ps xmm7, xmm3
+        cvtss2sd xmm2, dword ptr [esi + 12]
+        unpcklpd xmm2, xmm2     // s s
+        movups xmm0, [edx]
+        cvtps2pd xmm1, xmm0     // b0 b1
+        movhlps xmm0, xmm0
+        cvtps2pd xmm0, xmm0     // b2 b3
+        movapd xmm4, xmm1
+        mulpd xmm4, xmm2        // b*s
+        movapd xmm5, xmm2
+        mulpd xmm5, xmm1        // s*b
+        movsd xmm5, xmm4        // lane 0 b*s, lane 1 s*b
+        movapd xmm3, xmm2
+        mulpd xmm3, xmm0        // lanes 2 3: s*b
+        cvtps2pd xmm6, xmm6     // the row so far (rounded to float), lanes 0 1
+        addpd xmm5, xmm6        // product + row
+        cvtps2pd xmm7, xmm7
+        addpd xmm3, xmm7
+        cvtpd2ps xmm6, xmm5
+        cvtpd2ps xmm7, xmm3
+        movlhps xmm6, xmm7
+        movups [edi], xmm6
+        add esi, 16
+        add edi, 16
+        dec ecx
+        jnz row
+        pop ebx
+        pop edi
+        pop esi
+        ret
+    }
+}
+
+// Relaxed (render thread): each row as sum of A's factors times B's rows in float, four lanes at a time.
+inline __m128 row_relaxed(__m128 ar, __m128 b0, __m128 b1, __m128 b2, __m128 b3) {
+    __m128 x = _mm_mul_ps(_mm_shuffle_ps(ar, ar, 0x00), b0);
+    x = _mm_add_ps(x, _mm_mul_ps(_mm_shuffle_ps(ar, ar, 0x55), b1));
+    x = _mm_add_ps(x, _mm_mul_ps(_mm_shuffle_ps(ar, ar, 0xAA), b2));
+    return _mm_add_ps(x, _mm_mul_ps(_mm_shuffle_ps(ar, ar, 0xFF), b3));
+}
+
+void mat44_mul_relaxed(float* out, const float* a, const float* b) {
+    const __m128 b0 = _mm_loadu_ps(b), b1 = _mm_loadu_ps(b + 4), b2 = _mm_loadu_ps(b + 8), b3 = _mm_loadu_ps(b + 12);
+    const __m128 r0 = row_relaxed(_mm_loadu_ps(a), b0, b1, b2, b3);
+    const __m128 r1 = row_relaxed(_mm_loadu_ps(a + 4), b0, b1, b2, b3);
+    const __m128 r2 = row_relaxed(_mm_loadu_ps(a + 8), b0, b1, b2, b3);
+    const __m128 r3 = row_relaxed(_mm_loadu_ps(a + 12), b0, b1, b2, b3);
+    _mm_storeu_ps(out, r0);
+    _mm_storeu_ps(out + 4, r1);
+    _mm_storeu_ps(out + 8, r2);
+    _mm_storeu_ps(out + 12, r3);
+}
+
+void mat34_mul_relaxed(float* out, const float* b, const float* a) {
+    const __m128 b0 = _mm_loadu_ps(b), b1 = _mm_loadu_ps(b + 4), b2 = _mm_loadu_ps(b + 8);
+    const __m128 w = _mm_loadu_ps(reinterpret_cast<const float*>(0x10D52D0));
+    const __m128 r0 = row_relaxed(_mm_loadu_ps(a), b0, b1, b2, w);
+    const __m128 r1 = row_relaxed(_mm_loadu_ps(a + 4), b0, b1, b2, w);
+    const __m128 r2 = row_relaxed(_mm_loadu_ps(a + 8), b0, b1, b2, w);
+    _mm_storeu_ps(out, r0);
+    _mm_storeu_ps(out + 4, r1);
+    _mm_storeu_ps(out + 8, r2);
+}
+
 // out (4x4) = A (4x4) x B (4x4), cdecl (out, A, B). Each row's four factors are read before the row is written.
 float* __cdecl mat44_mul(float* out, const float* a, const float* b) {
+    if (relaxed_here() && apart(out, 64, a, 64) && apart(out, 64, b, 64)) {
+        mat44_mul_relaxed(out, a, b);
+        return out;
+    }
+    if (g_fused && apart(out, 64, a, 64) && apart(out, 64, b, 64)) {
+        mat44_mul_regs(out, a, b);
+        return out;
+    }
     for (int r = 0; r < 4; ++r) {
         const float a0 = a[r * 4 + 0], a1 = a[r * 4 + 1], a2 = a[r * 4 + 2], a3 = a[r * 4 + 3];
         float* o = out + r * 4;
@@ -537,6 +805,14 @@ float* __cdecl mat44_mul(float* out, const float* a, const float* b) {
 
 // out (3x4) = A (3x4) x [B (3x4); the engine's constant row 0 0 0 1 at 0x10D52D0], cdecl (out, B, A).
 float* __cdecl mat34_mul(float* out, const float* b, const float* a) {
+    if (relaxed_here() && apart(out, 48, a, 48) && apart(out, 48, b, 48)) {
+        mat34_mul_relaxed(out, b, a);
+        return out;
+    }
+    if (g_fused && apart(out, 48, a, 48) && apart(out, 48, b, 48)) {
+        mat34_mul_regs(out, b, a);
+        return out;
+    }
     const float* w = reinterpret_cast<const float*>(0x10D52D0);
     for (int r = 0; r < 3; ++r) {
         const float a0 = a[r * 4 + 0], a1 = a[r * 4 + 1], a2 = a[r * 4 + 2], a3 = a[r * 4 + 3];
@@ -2670,6 +2946,23 @@ int rendermath_set_site(uintptr_t at, bool on) {
         if (g_saved[i].at == at && switch_site(g_saved[i], g_saved[i].target, on)) ++n;
     }
     return n;
+}
+
+void rendermath_render_frame() {
+    // Render thread, at each frame's start: the relaxed tier follows the thread the draws run on.
+    const uint32_t want = g_relaxed_wanted ? static_cast<uint32_t>(GetCurrentThreadId()) : 0;
+    if (g_relaxed_tid != want) g_relaxed_tid = want;
+}
+
+bool rendermath_set_relaxed(bool on) {
+    g_relaxed_wanted = on;
+    if (!on) g_relaxed_tid = 0;
+    return g_relaxed_wanted;
+}
+
+bool rendermath_set_fused(bool on) {
+    g_fused = on;
+    return g_fused;
 }
 
 int rendermath_set_table(int table, bool on) {

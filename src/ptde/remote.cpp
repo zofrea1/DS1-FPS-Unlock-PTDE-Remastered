@@ -13,6 +13,9 @@
 #include "layout.h"
 #include "eventwaits.h"
 #include "passcull.h"
+#include "surfpool.h"
+#include "d3dperf.h"
+#include "phases.h"
 #include "resolution.h"
 #include "rendermath.h"
 #include "watch.h"
@@ -673,6 +676,12 @@ void track(void* p, char kind, UINT w, UINT h, D3DFORMAT f, DWORD usage, const c
         id = g_next_res++;
         g_res[p] = Res{id, kind, w, h, f, usage};
         hook_release(p);
+    }
+    // Only the first creations are written out: a file write per frame (the game makes some surfaces every frame)
+    // would slow the render thread being measured.
+    if (id >= 400) {
+        if (id == 400) out("create: later creations are not written out (counted in `surfpool`)");
+        return;
     }
     char fb[16];
     const std::string st = game_stack(_AddressOfReturnAddress(), (w >= 2048 && w == h) ? 28 : 6);
@@ -1872,6 +1881,10 @@ void run(const std::string& line) {
     } else if (c == "fastmath" && t.size() > 3 && t[1] == "at") {
         const auto at = static_cast<uintptr_t>(std::strtoul(t[2].c_str(), nullptr, 16));
         out("fastmath at %X %ld: %d sites", static_cast<unsigned>(at), num(3, 1), rendermath_set_site(at, num(3, 1) != 0));
+    } else if (c == "fastmath" && t.size() > 2 && t[1] == "relaxed") {
+        out("fastmath relaxed %d", rendermath_set_relaxed(num(2, 1) != 0) ? 1 : 0);
+    } else if (c == "fastmath" && t.size() > 2 && t[1] == "fused") {
+        out("fastmath fused %d", rendermath_set_fused(num(2, 1) != 0) ? 1 : 0);
     } else if (c == "fastmath" && t.size() > 2) {
         const int table = t[1] == "effects" ? 1 : t[1] == "new" ? 2 : t[1] == "bone" ? 3 : 0;
         out("fastmath %s %ld: %d sites", t[1].c_str(), num(2, 1), rendermath_set_table(table, num(2, 1) != 0));
@@ -1881,6 +1894,18 @@ void run(const std::string& line) {
         // passdump NAME: the kept copy of the water's mirror scene (passcull 1, after a frame that drew it).
         g_passdump_name = t[1];
         g_passdump_requested = true;
+    } else if (c == "phases" && t.size() > 1) {
+        // phases on | phases add ADDR: subsystem times of the frame function ([phases] lines every 5 s).
+        const uint32_t at = t.size() > 2 ? static_cast<uint32_t>(std::strtoul(t[2].c_str(), nullptr, 16)) : 0;
+        out("phases %s: %s", t[1].c_str(), phases_command(t[1].c_str(), at));
+    } else if (c == "d3dfast") {
+        out("d3dfast %d", d3dperf_set_quick(t.size() > 1 ? static_cast<int>(num(1, 1)) : -1));
+    } else if (c == "surfpool") {
+        // surfpool [MASK]: pooled kinds (bit 0 depth-stencil, 1 offscreen, 2 render target), with the counts so far.
+        unsigned long reused = 0, created = 0;
+        surfpool_stats(&reused, &created);
+        out("surfpool %d (reused %lu, created %lu)", surfpool_set_kinds(t.size() > 1 ? static_cast<int>(num(1, 7)) : -1),
+            reused, created);
     } else if (c == "passcull") {
         // passcull [0|1|2]: the water's mirror scene drawn always, skipped while unused, or always skipped.
         if (t.size() > 1) passcull_set_mode(static_cast<int>(num(1, 1)));

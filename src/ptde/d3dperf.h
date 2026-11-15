@@ -43,3 +43,5 @@ unsigned long d3dperf_readback_waits();
 void d3dperf_filter_stats(unsigned long* switches, unsigned long* applies, unsigned long* recorded);
 // FilterShaderConstants since the start: calls and registers reaching the filter, calls answered, registers sent on.
 void d3dperf_constant_stats(unsigned long* calls, unsigned long* regs, unsigned long* skipped, unsigned long* sent);
+// Diagnostics: the filters' quick answer for repeats on (1) or off (0); -1 only reads.
+int d3dperf_set_quick(int on);
