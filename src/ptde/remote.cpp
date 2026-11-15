@@ -1217,6 +1217,8 @@ bool warp_chr(int who, int region, int floor = 0) {
     return true;
 }
 
+float g_atk_ref[3] = {};
+bool g_atk_ref_set = false;
 int g_warp_who = 0, g_warp_region = 0;
 ULONGLONG g_warp_until = 0;
 
@@ -1325,9 +1327,10 @@ void track_frame() {
     out("%s", line);
     // The attacks alive now (the list of 0x137D6AC's manager, linked at +0x1D0): every float triple in their first
     // 0x1D0 bytes within 3 m of the tracked map object's bone 0 (what the hit test of an event's damaging object uses).
-    float near_to[3] = {0, 0, 0};
-    bool have = false;
+    float near_to[3] = {g_atk_ref[0], g_atk_ref[1], g_atk_ref[2]};
+    bool have = g_atk_ref_set;
     for (const Tracked& e : g_tracked) {
+        if (have) break;
         uint32_t model = 0;
         if (e.obj && safe_read(e.obj + 0x90, &model, 4) && model) {
             float b[12] = {};
@@ -1354,7 +1357,11 @@ void track_frame() {
                 i += 2;
             }
         }
-        if (hits) out("%s", al);
+        // +0x70: radius, ?, knockback distance (an event's damaging object: its radius and AtkParam knockbackDist)
+        if (hits) {
+            an += std::snprintf(al + an, sizeof(al) - an, " | r %.3f %.3f %.3f", f[0x70 / 4], f[0x74 / 4], f[0x78 / 4]);
+            out("%s", al);
+        }
         uint32_t next = 0;
         if (!safe_read(atk + 0x1D0, &next, 4)) break;
         atk = next;
@@ -1758,6 +1765,15 @@ void run_game(const std::vector<std::string>& t) {
         g_warp_until = GetTickCount64() + static_cast<ULONGLONG>(num(4, 0));
         out("tpr %.2f %.2f %.2f (region record %08X): %s", p[0], p[1], p[2], static_cast<unsigned>(rec),
             ok ? "done" : "exception");
+    } else if (c == "atkref") {
+        // atkref X Y Z: track's attack log takes attacks near this point (atkref off: near the object's bone 0).
+        g_atk_ref_set = t.size() > 3;
+        if (g_atk_ref_set) {
+            g_atk_ref[0] = fnum(1);
+            g_atk_ref[1] = fnum(2);
+            g_atk_ref[2] = fnum(3);
+        }
+        out("atkref %s", g_atk_ref_set ? "set" : "off");
     } else if (c == "ent") {
         // ent ENTITY: the character or map object with that MSB entity id.
         const int id = static_cast<int>(num(1, 0));
@@ -2186,7 +2202,7 @@ void run(const std::string& line) {
         }
     } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp" || c == "speffect" ||
                c == "anim" || c == "ent" || c == "objscan" || c == "objpath" || c == "track" ||
-               c == "warpchr" || c == "tpr") {
+               c == "warpchr" || c == "tpr" || c == "atkref") {
         std::lock_guard<std::mutex> lock(g_game_lock);
         g_game_cmds.push_back(t);
     } else if (c == "queries") {
