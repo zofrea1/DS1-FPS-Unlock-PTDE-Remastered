@@ -1220,6 +1220,41 @@ bool warp_chr(int who, int region, int floor = 0) {
 int g_warp_who = 0, g_warp_region = 0;
 ULONGLONG g_warp_until = 0;
 
+// A loaded region's MSB record by entity id (WorldPointManImp [0x137D6E8]: +0x24 id tables of 0x14 bytes from
+// +0x28 {first, last, ?, count, (id, handle) pairs}; a handle is block << 20 | index into the blocks at +0x20, 0x1C
+// bytes each, whose map data (+4) leads through +0x18 to the regions (+0x24: +8 count + 1, +0xC records); a record
+// has its position at +0x10), as Prepare to Co-op's game.cpp reads it. 0 when not found.
+uintptr_t region_record(int entity) {
+    uint32_t wpm = 0;
+    int tables = 0;
+    if (!safe_read(0x0137D6E8, &wpm, 4) || !wpm || !safe_read(wpm + 0x24, &tables, 4) || tables <= 0 || tables > 64) {
+        return 0;
+    }
+    for (int t = 0; t < tables; ++t) {
+        const uintptr_t table = wpm + 0x28 + t * 0x14;
+        int count = 0;
+        uint32_t pairs = 0;
+        if (!safe_read(table + 0xC, &count, 4) || !safe_read(table + 0x10, &pairs, 4) || !pairs) continue;
+        for (int i = 0; i < count && i < 8192; ++i) {
+            int id = -1;
+            uint32_t handle = 0;
+            if (!safe_read(pairs + i * 8, &id, 4) || id != entity || !safe_read(pairs + i * 8 + 4, &handle, 4)) continue;
+            const uint32_t block = handle >> 20 & 0xFF, index = handle & 0xFFFFF;
+            uint32_t nblocks = 0, blocks = 0, mapdata = 0, data = 0, list = 0;
+            int n = 0;
+            uint32_t rec = 0;
+            if (!safe_read(wpm + 0x1C, &nblocks, 4) || block >= nblocks || !safe_read(wpm + 0x20, &blocks, 4) ||
+                !safe_read(blocks + 4 + block * 0x1C, &mapdata, 4) || !safe_read(mapdata + 0x18, &data, 4) ||
+                !safe_read(data + 0x24, &list, 4) || !safe_read(list + 8, &n, 4) || static_cast<int>(index) >= n - 1 ||
+                !safe_read(list + 0xC + index * 4, &rec, 4)) {
+                return 0;
+            }
+            return rec;
+        }
+    }
+    return 0;
+}
+
 // track: entities followed every game frame (track MS ENTITY..), and where a map object keeps its position
 // (objpath OFF [OFF2]: the float triple at obj+OFF, or at [obj+OFF]+OFF2).
 struct Tracked {
@@ -1648,6 +1683,26 @@ void run_game(const std::vector<std::string>& t) {
         g_warp_who = who;
         g_warp_region = region;
         g_warp_until = GetTickCount64() + static_cast<ULONGLONG>(num(3, 0));
+    } else if (c == "tpr") {
+        // tpr X Y Z [MS]: the player to X Y Z through a region of the Undead Burg nobody uses offline (black invasion
+        // point 1014011, moved there), held there by the same warp every game frame for MS ms.
+        const uintptr_t rec = region_record(1014011);
+        if (!rec) {
+            out("tpr: region 1014011 not loaded");
+            return;
+        }
+        float p[3] = {fnum(1), fnum(2), fnum(3)};
+        DWORD old = 0;
+        if (VirtualProtect(reinterpret_cast<void*>(rec + 0x10), 12, PAGE_READWRITE, &old)) {
+            std::memcpy(reinterpret_cast<void*>(rec + 0x10), p, 12);
+            VirtualProtect(reinterpret_cast<void*>(rec + 0x10), 12, old, &old);
+        }
+        const bool ok = warp_chr(10000, 1014011);
+        g_warp_who = 10000;
+        g_warp_region = 1014011;
+        g_warp_until = GetTickCount64() + static_cast<ULONGLONG>(num(4, 0));
+        out("tpr %.2f %.2f %.2f (region record %08X): %s", p[0], p[1], p[2], static_cast<unsigned>(rec),
+            ok ? "done" : "exception");
     } else if (c == "ent") {
         // ent ENTITY: the character or map object with that MSB entity id.
         const int id = static_cast<int>(num(1, 0));
@@ -2076,7 +2131,7 @@ void run(const std::string& line) {
         }
     } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp" || c == "speffect" ||
                c == "anim" || c == "ent" || c == "objscan" || c == "objpath" || c == "track" ||
-               c == "warpchr") {
+               c == "warpchr" || c == "tpr") {
         std::lock_guard<std::mutex> lock(g_game_lock);
         g_game_cmds.push_back(t);
     } else if (c == "queries") {
