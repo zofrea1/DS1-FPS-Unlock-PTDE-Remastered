@@ -315,7 +315,8 @@ void steamguard_start(bool enabled, bool hook_game_imports) {
     if (HANDLE t = CreateThread(nullptr, 0, canary_thread, nullptr, 0, nullptr)) {
         SetThreadPriority(t, THREAD_PRIORITY_ABOVE_NORMAL);
         CloseHandle(t);
-        LOG_INFO("SteamPauseGuard: on (every-frame Steam calls go right after a quick answer from Steam)");
+        LOG_INFO("SteamPauseGuard: on (every-frame Steam calls go right after a quick answer from Steam; %s)",
+                 hook_game_imports ? "the game's own Steam imports hooked" : "Prepare to Co-op hooks them and asks");
     }
 }
 
