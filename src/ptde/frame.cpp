@@ -31,6 +31,7 @@
 #include "slidesteer.h"
 #include "snap.h"
 #include "bullettrace.h"
+#include "sfxsway.h"
 #include "sfxwatch.h"
 #include "soulcounter.h"
 #include "flick.h"
@@ -255,6 +256,7 @@ void frame_boundary() {
         const double step = g.driver ? static_cast<double>(g.written) : 1.0 / 30.0;
         fixes_update(step);
         sfxwatch_tick();
+        sfxsway_tick();
         footik_update(step);
         slidesteer_update(step);
         ghost_frame(step);
@@ -620,6 +622,9 @@ bool frame_install(const Settings& settings) {
     script_install(settings.driver && settings.fix_script_memory);
     if (settings.bullet_trace) {
         bullettrace_install();
+    }
+    if (settings.trace) {
+        sfxsway_install();
     }
     present_install(settings);
     if (settings.profile) {
