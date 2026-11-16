@@ -35,3 +35,12 @@ bool sfx_distortion_install();
 // (sfx.cpp). sfx_sway_frame takes each frame's step.
 bool sfx_sway_install();
 void sfx_sway_frame(double step);
+
+// FixSfxTrails: effect trails (FXParticleAppearance_Tracer, node type 40) hold a fixed number of points sized for
+// one commit per 1/60 s, and most commit every frame, so above 60 FPS the trail was cut to lifetime * 60 / FPS. The
+// commit step is raised so the history holds the whole lifetime (sfx.cpp). stats: the SfxTrails trace lines (Trace =
+// true), with the hook in place even when fix is false; sfx_trails_set turns the fix on or off at run time (remote
+// command "trails"); sfx_trails_tick logs once a second.
+bool sfx_trails_install(bool fix, bool stats);
+void sfx_trails_set(bool fix);
+void sfx_trails_tick();

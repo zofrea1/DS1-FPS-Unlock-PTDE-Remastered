@@ -258,6 +258,7 @@ void frame_boundary() {
         sfx_sway_frame(step);
         sfxwatch_tick();
         sfxsway_tick();
+        sfx_trails_tick();
         footik_update(step);
         slidesteer_update(step);
         ghost_frame(step);
@@ -540,6 +541,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_sfx_sway) {
             sfx_sway_install();
+        }
+        if (settings.fix_sfx_trails) {
+            sfx_trails_install(true, settings.trace);
         }
         // Before the game makes its render targets: its anti-aliasing's sample count (it multisamples only when on).
         atoc_set_msaa_samples(settings.antialiasing_samples);

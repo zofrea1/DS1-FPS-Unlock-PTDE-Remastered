@@ -201,6 +201,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_sfx_actions = parse_bool(val);
         } else if (key == "fixsfxsway") {
             s.fix_sfx_sway = parse_bool(val);
+        } else if (key == "fixsfxtrails") {
+            s.fix_sfx_trails = parse_bool(val);
         } else if (key == "fixsfxdistortion") {
             s.fix_sfx_distortion = parse_bool(val);
         } else if (key == "yieldtodsfix") {
@@ -441,7 +443,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"fasteffects", "false"}, {"fastrendermath", "false"}, {"rendermathprecision", "exact"},
                 // Fixes in the effects library and the cutscene camera, which the RTX mod hooks too.
                 {"fixsfxspawnrate", "false"}, {"fixsfxactions", "false"}, {"fixsfxdistortion", "false"},
-                {"fixsfxsway", "false"},
+                {"fixsfxsway", "false"}, {"fixsfxtrails", "false"},
                 {"fixcutscenecamera", "false"},
                 // The mouse and keyboard, and the start-up.
                 {"hidemousecursor", "false"}, {"cacheinputreads", "false"}, {"skipintro", "false"},
@@ -455,8 +457,9 @@ Settings settings_load(const wchar_t* dll_path) {
                          "water, colour, shadow, filtering, aspect and HUD scale settings, its Direct3D-level speed-ups "
                          "(FastEffects, FastRenderMath, AsyncReadback, ReuseSurfaces, PreloadTextures, "
                          "FilterSamplerStates, SkipUnusedReflection), DXVK, FixSfxSpawnRate, FixSfxActions, FixSfxSway, "
-                         "FixSfxDistortion, FixCutsceneCamera, HideMouseCursor, CacheInputReads and SkipIntro are off; "
-                         "the frame rate, FullscreenRefreshRate, every gameplay fix and FixController stay on",
+                         "FixSfxTrails, FixSfxDistortion, FixCutsceneCamera, HideMouseCursor, CacheInputReads and "
+                         "SkipIntro are off; the frame rate, FullscreenRefreshRate, every gameplay fix and FixController "
+                         "stay on",
                          remix ? "RTX Remix found beside the game (d3d9.dll, .trex\\NvRemixBridge.exe)"
                                : "YieldToRtxRemix = true");
             }

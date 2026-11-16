@@ -367,6 +367,158 @@ void sfx_sway_frame(double step) {
     InterlockedExchange(&g_sway_ticks, ticks);
 }
 
+// --------------------------------------------------------------------------------------------------- effect trails
+// FXParticleAppearance_Tracer (effect node type 40) draws a ribbon through a particle's recent positions. Each update
+// (0xB90CD0) adds the current position, plus the node's interpolated points in between (data +0x60, so n points in
+// all), and commits them to the trail's history once more than the node's step (data +0x54, seconds) has passed since
+// the last commit; points older than the trail's lifetime (data +0x58) drop off the end. The history holds a fixed
+// number of points, sized when the trail starts (0xB93590): min(data +0x5C * n, the lifetime at 60 a second * n) + 2,
+// so the trail was built for one commit per 1/60 s at most (data +0x5C is the lifetime in sixtieths in nearly every
+// effect). 112 of PTDE's 165 trail nodes have a step of 0, which commits every frame: above 60 FPS the history fills
+// before the lifetime ends and the oldest points are dropped early, so the trail is cut to lifetime * 60 / FPS. At 240
+// FPS the usual 1/3 s trail (sorceries, enemy attacks) was a quarter as long. The step is raised so that the history
+// holds the whole lifetime, at 90% of it as at 60 FPS, and never beyond 0.03 s (just under a 30 FPS frame). Up to 60
+// FPS every frame still commits, as before; above it the trail gets a point about every 1/60 s, and its head still
+// follows the particle every frame (the uncommitted points are redrawn each update).
+namespace {
+
+// 0xB9242F: fld dword ptr [edx+54h] (the node's step; edx = the node's data) ; fcompp (with ST1 = now - last
+// commit, the x87 stack's only value); then fnstsw ax ; test ah,5 ; jp no-commit. [ebp-14h] = the trail.
+constexpr uint32_t kTrailCommit = 0x00B9242F;
+constexpr uint8_t kTrailCommitBytes[5] = {0xD9, 0x42, 0x54, 0xDE, 0xD9};
+constexpr float kTrailMaxStep = 0.03f;
+constexpr float kTrailFill = 0.9f;
+volatile LONG g_trail_fix = 0;
+bool g_trail_stats = false;
+
+// Trace statistics (once a second): updates, commits, updates of a trail whose history is full, and for those the
+// time its points cover against its lifetime (thousandths, summed, and the least).
+volatile LONG g_trail_updates = 0;
+volatile LONG g_trail_commits = 0;
+volatile LONG g_trail_full = 0;
+volatile LONG g_trail_cover_sum = 0;
+volatile LONG g_trail_cover_min = 1000000;
+LARGE_INTEGER g_trail_freq{};
+LARGE_INTEGER g_trail_since{};
+LONG g_trail_frames = 0;
+int g_trail_lines = 0;
+
+void trail_note(const uint8_t* self, uint32_t cap, uint32_t slack, float life, float elapsed, float use) {
+    InterlockedIncrement(&g_trail_updates);
+    if (use < elapsed) InterlockedIncrement(&g_trail_commits);
+    __try {
+        const uint32_t count = *reinterpret_cast<const uint32_t*>(self + 0x5C);
+        if (count + slack < cap || !(life > 0.0f)) return;
+        const float* stamps = *reinterpret_cast<float* const*>(self + 0x68);
+        const float now = elapsed + *reinterpret_cast<const float*>(self + 0x0C);
+        const LONG cover = static_cast<LONG>((now - stamps[0]) / life * 1000.0f);
+        InterlockedIncrement(&g_trail_full);
+        InterlockedExchangeAdd(&g_trail_cover_sum, cover);
+        LONG cur = g_trail_cover_min;
+        while (cover < cur) {
+            const LONG seen = InterlockedCompareExchange(&g_trail_cover_min, cover, cur);
+            if (seen == cur) break;
+            cur = seen;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+float __cdecl trail_step(const uint8_t* data, const uint8_t* self, float elapsed) {
+    float use = 0.0f;
+    uint32_t cap = 0, slack = 0;
+    float life = 0.0f;
+    __try {
+        use = *reinterpret_cast<const float*>(data + 0x54);
+        const int sub = *reinterpret_cast<const int*>(data + 0x60);
+        life = *reinterpret_cast<const float*>(data + 0x58);
+        cap = *reinterpret_cast<const uint32_t*>(self + 0x58);
+        const uint32_t n = sub > 0 ? static_cast<uint32_t>(sub) + 1 : 1;
+        slack = 2 * n + 1;  // the update keeps room for n new points, n pending and one more
+        if (g_trail_fix && life > 0.0f && cap > slack) {
+            float need = kTrailFill * static_cast<float>(n) * life / static_cast<float>(cap - slack);
+            if (need > kTrailMaxStep) need = kTrailMaxStep;
+            if (need > use) use = need;  // a NaN step stays NaN: no commit, as before
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    if (g_trail_stats) trail_note(self, cap, slack, life, elapsed, use);
+    return use;
+}
+
+// Called in place of the 5 bytes: ST0 = elapsed on entry; returns with fcompp done (step against elapsed).
+__declspec(naked) void trail_stub() {
+    __asm {
+        sub esp, 4
+        fstp dword ptr [esp]         // elapsed; the x87 stack is empty for the call
+        push eax
+        push ecx
+        push edx
+        push dword ptr [esp + 12]    // elapsed
+        push dword ptr [ebp - 14h]   // the trail
+        push edx                     // the node's data
+        call trail_step              // ST0 = the step to use
+        add esp, 12
+        pop edx
+        pop ecx
+        pop eax
+        fld dword ptr [esp]          // ST0 = elapsed, ST1 = step
+        fxch st(1)
+        add esp, 4
+        fcompp
+        ret
+    }
+}
+
+}  // namespace
+
+bool sfx_trails_install(bool fix, bool stats) {
+    auto* p = reinterpret_cast<uint8_t*>(kTrailCommit);
+    if (std::memcmp(p, kTrailCommitBytes, sizeof(kTrailCommitBytes)) != 0) {
+        LOG_ERROR("Effect trail commit at %08X does not match this build. Not patching.", kTrailCommit);
+        return false;
+    }
+    g_trail_fix = fix ? 1 : 0;
+    g_trail_stats = stats;
+    QueryPerformanceFrequency(&g_trail_freq);
+    QueryPerformanceCounter(&g_trail_since);
+    DWORD old = 0;
+    if (!VirtualProtect(p, sizeof(kTrailCommitBytes), PAGE_EXECUTE_READWRITE, &old)) return false;
+    p[0] = 0xE8;  // call trail_stub
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&trail_stub) - (kTrailCommit + 5));
+    std::memcpy(p + 1, &rel, 4);
+    FlushInstructionCache(GetCurrentProcess(), p, sizeof(kTrailCommitBytes));
+    DWORD ignored = 0;
+    VirtualProtect(p, sizeof(kTrailCommitBytes), old, &ignored);
+    if (fix) LOG_INFO("Effect trails keep their whole length at any frame rate (%08X)", kTrailCommit);
+    if (stats) LOG_INFO("SfxTrails: effect trail updates are counted once a second while they run");
+    return true;
+}
+
+void sfx_trails_set(bool fix) { InterlockedExchange(&g_trail_fix, fix ? 1 : 0); }
+
+void sfx_trails_tick() {
+    if (!g_trail_stats) return;
+    ++g_trail_frames;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const double secs =
+        static_cast<double>(now.QuadPart - g_trail_since.QuadPart) / static_cast<double>(g_trail_freq.QuadPart);
+    if (secs < 1.0) return;
+    const LONG updates = InterlockedExchange(&g_trail_updates, 0), commits = InterlockedExchange(&g_trail_commits, 0);
+    const LONG full = InterlockedExchange(&g_trail_full, 0), sum = InterlockedExchange(&g_trail_cover_sum, 0);
+    const LONG least = InterlockedExchange(&g_trail_cover_min, 1000000);
+    const LONG frames = g_trail_frames;
+    g_trail_frames = 0;
+    g_trail_since = now;
+    if (updates == 0 || g_trail_lines >= 600) return;
+    ++g_trail_lines;
+    LOG_INFO("SfxTrails: %.2f s, %ld frames (%.0f FPS), fix %s: %ld trail updates, %ld commits; %ld updates with a "
+             "full history, covering %.2f of the lifetime on average (least %.2f)",
+             secs, frames, frames / secs, g_trail_fix ? "on" : "off", updates, commits, full,
+             full ? sum / 1000.0 / full : 0.0, full ? least / 1000.0 : 0.0);
+}
+
 bool sfx_install(bool raise) {
     g_raise = raise;
     // mov eax,[0x013787C8] ; push esi ; push edi

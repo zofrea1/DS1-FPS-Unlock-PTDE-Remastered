@@ -18,6 +18,7 @@
 #include "phases.h"
 #include "inputcache.h"
 #include "resolution.h"
+#include "sfx.h"
 #include "rendermath.h"
 #include "watch.h"
 #include "log.h"
@@ -2156,6 +2157,10 @@ void run(const std::string& line) {
         // ours at half resolution.
         resolution_set_effects(static_cast<int>(num(1, 3)));
         out("effects %ld", num(1, 3));
+    } else if (c == "trails" && t.size() > 1) {
+        // trails 0/1: FixSfxTrails off or on for this session (needs it on in the INI for the hook).
+        sfx_trails_set(num(1, 1) != 0);
+        out("trails %s", num(1, 1) != 0 ? "fixed" : "the game's own");
     } else if (c == "eventwaits" && t.size() > 1) {
         eventwaits_set(num(1, 1) != 0);
         out("eventwaits %s", num(1, 1) != 0 ? "fixed" : "the game's own");
