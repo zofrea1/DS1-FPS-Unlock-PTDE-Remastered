@@ -12,8 +12,16 @@
 namespace {
 
 using ChangeDisplayFn = LONG(WINAPI*)(LPCWSTR, DEVMODEW*, HWND, DWORD, LPVOID);
-ChangeDisplayFn g_original = nullptr;
+// The function the first wrapped import called, saved before the import is pointed at the hook (wrap_import) and read
+// back with a barrier: the bridge's thread can call the hook as soon as the slot changes, and a translator for ARM
+// (Box64, FEX) need not keep x86's store order.
+void* volatile g_original = nullptr;
 volatile LONG g_refresh = -1;
+
+ChangeDisplayFn original() {
+    void* const fn = InterlockedCompareExchangePointer(&g_original, nullptr, nullptr);
+    return fn ? reinterpret_cast<ChangeDisplayFn>(fn) : &ChangeDisplaySettingsExW;  // our own import: not wrapped
+}
 int g_logged = 0;
 
 // The rate for a mode of `w` x `h` (and `bpp` when nonzero) on `device`: FullscreenRefreshRate 0 = the highest listed,
@@ -51,12 +59,12 @@ LONG WINAPI hook_change_display(LPCWSTR device, DEVMODEW* mode, HWND window, DWO
                          mode->dmPelsWidth, mode->dmPelsHeight, asked, rate,
                          g_refresh > 0 ? "FullscreenRefreshRate = N" : "the display's highest at that size");
             }
-            const LONG r = g_original(device, &copy, window, flags, param);
+            const LONG r = original()(device, &copy, window, flags, param);
             if (r == DISP_CHANGE_SUCCESSFUL) return r;
             LOG_ERROR("FullscreenRefreshRate: %lu Hz was refused (%ld); RTX Remix's own mode instead", rate, r);
         }
     }
-    return g_original(device, mode, window, flags, param);
+    return original()(device, mode, window, flags, param);
 }
 
 // The import of USER32!ChangeDisplaySettingsExW in `module`, wrapped. True when it is (now or already).
@@ -80,8 +88,9 @@ bool wrap_import(HMODULE module) {
             if (current == reinterpret_cast<void*>(&hook_change_display)) return true;
             DWORD old = 0;
             if (!VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), PAGE_READWRITE, &old)) return false;
-            if (!g_original) g_original = reinterpret_cast<ChangeDisplayFn>(current);
-            slots->u1.Function = reinterpret_cast<ULONG_PTR>(&hook_change_display);
+            InterlockedCompareExchangePointer(&g_original, current, nullptr);  // the first one's, kept
+            InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&slots->u1.Function),
+                                       reinterpret_cast<void*>(&hook_change_display));
             VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), old, &old);
             return true;
         }

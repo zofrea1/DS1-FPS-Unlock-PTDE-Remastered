@@ -5,5 +5,5 @@
 // tools\make_ini.ps1 reads it from there; a static_assert there keeps the two equal.
 #define FPSU_VERSION_MAJOR 2
 #define FPSU_VERSION_MINOR 4
-#define FPSU_VERSION_PATCH 1
-#define FPSU_VERSION_STR "2.4.1"
+#define FPSU_VERSION_PATCH 2
+#define FPSU_VERSION_STR "2.4.2"

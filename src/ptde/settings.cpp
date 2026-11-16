@@ -204,10 +204,12 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "yieldtodsfix") {
             s.yield_to_dsfix = parse_bool(val);
         } else if (key == "yieldtortxremix") {
-            const std::string v = trim(val);
-            s.yield_to_rtx_remix = (v == "true" || v == "on" || v == "1")     ? 1
-                                   : (v == "false" || v == "off" || v == "0") ? 2
-                                                                               : 0;
+            // auto, or a boolean as every other key takes it (False and no are never, not auto).
+            const std::string v = lower(trim(val));
+            s.yield_to_rtx_remix = v == "auto" || v.empty()                              ? 0
+                                   : parse_bool(v)                                         ? 1
+                                   : (v == "false" || v == "no" || v == "off" || v == "0") ? 2
+                                                                                           : 0;
         } else if (key == "fixsun") {
             s.fix_sun_with_dsfix = parse_bool(val);
         } else if (key == "fixwater") {
@@ -409,7 +411,11 @@ Settings settings_load(const wchar_t* dll_path) {
     // shape, the mouse pointer and the intro skip, which the RTX mod handles. The frame rate, every gameplay fix and
     // FixController stay (a pad the game does not know needs FixController; checked 2026-11-15 with Dark Souls PTDE
     // RTX: with all of these off the picture was right), and so does FullscreenRefreshRate, which reaches the display
-    // mode the bridge sets itself (remixdisplay.h).
+    // mode the bridge sets itself (remixdisplay.h). GammaRamp goes back to auto, the game's own way: the game's ramp
+    // (Options > Brightness) is passed on; false would replace it with a flat one, as 2.4.1 did. DpiAware stays as
+    // the INI says: DllMain sets it from the INI before the game makes its window (window.h), which a setting here
+    // cannot undo, and every test with the RTX mod ran with it on (2.4.1 turned the setting off here, and only the
+    // log followed: it said Windows stretches the picture while the game was DPI aware).
     if (s.yield_to_rtx_remix != 2) {
         std::wstring dir(dll_path);
         const size_t slash = dir.find_last_of(L"\\/");
@@ -423,8 +429,8 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"depthoffieldresolution", "game"}, {"effectsresolution", "game"}, {"waterresolution", "game"},
                 {"highprecisioncolor", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
                 {"shadowbias", "0"}, {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
-                {"fixsun", "false"}, {"fixwater", "false"}, {"gammaramp", "false"}, {"dxvk", "false"},
-                {"dpiaware", "false"}, {"borderlessfullscreen", "false"},
+                {"fixsun", "false"}, {"fixwater", "false"}, {"gammaramp", "auto"}, {"dxvk", "false"},
+                {"borderlessfullscreen", "false"},
                 // The screen's shape and the HUD.
                 {"fixaspect", "false"}, {"fixaspectui", "false"}, {"uiscale", "100"}, {"uiscaleworld", "100"},
                 // Direct3D-level and render-code speed-ups.
