@@ -255,6 +255,7 @@ void frame_boundary() {
         }
         const double step = g.driver ? static_cast<double>(g.written) : 1.0 / 30.0;
         fixes_update(step);
+        sfx_sway_frame(step);
         sfxwatch_tick();
         sfxsway_tick();
         footik_update(step);
@@ -536,6 +537,9 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_sfx_distortion) {
             sfx_distortion_install();
+        }
+        if (settings.fix_sfx_sway) {
+            sfx_sway_install();
         }
         // Before the game makes its render targets: its anti-aliasing's sample count (it multisamples only when on).
         atoc_set_msaa_samples(settings.antialiasing_samples);

@@ -102,8 +102,12 @@ constexpr int kMaxLines = 600;
 }  // namespace
 
 bool sfxsway_install() {
-    for (const Site& s : kSites) {
-        if (std::memcmp(reinterpret_cast<const void*>(s.at), s.bytes, s.len) != 0) {
+    // A site FixSfxSway hooked already starts with its jmp: the watch goes in front of it and then on to it.
+    bool chained[5] = {};
+    for (int i = 0; i < 5; ++i) {
+        const Site& s = kSites[i];
+        chained[i] = *reinterpret_cast<const uint8_t*>(s.at) == 0xE9;
+        if (!chained[i] && std::memcmp(reinterpret_cast<const void*>(s.at), s.bytes, s.len) != 0) {
             LOG_ERROR("SfxSway: the code at %08X does not match this build. Not watching.", s.at);
             return false;
         }
@@ -113,24 +117,35 @@ bool sfxsway_install() {
     for (int i = 0; i < 5; ++i) {
         const Site& s = kSites[i];
         uint8_t* t = mem + i * 16;
-        std::memcpy(t, s.bytes, s.len);
-        t[s.len] = 0xE9;
-        const int32_t back = static_cast<int32_t>((s.at + s.len) - reinterpret_cast<uintptr_t>(t + s.len + 5));
-        std::memcpy(t + s.len + 1, &back, 4);
+        if (chained[i]) {
+            int32_t rel = 0;
+            std::memcpy(&rel, reinterpret_cast<const void*>(s.at + 1), 4);
+            const uintptr_t target = s.at + 5 + rel;
+            t[0] = 0xE9;
+            const int32_t to = static_cast<int32_t>(target - reinterpret_cast<uintptr_t>(t + 5));
+            std::memcpy(t + 1, &to, 4);
+        } else {
+            std::memcpy(t, s.bytes, s.len);
+            t[s.len] = 0xE9;
+            const int32_t back = static_cast<int32_t>((s.at + s.len) - reinterpret_cast<uintptr_t>(t + s.len + 5));
+            std::memcpy(t + s.len + 1, &back, 4);
+        }
         g_tramp[i] = t;
     }
     FlushInstructionCache(GetCurrentProcess(), mem, 5 * 16);
-    for (const Site& s : kSites) {
+    for (int i = 0; i < 5; ++i) {
+        const Site& s = kSites[i];
+        const int len = chained[i] ? 5 : s.len;
         auto* p = reinterpret_cast<uint8_t*>(s.at);
         DWORD old = 0;
-        if (!VirtualProtect(p, s.len, PAGE_EXECUTE_READWRITE, &old)) return false;
+        if (!VirtualProtect(p, len, PAGE_EXECUTE_READWRITE, &old)) return false;
         p[0] = 0xE9;
         const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(s.stub) - (s.at + 5));
         std::memcpy(p + 1, &rel, 4);
-        for (int k = 5; k < s.len; ++k) p[k] = 0x90;
-        FlushInstructionCache(GetCurrentProcess(), p, s.len);
+        for (int k = 5; k < len; ++k) p[k] = 0x90;
+        FlushInstructionCache(GetCurrentProcess(), p, len);
         DWORD ignored = 0;
-        VirtualProtect(p, s.len, old, &ignored);
+        VirtualProtect(p, len, old, &ignored);
     }
     QueryPerformanceFrequency(&g_freq);
     QueryPerformanceCounter(&g_since);

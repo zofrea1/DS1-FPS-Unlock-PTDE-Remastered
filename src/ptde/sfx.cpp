@@ -265,6 +265,108 @@ bool sfx_distortion_install() {
     return true;
 }
 
+// ---------------------------------------------------------------------------------------------- swaying particles
+// FXClusterMovement_Yurayura (effect node type 84) and FXClusterMovement_PartialFollow (type 105) turn every particle's
+// velocity by a random angle (0xA50100) once their counter (+0x10) passes the node's limit (10 or 20 thirtieths of a
+// second: data +0x40), and the counter goes up by one each time the cluster's per-call function runs (0x9E6050,
+// 0x9E50C0), once a frame. At 240 FPS the particles turned eight times as often: the SfxSway diagnostic (2026-11-15,
+// Blighttown) counted about 60 turns a second at 30 FPS and 500 at 220 FPS for the same 43 clusters, and the
+// spider offspring's magma tentacle (effect 13401) ended in a jitter that stretched far behind it instead of
+// staying on its body. The counter now counts the 30 FPS frames of the game's clock: before the per-call function
+// adds its one, the counter moves by the number of 1/30 s steps the clock crossed this frame, less one. At 30 FPS
+// that is exactly one a frame, as before.
+namespace {
+
+constexpr uint32_t kSwayCalls[2] = {0x009E6050, 0x009E50C0};
+constexpr uint8_t kSwayCallBytes[2][6] = {
+    {0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x00},  // push ebp ; mov ebp,esp ; push -1
+    {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08},  // push ebx ; mov ebx,esp ; sub esp,8
+};
+constexpr int kSwayCallLen[2] = {5, 6};
+void* g_sway_tramp[2] = {};
+volatile LONG g_sway_ticks = 1;  // 1/30 s steps the game's clock crossed this frame
+double g_sway_clock = 0.0;
+
+void __stdcall sway_step(uint8_t* self) {
+    const LONG ticks = g_sway_ticks;
+    if (ticks == 1 || !self) return;
+    __try {
+        *reinterpret_cast<int32_t*>(self + 0x10) += ticks - 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// thiscall (ecx = the movement): the counter moved, then on into the moved instructions.
+__declspec(naked) void sway_stub_0() {
+    __asm {
+        pushad
+        push ecx
+        call sway_step
+        popad
+        jmp dword ptr [g_sway_tramp]
+    }
+}
+
+__declspec(naked) void sway_stub_1() {
+    __asm {
+        pushad
+        push ecx
+        call sway_step
+        popad
+        jmp dword ptr [g_sway_tramp + 4]
+    }
+}
+
+}  // namespace
+
+bool sfx_sway_install() {
+    for (int i = 0; i < 2; ++i) {
+        if (std::memcmp(reinterpret_cast<const void*>(kSwayCalls[i]), kSwayCallBytes[i], kSwayCallLen[i]) != 0) {
+            LOG_ERROR("Effect sway counter at %08X does not match this build. Not patching.", kSwayCalls[i]);
+            return false;
+        }
+    }
+    auto* mem = static_cast<uint8_t*>(VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!mem) return false;
+    void (*const stubs[2])() = {&sway_stub_0, &sway_stub_1};
+    for (int i = 0; i < 2; ++i) {
+        uint8_t* t = mem + i * 16;
+        const int n = kSwayCallLen[i];
+        std::memcpy(t, kSwayCallBytes[i], n);
+        t[n] = 0xE9;
+        const int32_t back = static_cast<int32_t>((kSwayCalls[i] + n) - reinterpret_cast<uintptr_t>(t + n + 5));
+        std::memcpy(t + n + 1, &back, 4);
+        g_sway_tramp[i] = t;
+    }
+    FlushInstructionCache(GetCurrentProcess(), mem, 32);
+    for (int i = 0; i < 2; ++i) {
+        auto* p = reinterpret_cast<uint8_t*>(kSwayCalls[i]);
+        DWORD old = 0;
+        if (!VirtualProtect(p, kSwayCallLen[i], PAGE_EXECUTE_READWRITE, &old)) return false;
+        p[0] = 0xE9;
+        const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(stubs[i]) - (kSwayCalls[i] + 5));
+        std::memcpy(p + 1, &rel, 4);
+        for (int k = 5; k < kSwayCallLen[i]; ++k) p[k] = 0x90;
+        FlushInstructionCache(GetCurrentProcess(), p, kSwayCallLen[i]);
+        DWORD ignored = 0;
+        VirtualProtect(p, kSwayCallLen[i], old, &ignored);
+    }
+    LOG_INFO("Swaying effect particles turn on the 30 FPS clock (sites %08X, %08X)", kSwayCalls[0], kSwayCalls[1]);
+    return true;
+}
+
+void sfx_sway_frame(double step) {
+    if (!(step > 0.0) || step > 1.0) step = 1.0 / 30.0;
+    const double before = g_sway_clock;
+    g_sway_clock += step;
+    if (g_sway_clock > 86400.0) g_sway_clock -= 86400.0;  // a day: the 1/30 s grid is whole there (2592000 steps)
+    const double was = before > g_sway_clock ? before - 86400.0 : before;
+    LONG ticks = static_cast<LONG>(std::floor(g_sway_clock * 30.0 + 1e-4) - std::floor(was * 30.0 + 1e-4));
+    if (ticks < 0) ticks = 0;
+    if (ticks > 15) ticks = 15;
+    InterlockedExchange(&g_sway_ticks, ticks);
+}
+
 bool sfx_install(bool raise) {
     g_raise = raise;
     // mov eax,[0x013787C8] ; push esi ; push edi

@@ -28,3 +28,10 @@ bool sfx_actions_install();
 // 30 FPS grid: at 30 FPS it is the same step, above it the pattern jumps 30 times a second as at 30 FPS. Size,
 // colour and position still follow every frame.
 bool sfx_distortion_install();
+
+// FixSfxSway: the swaying particle movements (FXClusterMovement_Yurayura, node type 84, and
+// FXClusterMovement_PartialFollow, type 105) turn their particles once a counter passes the node's limit, and the
+// counter went up once a frame (8x as often at 240 FPS). It now counts the 30 FPS frames of the game's clock
+// (sfx.cpp). sfx_sway_frame takes each frame's step.
+bool sfx_sway_install();
+void sfx_sway_frame(double step);

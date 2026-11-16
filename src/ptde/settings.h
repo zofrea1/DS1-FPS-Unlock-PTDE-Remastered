@@ -68,6 +68,8 @@ struct Settings {
     bool fix_sfx_actions = true;
     // Heat haze (distortion effects) scrolls on the 30 FPS frame grid, as it was authored (see sfx.h).
     bool fix_sfx_distortion = true;
+    // Swaying effect particles turn on the 30 FPS clock, as they were authored (see sfx.h).
+    bool fix_sfx_sway = true;
     // Internal render resolution of the 3D scene and the HUD (resolution.h): -1 = auto (the monitor's resolution),
     // 0 = the game's own 1024x720 (HUD 1280x720), else width x height.
     int render_width = -1;
