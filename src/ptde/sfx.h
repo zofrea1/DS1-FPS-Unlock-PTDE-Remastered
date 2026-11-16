@@ -35,6 +35,10 @@ bool sfx_distortion_install();
 // (sfx.cpp). sfx_sway_frame takes each frame's step.
 bool sfx_sway_install();
 void sfx_sway_frame(double step);
+// Part of FixSfxSway: the jittering effect follow (FXMovementFollow with a jitter curve, update 0xB7AE50) turns its
+// effect every N updates; N now counts 30 FPS frames. stats: SfxJitter trace lines once a second (sfx_jitter_tick).
+bool sfx_jitter_install(bool stats);
+void sfx_jitter_tick();
 
 // FixSfxTrails: effect trails (FXParticleAppearance_Tracer, node type 40) hold a fixed number of points sized for
 // one commit per 1/60 s, and most commit every frame, so above 60 FPS the trail was cut to lifetime * 60 / FPS. The

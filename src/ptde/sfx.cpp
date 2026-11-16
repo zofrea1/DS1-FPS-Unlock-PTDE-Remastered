@@ -355,6 +355,103 @@ bool sfx_sway_install() {
     return true;
 }
 
+// The jittering follow: FXMovementFollow's variant with vtable 0x115822C (made by 0xB7AD00 when the game's effect
+// entity asks for a jitter curve, entity +0x78, and an interval, +0x7C) attaches an effect to its owner and, in its
+// update (0xB7AE50, slot 0), counts the update in +0x58 and once the count reaches the interval (+0x54) turns the
+// effect by a random angle within the curve's value (+0x50) and starts the count again: once a frame, so at 240 FPS
+// eight times as often. The same 30 FPS ticks: before the update adds its one, the count moves by ticks - 1.
+namespace {
+
+constexpr uint32_t kJitterUpdate = 0x00B7AE50;
+constexpr uint8_t kJitterUpdateBytes[6] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08};  // push ebx ; mov ebx,esp ; sub esp,8
+void* g_jitter_tramp = nullptr;
+bool g_jitter_stats = false;
+volatile LONG g_jitter_updates = 0;
+volatile LONG g_jitter_turns = 0;
+volatile LONG g_jitter_low = 0x7FFFFFFF;  // the shortest and longest intervals seen (with a curve)
+volatile LONG g_jitter_high = 0;
+LARGE_INTEGER g_jitter_freq{};
+LARGE_INTEGER g_jitter_since{};
+int g_jitter_lines = 0;
+
+void __stdcall jitter_step(uint8_t* self) {
+    if (!self) return;
+    const LONG ticks = g_sway_ticks;
+    __try {
+        if (ticks != 1) *reinterpret_cast<int32_t*>(self + 0x58) += ticks - 1;
+        if (g_jitter_stats) {
+            InterlockedIncrement(&g_jitter_updates);
+            const LONG limit = *reinterpret_cast<const LONG*>(self + 0x54);
+            if (*reinterpret_cast<const uint32_t*>(self + 0x50) != 0) {
+                if (static_cast<uint32_t>(*reinterpret_cast<const int32_t*>(self + 0x58) + 1) >=
+                    static_cast<uint32_t>(limit))
+                    InterlockedIncrement(&g_jitter_turns);
+                if (limit < g_jitter_low) InterlockedExchange(&g_jitter_low, limit);
+                if (limit > g_jitter_high) InterlockedExchange(&g_jitter_high, limit);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+__declspec(naked) void jitter_stub() {
+    __asm {
+        pushad
+        push ecx
+        call jitter_step
+        popad
+        jmp dword ptr [g_jitter_tramp]
+    }
+}
+
+}  // namespace
+
+bool sfx_jitter_install(bool stats) {
+    auto* p = reinterpret_cast<uint8_t*>(kJitterUpdate);
+    if (std::memcmp(p, kJitterUpdateBytes, sizeof(kJitterUpdateBytes)) != 0) {
+        LOG_ERROR("Effect follow jitter at %08X does not match this build. Not patching.", kJitterUpdate);
+        return false;
+    }
+    auto* t = static_cast<uint8_t*>(VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!t) return false;
+    std::memcpy(t, kJitterUpdateBytes, sizeof(kJitterUpdateBytes));
+    t[6] = 0xE9;
+    const int32_t back = static_cast<int32_t>((kJitterUpdate + 6) - reinterpret_cast<uintptr_t>(t + 11));
+    std::memcpy(t + 7, &back, 4);
+    FlushInstructionCache(GetCurrentProcess(), t, 16);
+    g_jitter_tramp = t;
+    g_jitter_stats = stats;
+    QueryPerformanceFrequency(&g_jitter_freq);
+    QueryPerformanceCounter(&g_jitter_since);
+    DWORD old = 0;
+    if (!VirtualProtect(p, 6, PAGE_EXECUTE_READWRITE, &old)) return false;
+    p[0] = 0xE9;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&jitter_stub) - (kJitterUpdate + 5));
+    std::memcpy(p + 1, &rel, 4);
+    p[5] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), p, 6);
+    DWORD ignored = 0;
+    VirtualProtect(p, 6, old, &ignored);
+    LOG_INFO("Jittering effect follows turn on the 30 FPS clock (%08X)", kJitterUpdate);
+    return true;
+}
+
+void sfx_jitter_tick() {
+    if (!g_jitter_stats) return;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const double secs =
+        static_cast<double>(now.QuadPart - g_jitter_since.QuadPart) / static_cast<double>(g_jitter_freq.QuadPart);
+    if (secs < 1.0) return;
+    g_jitter_since = now;
+    const LONG updates = InterlockedExchange(&g_jitter_updates, 0), turns = InterlockedExchange(&g_jitter_turns, 0);
+    const LONG low = InterlockedExchange(&g_jitter_low, 0x7FFFFFFF), high = InterlockedExchange(&g_jitter_high, 0);
+    if (updates == 0 || g_jitter_lines >= 600) return;
+    ++g_jitter_lines;
+    LOG_INFO("SfxJitter: %.2f s: %ld jittering-follow updates, %ld turns, intervals %ld..%ld", secs, updates, turns,
+             high ? low : 0, high);
+}
+
 void sfx_sway_frame(double step) {
     if (!(step > 0.0) || step > 1.0) step = 1.0 / 30.0;
     const double before = g_sway_clock;
@@ -511,7 +608,7 @@ void sfx_trails_tick() {
     const LONG frames = g_trail_frames;
     g_trail_frames = 0;
     g_trail_since = now;
-    if (updates == 0 || g_trail_lines >= 600) return;
+    if (updates == 0 || g_trail_lines >= 1800) return;
     ++g_trail_lines;
     LOG_INFO("SfxTrails: %.2f s, %ld frames (%.0f FPS), fix %s: %ld trail updates, %ld commits; %ld updates with a "
              "full history, covering %.2f of the lifetime on average (least %.2f)",

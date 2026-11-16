@@ -97,7 +97,7 @@ LARGE_INTEGER g_freq{};
 LARGE_INTEGER g_since{};
 LONG g_frames = 0;
 int g_lines = 0;
-constexpr int kMaxLines = 600;
+constexpr int kMaxLines = 1800;
 
 }  // namespace
 

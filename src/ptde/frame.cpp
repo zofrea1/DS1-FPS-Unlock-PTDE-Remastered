@@ -259,6 +259,7 @@ void frame_boundary() {
         sfxwatch_tick();
         sfxsway_tick();
         sfx_trails_tick();
+        sfx_jitter_tick();
         footik_update(step);
         slidesteer_update(step);
         ghost_frame(step);
@@ -541,6 +542,7 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_sfx_sway) {
             sfx_sway_install();
+            sfx_jitter_install(settings.trace);
         }
         if (settings.fix_sfx_trails) {
             sfx_trails_install(true, settings.trace);
