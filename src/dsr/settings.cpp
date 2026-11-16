@@ -155,6 +155,12 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_sfx_distortion = parse_bool(val);
         } else if (key == "sfxdistortionptdespeed") {
             s.sfx_distortion_ptde_speed = parse_bool(val);
+        } else if (key == "fixsfxsway") {
+            s.fix_sfx_sway = parse_bool(val);
+        } else if (key == "sfxswayptdespeed") {
+            s.sfx_sway_ptde_speed = parse_bool(val);
+        } else if (key == "fixsfxtrails") {
+            s.fix_sfx_trails = parse_bool(val);
         } else if (key == "fixsoulcounter") {
             s.fix_soul_counter = parse_bool(val);
         } else if (key == "fixstaminatick") {

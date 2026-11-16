@@ -343,6 +343,8 @@ float* g_ghost_turn = nullptr;     // 4 x (frame time * 60), the per-frame turn 
 float* g_frame_cells = nullptr;    // frame constants page (see patch_frame_constants)
 float* g_foot_cells = nullptr;     // foot IK per-frame values (see patch_foot_ik and FootCell)
 float* g_bullet_cells = nullptr;   // ground-crawling bullet values (see patch_bullets and BulletCell)
+int32_t* g_sway_cell = nullptr;      // native frames crossed this frame, less one (see patch_sfx_sway)
+void write_sway_cell(float dt);
 
 // Layout of the bullet cells, read by the patched code.
 enum BulletCell : int {
@@ -491,6 +493,9 @@ void apply_frame_step(float dt) {
     }
     if (g_bullet_cells) {
         write_bullet_cells(dt);
+    }
+    if (g_sway_cell) {
+        write_sway_cell(dt);
     }
 }
 
@@ -4256,6 +4261,155 @@ bool patch_sfx_distortion() {
     return true;
 }
 
+// Swaying effect particles (FixSfxSway) on the native frame grid. The effect library's swaying movements
+// (FXClusterMovement_Yurayura, node type 84, and FXClusterMovement_PartialFollow, type 105) turn every particle by a
+// random angle once a counter passes the node's limit (5 in most effects), and the counter (+0x20) goes up once a
+// frame in the cluster's per-call function (0x140F69750, 0x140F6A280). Remastered kept the original game's limits, so
+// its particles turned twice as often at 60 FPS as at 30, and four times as often again at 240. Before each per-call
+// function adds its one, the counter moves by the native frames (1/30 s with SfxSwayPtdeSpeed, else 1/60 s) the
+// frame's step crossed, less one. A small cave at each entry: mov eax, [cell] ; add [rcx+20h], eax ; the moved
+// instructions ; jmp back.
+std::atomic<int> g_sway_state{0};
+double g_sway_clock = 0.0;
+
+void write_sway_cell(float dt) {
+    double step = static_cast<double>(dt);
+    if (!(step > 0.0) || step > 1.0) step = 1.0 / 60.0;
+    const double rate = g_sfx_sway_ptde_speed.load(std::memory_order_relaxed) != 0 ? 30.0 : 60.0;
+    const double before = g_sway_clock;
+    g_sway_clock += step;
+    if (g_sway_clock > 86400.0) g_sway_clock -= 86400.0;  // a day: whole on both grids
+    const double was = before > g_sway_clock ? before - 86400.0 : before;
+    long ticks = static_cast<long>(std::floor(g_sway_clock * rate + 1e-4) - std::floor(was * rate + 1e-4));
+    if (ticks < 0) ticks = 0;
+    if (ticks > 15) ticks = 15;
+    *g_sway_cell = static_cast<int32_t>(ticks - 1);
+}
+
+bool patch_sfx_sway() {
+    struct Site {
+        uint32_t rva;
+        uint8_t bytes[8];
+        size_t len;
+        const char* what;
+    };
+    // push rdi ; sub rsp,30h  /  mov rax,rsp ; push rbp ; lea rbp,[rax-38h]: no rip-relative operands, so they move.
+    static const Site kSites[2] = {
+        {0x00F69750, {0x40, 0x57, 0x48, 0x83, 0xEC, 0x30}, 6, "effect sway counter (Yurayura)"},
+        {0x00F6A280, {0x48, 0x8B, 0xC4, 0x55, 0x48, 0x8D, 0x68, 0xC8}, 8, "effect sway counter (PartialFollow)"},
+    };
+    for (const Site& s : kSites) {
+        if (std::memcmp(g_image + s.rva, s.bytes, s.len) != 0) {
+            LOG_ERROR("FixSfxSway: the %s at 0x%08X does not match this build. Not patching.", s.what, s.rva);
+            return false;
+        }
+    }
+    auto* cell = static_cast<int32_t*>(alloc_near(g_image + kSites[0].rva));
+    if (!cell) {
+        LOG_ERROR("FixSfxSway: no memory near the game for the frame cell. Not patching.");
+        return false;
+    }
+    *cell = 0;
+    g_sway_clock = 0.0;
+    g_sway_cell = cell;
+    for (const Site& s : kSites) {
+        uint8_t* site = g_image + s.rva;
+        auto* page = static_cast<uint8_t*>(alloc_near(site));
+        if (!page) {
+            LOG_ERROR("FixSfxSway: no memory near the game for the %s cave. Not patching.", s.what);
+            return false;
+        }
+        CaveEmitter e{page};
+        e.b(0x8B);
+        e.b(0x05);  // mov eax, [rip + cell]
+        const size_t at = e.imm32();
+        e.fix32(at, cell);
+        for (uint8_t b : {0x01, 0x41, 0x20}) e.b(b);  // add [rcx+20h], eax
+        e.put(s.bytes, s.len);
+        e.b(0xE9);  // jmp back
+        const size_t back = e.imm32();
+        e.fix32(back, site + s.len);
+        if (!finish_cave(site, s.len, page, s.what)) return false;
+    }
+    LOG_INFO("FixSfxSway: swaying effect particles turn on the %s frame grid (0x%08X, 0x%08X)",
+             g_sfx_sway_ptde_speed.load(std::memory_order_relaxed) != 0 ? "original game's 30 FPS" : "60 FPS",
+             kSites[0].rva, kSites[1].rva);
+    return true;
+}
+
+// Effect trails (FixSfxTrails). FXParticleAppearance_Tracer (node type 40) keeps a trail's points in a history whose
+// size is fixed when the trail starts (trail +0x64): sized for one commit per 1/60 s over the trail's lifetime (node
+// data +0x8C), times n, the node's interpolated points (+0x94) + 1. The update (0x14117DD30) commits once more than
+// the node's step (+0x88) has passed since the last commit (comiss at 0x14117EA13: xmm0 = now - last commit), and 260
+// of Remastered's 263 trail nodes have a step of 0: above 60 FPS the history fills before the lifetime ends and the
+// oldest points drop early, so the trail is cut to lifetime * 60 / FPS. The compare now uses
+// max(step, 0.9 * n * lifetime / (capacity - 2n - 1)), at most 0.03 s: the history holds the whole lifetime. Up to
+// 60 FPS every frame still commits. rbx = the trail, rdi = the node's data; the cave keeps rax, xmm1 and xmm2 and
+// leaves the compare's flags for the jbe after the site.
+std::atomic<int> g_trails_state{0};
+
+bool patch_sfx_trails() {
+    constexpr uint32_t kSiteRva = 0x0117EA13;  // comiss xmm0, [rdi+88h] ; jbe (no commit)
+    static const uint8_t kSite[] = {0x0F, 0x2F, 0x87, 0x88, 0x00, 0x00, 0x00, 0x0F, 0x86};
+    uint8_t* site = g_image + kSiteRva;
+    if (std::memcmp(site, kSite, sizeof(kSite)) != 0) {
+        LOG_ERROR("FixSfxTrails: the trail commit at %p does not match this build. Not patching.", site);
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("FixSfxTrails: no memory near the game for the cave. Not patching.");
+        return false;
+    }
+    float* k = reinterpret_cast<float*>(page + 0x100);
+    k[0] = 0.9f;   // the share of the history the lifetime may fill
+    k[1] = 0.03f;  // the longest step: just under a 30 FPS frame
+    CaveEmitter e{page};
+    auto put = [&](std::initializer_list<uint8_t> bytes) {
+        for (uint8_t b : bytes) e.b(b);
+    };
+    put({0x48, 0x8D, 0x64, 0x24, 0xD8});                    // lea rsp, [rsp-28h]
+    put({0x0F, 0x11, 0x0C, 0x24});                          // movups [rsp], xmm1
+    put({0x0F, 0x11, 0x54, 0x24, 0x10});                    // movups [rsp+10h], xmm2
+    put({0x48, 0x89, 0x44, 0x24, 0x20});                    // mov [rsp+20h], rax
+    put({0x8B, 0x87, 0x94, 0x00, 0x00, 0x00});              // mov eax, [rdi+94h]      interpolated points
+    put({0x85, 0xC0});                                      // test eax, eax
+    put({0x7D, 0x02});                                      // jge +2
+    put({0x31, 0xC0});                                      // xor eax, eax
+    put({0xFF, 0xC0});                                      // inc eax                  n
+    put({0xF3, 0x0F, 0x2A, 0xC8});                          // cvtsi2ss xmm1, eax
+    put({0xF3, 0x0F, 0x59, 0x8F, 0x8C, 0x00, 0x00, 0x00});  // mulss xmm1, [rdi+8Ch]  * lifetime
+    put({0xF3, 0x0F, 0x59, 0x0D});                          // mulss xmm1, [rip + 0.9]
+    e.fix32(e.imm32(), &k[0]);
+    put({0x8D, 0x44, 0x00, 0x01});                          // lea eax, [rax+rax+1]     2n + 1
+    put({0xF7, 0xD8});                                      // neg eax
+    put({0x03, 0x43, 0x64});                                // add eax, [rbx+64h]       capacity - (2n + 1)
+    put({0x7E});                                            // jle use_step
+    const size_t to_step = e.len;
+    e.b(0);
+    put({0xF3, 0x0F, 0x2A, 0xD0});                          // cvtsi2ss xmm2, eax
+    put({0xF3, 0x0F, 0x5E, 0xCA});                          // divss xmm1, xmm2
+    put({0xF3, 0x0F, 0x5D, 0x0D});                          // minss xmm1, [rip + 0.03]
+    e.fix32(e.imm32(), &k[1]);
+    put({0xF3, 0x0F, 0x5F, 0x8F, 0x88, 0x00, 0x00, 0x00});  // maxss xmm1, [rdi+88h]  (a NaN step stays NaN)
+    put({0x0F, 0x2F, 0xC1});                                // comiss xmm0, xmm1
+    put({0xEB});                                            // jmp restore
+    const size_t to_restore = e.len;
+    e.b(0);
+    page[to_step] = static_cast<uint8_t>(e.len - (to_step + 1));
+    put({0x0F, 0x2F, 0x87, 0x88, 0x00, 0x00, 0x00});        // use_step: comiss xmm0, [rdi+88h]
+    page[to_restore] = static_cast<uint8_t>(e.len - (to_restore + 1));
+    put({0x0F, 0x10, 0x0C, 0x24});                          // restore: movups xmm1, [rsp]
+    put({0x0F, 0x10, 0x54, 0x24, 0x10});                    // movups xmm2, [rsp+10h]
+    put({0x48, 0x8B, 0x44, 0x24, 0x20});                    // mov rax, [rsp+20h]
+    put({0x48, 0x8D, 0x64, 0x24, 0x28});                    // lea rsp, [rsp+28h]
+    e.b(0xE9);                                              // jmp back to the jbe
+    e.fix32(e.imm32(), site + 7);
+    if (!finish_cave(site, 7, page, "effect trail commit")) return false;
+    LOG_INFO("FixSfxTrails: effect trails keep their whole length at any frame rate (0x%08X)", kSiteRva);
+    return true;
+}
+
 void store_hit_record_time(uint8_t* entry, float life) {
     *reinterpret_cast<float*>(entry + 4) =
         hitrecord_adjust(life, static_cast<double>(current_step()), bullet_rate());
@@ -4430,6 +4584,16 @@ void try_delayed_patches() {
     if (g_distortion_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_sfx_distortion.load(std::memory_order_relaxed) == 0 || patch_sfx_distortion();
         g_distortion_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_sway_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_sfx_sway.load(std::memory_order_relaxed) == 0 || patch_sfx_sway();
+        g_sway_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_trails_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_sfx_trails.load(std::memory_order_relaxed) == 0 || patch_sfx_trails();
+        g_trails_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_roll_state.compare_exchange_strong(expected, 1)) {

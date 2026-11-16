@@ -123,6 +123,9 @@ DWORD WINAPI worker(void*) {
              settings.event_wait_ptde_speed ? "true" : "false");
     g_fix_sfx_distortion.store(settings.fix_sfx_distortion ? 1 : 0, std::memory_order_relaxed);
     g_sfx_distortion_ptde_speed.store(settings.sfx_distortion_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    g_fix_sfx_sway.store(settings.fix_sfx_sway ? 1 : 0, std::memory_order_relaxed);
+    g_sfx_sway_ptde_speed.store(settings.sfx_sway_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    g_fix_sfx_trails.store(settings.fix_sfx_trails ? 1 : 0, std::memory_order_relaxed);
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);
     g_slide_ptde.store(settings.slide_ptde ? 1 : 0, std::memory_order_relaxed);

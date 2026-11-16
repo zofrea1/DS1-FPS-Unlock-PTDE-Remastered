@@ -89,6 +89,12 @@ struct Settings {
     // with SfxDistortionPtdeSpeed, else Remastered's 60.
     bool fix_sfx_distortion = true;
     bool sfx_distortion_ptde_speed = true;
+    // Swaying effect particles turn on the native frame grid (patch_sfx_sway): the original game's 30 FPS with
+    // SfxSwayPtdeSpeed, else Remastered's 60.
+    bool fix_sfx_sway = true;
+    bool sfx_sway_ptde_speed = true;
+    // Effect trails keep their whole length above 60 FPS (patch_sfx_trails).
+    bool fix_sfx_trails = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;
