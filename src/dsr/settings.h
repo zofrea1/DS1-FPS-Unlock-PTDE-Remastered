@@ -93,8 +93,13 @@ struct Settings {
     // SfxSwayPtdeSpeed, else Remastered's 60.
     bool fix_sfx_sway = true;
     bool sfx_sway_ptde_speed = true;
-    // Effect trails keep their whole length above 60 FPS (patch_sfx_trails).
+    // Effect trails keep their length above 60 FPS (patch_sfx_trails): as in the original game with
+    // SfxTrailsPtdeSpeed, else as at Remastered's 60 FPS.
     bool fix_sfx_trails = true;
+    bool sfx_trails_ptde_speed = true;
+    // Effect spawn timers fire up to 1/600 s early, so an interval that is a whole number of frames does not sit on
+    // a frame's end (patch_sfx_spawn_rate).
+    bool fix_sfx_spawn_rate = true;
     // Feeds the move-control dispatcher the real frame time instead of a
     // hardcoded 1/60 (ladder slides overshoot the floor at high FPS without it).
     bool fix_move_dt = true;

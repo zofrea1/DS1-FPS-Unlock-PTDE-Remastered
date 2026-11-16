@@ -537,18 +537,24 @@ void sfx_sway_frame(double step) {
 // so the trail was built for one commit per 1/60 s at most (data +0x5C is the lifetime in sixtieths in nearly every
 // effect). 112 of PTDE's 165 trail nodes have a step of 0, which commits every frame: above 60 FPS the history fills
 // before the lifetime ends and the oldest points are dropped early, so the trail is cut to lifetime * 60 / FPS. At 240
-// FPS the usual 1/3 s trail (sorceries, enemy attacks) was a quarter as long. The step is raised so that the history
-// holds the whole lifetime, at 90% of it as at 60 FPS, and never beyond 0.03 s (just under a 30 FPS frame). Up to 60
-// FPS every frame still commits, as before; above it the trail gets a point about every 1/60 s, and its head still
-// follows the particle every frame (the uncommitted points are redrawn each update).
+// FPS the usual 1/3 s trail (sorceries, enemy attacks) was a quarter as long. The step is raised to just under a whole
+// number of 60 FPS frames, so no frame rate sits on its border: 0.95/60 s when the history holds 90% of the lifetime at
+// that rate (the step it needs, 0.9 * n * lifetime / (capacity - 2n - 1), is at most 1.05/60 s), else 0.95/30 s, as
+// at 30 FPS. Up to 60 FPS the first kind still commits every frame, as before; the second (80 of the 165 nodes, short
+// trails and trails with few points) commits every other frame at 60 FPS, as at 30, so it keeps the length it has at
+// 30 FPS. Above 60 FPS the trail gets a point every 1/60 or 1/30 s, and its head still follows the particle every
+// frame (the uncommitted points are redrawn each update). An authored step above 1/30 s is kept (none in the data).
 namespace {
 
 // 0xB9242F: fld dword ptr [edx+54h] (the node's step; edx = the node's data) ; fcompp (with ST1 = now - last
 // commit, the x87 stack's only value); then fnstsw ax ; test ah,5 ; jp no-commit. [ebp-14h] = the trail.
 constexpr uint32_t kTrailCommit = 0x00B9242F;
 constexpr uint8_t kTrailCommitBytes[5] = {0xD9, 0x42, 0x54, 0xDE, 0xD9};
-constexpr float kTrailMaxStep = 0.03f;
 constexpr float kTrailFill = 0.9f;
+constexpr float kTrailStep60 = 0.95f / 60.0f;      // a point every 60 FPS frame, off the frame's end
+constexpr float kTrailStep30 = 0.95f / 30.0f;      // a point every 30 FPS frame
+constexpr float kTrailSplit = 1.05f / 60.0f;       // needed steps up to this get the 60 FPS step
+constexpr float kTrailKeep = 2.0f / 60.0f + 1e-4f;  // steps above a 30 FPS frame are kept as authored
 volatile LONG g_trail_fix = 0;
 bool g_trail_stats = false;
 
@@ -596,10 +602,14 @@ float __cdecl trail_step(const uint8_t* data, const uint8_t* self, float elapsed
         cap = *reinterpret_cast<const uint32_t*>(self + 0x58);
         const uint32_t n = sub > 0 ? static_cast<uint32_t>(sub) + 1 : 1;
         slack = 2 * n + 1;  // the update keeps room for n new points, n pending and one more
-        if (g_trail_fix && life > 0.0f && cap > slack) {
-            float need = kTrailFill * static_cast<float>(n) * life / static_cast<float>(cap - slack);
-            if (need > kTrailMaxStep) need = kTrailMaxStep;
+        if (g_trail_fix) {
+            float need = 0.0f;
+            if (life > 0.0f && cap > slack) {
+                need = kTrailFill * static_cast<float>(n) * life / static_cast<float>(cap - slack);
+                if (need > kTrailStep30) need = kTrailStep30;
+            }
             if (need > use) use = need;  // a NaN step stays NaN: no commit, as before
+            if (use <= kTrailKeep) use = use <= kTrailSplit ? kTrailStep60 : kTrailStep30;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }

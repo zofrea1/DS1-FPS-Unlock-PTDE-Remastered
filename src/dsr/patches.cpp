@@ -4338,14 +4338,21 @@ bool patch_sfx_sway() {
 }
 
 // Effect trails (FixSfxTrails). FXParticleAppearance_Tracer (node type 40) keeps a trail's points in a history whose
-// size is fixed when the trail starts (trail +0x64): sized for one commit per 1/60 s over the trail's lifetime (node
-// data +0x8C), times n, the node's interpolated points (+0x94) + 1. The update (0x14117DD30) commits once more than
-// the node's step (+0x88) has passed since the last commit (comiss at 0x14117EA13: xmm0 = now - last commit), and 260
-// of Remastered's 263 trail nodes have a step of 0: above 60 FPS the history fills before the lifetime ends and the
-// oldest points drop early, so the trail is cut to lifetime * 60 / FPS. The compare now uses
-// max(step, 0.9 * n * lifetime / (capacity - 2n - 1)), at most 0.03 s: the history holds the whole lifetime. Up to
-// 60 FPS every frame still commits. rbx = the trail, rdi = the node's data; the cave keeps rax, xmm1 and xmm2 and
-// leaves the compare's flags for the jbe after the site.
+// size is fixed when the trail starts (init 0x14117FAB0, trail +0x64): min(node data +0x90 * n, ceil(lifetime * n /
+// step)) + 2, a step of 0 counting as 1/60 s, with the lifetime at +0x8C and n = the node's interpolated points
+// (+0x94) + 1. The update (0x14117DD30) commits once more than the node's step (+0x88) has passed since the last
+// commit (comiss at 0x14117EA13: xmm0 = now - last commit), and 260 of Remastered's 263 trail nodes have a step of 0:
+// above 60 FPS the history fills before the lifetime ends and the oldest points drop early, so the trail is cut to
+// about lifetime * 60 / FPS. The compare now uses a step just under a whole number of 60 FPS frames, so no frame rate
+// sits on its border:
+//  - SfxTrailsPtdeSpeed (the original game's look, and that of effects ported from it): the step the history needs to
+//    hold 90% of the lifetime, 0.9 * n * lifetime / (capacity - 2n - 1), raised to 0.95/60 s when that is at most
+//    1.05/60 s, else 0.95/30 s (a point every other frame at 60 FPS, as at 30). 62 of the 263 nodes get 0.95/30 s.
+//  - else (Remastered's own 60 FPS look): 0.95/60 s, a point every frame up to 60 FPS, as before, and every 1/60 s
+//    above it.
+// An authored step above 1/30 s is kept (none in the game's data); a NaN step stays NaN (no commit, as before).
+// rbx = the trail, rdi = the node's data; the cave keeps rax, xmm1 and xmm2 and leaves the compare's flags for the jbe
+// after the site.
 std::atomic<int> g_trails_state{0};
 
 bool patch_sfx_trails() {
@@ -4361,52 +4368,137 @@ bool patch_sfx_trails() {
         LOG_ERROR("FixSfxTrails: no memory near the game for the cave. Not patching.");
         return false;
     }
+    const bool ptde = g_sfx_trails_ptde_speed.load(std::memory_order_relaxed) != 0;
     float* k = reinterpret_cast<float*>(page + 0x100);
-    k[0] = 0.9f;   // the share of the history the lifetime may fill
-    k[1] = 0.03f;  // the longest step: just under a 30 FPS frame
+    k[0] = 0.9f;                  // the share of the history the lifetime may fill
+    k[1] = 0.95f / 30.0f;         // the 30 Hz step, and the most a needed step may be
+    k[2] = 2.0f / 60.0f + 1e-4f;  // steps above this (a 30 FPS frame) are kept as authored
+    k[3] = 1.05f / 60.0f;         // needed steps up to this get the 60 Hz step
+    k[4] = 0.95f / 60.0f;         // the 60 Hz step
+    auto* mode = reinterpret_cast<int32_t*>(page + 0x120);
+    *mode = ptde ? 1 : 0;
     CaveEmitter e{page};
     auto put = [&](std::initializer_list<uint8_t> bytes) {
         for (uint8_t b : bytes) e.b(b);
     };
+    // A forward short jump: the opcode now, its distance set by land() at the target.
+    auto jump = [&](uint8_t op) {
+        e.b(op);
+        const size_t at = e.len;
+        e.b(0);
+        return at;
+    };
+    auto land = [&](size_t at) { page[at] = static_cast<uint8_t>(e.len - (at + 1)); };
     put({0x48, 0x8D, 0x64, 0x24, 0xD8});                    // lea rsp, [rsp-28h]
     put({0x0F, 0x11, 0x0C, 0x24});                          // movups [rsp], xmm1
     put({0x0F, 0x11, 0x54, 0x24, 0x10});                    // movups [rsp+10h], xmm2
     put({0x48, 0x89, 0x44, 0x24, 0x20});                    // mov [rsp+20h], rax
-    put({0x8B, 0x87, 0x94, 0x00, 0x00, 0x00});              // mov eax, [rdi+94h]      interpolated points
+    put({0x0F, 0x57, 0xC9});                                // xorps xmm1, xmm1          needed step 0
+    put({0x8B, 0x05});                                      // mov eax, [rip + mode]
+    e.fix32(e.imm32(), mode);
+    put({0x85, 0xC0});                                      // test eax, eax
+    const size_t to_have = jump(0x74);                      // je have_need              (Remastered's look)
+    put({0x8B, 0x87, 0x94, 0x00, 0x00, 0x00});              // mov eax, [rdi+94h]        interpolated points
     put({0x85, 0xC0});                                      // test eax, eax
     put({0x7D, 0x02});                                      // jge +2
     put({0x31, 0xC0});                                      // xor eax, eax
-    put({0xFF, 0xC0});                                      // inc eax                  n
+    put({0xFF, 0xC0});                                      // inc eax                   n
     put({0xF3, 0x0F, 0x2A, 0xC8});                          // cvtsi2ss xmm1, eax
-    put({0xF3, 0x0F, 0x59, 0x8F, 0x8C, 0x00, 0x00, 0x00});  // mulss xmm1, [rdi+8Ch]  * lifetime
+    put({0xF3, 0x0F, 0x59, 0x8F, 0x8C, 0x00, 0x00, 0x00});  // mulss xmm1, [rdi+8Ch]     * lifetime
     put({0xF3, 0x0F, 0x59, 0x0D});                          // mulss xmm1, [rip + 0.9]
     e.fix32(e.imm32(), &k[0]);
-    put({0x8D, 0x44, 0x00, 0x01});                          // lea eax, [rax+rax+1]     2n + 1
+    put({0x8D, 0x44, 0x00, 0x01});                          // lea eax, [rax+rax+1]      2n + 1
     put({0xF7, 0xD8});                                      // neg eax
-    put({0x03, 0x43, 0x64});                                // add eax, [rbx+64h]       capacity - (2n + 1)
-    put({0x7E});                                            // jle use_step
-    const size_t to_step = e.len;
-    e.b(0);
+    put({0x03, 0x43, 0x64});                                // add eax, [rbx+64h]        capacity - (2n + 1)
+    const size_t to_zero = jump(0x7E);                      // jle zero_need
     put({0xF3, 0x0F, 0x2A, 0xD0});                          // cvtsi2ss xmm2, eax
-    put({0xF3, 0x0F, 0x5E, 0xCA});                          // divss xmm1, xmm2
-    put({0xF3, 0x0F, 0x5D, 0x0D});                          // minss xmm1, [rip + 0.03]
+    put({0xF3, 0x0F, 0x5E, 0xCA});                          // divss xmm1, xmm2          needed step
+    put({0xF3, 0x0F, 0x5D, 0x0D});                          // minss xmm1, [rip + 0.95/30]
     e.fix32(e.imm32(), &k[1]);
-    put({0xF3, 0x0F, 0x5F, 0x8F, 0x88, 0x00, 0x00, 0x00});  // maxss xmm1, [rdi+88h]  (a NaN step stays NaN)
-    put({0x0F, 0x2F, 0xC1});                                // comiss xmm0, xmm1
-    put({0xEB});                                            // jmp restore
-    const size_t to_restore = e.len;
-    e.b(0);
-    page[to_step] = static_cast<uint8_t>(e.len - (to_step + 1));
-    put({0x0F, 0x2F, 0x87, 0x88, 0x00, 0x00, 0x00});        // use_step: comiss xmm0, [rdi+88h]
-    page[to_restore] = static_cast<uint8_t>(e.len - (to_restore + 1));
-    put({0x0F, 0x10, 0x0C, 0x24});                          // restore: movups xmm1, [rsp]
+    const size_t to_have2 = jump(0xEB);                     // jmp have_need
+    land(to_zero);
+    put({0x0F, 0x57, 0xC9});                                // zero_need: xorps xmm1, xmm1
+    land(to_have);
+    land(to_have2);
+    put({0xF3, 0x0F, 0x5F, 0x8F, 0x88, 0x00, 0x00, 0x00});  // have_need: maxss xmm1, [rdi+88h] (a NaN step stays NaN)
+    put({0x0F, 0x2F, 0x0D});                                // comiss xmm1, [rip + 2/60]
+    e.fix32(e.imm32(), &k[2]);
+    const size_t to_keep1 = jump(0x7A);                     // jp keep                   NaN
+    const size_t to_keep2 = jump(0x77);                     // ja keep                   above a 30 FPS frame
+    put({0x0F, 0x2F, 0x0D});                                // comiss xmm1, [rip + 1.05/60]
+    e.fix32(e.imm32(), &k[3]);
+    const size_t to_30 = jump(0x77);                        // ja use30
+    put({0xF3, 0x0F, 0x10, 0x0D});                          // movss xmm1, [rip + 0.95/60]
+    e.fix32(e.imm32(), &k[4]);
+    const size_t to_keep3 = jump(0xEB);                     // jmp keep
+    land(to_30);
+    put({0xF3, 0x0F, 0x10, 0x0D});                          // use30: movss xmm1, [rip + 0.95/30]
+    e.fix32(e.imm32(), &k[1]);
+    land(to_keep1);
+    land(to_keep2);
+    land(to_keep3);
+    put({0x0F, 0x2F, 0xC1});                                // keep: comiss xmm0, xmm1
+    put({0x0F, 0x10, 0x0C, 0x24});                          // movups xmm1, [rsp]
     put({0x0F, 0x10, 0x54, 0x24, 0x10});                    // movups xmm2, [rsp+10h]
     put({0x48, 0x8B, 0x44, 0x24, 0x20});                    // mov rax, [rsp+20h]
     put({0x48, 0x8D, 0x64, 0x24, 0x28});                    // lea rsp, [rsp+28h]
     e.b(0xE9);                                              // jmp back to the jbe
     e.fix32(e.imm32(), site + 7);
     if (!finish_cave(site, 7, page, "effect trail commit")) return false;
-    LOG_INFO("FixSfxTrails: effect trails keep their whole length at any frame rate (0x%08X)", kSiteRva);
+    LOG_INFO("FixSfxTrails: effect trails keep their length at any frame rate, %s (0x%08X)",
+             ptde ? "as in the original game (SfxTrailsPtdeSpeed)" : "as at Remastered's 60 FPS", kSiteRva);
+    return true;
+}
+
+// Effect spawn timing (FixSfxSpawnRate). The effect state machine (0x140FE2E60, the original game's 0x546550) runs an
+// emitter template's state each frame: templates 2020 and 2024 (and 2023) wait until the state's clock (node +0x78)
+// reaches the interval of their timing block (+0x0C, or +0x10), then spawn and restart the clock at 0, dropping
+// whatever the last frame went past the interval. Remastered raised every interval below 1/30 s to exactly 1/30 s in
+// its data (3,247 values; the Prepare to Die Edition effects mod does the same), and its other intervals are whole
+// sixtieths (3,179 values): at 60 FPS every one of them sits on a frame's end, so a frame that came a fraction of a
+// millisecond early made the emitter wait a whole frame more. In the original game the same 1/30 s rule thinned the
+// Demon Ruins bonfire's particles from 878 to 646 a second at 30 FPS. The clock is now compared with 1/600 s added
+// (0.05/30 s, the margin of the original game's fix): the state's movss load goes through a cave that adds it. The
+// templates whose intervals Remastered counts in whole milliseconds (2031 to 2035) round the clock to a millisecond
+// and get at least 33 ms from the game itself, so they keep the half millisecond that rounding gives.
+std::atomic<int> g_spawn_state{0};
+
+bool patch_sfx_spawn_rate() {
+    struct Site {
+        uint32_t rva;
+        uint8_t bytes[9];
+        const char* what;
+    };
+    // movss xmm0, [rbx+78h] ; comiss xmm0, [rdi+0Ch] / [rdi+10h] ; jb (wait). Only the 5-byte load moves.
+    static const Site kSites[2] = {
+        {0x00FE300E, {0xF3, 0x0F, 0x10, 0x43, 0x78, 0x0F, 0x2F, 0x47, 0x0C}, "effect spawn timer (templates 2020, 2024)"},
+        {0x00FE30CC, {0xF3, 0x0F, 0x10, 0x43, 0x78, 0x0F, 0x2F, 0x47, 0x10}, "effect spawn timer (template 2023)"},
+    };
+    for (const Site& s : kSites) {
+        if (std::memcmp(g_image + s.rva, s.bytes, sizeof(s.bytes)) != 0) {
+            LOG_ERROR("FixSfxSpawnRate: the %s at 0x%08X does not match this build. Not patching.", s.what, s.rva);
+            return false;
+        }
+    }
+    for (const Site& s : kSites) {
+        uint8_t* site = g_image + s.rva;
+        auto* page = static_cast<uint8_t*>(alloc_near(site));
+        if (!page) {
+            LOG_ERROR("FixSfxSpawnRate: no memory near the game for the %s cave. Not patching.", s.what);
+            return false;
+        }
+        auto* margin = reinterpret_cast<float*>(page + 0x80);
+        *margin = 0.05f / 30.0f;
+        CaveEmitter e{page};
+        e.put(s.bytes, 5);                                   // movss xmm0, [rbx+78h]
+        for (uint8_t b : {0xF3, 0x0F, 0x58, 0x05}) e.b(b);  // addss xmm0, [rip + margin]
+        e.fix32(e.imm32(), margin);
+        e.b(0xE9);  // jmp back to the comiss
+        e.fix32(e.imm32(), site + 5);
+        if (!finish_cave(site, 5, page, s.what)) return false;
+    }
+    LOG_INFO("FixSfxSpawnRate: effect spawn timers fire up to 1/600 s early, off the frame's end (0x%08X, 0x%08X)",
+             kSites[0].rva, kSites[1].rva);
     return true;
 }
 
@@ -4594,6 +4686,11 @@ void try_delayed_patches() {
     if (g_trails_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_sfx_trails.load(std::memory_order_relaxed) == 0 || patch_sfx_trails();
         g_trails_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_spawn_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_sfx_spawn_rate.load(std::memory_order_relaxed) == 0 || patch_sfx_spawn_rate();
+        g_spawn_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_roll_state.compare_exchange_strong(expected, 1)) {

@@ -161,6 +161,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.sfx_sway_ptde_speed = parse_bool(val);
         } else if (key == "fixsfxtrails") {
             s.fix_sfx_trails = parse_bool(val);
+        } else if (key == "sfxtrailsptdespeed") {
+            s.sfx_trails_ptde_speed = parse_bool(val);
+        } else if (key == "fixsfxspawnrate") {
+            s.fix_sfx_spawn_rate = parse_bool(val);
         } else if (key == "fixsoulcounter") {
             s.fix_soul_counter = parse_bool(val);
         } else if (key == "fixstaminatick") {

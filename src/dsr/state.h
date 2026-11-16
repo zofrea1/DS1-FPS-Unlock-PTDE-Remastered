@@ -52,6 +52,8 @@ inline std::atomic<int> g_sfx_distortion_ptde_speed{1};
 inline std::atomic<int> g_fix_sfx_sway{1};
 inline std::atomic<int> g_sfx_sway_ptde_speed{1};
 inline std::atomic<int> g_fix_sfx_trails{1};
+inline std::atomic<int> g_sfx_trails_ptde_speed{1};
+inline std::atomic<int> g_fix_sfx_spawn_rate{1};
 // Per-frame constants of a fixed 60 FPS frame (see patch_frame_constants): timers and fades, the camera
 // pivot ease, and velocities derived from one frame's movement.
 inline std::atomic<int> g_fix_timers{1};
