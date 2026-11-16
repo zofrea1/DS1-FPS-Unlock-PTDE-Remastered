@@ -11,7 +11,7 @@ Looking for quality-of-life features in Prepare to Die Edition? [DSfix 3.0](http
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
-| Release | `v2.4.0-REMASTERED-DX11` | `v2.4.0-PTDE-DX9` |
+| Release | `v2.4.0-REMASTERED-DX11` | `v2.4.1-PTDE-DX9` |
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini`, `dxvk_d3d9.dll` (DXVK) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
