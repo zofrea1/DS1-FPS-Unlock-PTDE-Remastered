@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -17,6 +18,12 @@ namespace {
 
 constexpr uint32_t kRegisterEffect = 0x00D19CF0;
 constexpr float kMinInterval = 1.0f / 30.0f;
+// What an interval below 1/30 s becomes: just under 1/30 s. The emitter spawns once the time since its last spawn
+// reaches the interval, so exactly 1/30 s sits on the 30 FPS frame: a frame a hair shorter (the frame time varies by
+// a fraction of a millisecond) spawned nothing. Measured at the Demon Ruins bonfire (2026-11-16, particles emitted a
+// second): the game as shipped 878 at 30 FPS; with 1/30 s, 646 at 30 FPS and 654 at 60; with 0.98/30 s, 876 at 30,
+// 884 at 60 and 852 at 214. 0.95/30 s leaves 1.7 ms for frames that come early.
+constexpr float kRaisedInterval = 0.95f / 30.0f;
 
 using RegisterFn = void*(__stdcall*)(const void* name, uint8_t* data, uint32_t size);
 RegisterFn g_orig = nullptr;
@@ -69,7 +76,7 @@ int raise_intervals(uint8_t* d, uint32_t size) {
         float v;
         std::memcpy(&v, d + at, 4);
         if (v >= 0.0f && v < kMinInterval - 1e-6f) {
-            std::memcpy(d + at, &kMinInterval, 4);
+            std::memcpy(d + at, &kRaisedInterval, 4);
             ++raised;
         }
     }
@@ -89,7 +96,8 @@ void* __stdcall hk_register(const void* name, uint8_t* data, uint32_t size) {
     const int total = (g_raised += raised);
     // The first effect shows the hook was in place before the common effects loaded; then a running total.
     if (effects == 1 || effects % 500 == 0) {
-        LOG_INFO("Effect spawn intervals: %d raised to 1/30 s in the %d effects loaded so far", total, effects);
+        LOG_INFO("Effect spawn intervals: %d raised to just under 1/30 s in the %d effects loaded so far", total,
+                 effects);
     }
     void* resource = g_orig(name, data, size);
     if (watching) sfxwatch_after_load(resource);
@@ -164,11 +172,33 @@ void __stdcall action_end() {
     }
 }
 
+// Trace statistics: calls per action routine (the routine's address), logged once a second by sfx_actions_tick.
+bool g_action_stats = false;
+constexpr int kActionSlots = 256;
+volatile LONG g_action_key[kActionSlots];
+volatile LONG g_action_count[kActionSlots];
+
+void __stdcall action_note(uint32_t routine) {
+    if (!g_action_stats || !routine) return;
+    uint32_t i = (routine >> 4) & (kActionSlots - 1);
+    for (int n = 0; n < kActionSlots; ++n, i = (i + 1) & (kActionSlots - 1)) {
+        const LONG k = g_action_key[i];
+        if (k == static_cast<LONG>(routine) ||
+            (k == 0 && InterlockedCompareExchange(&g_action_key[i], static_cast<LONG>(routine), 0) == 0) ||
+            g_action_key[i] == static_cast<LONG>(routine)) {
+            InterlockedIncrement(&g_action_count[i]);
+            return;
+        }
+    }
+}
+
 // Entered by `call` in place of `call [ebp-8] ; add esp,10h`: [esp] the return, then handler, node, args, x.
 __declspec(naked) void action_call_stub() {
     __asm {
         push dword ptr [esp + 8]
         call action_begin
+        push dword ptr [ebp - 8]     // the routine
+        call action_note
         push dword ptr [esp + 10h]
         push dword ptr [esp + 10h]
         push dword ptr [esp + 10h]
@@ -211,6 +241,40 @@ bool sfx_actions_install() {
     LOG_INFO("Effect actions read their node's clock on the 30 FPS frame grid (sites %08X, %08X)", kActionCalls[0],
              kActionCalls[1]);
     return true;
+}
+
+void sfx_actions_stats(bool on) { g_action_stats = on; }
+
+void sfx_actions_tick() {
+    static LARGE_INTEGER freq{}, since{};
+    static LONG frames = 0;
+    static int lines = 0;
+    if (!g_action_stats) return;
+    if (!freq.QuadPart) {
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&since);
+    }
+    ++frames;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const double secs = static_cast<double>(now.QuadPart - since.QuadPart) / static_cast<double>(freq.QuadPart);
+    if (secs < 1.0) return;
+    char buf[1024];
+    int len = 0;
+    LONG total = 0;
+    for (int i = 0; i < kActionSlots; ++i) {
+        const LONG c = InterlockedExchange(&g_action_count[i], 0);
+        if (!c) continue;
+        total += c;
+        if (len < 900) len += std::snprintf(buf + len, sizeof(buf) - len, " %lX:%ld", g_action_key[i], c);
+    }
+    const LONG f = frames;
+    frames = 0;
+    since = now;
+    if (!total || lines >= 1800) return;
+    ++lines;
+    buf[len] = 0;
+    LOG_INFO("SfxActions: %.2f s, %ld frames (%.0f FPS), %ld action calls:%s", secs, f, f / secs, total, buf);
 }
 
 namespace {
@@ -644,7 +708,8 @@ bool sfx_install(bool raise) {
     DWORD ignored = 0;
     VirtualProtect(site, kStolen, old, &ignored);
     if (raise) {
-        LOG_INFO("Effect spawn intervals below 1/30 s are raised to 1/30 s as effects load (Remastered's 60 FPS rule)");
+        LOG_INFO("Effect spawn intervals below 1/30 s are raised to just under 1/30 s as effects load (Remastered's "
+                 "60 FPS rule, off the 30 FPS frame)");
     }
     return true;
 }

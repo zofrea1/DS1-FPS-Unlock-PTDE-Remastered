@@ -260,6 +260,7 @@ void frame_boundary() {
         sfxsway_tick();
         sfx_trails_tick();
         sfx_jitter_tick();
+        sfx_actions_tick();
         footik_update(step);
         slidesteer_update(step);
         ghost_frame(step);
@@ -536,6 +537,7 @@ bool frame_install(const Settings& settings) {
         }
         if (settings.fix_sfx_actions) {
             sfx_actions_install();
+            sfx_actions_stats(settings.trace);
         }
         if (settings.fix_sfx_distortion) {
             sfx_distortion_install();

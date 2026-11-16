@@ -62,8 +62,8 @@ struct Settings {
     bool fix_foot_ik = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
     bool fix_ghosts = true;
-    // Effect particle spawn intervals below 1/30 s are raised to 1/30 s as effects load (Remastered's rule),
-    // so emitters spawn as densely as at 30 FPS.
+    // Effect particle spawn intervals below 1/30 s are raised to just under 1/30 s as effects load (Remastered's
+    // rule, off the 30 FPS frame), so emitters spawn as densely as at 30 FPS.
     bool fix_sfx_spawn_rate = true;
     bool fix_sfx_actions = true;
     // Heat haze (distortion effects) scrolls on the 30 FPS frame grid, as it was authored (see sfx.h).

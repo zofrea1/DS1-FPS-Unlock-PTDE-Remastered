@@ -19,6 +19,9 @@ bool sfx_install(bool raise = true);
 // appears. While an action runs, the clock is rounded up to the next 30 FPS frame and then put back (unless the
 // action set it). At 30 FPS nothing changes.
 bool sfx_actions_install();
+// Trace: calls per action routine, logged once a second (SfxActions lines).
+void sfx_actions_stats(bool on);
+void sfx_actions_tick();
 
 // Heat haze (distortion particles, FXParticleAppearance_Distortion) on the 30 FPS frame grid. The haze scrolls its
 // normal map across the particle by a phase the game integrates in real time: phase += speed(t) * (t - t_prev) at

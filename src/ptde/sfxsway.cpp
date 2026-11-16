@@ -92,6 +92,68 @@ const Site kSites[5] = {
     {0x00A50100, {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08}, 6, &stub_turn},
 };
 
+// Particles emitted: the six emitter shapes' per-call functions (Cone 0x9ED540, Square 0x9EC8A0, Circle 0x9EBA60,
+// Sphere 0x9EA7A0, Box 0x9E92A0, EqualDistance 0x9E7A80) take the number of new particles as their third stack
+// argument: their sum is every particle the effects emit.
+volatile LONG g_emit_calls = 0;
+volatile LONG g_emit_particles = 0;
+void* g_emit_tramp[6] = {};
+
+void __stdcall emit_note(uint32_t count) {
+    InterlockedIncrement(&g_emit_calls);
+    if (count < 100000) InterlockedExchangeAdd(&g_emit_particles, static_cast<LONG>(count));
+}
+
+#define EMIT_STUB(name, slot)                              \
+    __declspec(naked) void name() {                        \
+        __asm { pushad }                                   \
+        __asm { push dword ptr [esp + 32 + 12] }           \
+        __asm { call emit_note }                           \
+        __asm { popad }                                    \
+        __asm { jmp dword ptr [g_emit_tramp + slot * 4] }  \
+    }
+EMIT_STUB(emit_stub_0, 0)
+EMIT_STUB(emit_stub_1, 1)
+EMIT_STUB(emit_stub_2, 2)
+EMIT_STUB(emit_stub_3, 3)
+EMIT_STUB(emit_stub_4, 4)
+EMIT_STUB(emit_stub_5, 5)
+const uint32_t kEmitSites[6] = {0x009ED540, 0x009EC8A0, 0x009EBA60, 0x009EA7A0, 0x009E92A0, 0x009E7A80};
+void (*const kEmitStubs[6])() = {&emit_stub_0, &emit_stub_1, &emit_stub_2, &emit_stub_3, &emit_stub_4, &emit_stub_5};
+
+void install_emit_watch() {
+    static const uint8_t kHead[6] = {0x53, 0x8B, 0xDC, 0x83, 0xEC, 0x08};  // push ebx ; mov ebx,esp ; sub esp,8
+    for (uint32_t a : kEmitSites) {
+        if (std::memcmp(reinterpret_cast<const void*>(a), kHead, 6) != 0) {
+            LOG_ERROR("SfxSway: emitter per-call at %08X does not match. Not counting particles.", a);
+            return;
+        }
+    }
+    auto* mem = static_cast<uint8_t*>(VirtualAlloc(nullptr, 6 * 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!mem) return;
+    for (int i = 0; i < 6; ++i) {
+        uint8_t* t = mem + i * 16;
+        std::memcpy(t, kHead, 6);
+        t[6] = 0xE9;
+        const int32_t back = static_cast<int32_t>((kEmitSites[i] + 6) - reinterpret_cast<uintptr_t>(t + 11));
+        std::memcpy(t + 7, &back, 4);
+        g_emit_tramp[i] = t;
+    }
+    FlushInstructionCache(GetCurrentProcess(), mem, 6 * 16);
+    for (int i = 0; i < 6; ++i) {
+        auto* p = reinterpret_cast<uint8_t*>(kEmitSites[i]);
+        DWORD old = 0;
+        if (!VirtualProtect(p, 6, PAGE_EXECUTE_READWRITE, &old)) return;
+        p[0] = 0xE9;
+        const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(kEmitStubs[i]) - (kEmitSites[i] + 5));
+        std::memcpy(p + 1, &rel, 4);
+        p[5] = 0x90;
+        FlushInstructionCache(GetCurrentProcess(), p, 6);
+        DWORD ignored = 0;
+        VirtualProtect(p, 6, old, &ignored);
+    }
+}
+
 bool g_on = false;
 LARGE_INTEGER g_freq{};
 LARGE_INTEGER g_since{};
@@ -147,6 +209,7 @@ bool sfxsway_install() {
         DWORD ignored = 0;
         VirtualProtect(p, len, old, &ignored);
     }
+    install_emit_watch();
     QueryPerformanceFrequency(&g_freq);
     QueryPerformanceCounter(&g_since);
     g_on = true;
@@ -167,6 +230,11 @@ void sfxsway_tick() {
     const LONG frames = g_frames;
     g_frames = 0;
     g_since = now;
+    const LONG ecalls = InterlockedExchange(&g_emit_calls, 0), eparts = InterlockedExchange(&g_emit_particles, 0);
+    if (ecalls && g_lines < kMaxLines) {
+        LOG_INFO("SfxEmit: %.2f s, %ld frames (%.0f FPS): %ld emitter calls, %ld particles emitted", secs, frames,
+                 frames / secs, ecalls, eparts);
+    }
     if ((c[kSwayUpdate] == 0 && c[kFollowUpdate] == 0) || g_lines >= kMaxLines) return;
     ++g_lines;
     LOG_INFO("SfxSway: %.2f s, %ld frames (%.0f FPS): sway per-call %ld, updates %ld, turns %ld (top counter %ld); "
