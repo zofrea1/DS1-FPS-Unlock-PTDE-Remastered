@@ -122,11 +122,11 @@ DWORD WINAPI worker(void*) {
     LOG_INFO("FixEventWaits: %s, EventWaitPtdeSpeed: %s", settings.fix_event_waits ? "true" : "false",
              settings.event_wait_ptde_speed ? "true" : "false");
     g_fix_sfx_distortion.store(settings.fix_sfx_distortion ? 1 : 0, std::memory_order_relaxed);
-    g_sfx_distortion_ptde_speed.store(settings.sfx_distortion_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    g_sfx_distortion_ptde_speed.store(settings.sfx_distortion_ptde_speed == 0 ? 0 : 1, std::memory_order_relaxed);
     g_fix_sfx_sway.store(settings.fix_sfx_sway ? 1 : 0, std::memory_order_relaxed);
-    g_sfx_sway_ptde_speed.store(settings.sfx_sway_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    g_sfx_sway_ptde_speed.store(settings.sfx_sway_ptde_speed == 0 ? 0 : 1, std::memory_order_relaxed);
     g_fix_sfx_trails.store(settings.fix_sfx_trails ? 1 : 0, std::memory_order_relaxed);
-    g_sfx_trails_ptde_speed.store(settings.sfx_trails_ptde_speed ? 1 : 0, std::memory_order_relaxed);
+    g_sfx_trails_ptde_speed.store(settings.sfx_trails_ptde_speed == 0 ? 0 : 1, std::memory_order_relaxed);
     g_fix_sfx_spawn_rate.store(settings.fix_sfx_spawn_rate ? 1 : 0, std::memory_order_relaxed);
     g_fix_move_dt.store(settings.fix_move_dt ? 1 : 0, std::memory_order_relaxed);
     g_fix_step_down.store(settings.fix_step_down ? 1 : 0, std::memory_order_relaxed);

@@ -4,6 +4,10 @@
 constexpr int kMinMaxFps = 10;
 constexpr int kMaxMaxFps = 1000;
 
+// A switch set to auto (SfxDistortionPtdeSpeed, SfxSwayPtdeSpeed, SfxTrailsPtdeSpeed): settings_load resolves it to
+// 1 or 0 (see settings_resolve_effect_looks), so nothing after it sees this value.
+constexpr int kAuto = -1;
+
 struct Settings {
     // Master switch: false leaves the game completely unchanged (every fix and diagnostic off).
     bool fps_unlock = true;
@@ -85,18 +89,21 @@ struct Settings {
     // false: Remastered's own 60 FPS.
     bool fix_event_waits = true;
     bool event_wait_ptde_speed = true;
+    // The three effect looks below depend on whose effects the game draws: the original game's were made at 30 FPS,
+    // Remastered's own at 60. Each *PtdeSpeed switch is 1 (the original game's look), 0 (Remastered's) or kAuto (the
+    // default): the original game's when the Prepare to Die Edition effects mod is installed, else Remastered's.
     // Heat haze (distortion effects) scrolls on the native frame grid (patch_sfx_distortion): the original game's 30 FPS
     // with SfxDistortionPtdeSpeed, else Remastered's 60.
     bool fix_sfx_distortion = true;
-    bool sfx_distortion_ptde_speed = true;
+    int sfx_distortion_ptde_speed = kAuto;
     // Swaying effect particles turn on the native frame grid (patch_sfx_sway): the original game's 30 FPS with
     // SfxSwayPtdeSpeed, else Remastered's 60.
     bool fix_sfx_sway = true;
-    bool sfx_sway_ptde_speed = true;
+    int sfx_sway_ptde_speed = kAuto;
     // Effect trails keep their length above 60 FPS (patch_sfx_trails): as in the original game with
     // SfxTrailsPtdeSpeed, else as at Remastered's 60 FPS.
     bool fix_sfx_trails = true;
-    bool sfx_trails_ptde_speed = true;
+    int sfx_trails_ptde_speed = kAuto;
     // Effect spawn timers fire up to 1/600 s early, so an interval that is a whole number of frames does not sit on
     // a frame's end (patch_sfx_spawn_rate).
     bool fix_sfx_spawn_rate = true;

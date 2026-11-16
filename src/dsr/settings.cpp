@@ -36,6 +36,74 @@ bool parse_bool(const std::string& v) {
     return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
+// true / false, or auto (kAuto).
+int parse_auto(const std::string& v) {
+    return lower(trim(v)) == "auto" ? kAuto : (parse_bool(v) ? 1 : 0);
+}
+
+// Remastered's own effect archives (sfx\, the Steam build, unchanged since 2022) and their sizes. The Prepare to Die
+// Edition effects mod ("Dark Souls Remastered: PTDE Effects Fully Restored") replaces all 29, and every release of it
+// (1.0.0, 1.1.0, 1.2.0) changes the size of each one, so an archive of another size counts as replaced.
+struct EffectArchive {
+    const wchar_t* name;
+    unsigned long long size;
+};
+const EffectArchive kEffectArchives[] = {
+    {L"FRPG_SfxBnd_CommonEffects.ffxbnd.dcx", 67445412u}, {L"FRPG_SfxBnd_Patch.ffxbnd.dcx", 1753816u},
+    {L"FRPG_SfxBnd_c3471.ffxbnd.dcx", 395800u},           {L"FRPG_SfxBnd_c4100.ffxbnd.dcx", 189253u},
+    {L"FRPG_SfxBnd_c4500.ffxbnd.dcx", 305495u},           {L"FRPG_SfxBnd_c4510.ffxbnd.dcx", 59953u},
+    {L"FRPG_SfxBnd_m10.ffxbnd.dcx", 222762u},             {L"FRPG_SfxBnd_m10_00.ffxbnd.dcx", 1398024u},
+    {L"FRPG_SfxBnd_m10_01.ffxbnd.dcx", 1394407u},         {L"FRPG_SfxBnd_m10_02.ffxbnd.dcx", 143556u},
+    {L"FRPG_SfxBnd_m11.ffxbnd.dcx", 954271u},             {L"FRPG_SfxBnd_m12.ffxbnd.dcx", 1308938u},
+    {L"FRPG_SfxBnd_m12_00.ffxbnd.dcx", 772223u},          {L"FRPG_SfxBnd_m12_01.ffxbnd.dcx", 1467396u},
+    {L"FRPG_SfxBnd_m13.ffxbnd.dcx", 364045u},             {L"FRPG_SfxBnd_m13_00.ffxbnd.dcx", 180062u},
+    {L"FRPG_SfxBnd_m13_01.ffxbnd.dcx", 282837u},          {L"FRPG_SfxBnd_m13_02.ffxbnd.dcx", 504686u},
+    {L"FRPG_SfxBnd_m14.ffxbnd.dcx", 1860829u},            {L"FRPG_SfxBnd_m14_00.ffxbnd.dcx", 210593u},
+    {L"FRPG_SfxBnd_m14_01.ffxbnd.dcx", 838249u},          {L"FRPG_SfxBnd_m15.ffxbnd.dcx", 123437u},
+    {L"FRPG_SfxBnd_m15_00.ffxbnd.dcx", 417178u},          {L"FRPG_SfxBnd_m15_01.ffxbnd.dcx", 677151u},
+    {L"FRPG_SfxBnd_m16.ffxbnd.dcx", 1653641u},            {L"FRPG_SfxBnd_m17.ffxbnd.dcx", 1069320u},
+    {L"FRPG_SfxBnd_m18.ffxbnd.dcx", 194263u},             {L"FRPG_SfxBnd_m18_00.ffxbnd.dcx", 242470u},
+    {L"FRPG_SfxBnd_m18_01.ffxbnd.dcx", 125679u},
+};
+constexpr int kEffectArchiveCount = static_cast<int>(sizeof(kEffectArchives) / sizeof(kEffectArchives[0]));
+
+// The switches set to auto take the original game's look (1) when more than half of the effect archives in the game
+// folder's sfx\ are replaced (the effects mod replaces all of them; a mod that changes a few effects is not taken for
+// it), else Remastered's (0). Logs what it found.
+void settings_resolve_effect_looks(Settings& s, const wchar_t* dir) {
+    int* const looks[] = {&s.sfx_distortion_ptde_speed, &s.sfx_sway_ptde_speed, &s.sfx_trails_ptde_speed};
+    static const char* const kNames[] = {"SfxDistortionPtdeSpeed", "SfxSwayPtdeSpeed", "SfxTrailsPtdeSpeed"};
+    bool any_auto = false;
+    for (int* v : looks) any_auto = any_auto || *v == kAuto;
+    if (!any_auto) return;
+    int found = 0, replaced = 0;
+    for (const EffectArchive& a : kEffectArchives) {
+        wchar_t file[MAX_PATH];
+        _snwprintf_s(file, _TRUNCATE, L"%ssfx\\%s", dir, a.name);
+        WIN32_FILE_ATTRIBUTE_DATA info{};
+        if (!GetFileAttributesExW(file, GetFileExInfoStandard, &info)) continue;
+        ++found;
+        const unsigned long long size = (static_cast<unsigned long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+        if (size != a.size) ++replaced;
+    }
+    const bool ptde = replaced * 2 > kEffectArchiveCount;
+    std::string autos;
+    for (int i = 0; i < 3; ++i) {
+        if (*looks[i] != kAuto) continue;
+        *looks[i] = ptde ? 1 : 0;
+        autos += autos.empty() ? kNames[i] : std::string(", ") + kNames[i];
+    }
+    if (ptde) {
+        LOG_INFO("Effects: %d of Remastered's %d effect archives are replaced: the PTDE effects mod. %s (auto): the "
+                 "original game's look (30 FPS), as its effects were made", replaced, kEffectArchiveCount,
+                 autos.c_str());
+    } else {
+        LOG_INFO("Effects: %d of Remastered's %d effect archives found, %d replaced%s. %s (auto): Remastered's own "
+                 "look (60 FPS)", found, kEffectArchiveCount, replaced,
+                 replaced > 0 ? " (not the PTDE effects mod, which replaces all of them)" : "", autos.c_str());
+    }
+}
+
 // MaxFPS: a whole number, clamped to kMinMaxFps..kMaxMaxFps. Anything that is not a number keeps
 // the default.
 int parse_max_fps(const std::string& v, int fallback) {
@@ -54,7 +122,7 @@ int parse_max_fps(const std::string& v, int fallback) {
 
 }  // namespace
 
-Settings settings_load(const wchar_t* dll_path) {
+Settings settings_read(const wchar_t* dll_path) {
     Settings s;
     wchar_t path[MAX_PATH];
     lstrcpynW(path, dll_path, MAX_PATH);
@@ -154,15 +222,15 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "fixsfxdistortion") {
             s.fix_sfx_distortion = parse_bool(val);
         } else if (key == "sfxdistortionptdespeed") {
-            s.sfx_distortion_ptde_speed = parse_bool(val);
+            s.sfx_distortion_ptde_speed = parse_auto(val);
         } else if (key == "fixsfxsway") {
             s.fix_sfx_sway = parse_bool(val);
         } else if (key == "sfxswayptdespeed") {
-            s.sfx_sway_ptde_speed = parse_bool(val);
+            s.sfx_sway_ptde_speed = parse_auto(val);
         } else if (key == "fixsfxtrails") {
             s.fix_sfx_trails = parse_bool(val);
         } else if (key == "sfxtrailsptdespeed") {
-            s.sfx_trails_ptde_speed = parse_bool(val);
+            s.sfx_trails_ptde_speed = parse_auto(val);
         } else if (key == "fixsfxspawnrate") {
             s.fix_sfx_spawn_rate = parse_bool(val);
         } else if (key == "fixsoulcounter") {
@@ -201,5 +269,16 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_move_dt = parse_bool(val);
         }
     }
+    return s;
+}
+
+Settings settings_load(const wchar_t* dll_path) {
+    Settings s = settings_read(dll_path);
+    // The game folder (the DLL sits in it).
+    wchar_t dir[MAX_PATH];
+    lstrcpynW(dir, dll_path, MAX_PATH);
+    wchar_t* slash = wcsrchr(dir, L'\\');
+    if (slash) slash[1] = 0;
+    settings_resolve_effect_looks(s, dir);
     return s;
 }
