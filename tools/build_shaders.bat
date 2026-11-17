@@ -19,6 +19,10 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /D SIDE_ALPHA=1 /Vn kAreaReduceSidePs /Fh src\ptde\shaders\area_reduce_side_ps.h src\ptde\shaders\area_reduce.hlsl
 if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main_h /O3 /Vn kAreaReduce2HPs /Fh src\ptde\shaders\area_reduce2_h_ps.h src\ptde\shaders\area_reduce2.hlsl
+if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main_v /O3 /Vn kAreaReduce2VPs /Fh src\ptde\shaders\area_reduce2_v_ps.h src\ptde\shaders\area_reduce2.hlsl
+if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kDofNearRatePs /Fh src\ptde\shaders\dof_near_rate_ps.h src\ptde\shaders\dof_near_rate.hlsl
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kPresentLutPs /Fh src\ptde\shaders\present_lut_ps.h src\ptde\shaders\present_lut.hlsl

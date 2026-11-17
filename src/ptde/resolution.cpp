@@ -10,6 +10,8 @@
 #include "layout.h"
 #include "shaders/area_reduce_ps.h"
 #include "shaders/area_reduce_side_ps.h"
+#include "shaders/area_reduce2_h_ps.h"
+#include "shaders/area_reduce2_v_ps.h"
 #include "shaders/dof_composite_ps.h"
 #include "shaders/dof_composite_side_ps.h"
 #include "shaders/dof_near_rate_ps.h"
@@ -258,7 +260,8 @@ const float kNoDither[4] = {0, 0, 0, 0};
 volatile bool g_present_swap_enabled = true;  // RemoteControl `reduce 0/1`
 volatile LONG g_swap_off_mask = 0;            // RemoteControl `swapoff MASK` (diagnostics): bit i = swap i, bit 7 = copies,
                                               // bit 6 = the 10-bit scene's alpha kept in the scene (none of ours),
-                                              // bit 4 = its draw not into ours, bit 5 = ours not read
+                                              // bit 4 = its draw not into ours, bit 5 = ours not read,
+                                              // bit 8 = the averaging copies in one pass
 
 int swap_of(const DWORD* code) {
     for (int i = 0; i < kSwapCount; ++i) {
@@ -1259,6 +1262,146 @@ HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseT
     return o_set_texture(dev, stage, tex);
 }
 
+// The same average in two passes (shaders/area_reduce2.hlsl says why): along x into a float target of ours of the
+// destination's width and the source's height (drawn with our quad), then along y into the game's target with the
+// game's own draw. Measured 2026-11-17 (Firelink 5760x3240, 4x AA, DXVK): the two copies of the scene each frame
+// (the depth of field's 512x360, the glare's 256x180) took about 0.9 ms in one pass (RemoteControl `swapoff 0x100`
+// draws them so for comparison).
+struct Area2 {
+    IDirect3DDevice9* dev = nullptr;
+    IDirect3DVertexShader9* vs = nullptr;
+    IDirect3DVertexDeclaration9* decl = nullptr;
+    IDirect3DPixelShader9* h = nullptr;
+    IDirect3DPixelShader9* v = nullptr;
+    struct Mid {
+        IDirect3DTexture9* tex = nullptr;
+        IDirect3DSurface9* surf = nullptr;
+        UINT w = 0, h = 0;
+    } mid[3];
+    bool failed = false;
+    bool logged = false;
+};
+Area2 g_area2;
+
+void area2_release_targets() {
+    for (Area2::Mid& m : g_area2.mid) {
+        if (m.surf) m.surf->Release();
+        if (m.tex) m.tex->Release();
+        m = Area2::Mid{};
+    }
+}
+
+// The pass-1 target for a w x h result (made on first use; float where the card can render into it), or nullptr.
+Area2::Mid* area2_mid(IDirect3DDevice9* dev, UINT w, UINT h) {
+    if (g_area2.dev != dev) {
+        area2_release_targets();
+        IUnknown* objs[] = {g_area2.vs, g_area2.decl, g_area2.h, g_area2.v};
+        for (IUnknown* o : objs) {
+            if (o) o->Release();
+        }
+        g_area2.vs = nullptr;
+        g_area2.decl = nullptr;
+        g_area2.h = g_area2.v = nullptr;
+        g_area2.dev = dev;
+        g_area2.failed = false;
+        static const D3DVERTEXELEMENT9 kDecl[] = {
+            {0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0}, D3DDECL_END()};
+        if (FAILED(dev->CreateVertexShader(reinterpret_cast<const DWORD*>(kDofHrVs), &g_area2.vs)) ||
+            FAILED(dev->CreateVertexDeclaration(kDecl, &g_area2.decl)) ||
+            FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kAreaReduce2HPs), &g_area2.h)) ||
+            FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kAreaReduce2VPs), &g_area2.v))) {
+            g_area2.failed = true;
+            LOG_ERROR("Resolution: the two-pass averaging shaders could not be made; the one-pass copy is used");
+        }
+    }
+    if (g_area2.failed) return nullptr;
+    Area2::Mid* free_slot = nullptr;
+    for (Area2::Mid& m : g_area2.mid) {
+        if (m.tex && m.w == w && m.h == h) return &m;
+        if (!m.tex && !free_slot) free_slot = &m;
+    }
+    if (!free_slot) {
+        area2_release_targets();  // the sizes changed (a new resolution): made again
+        free_slot = &g_area2.mid[0];
+    }
+    const D3DFORMAT formats[] = {D3DFMT_A16B16G16R16F, D3DFMT_A8R8G8B8};
+    for (D3DFORMAT f : formats) {
+        if (SUCCEEDED(dev->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, f, D3DPOOL_DEFAULT, &free_slot->tex,
+                                         nullptr)) &&
+            free_slot->tex && SUCCEEDED(free_slot->tex->GetSurfaceLevel(0, &free_slot->surf))) {
+            free_slot->w = w;
+            free_slot->h = h;
+            return free_slot;
+        }
+        if (free_slot->tex) free_slot->tex->Release();
+        free_slot->tex = nullptr;
+    }
+    return nullptr;
+}
+
+// Pass 1 into `mid` with our quad (the game's target, viewport, clipping, vertex shader and its c0 back after), then
+// pass 2: the game's draw with our shader reading `mid`.
+HRESULT area2_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DVIEWPORT9& vp, Area2::Mid* mid,
+                   D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    IDirect3DSurface9* rt = nullptr;
+    dev->GetRenderTarget(0, &rt);
+    RECT scissor{};
+    dev->GetScissorRect(&scissor);
+    DWORD scissor_on = FALSE;
+    dev->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissor_on);
+    IDirect3DVertexShader9* game_vs = nullptr;
+    dev->GetVertexShader(&game_vs);
+    IDirect3DVertexDeclaration9* game_decl = nullptr;
+    dev->GetVertexDeclaration(&game_decl);
+    float game_c0[4] = {};
+    dev->GetVertexShaderConstantF(0, game_c0, 1);
+
+    o_set_rt(dev, 0, mid->surf);
+    const D3DVIEWPORT9 whole{0, 0, mid->w, mid->h, 0.0f, 1.0f};
+    o_set_viewport(dev, &whole);
+    if (scissor_on) dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+    dev->SetVertexShader(g_area2.vs);
+    dev->SetVertexDeclaration(g_area2.decl);
+    const float half[4] = {-1.0f / mid->w, 1.0f / mid->h, 0, 0};
+    dev->SetVertexShaderConstantF(0, half, 1);
+    const float sizes1[8] = {static_cast<float>(src.Width), static_cast<float>(src.Height), 1.0f / src.Width,
+                             1.0f / src.Height, static_cast<float>(mid->w), static_cast<float>(mid->h),
+                             1.0f / mid->w, 1.0f / mid->h};
+    dev->SetPixelShaderConstantF(200, sizes1, 2);
+    o_set_ps(dev, g_area2.h);
+    static const float kQuad[16] = {-1, 1, 0, 1, 1, 1, 0, 1, -1, -1, 0, 1, 1, -1, 0, 1};
+    o_draw_up(dev, D3DPT_TRIANGLESTRIP, 2, kQuad, 16);
+
+    o_set_rt(dev, 0, rt);  // resets the viewport and clipping rectangle: the game's back
+    o_set_viewport(dev, &vp);
+    o_set_scissor(dev, &scissor);
+    if (scissor_on) dev->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+    dev->SetVertexShader(game_vs);
+    dev->SetVertexDeclaration(game_decl);
+    dev->SetVertexShaderConstantF(0, game_c0, 1);
+    if (game_vs) game_vs->Release();
+    if (game_decl) game_decl->Release();
+    if (rt) rt->Release();
+
+    IDirect3DBaseTexture9* source = nullptr;
+    dev->GetTexture(0, &source);
+    o_set_texture(dev, 0, mid->tex);
+    const float sizes2[8] = {static_cast<float>(mid->w), static_cast<float>(mid->h), 1.0f / mid->w, 1.0f / mid->h,
+                             static_cast<float>(vp.Width), static_cast<float>(vp.Height), 1.0f / vp.Width,
+                             1.0f / vp.Height};
+    dev->SetPixelShaderConstantF(200, sizes2, 2);
+    o_set_ps(dev, g_area2.v);
+    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    o_set_texture(dev, 0, source);
+    if (source) source->Release();
+    if (!g_area2.logged) {
+        g_area2.logged = true;
+        LOG_INFO("Resolution: the scene's averaging copies are made in two passes (along x into %ux%u, then along y)",
+                 mid->w, mid->h);
+    }
+    return hr;
+}
+
 // The game's copy of a large render target into a small one, drawn with our averaging shader: the sizes to c200/c201,
 // bilinear filtering (the shader reads pairs of pixels per fetch) and clamping on stage 0, then the game's shader and
 // states back.
@@ -1278,13 +1421,22 @@ HRESULT area_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DVI
     }
     IDirect3DPixelShader9* game = nullptr;
     dev->GetPixelShader(&game);
-    // HighPrecisionColor = 10bit: the scene's alpha (the depth of field's rate) from ours, stage 1.
+    // HighPrecisionColor = 10bit: the scene's alpha (the depth of field's rate) from ours, stage 1 (one pass).
     if (!g_area_side_ps) side = nullptr;
+    Area2::Mid* mid = nullptr;
+    if (!side && !(g_swap_off_mask & 0x100) && vp.Width < src.Width && vp.Height < src.Height) {
+        mid = area2_mid(dev, vp.Width, src.Height);
+    }
     IDirect3DBaseTexture9* side_saved_tex = nullptr;
     DWORD side_saved[6] = {};
     if (side) alpha_stage_set(dev, 1, side, &side_saved_tex, side_saved);
-    o_set_ps(dev, side ? g_area_side_ps : g_area_ps);
-    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    HRESULT hr;
+    if (mid) {
+        hr = area2_draw(dev, src, vp, mid, type, count, data, stride);
+    } else {
+        o_set_ps(dev, side ? g_area_side_ps : g_area_ps);
+        hr = o_draw_up(dev, type, count, data, stride);
+    }
     o_set_ps(dev, game);
     if (game) game->Release();
     if (side) alpha_stage_restore(dev, 1, side_saved_tex, side_saved);
@@ -1914,6 +2066,7 @@ void resolution_reset() {
     alpha_release();  // the default pool goes before a Reset; made again on the next use
     g_rt0_10bit = false;
     release_ptr(g_reduce.state);  // made again on the next use
+    area2_release_targets();
     fx_release_target();          // the default pool goes before a Reset; made again on the next use
     dofhr_release_targets();
     fx_forget_sequence();
