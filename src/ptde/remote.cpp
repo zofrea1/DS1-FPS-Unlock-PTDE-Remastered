@@ -1781,14 +1781,13 @@ bool show_item_get(uint32_t category, int32_t id, int32_t n) {
 // The game's message box with an OK button (the action box, MenuMan+0xEC0, drawn by the recall dialog 'F22'): a line
 // queued into a free channel by 0x515B80 (ecx = box, eax = channel, push text; ret 4), MenuMan+0xF4 = 1 shows it, as
 // RecallMenuEvent (0xD74950) and Prepare to Co-op's notices ("X has died") do.
-bool show_action_box(const std::wstring& line) {
+bool show_action_box(const std::wstring& line, int want = -1) {
     uint32_t mm = 0;
     if (!safe_read_any(0x013786D0, &mm, 4) || mm < 0x10000) return false;
-    static wchar_t buf[256];
-    wcsncpy_s(buf, line.c_str(), _TRUNCATE);
+    static wchar_t bufs[2][256];
     const uint32_t box = mm + 0xEC0;
-    int channel = 0;
-    for (int ch = 0, found = 0; ch < 2 && !found; ++ch) {
+    int channel = want == 0 || want == 1 ? want : 0;
+    for (int ch = 0, found = want == 0 || want == 1; ch < 2 && !found; ++ch) {
         for (int k = 0; k < 3; ++k) {
             uint8_t used = 1;
             if (safe_read_any(box + 4 + ch * 12 + 8 + k, &used, 1) && !used) {
@@ -1798,6 +1797,8 @@ bool show_action_box(const std::wstring& line) {
             }
         }
     }
+    wchar_t* buf = bufs[channel];
+    wcsncpy_s(buf, 256, line.c_str(), _TRUNCATE);
     const wchar_t* text = buf;
     __try {
         __asm {
@@ -1899,14 +1900,21 @@ void run_game(const std::vector<std::string>& t) {
                                       static_cast<int32_t>(num(3, 1)));
         out("itemget: %s", ok ? "shown" : "refused");
     } else if (c == "actionbox") {
-        // actionbox TEXT...: the game's message box with an OK button showing TEXT (UI tests).
+        // actionbox [0|1] TEXT...: the game's message box with an OK button showing TEXT, in that channel (each of the
+        // two channels is a box of its own: both can be up at once) or the first with a free line (UI tests).
+        size_t first = 1;
+        int want = -1;
+        if (t.size() > 2 && (t[1] == "0" || t[1] == "1")) {
+            want = t[1][0] - '0';
+            first = 2;
+        }
         std::wstring w;
-        for (size_t k = 1; k < t.size(); ++k) {
-            if (k > 1) w += L' ';
+        for (size_t k = first; k < t.size(); ++k) {
+            if (k > first) w += L' ';
             for (char ch : t[k]) w += static_cast<wchar_t>(static_cast<unsigned char>(ch));
         }
         if (w.empty()) w = L"Someone has died";
-        out("actionbox: %s", show_action_box(w) ? "shown" : "refused");
+        out("actionbox: %s", show_action_box(w, want) ? "shown" : "refused");
     } else if (c == "speffect") {
         // speffect ID: apply SpEffectParam row ID to the player (diagnostics: ticking effects, SpEffect timing).
         out("speffect %ld: %s", num(1, 0), apply_speffect(player_chr(), static_cast<int>(num(1, 0))) ? "applied" :
