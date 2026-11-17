@@ -322,7 +322,8 @@ volatile LONG g_swap_off_mask = 0;            // RemoteControl `swapoff MASK` (d
                                               // bit 6 = the 10-bit scene's alpha kept in the scene (none of ours),
                                               // bit 4 = its draw not into ours, bit 5 = ours not read,
                                               // bit 8 = the averaging copies in one pass,
-                                              // bit 9 = the camera blur drawn as the game does when it is off
+                                              // bit 9 = the camera blur drawn as the game does when it is off,
+                                              // bit 10 = every resolve made (none left out as made already)
 
 int swap_of(const DWORD* code) {
     for (int i = 0; i < kSwapCount; ++i) {
@@ -996,7 +997,10 @@ void alpha_stage_restore(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTextur
     if (saved_tex) saved_tex->Release();
 }
 
+void resolve_forget(IDirect3DSurface9* s);
+
 HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt) {
+    resolve_forget(rt);  // drawn into from here
     if (index == 0 && g_scene_10bit) {
         D3DSURFACE_DESC d{};
         g_rt0_10bit = rt && SUCCEEDED(rt->GetDesc(&d)) && d.Format == D3DFMT_A2R10G10B10 &&
@@ -1017,6 +1021,7 @@ HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* 
 }
 
 HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
+    resolve_forget(ds);
     g_fx.ds = ds;
     if (g_water.bound && ds && ds == g_water.game_ds) return o_set_ds(dev, g_water.ds);
     if (g_refl.bound && ds && ds == g_refl.game_ds) return o_set_ds(dev, g_refl.ds);
@@ -2194,8 +2199,71 @@ HRESULT reduce_draw(IDirect3DDevice9* dev, IDirect3DTexture9* tex, const D3DSURF
     return hr;
 }
 
+// A resolve made again for nothing: with the game's anti-aliasing the multisampled depth (R32F with
+// FixAntialiasingDepth) is resolved into its texture after the opaque scene and again after the effects, with nothing
+// drawn into either in between (Firelink's frame log, 2026-11-17): the second gives the same texture. A resolve (a
+// StretchRect from a multisampled surface) the same as one made before, from the same surface into the same one with the
+// same rectangles and filter, is left out while neither has been a render target, the depth buffer or a copy's target
+// since. RemoteControl `swapoff 0x400` makes them all.
+struct Resolve {
+    IDirect3DSurface9* src = nullptr;
+    IDirect3DSurface9* dst = nullptr;
+    RECT s{}, d{};
+    bool has_s = false, has_d = false;
+    D3DTEXTUREFILTERTYPE filter = D3DTEXF_NONE;
+};
+Resolve g_resolves[4];
+int g_resolve_next = 0;
+bool g_resolve_logged = false;
+
+void resolve_forget(IDirect3DSurface9* s) {
+    if (!s) return;
+    for (Resolve& r : g_resolves) {
+        if (r.src == s || r.dst == s) r = Resolve{};
+    }
+}
+
+bool resolve_same(const Resolve& r, IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst, const RECT* dr,
+                  D3DTEXTUREFILTERTYPE filter) {
+    return r.src == src && r.dst == dst && r.filter == filter && r.has_s == (sr != nullptr) &&
+           r.has_d == (dr != nullptr) && (!sr || std::memcmp(&r.s, sr, sizeof(RECT)) == 0) &&
+           (!dr || std::memcmp(&r.d, dr, sizeof(RECT)) == 0);
+}
+
 HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst,
                           const RECT* dr, D3DTEXTUREFILTERTYPE filter) {
+    if (src && dst && src != dst) {
+        D3DSURFACE_DESC rd{};
+        const bool resolve = SUCCEEDED(src->GetDesc(&rd)) && rd.MultiSampleType != D3DMULTISAMPLE_NONE;
+        if (resolve && !(g_swap_off_mask & 0x400)) {
+            for (const Resolve& r : g_resolves) {
+                if (resolve_same(r, src, sr, dst, dr, filter)) {
+                    if (!g_resolve_logged) {
+                        g_resolve_logged = true;
+                        LOG_INFO("Resolution: a resolve made again with nothing drawn into either surface since the "
+                                 "last one is left out (the anti-aliased depth, after the effects)");
+                    }
+                    return D3D_OK;
+                }
+            }
+        }
+        resolve_forget(dst);  // its target holds something else from here
+        if (resolve) {
+            const HRESULT hr = o_stretch(dev, src, sr, dst, dr, filter);
+            if (SUCCEEDED(hr)) {
+                Resolve& r = g_resolves[g_resolve_next];
+                g_resolve_next = (g_resolve_next + 1) % 4;
+                r.src = src;
+                r.dst = dst;
+                r.has_s = sr != nullptr;
+                r.has_d = dr != nullptr;
+                if (sr) r.s = *sr;
+                if (dr) r.d = *dr;
+                r.filter = filter;
+            }
+            return hr;
+        }
+    }
     // The game's copy of its reflection target: made from ours (scaled down).
     if (src && g_refl.window && src == g_refl.game_surf && g_refl.surf && !sr) {
         return o_stretch(dev, g_refl.surf, nullptr, dst, dr, D3DTEXF_LINEAR);
@@ -2318,6 +2386,7 @@ void resolution_reset() {
     alpha_release();  // the default pool goes before a Reset; made again on the next use
     g_rt0_10bit = false;
     release_ptr(g_reduce.state);  // made again on the next use
+    for (Resolve& r : g_resolves) r = Resolve{};
     area2_release_targets();
     fx_release_target();          // the default pool goes before a Reset; made again on the next use
     dofhr_release_targets();
