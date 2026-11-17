@@ -1612,6 +1612,29 @@ uintptr_t player_chr() {
 // Co-op's world.cpp calls it: the player as the source, the effect this game's own.
 using ApplySpEffectFn = char(__fastcall*)(uintptr_t chr, void*, int id, uintptr_t src, int a, float f1, float f2,
                                           float f3, int own);
+// The game's item-get window (its pickups' and awards'): 0xC22830, eax = the queue [0x137E174], stdcall(category, id,
+// count) (as Prepare to Co-op's items::show_obtained). Shows the item only; nothing is given.
+bool show_item_get(uint32_t category, int32_t id, int32_t n) {
+    uint32_t queue = 0, shown = 0, spare = 0;
+    if (!safe_read_any(0x0137E174, &queue, 4) || queue < 0x10000 || !safe_read_any(queue + 4, &shown, 4) ||
+        !safe_read_any(queue + 8, &spare, 4) || (!shown && !spare) || n <= 0) {
+        return false;
+    }
+    __try {
+        __asm {
+            push n
+            push id
+            push category
+            mov eax, queue
+            mov edx, 0x00C22830
+            call edx
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
 bool apply_speffect(uintptr_t chr, int id) {
     uintptr_t vt = 0, fn = 0;
     if (!chr || !safe_read(chr, &vt, 4) || !safe_read(vt + 125 * 4, &fn, 4) || fn != 0x00E7E950) return false;
@@ -1690,6 +1713,12 @@ void run_game(const std::vector<std::string>& t) {
         uint32_t at = t.size() > 2 ? static_cast<uint32_t>(std::strtoul(t[2].c_str(), nullptr, 16)) : 0;
         if (t[1] == "d3d" && !at) at = d3dperf_device_table();
         out("phases %s: %s", t[1].c_str(), phases_command(t[1].c_str(), at));
+    } else if (c == "itemget") {
+        // itemget [CATEGORY ID COUNT]: the game's item-get window for that item (default: goods 0x40000000, 330 the
+        // Homeward Bone, 1); shown only, nothing given (UI tests).
+        const bool ok = show_item_get(static_cast<uint32_t>(num(1, 0x40000000)), static_cast<int32_t>(num(2, 330)),
+                                      static_cast<int32_t>(num(3, 1)));
+        out("itemget: %s", ok ? "shown" : "refused");
     } else if (c == "speffect") {
         // speffect ID: apply SpEffectParam row ID to the player (diagnostics: ticking effects, SpEffect timing).
         out("speffect %ld: %s", num(1, 0), apply_speffect(player_chr(), static_cast<int>(num(1, 0))) ? "applied" :
@@ -2287,7 +2316,7 @@ void run(const std::string& line) {
         } else {
             out("hp: no player");
         }
-    } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp" || c == "speffect" ||
+    } else if (c == "flag" || c == "setflag" || c == "tp" || c == "warp" || c == "speffect" || c == "itemget" ||
                c == "anim" || c == "ent" || c == "objscan" || c == "objpath" || c == "track" ||
                c == "warpchr" || c == "tpr" || c == "atkref") {
         std::lock_guard<std::mutex> lock(g_game_lock);
