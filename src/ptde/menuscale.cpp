@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -117,14 +118,33 @@ std::string class_of(uintptr_t obj) {
     return at == std::string::npos ? s : s.substr(0, at);
 }
 
+// A dialog's name in its menu file (the definition it was made from, +0x2C, starts with the name's address: "R04"),
+// or empty.
+std::wstring dialog_name(uintptr_t dlg) {
+    uint32_t def = 0, text = 0;
+    if (!read32(dlg + 0x2C, &def) || def < 0x10000 || !read32(def, &text) || text < 0x10000) return {};
+    wchar_t buf[24] = {};
+    if (!read_bytes(text, buf, sizeof(buf) - sizeof(wchar_t))) return {};
+    for (wchar_t& c : buf) {
+        if (c == 0) break;
+        if (c < 0x20 || c > 0x7E) return {};
+    }
+    return std::wstring(buf);
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The scaled dialogs.
-enum Kind { kNone, kHud, kMark };
+// kMenu: the in-game menu's screens (UIScaleMenus), about the middle of the screen; found by their names in the menu
+// file (menu_member), not by class (each is a plain EzMenuDialog holding the screen's dialogs).
+enum Kind { kNone, kHud, kMark, kMenu };
+// FixBossBarOverlap: the prompt (and the item windows above it) moved up while a boss's health bar is shown.
+enum Lift { kLiftNone, kLiftPrompt, kLiftItems, kBossBar };
 struct Rule {
     const char* cls;
     Kind kind;
     float ax, ay;    // kHud: the anchor (1280x720 layout units); kMark: the dialog's own middle (unused)
     bool container;  // its own pieces only: a dialog inside it without a rule of its own keeps the game's size
+    Lift lift;
 };
 const Rule kRules[] = {
     // The HUD: FrpgMenuDlgPCGauge is the whole-screen HUD dialog; its own pieces are the health and stamina bars (top
@@ -133,13 +153,13 @@ const Rule kRules[] = {
     {"FrpgMenuDlgFEPlayerState", kHud, 0.0f, 0.0f},       // humanity, status icons: top left
     {"FrpgMenuDlgFeShortcut", kHud, 0.0f, 720.0f},        // the equipment slots (each one a dialog): bottom left
     {"FrpgMenuDlgFEGetSoul", kHud, 1280.0f, 720.0f},      // the soul count and the souls gained: bottom right
-    {"FrpgMenuDlgBossGauge", kHud, 737.3f, 720.0f},       // a boss's health bar: down toward the bottom edge
+    {"FrpgMenuDlgBossGauge", kHud, 737.3f, 720.0f, false, kBossBar},  // a boss's health bar: toward the bottom edge
     {"FrpgMenuDlgResistGauge", kHud, 685.0f, 505.5f},     // the build-up meters (poison, toxic, bleed, curse): about
                                                           // the middle of their stack (535..835 x 447..564)
     {"FrpgMenuDlgFECondition", kHud, 640.0f, 216.0f},     // "! POISONED !" and the like: about its middle
-    {"FrpgMenuDlgMapAction", kHud, 640.0f, 720.0f},       // prompts ("A: Talk", "A: Pick up item")
-    {"FrpgMenuDlgItemGet", kHud, 640.0f, 720.0f},         // items picked up
-    {"FrpgMenuDlgItemGetPlate", kHud, 640.0f, 720.0f},
+    {"FrpgMenuDlgMapAction", kHud, 640.0f, 720.0f, false, kLiftPrompt},  // prompts ("A: Talk", "A: Pick up item")
+    {"FrpgMenuDlgItemGet", kHud, 640.0f, 720.0f, false, kLiftItems},     // items picked up
+    {"FrpgMenuDlgItemGetPlate", kHud, 640.0f, 720.0f, false, kLiftItems},
     {"FrpgMenuDlgBloodMsgDisplay", kHud, 640.0f, 0.0f},   // a message being read: toward the top edge
     // Marks over things in the world (UIScaleWorld), each about its own middle.
     {"FrpgMenuDlgFEEnemyGauge", kMark, 0.0f, 0.0f},
@@ -188,19 +208,89 @@ const ClassInfo& info_of(uintptr_t dlg) {
 std::atomic<int> g_scale_pct{100};
 std::atomic<int> g_world_pct{100};
 std::atomic<int> g_text_pct{0};  // UIScaleText: 0 = each text at its dialog's scale, else percent of the game's size
+std::atomic<int> g_menu_pct{0};  // UIScaleMenus: 0 = as UIScale, else percent
+std::atomic<bool> g_fix_boss{false};
+
+// The menus' scale in percent now (UIScaleMenus, or UIScale for auto), 100 when off or out of range.
+int menu_pct() {
+    int pct = g_menu_pct.load(std::memory_order_relaxed);
+    if (pct == 0) pct = g_scale_pct.load(std::memory_order_relaxed);
+    return pct < 25 || pct > 200 ? 100 : pct;
+}
 
 // A dialog being drawn smaller (or a dialog inside one drawn at another scale): `s`, `ax`, `ay` its scale about its
-// anchor on the screen (its clipping rectangles are mapped so); `a`, `bx`, `by` the change its first read of the
-// transform (its parent) gets: x * a + bx, y * a + by (the scale itself, or the scale of the dialog around it undone
-// and then its own); `ts` the size of the letters of a text written in it.
+// anchor on the screen; `ox`, `oy` where that puts it: x' = x * s + ox (the anchor's ax * (1 - s), plus a move of its
+// own; its clipping rectangles are mapped so); `a`, `bx`, `by` the change its first read of the transform (its parent)
+// gets: x * a + bx, y * a + by (the scale itself, or the place of the dialog around it undone and then its own); `ts`
+// the size of the letters of a text written in it.
 struct Active {
     bool on = false;
     bool pending = false;
     bool container = false;
     float s = 1.0f, ax = 0.0f, ay = 0.0f;
+    float ox = 0.0f, oy = 0.0f;
     float a = 1.0f, bx = 0.0f, by = 0.0f;
     float ts = 1.0f;
 };
+
+// ---------------------------------------------------------------------------------------------------------------
+// The frame's 2D, on the game thread. Each top-level dialog is drawn once a frame, in the same order (2026-11-17,
+// in the field with the inventory open: the button guide 'R04', the fade 'black', the save icon 'R08', 'F24', the
+// marks over characters 'F21', the HUD 'F20-00', 'F20', 'Icon', 'F20-01', 'F23', 'F25', 'Icon', the back plate 'R11',
+// the start menu 'R00', the menu's screen ('I01' the items), 'Icon', 'F03', the field messages 'F05' (prompts, item
+// windows), 'F22', the movie 'R06'), so one drawn a second time starts the next frame.
+constexpr float kNoBoss = 1.0e9f;
+// FixBossBarOverlap, measured at 100% (2048x1152, 2026-11-17): a boss's name starts 598 units down its dialog's own
+// 720 (the dialog is placed at 59,-29 .. 1335,679 for the first boss, 47 higher for a second), the prompt's box ends
+// 5 above its dialog's bottom (563 .. 638 with one line, .. 663 with two), and the prompt's box covered the name and
+// the bar. Kept this far above the name.
+constexpr float kBossNameTop = 598.0f;
+constexpr float kPromptBoxBottom = 5.0f;
+constexpr float kBossGap = 6.0f;
+struct FrameState {
+    uintptr_t seen[32] = {};
+    int n = 0;
+    bool menu = false, menu_prev = false;                // the start menu is up (this frame, the last one)
+    float menu_s = 1.0f;                                 // its scale
+    float boss_top = kNoBoss, boss_top_prev = kNoBoss;   // the top of the highest boss bar shown
+    float lift = 0.0f, lift_prev = 0.0f;                 // how far the prompt was moved up
+    bool prompt = false, prompt_prev = false;            // a prompt is shown
+};
+FrameState g_frame;
+float g_mouse_s = 1.0f;  // the menus' scale while they are up (the mouse's place in them, cursor_after)
+
+void top_level_drawn(uintptr_t dlg) {
+    FrameState& f = g_frame;
+    for (int i = 0; i < f.n; ++i) {
+        if (f.seen[i] != dlg) continue;
+        if (g_probe_dialogs.load(std::memory_order_relaxed) > 0) {
+            LOG_INFO("menuprobe frame: %08X again (seen %d of %d)", static_cast<unsigned>(dlg), i, f.n);
+        }
+        f.n = 0;
+        f.menu_prev = f.menu;
+        f.menu = false;
+        f.boss_top_prev = f.boss_top;
+        f.boss_top = kNoBoss;
+        f.lift_prev = f.lift;
+        f.lift = 0.0f;
+        f.prompt_prev = f.prompt;
+        f.prompt = false;
+        g_mouse_s = f.menu_prev ? f.menu_s : 1.0f;
+        break;
+    }
+    if (f.n < 32) f.seen[f.n++] = dlg;
+}
+
+// A part of the in-game menu: drawn after the start menu 'R00' in the frame (the screen it opened: the items 'I01',
+// the equipment 'I02', the status 'R02', the system 'I06', the options 'R01', their submenus, the icon layer drawn
+// with them), but not the field's layers ('F...': the prompts and item windows are the HUD's), the movie 'R06' or the
+// save icon 'R08'; or the button guide and help line 'R04' (drawn first in the frame: with the start menu up in the
+// last one; shared with the other menus, scaled only with this one).
+bool menu_member(const std::wstring& n, const FrameState& f) {
+    if (n == L"R04") return f.menu || f.menu_prev;
+    if (!f.menu || n.empty() || n[0] == L'F') return false;
+    return n != L"R06" && n != L"R08" && n != L"R11" && n != L"black";
+}
 
 // The size of the letters in a dialog drawn at `s` (UIScaleText): its own scale, or the setting's.
 float text_scale_for(float s) {
@@ -231,9 +321,10 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
         uint32_t vis = 0;
         read_bytes(base + 0x78, r, sizeof(r));
         read32(base + 0x98, &vis);
-        LOG_INFO("menuprobe dialog %p %s vis %u alt %u cur %.1f,%.1f-%.1f,%.1f file %.1f,%.1f-%.1f,%.1f depth %d in %s%s",
-                 dlg, info_of(base).name.c_str(), vis & 0xFF, alt, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
-                 t_depth, t_parent ? t_parent : "-", t_active.on ? " (in a scaled dialog)" : "");
+        LOG_INFO("menuprobe dialog %p %s '%ls' vis %u alt %u cur %.1f,%.1f-%.1f,%.1f file %.1f,%.1f-%.1f,%.1f depth %d "
+                 "in %s%s", dlg, info_of(base).name.c_str(), dialog_name(base).c_str(), vis & 0xFF, alt, r[0], r[1],
+                 r[2], r[3], r[4], r[5], r[6], r[7], t_depth, t_parent ? t_parent : "-",
+                 t_active.on ? " (in a scaled dialog)" : "");
     }
     struct Nest {
         const char* saved;
@@ -248,14 +339,61 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
     } nest(info_of(base).name.c_str());
     const Rule* rule = info_of(base).rule;
     const Active outer = t_active;
+    FrameState& fs = g_frame;
+    // A top-level dialog: the frame's bookkeeping, and the in-game menu's screens by their names.
+    static const Rule kMenuRule = {"", kMenu, 640.0f, 360.0f};
+    if (t_depth == 1) {
+        top_level_drawn(base);
+        if (!rule) {
+            const std::wstring name = dialog_name(base);
+            if (name == L"R00") {
+                uint32_t vis = 0;
+                read32(base + 0x98, &vis);
+                fs.menu = (vis & 0xFF) != 0;
+                fs.menu_s = menu_pct() / 100.0f;
+                if (fs.menu) rule = &kMenuRule;
+            } else if (menu_member(name, fs)) {
+                rule = &kMenuRule;
+            }
+            if (g_probe_dialogs.load(std::memory_order_relaxed) > 0) {
+                LOG_INFO("menuprobe top '%ls' menu %d (last frame %d) -> %s", name.c_str(), fs.menu ? 1 : 0,
+                         fs.menu_prev ? 1 : 0, rule ? "menu scale" : "-");
+            }
+        }
+    }
+    // FixBossBarOverlap: where the boss bars shown this frame start, and whether a prompt is up.
+    float lift = 0.0f;
+    if (rule && rule->lift != kLiftNone) {
+        uint32_t vis = 0;
+        float r[4] = {};
+        read32(base + 0x98, &vis);
+        read_bytes(base + 0x78, r, sizeof(r));
+        if (rule->lift == kBossBar && (vis & 0xFF)) {
+            const float top = r[1] + kBossNameTop * (r[3] - r[1]) / 720.0f;
+            if (top < fs.boss_top) fs.boss_top = top;
+        } else if (rule->lift == kLiftPrompt && g_fix_boss.load(std::memory_order_relaxed)) {
+            // The prompt's dialog (563 .. 638 in the layout): its box kept above the highest boss bar's name.
+            if (vis & 0xFF) fs.prompt = true;
+            const float boss = fs.boss_top < fs.boss_top_prev ? fs.boss_top : fs.boss_top_prev;
+            if (boss < kNoBoss) {
+                const float over = r[3] - kPromptBoxBottom - (boss - kBossGap);
+                if (over > 0.0f) lift = over;
+            }
+            if ((vis & 0xFF) && lift > fs.lift) fs.lift = lift;
+        } else if (rule->lift == kLiftItems && g_fix_boss.load(std::memory_order_relaxed)) {
+            // The item windows (stacked above the prompt) go up with it.
+            if (fs.prompt || fs.prompt_prev) lift = fs.lift > fs.lift_prev ? fs.lift : fs.lift_prev;
+        }
+    }
     // Inside a scaled dialog: one without a rule of its own goes with it (or keeps the game's size inside a container).
     if (!rule && (!outer.on || !outer.container)) return draw(dlg, dc);
     int pct = 100;
-    if (rule) pct = rule->kind == kMark ? g_world_pct.load() : g_scale_pct.load();
+    if (rule) pct = rule->kind == kMark ? g_world_pct.load() : rule->kind == kMenu ? menu_pct() : g_scale_pct.load();
     if (pct < 25 || pct > 200) pct = 100;
-    // A dialog inside a container without a rule of its own keeps the game's size, its letters too.
-    const float ts = rule ? text_scale_for(pct / 100.0f) : 1.0f;
-    if (!outer.on && pct == 100 && ts == 1.0f) return draw(dlg, dc);
+    // A dialog inside a container without a rule of its own keeps the game's size, its letters too; a menu's letters
+    // go with the menu.
+    const float ts = !rule ? 1.0f : rule->kind == kMenu ? pct / 100.0f : text_scale_for(pct / 100.0f);
+    if (!outer.on && pct == 100 && ts == 1.0f && lift == 0.0f) return draw(dlg, dc);
     Active a;
     a.on = true;
     a.pending = true;
@@ -271,12 +409,15 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
         a.ax = rule->ax;
         a.ay = rule->ay;
     }
-    // Its parent's transform carries the outer dialog's scale: undone first (x -> (x - b) / s), then its own.
+    // Its place: scaled about its anchor, after the move up (in its own units, so the move scales with it).
+    a.ox = a.ax * (1.0f - a.s);
+    a.oy = a.ay * (1.0f - a.s) - lift * a.s;
+    // Its parent's transform carries the outer dialog's place: undone first (x -> (x - o) / s), then its own.
     const float os = outer.on ? outer.s : 1.0f;
-    const float obx = outer.on ? outer.ax * (1.0f - outer.s) : 0.0f, oby = outer.on ? outer.ay * (1.0f - outer.s) : 0.0f;
+    const float oox = outer.on ? outer.ox : 0.0f, ooy = outer.on ? outer.oy : 0.0f;
     a.a = a.s / os;
-    a.bx = -obx * a.s / os + a.ax * (1.0f - a.s);
-    a.by = -oby * a.s / os + a.ay * (1.0f - a.s);
+    a.bx = -oox * a.s / os + a.ox;
+    a.by = -ooy * a.s / os + a.oy;
     float parent[16];
     std::memcpy(parent, static_cast<const char*>(dc) + 0x30, sizeof(parent));
     t_active = a;
@@ -313,8 +454,7 @@ void* __fastcall hk_set_clip(void* dc, void*, const float* r) {
     }
     if (t_active.on && r) {
         const float s = t_active.s;
-        float q[4] = {r[0] * s + t_active.ax * (1.0f - s), r[1] * s + t_active.ay * (1.0f - s),
-                      r[2] * s + t_active.ax * (1.0f - s), r[3] * s + t_active.ay * (1.0f - s)};
+        float q[4] = {r[0] * s + t_active.ox, r[1] * s + t_active.oy, r[2] * s + t_active.ox, r[3] * s + t_active.oy};
         return o_set_clip(dc, q);
     }
     return o_set_clip(dc, r);
@@ -359,9 +499,11 @@ void* __fastcall hk_piece_draw(void* piece, void*, void* dc) {
     a.ts = rule->keep ? 1.0f : outer.ts;
     a.ax = rule->ax;
     a.ay = rule->ay;
+    a.ox = a.ax * (1.0f - a.s);
+    a.oy = a.ay * (1.0f - a.s);
     const float k = a.s / outer.s;
-    const float bx = -outer.ax * (1.0f - outer.s) * k + a.ax * (1.0f - a.s);
-    const float by = -outer.ay * (1.0f - outer.s) * k + a.ay * (1.0f - a.s);
+    const float bx = -outer.ox * k + a.ox;
+    const float by = -outer.oy * k + a.oy;
     float placed[16], m[16];
     std::memcpy(placed, static_cast<const char*>(dc) + 0x30, sizeof(placed));
     std::memcpy(m, placed, sizeof(m));
@@ -439,6 +581,81 @@ uint32_t __fastcall hk_printer_line(void* printer, void*, uint32_t height) {
     return r;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The mouse in a scaled menu. Once a frame the game turns the pointer's place into the layout's units (0xF70520, with
+// esi = the mouse's state [0x137CF84], called from 0xC2B9BD and 0xF9187A, `ret 4`): +0x20, +0x24 the place now,
+// +0x28, +0x2C the last frame's, +0x38 set when it moved; it reads the pointer only while [[0x1378458]+0x38] is set.
+// The menus test that place against their dialogs' rectangles, which are drawn scaled about the middle of the screen
+// (UIScaleMenus): the place is mapped back into the menus' own units, and "moved" stays the pointer's own (a menu
+// opening at another scale is not a move, which would put its cursor under the pointer).
+constexpr uintptr_t kCursorFn = 0x00F70520;
+constexpr uintptr_t kCursorCalls[] = {0x00C2B9BD, 0x00F9187A};
+uintptr_t g_cursor_fn = kCursorFn;
+int g_raw_x = 0, g_raw_y = 0;
+bool g_raw_valid = false;
+float g_mouse_applied = 1.0f;
+
+void __cdecl cursor_after(uintptr_t st, uint32_t read) {
+    if (!read) return;
+    auto* p = reinterpret_cast<int32_t*>(st);
+    const int x = p[0x20 / 4], y = p[0x24 / 4];
+    const int px = g_raw_valid ? g_raw_x : x, py = g_raw_valid ? g_raw_y : y;
+    const float s = g_mouse_s;
+    if (s != 1.0f || g_mouse_applied != 1.0f) {
+        const auto back = [s](int v, float c) { return static_cast<int32_t>(std::floor(c + (v - c) / s + 0.5f)); };
+        p[0x20 / 4] = back(x, 640.0f);
+        p[0x24 / 4] = back(y, 360.0f);
+        p[0x28 / 4] = back(px, 640.0f);
+        p[0x2C / 4] = back(py, 360.0f);
+        *reinterpret_cast<uint8_t*>(st + 0x38) = (x != px || y != py) ? 1 : 0;
+    }
+    g_mouse_applied = s;
+    g_raw_x = x;
+    g_raw_y = y;
+    g_raw_valid = true;
+}
+
+__declspec(naked) void stub_cursor() {
+    __asm {
+        mov eax, dword ptr ds:[0x01378458]
+        movzx eax, byte ptr [eax + 0x38]
+        push eax                      // whether the game reads the pointer this time
+        push dword ptr [esp + 8]      // its argument, again
+        call dword ptr [g_cursor_fn]  // ret 4
+        xchg eax, dword ptr [esp]     // its result kept; eax = the flag
+        pushad
+        push eax
+        push esi
+        call cursor_after
+        add esp, 8
+        popad
+        pop eax
+        ret 4
+    }
+}
+
+bool install_cursor_hook() {
+    for (uintptr_t site : kCursorCalls) {
+        uint8_t code[5] = {};
+        if (!read_bytes(site, code, sizeof(code)) || code[0] != 0xE8) return false;
+        int32_t rel = 0;
+        std::memcpy(&rel, code + 1, 4);
+        if (site + 5 + rel != kCursorFn) return false;
+    }
+    for (uintptr_t site : kCursorCalls) {
+        uint8_t code[5] = {0xE8};
+        const int32_t rel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&stub_cursor) - (site + 5));
+        std::memcpy(code + 1, &rel, 4);
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(site), 5, PAGE_EXECUTE_READWRITE, &old)) return false;
+        std::memcpy(reinterpret_cast<void*>(site), code, 5);
+        DWORD ignored = 0;
+        VirtualProtect(reinterpret_cast<void*>(site), 5, old, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 5);
+    }
+    return true;
+}
+
 bool make_piece_trampoline() {
     auto* t = static_cast<uint8_t*>(VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     if (!t) return false;
@@ -477,6 +694,7 @@ bool write_jmp(uintptr_t site, const void* target) {
 }
 
 bool g_installed = false;
+bool g_cursor_ok = true;  // the mouse's place can follow a scaled menu (else the menus keep their size)
 
 }  // namespace
 
@@ -526,15 +744,21 @@ bool menuscale_install() {
         LOG_ERROR("MenuScale: the font printer is not what it is in this build (%08X %08X); the HUD's letters keep "
                   "the game's size", pb, pl);
     }
+    // The mouse's place in a scaled menu (UIScaleMenus).
+    if (g_installed && !install_cursor_hook()) {
+        LOG_ERROR("MenuScale: the mouse's place is not read as in this build; the menus keep the game's size");
+        g_cursor_ok = false;
+    }
     return g_installed;
 }
 
 bool menuscale_installed() { return g_installed; }
 
-void menuscale_set(int ui_scale, int ui_scale_world, int ui_scale_text) {
+void menuscale_set(int ui_scale, int ui_scale_world, int ui_scale_text, int ui_scale_menus) {
     if (ui_scale >= 0) g_scale_pct.store(ui_scale);
     if (ui_scale_world >= 0) g_world_pct.store(ui_scale_world);
     if (ui_scale_text >= 0) g_text_pct.store(ui_scale_text);
+    if (ui_scale_menus >= 0) g_menu_pct.store(g_cursor_ok ? ui_scale_menus : 100);
     ui_scale = g_scale_pct.load();
     ui_scale_world = g_world_pct.load();
     ui_scale_text = g_text_pct.load();
@@ -547,8 +771,16 @@ void menuscale_set(int ui_scale, int ui_scale_world, int ui_scale_text) {
         std::snprintf(text, sizeof(text), "their letters with them");
     }
     LOG_INFO("UIScale: the HUD's dialogs are drawn at %d%% (the marks over things in the world at %d%%), %s, by the "
-             "game's own placement: each dialog toward its corner or edge, whatever overlaps it; the menus keep their "
-             "size", ui_scale, ui_scale_world, text);
+             "game's own placement: each dialog toward its corner or edge, whatever overlaps it; the in-game menus at "
+             "%d%% about the middle of the screen (UIScaleMenus %s)", ui_scale, ui_scale_world, text, menu_pct(),
+             g_menu_pct.load() == 0 ? "auto" : "set");
+}
+
+void menuscale_fix_boss_bar(bool on) {
+    g_fix_boss.store(on);
+    LOG_INFO("FixBossBarOverlap: %s", on ? "the prompts and the item windows above them go up over a boss's health "
+                                           "bar while one is shown (the game draws them over it)"
+                                         : "off (the game's places)");
 }
 
 void menuscale_probe(int n) { g_probe.store(n); }

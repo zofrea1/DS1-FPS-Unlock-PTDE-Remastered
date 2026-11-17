@@ -2385,11 +2385,20 @@ void run(const std::string& line) {
         menuscale_probe_dialogs(t.size() > 1 ? static_cast<int>(num(1, 200)) : 200);
         out("menudlg");
     } else if (c == "menuscale" && t.size() > 1) {
-        // menuscale PCT [WORLD [TEXT]]: UIScale (and UIScaleWorld, UIScaleText: 0 = with each part) at the menus'
-        // source for this session.
+        // menuscale PCT [WORLD [TEXT [MENUS]]]: UIScale (and UIScaleWorld, UIScaleText: 0 = with each part,
+        // UIScaleMenus: 0 = as UIScale) at the menus' source for this session.
         menuscale_set(static_cast<int>(num(1, 100)), static_cast<int>(num(2, num(1, 100))),
-                      t.size() > 3 ? static_cast<int>(num(3, 0)) : -1);
-        out("menuscale %ld %ld %ld", num(1, 100), num(2, num(1, 100)), t.size() > 3 ? num(3, 0) : -1L);
+                      t.size() > 3 ? static_cast<int>(num(3, 0)) : -1, t.size() > 4 ? static_cast<int>(num(4, 0)) : -1);
+        out("menuscale %ld %ld %ld %ld", num(1, 100), num(2, num(1, 100)), t.size() > 3 ? num(3, 0) : -1L,
+            t.size() > 4 ? num(4, 0) : -1L);
+    } else if (c == "uiscalemenus" && t.size() > 1) {
+        // uiscalemenus N: the in-game menus at N percent about the middle of the screen (0 = as UIScale).
+        menuscale_set(-1, -1, -1, static_cast<int>(num(1, 0)));
+        out("uiscalemenus %ld", num(1, 0));
+    } else if (c == "fixbossbar" && t.size() > 1) {
+        // fixbossbar 0|1: FixBossBarOverlap for this session.
+        menuscale_fix_boss_bar(num(1, 1) != 0);
+        out("fixbossbar %ld", num(1, 1));
     } else if (c == "uiscaletext" && t.size() > 1) {
         // uiscaletext N: the HUD's letters at N percent of the game's size (0 = with each part) for this session.
         menuscale_set(-1, -1, static_cast<int>(num(1, 0)));

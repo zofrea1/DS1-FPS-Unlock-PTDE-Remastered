@@ -111,6 +111,11 @@ struct Settings {
     int ui_scale = 100;
     // UIScaleText: the letters of the HUD's texts (and the marks') at 0 their part's size (auto), else this percent.
     int ui_scale_text = 0;
+    // UIScaleMenus: the in-game menu's screens about the middle of the screen at 0 UIScale's size (auto), else this
+    // percent (100 = the game's).
+    int ui_scale_menus = 0;
+    // FixBossBarOverlap: the prompts and the item windows above them go up over a boss's health bar while one is shown.
+    bool fix_boss_bar_overlap = true;
     // The shadow map's side: 2048 (the game's), 4096 or 8192 (shadowbias.h).
     int shadow_map_resolution = 4096;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).

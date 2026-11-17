@@ -329,8 +329,18 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         // UIScaleText: the letters of the HUD's texts with their part (auto, 0) or at a size of their own.
         const int text_scale = dsfix_yields() ? 0 : settings().ui_scale_text;
         const bool text_own = text_scale >= 25 && text_scale <= 200 && text_scale != 100;
-        const bool at_source = (ui_scale != 100 || world_scale != 100 || text_own) && menuscale_install();
-        if (at_source) menuscale_set(ui_scale, world_scale, text_scale);
+        // UIScaleMenus: the in-game menu's screens about the middle of the screen (auto: as UIScale). FixBossBarOverlap:
+        // the prompts moved up over a boss's health bar.
+        const int menus_scale = settings().ui_scale_menus;
+        const int menus_eff = menus_scale == 0 ? ui_scale : menus_scale;
+        const bool menus_own = menus_eff >= 25 && menus_eff <= 200 && menus_eff != 100;
+        const bool fix_boss = settings().fix_boss_bar_overlap;
+        const bool hooks = ui_scale != 100 || world_scale != 100 || text_own || menus_own || fix_boss;
+        const bool at_source = hooks && menuscale_install();
+        if (at_source) {
+            menuscale_set(ui_scale, world_scale, text_scale, menus_scale);
+            menuscale_fix_boss_bar(fix_boss);
+        }
         layout_configure(settings().fix_aspect_ui, at_source ? 100 : ui_scale);
         layout_set_world_scale(at_source ? 100 : world_scale);
         if ((settings().fix_aspect_ui && aspect_is_active()) || (!at_source && (ui_scale < 100 || world_scale < 100))) {
