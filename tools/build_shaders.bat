@@ -25,6 +25,10 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kDofNearRatePs /Fh src\ptde\shaders\dof_near_rate_ps.h src\ptde\shaders\dof_near_rate.hlsl
 if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main_h /O3 /Vn kDofNearRate2HPs /Fh src\ptde\shaders\dof_near_rate2_h_ps.h src\ptde\shaders\dof_near_rate2.hlsl
+if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main_v /O3 /Vn kDofNearRate2VPs /Fh src\ptde\shaders\dof_near_rate2_v_ps.h src\ptde\shaders\dof_near_rate2.hlsl
+if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kPresentLutPs /Fh src\ptde\shaders\present_lut_ps.h src\ptde\shaders\present_lut.hlsl
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T vs_3_0 /E main_vs /O3 /Vn kDofHrVs /Fh src\ptde\shaders\dof_hr_vs.h src\ptde\shaders\dof_hr.hlsl

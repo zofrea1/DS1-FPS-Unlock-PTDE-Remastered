@@ -55,6 +55,9 @@ IDirect3DSurface9* resolution_reflection_source(IDirect3DSurface9* game_surface)
 // smoke and glows): mode 2 10-bit (the depth of field's rate kept apart), 1 16-bit float, 0 the game's 8 bits. Before
 // resolution_install; not with RenderScalePost or DSfix.
 void resolution_set_high_precision_color(int mode);
+// RemoteControl `neardump` (diagnostics): the depth of field's near blur mask after its next draw, into a file.
+void resolution_near_dump();
+void resolution_near_force(bool on);
 // After the device exists and before the game makes its targets: 10bit needs a target the scene can blend into,
 // filter and multisample at `samples` (AntialiasingSamples); else float, else the game's 8 bits.
 void resolution_check_scene_format(IDirect3DDevice9* dev, int samples);

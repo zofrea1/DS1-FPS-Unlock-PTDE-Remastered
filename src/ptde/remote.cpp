@@ -559,6 +559,143 @@ void write_frame() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// RemoteControl `gputime N`: the GPU's time for each pass of the next N frames (a pass = the draws between two changes
+// of render target 0), from timestamp queries issued at each change and at Present, read back a few frames later
+// without waiting; then the frame's passes in order with their average time, draws and target, in the log.
+struct GtMark {
+    IDirect3DQuery9* q;
+    std::string label;  // the target the pass after this mark draws into
+    int draws;          // draws in the pass before this mark
+};
+struct GtFrame {
+    IDirect3DQuery9* disjoint = nullptr;
+    IDirect3DQuery9* freq = nullptr;
+    std::vector<GtMark> marks;
+};
+volatile LONG g_gt_request = 0;  // RemoteControl's ask (frames), taken at the next Present
+volatile LONG g_gt_left = 0;   // frames still to record
+bool g_gt_recording = false;   // this frame (render thread)
+int g_gt_draws = 0;
+GtFrame g_gt_cur;
+std::vector<GtFrame> g_gt_pending;
+struct GtSum {
+    double ms = 0;
+    long draws = 0;
+    int frames = 0;
+    std::string label;
+};
+std::vector<GtSum> g_gt_sum;   // by the pass's index in the frame
+double g_gt_total_ms = 0;
+int g_gt_done = 0, g_gt_frames = 0;
+std::vector<IDirect3DQuery9*> g_gt_pool;
+
+IDirect3DQuery9* gt_query(IDirect3DDevice9* dev, D3DQUERYTYPE type) {
+    IDirect3DQuery9* q = nullptr;
+    if (type == D3DQUERYTYPE_TIMESTAMP && !g_gt_pool.empty()) {
+        q = g_gt_pool.back();
+        g_gt_pool.pop_back();
+        return q;
+    }
+    if (FAILED(dev->CreateQuery(type, &q))) return nullptr;
+    return q;
+}
+
+void gt_mark(IDirect3DDevice9* dev, const std::string& label) {
+    IDirect3DQuery9* q = gt_query(dev, D3DQUERYTYPE_TIMESTAMP);
+    if (!q) return;
+    q->Issue(D3DISSUE_END);
+    g_gt_cur.marks.push_back(GtMark{q, label, g_gt_draws});
+    g_gt_draws = 0;
+}
+
+void gt_release(GtFrame& f) {
+    for (GtMark& m : f.marks) g_gt_pool.push_back(m.q);
+    if (f.disjoint) f.disjoint->Release();
+    if (f.freq) f.freq->Release();
+    f = GtFrame{};
+}
+
+void gt_report() {
+    std::string out_text;
+    char line[256];
+    std::snprintf(line, sizeof(line), "gputime: %d frames, GPU %.3f ms a frame on average (passes of 0.02 ms or more):",
+                  g_gt_done, g_gt_done ? g_gt_total_ms / g_gt_done : 0.0);
+    LOG_INFO("%s", line);
+    for (size_t i = 0; i < g_gt_sum.size(); ++i) {
+        const GtSum& p = g_gt_sum[i];
+        if (!p.frames) continue;
+        const double ms = p.ms / p.frames;
+        if (ms < 0.02) continue;
+        LOG_INFO("gputime #%zu %.3f ms (%ld draws) %s", i, ms, p.draws / p.frames, p.label.c_str());
+    }
+    out("gputime: %d frames, %.3f ms a frame (passes in the log)", g_gt_done,
+        g_gt_done ? g_gt_total_ms / g_gt_done : 0.0);
+}
+
+// At Present: close this frame's record, and read back the frames recorded before whose queries are done.
+void gt_present(IDirect3DDevice9* dev) {
+    if (g_gt_recording) {
+        gt_mark(dev, "Present");
+        if (g_gt_cur.disjoint) g_gt_cur.disjoint->Issue(D3DISSUE_END);
+        if (g_gt_cur.freq) g_gt_cur.freq->Issue(D3DISSUE_END);
+        g_gt_pending.push_back(std::move(g_gt_cur));
+        g_gt_cur = GtFrame{};
+        g_gt_recording = false;
+    }
+    for (size_t k = 0; k < g_gt_pending.size();) {
+        GtFrame& f = g_gt_pending[k];
+        BOOL disjoint = TRUE;
+        UINT64 freq = 0;
+        bool ready = f.disjoint && f.freq && f.disjoint->GetData(&disjoint, sizeof(disjoint), 0) == S_OK &&
+                     f.freq->GetData(&freq, sizeof(freq), 0) == S_OK;
+        std::vector<UINT64> t(f.marks.size(), 0);
+        for (size_t i = 0; ready && i < f.marks.size(); ++i) {
+            if (f.marks[i].q->GetData(&t[i], sizeof(UINT64), 0) != S_OK) ready = false;
+        }
+        if (!ready) {
+            ++k;
+            continue;
+        }
+        if (!disjoint && freq) {
+            // Mark 0 starts the frame's first pass (at the frame's first target change).
+            for (size_t i = 0; i + 1 < f.marks.size(); ++i) {
+                if (g_gt_sum.size() <= i) g_gt_sum.resize(i + 1);
+                GtSum& p = g_gt_sum[i];
+                const double ms = static_cast<double>(t[i + 1] - t[i]) * 1000.0 / static_cast<double>(freq);
+                p.ms += ms;
+                p.draws += f.marks[i + 1].draws;
+                ++p.frames;
+                if (p.label.empty()) p.label = f.marks[i].label;
+            }
+            g_gt_total_ms += static_cast<double>(t.back() - t.front()) * 1000.0 / static_cast<double>(freq);
+            ++g_gt_done;
+        }
+        gt_release(f);
+        g_gt_pending.erase(g_gt_pending.begin() + static_cast<long>(k));
+        if (g_gt_left <= 0 && g_gt_pending.empty() && !g_gt_recording && g_gt_frames > 0) {
+            gt_report();
+            g_gt_frames = 0;
+        }
+    }
+    const LONG asked = InterlockedExchange(&g_gt_request, 0);
+    if (asked > 0) {
+        g_gt_sum.clear();
+        g_gt_total_ms = 0;
+        g_gt_done = 0;
+        g_gt_left = asked;
+    }
+    if (g_gt_left > 0) {
+        InterlockedDecrement(&g_gt_left);
+        g_gt_recording = true;
+        g_gt_draws = 0;
+        ++g_gt_frames;
+        g_gt_cur.disjoint = gt_query(dev, D3DQUERYTYPE_TIMESTAMPDISJOINT);
+        g_gt_cur.freq = gt_query(dev, D3DQUERYTYPE_TIMESTAMPFREQ);
+        if (g_gt_cur.disjoint) g_gt_cur.disjoint->Issue(D3DISSUE_BEGIN);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Hooks.
 HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, HWND w, const RGNDATA* r) {
     if (g_capturing) {
@@ -602,6 +739,7 @@ HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, H
             out("snaps %s: done (%ld)", g_snap_name.c_str(), static_cast<long>(g_snap_index));
         }
     }
+    gt_present(dev);
     const HRESULT hr = o_present(dev, a, b, w, r);
     if (g_frame_requested) {
         g_frame_requested = false;
@@ -764,6 +902,7 @@ HRESULT WINAPI hk_color_fill(IDirect3DDevice9* dev, IDirect3DSurface9* s, const 
 }
 HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD i, IDirect3DSurface9* s) {
     if (g_capturing) cap("SetRenderTarget %lu %s", static_cast<unsigned long>(i), surface_text(s).c_str());
+    if (g_gt_recording && i == 0) gt_mark(dev, surface_text(s));
     return o_set_rt(dev, i, s);
 }
 HRESULT WINAPI hk_set_depth(IDirect3DDevice9* dev, IDirect3DSurface9* s) {
@@ -858,14 +997,17 @@ void log_vertices(IDirect3DDevice9* dev, UINT start, UINT verts) {
 
 HRESULT WINAPI hk_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, UINT start, UINT count) {
     cap("Draw type %d start %u prims %u", static_cast<int>(t), start, count);
+    ++g_gt_draws;
     if (g_capturing && !g_vb_ps.empty() && g_cur_ps == g_vb_ps) log_vertices(dev, start, count * 3);
     return o_draw(dev, t, start, count);
 }
 HRESULT WINAPI hk_draw_idx(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, INT base, UINT mn, UINT nv, UINT si, UINT pc) {
     cap("DrawIndexed type %d verts %u prims %u", static_cast<int>(t), nv, pc);
+    ++g_gt_draws;
     return o_draw_idx(dev, t, base, mn, nv, si, pc);
 }
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, UINT pc, const void* v, UINT stride) {
+    ++g_gt_draws;
     if (g_shotfb_requested) {
         // The game's own last step in a window: a quad of the frame buffer (texture 0) drawn into the back buffer.
         IDirect3DSurface9* bb = nullptr;
@@ -904,6 +1046,7 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, UINT pc, co
 HRESULT WINAPI hk_draw_idx_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, UINT mn, UINT nv, UINT pc, const void* idx,
                               D3DFORMAT ifmt, const void* v, UINT stride) {
     cap("DrawIndexedUP type %d verts %u prims %u stride %u", static_cast<int>(t), nv, pc, stride);
+    ++g_gt_draws;
     return o_draw_idx_up(dev, t, mn, nv, pc, idx, ifmt, v, stride);
 }
 HRESULT WINAPI hk_create_vs(IDirect3DDevice9* dev, const DWORD* code, void** sh) {
@@ -2222,6 +2365,16 @@ void run(const std::string& line) {
             layout_set_world_scale(static_cast<int>(num(1, 100)));
         }
         out("uiscaleworld %ld", num(1, 100));
+    } else if (c == "nearforce") {
+        resolution_near_force(num(1, 1) != 0);
+        out("nearforce %ld", num(1, 1));
+    } else if (c == "neardump") {
+        resolution_near_dump();
+        out("neardump: requested");
+    } else if (c == "gputime") {
+        // gputime [N]: the GPU's time for each pass of the next N (default 120) frames, in the log when read back.
+        InterlockedExchange(&g_gt_request, static_cast<LONG>(num(1, 120)));
+        out("gputime: recording %ld frames", num(1, 120));
     } else if (c == "menuprobe") {
         // menuprobe [N]: the next N (default 400) calls of the menu context's transform and clipping methods in the
         // log, with the classes of the objects on the stack (menuscale.cpp).

@@ -12,6 +12,8 @@
 #include "shaders/area_reduce_side_ps.h"
 #include "shaders/area_reduce2_h_ps.h"
 #include "shaders/area_reduce2_v_ps.h"
+#include "shaders/dof_near_rate2_h_ps.h"
+#include "shaders/dof_near_rate2_v_ps.h"
 #include "shaders/dof_composite_ps.h"
 #include "shaders/dof_composite_side_ps.h"
 #include "shaders/dof_near_rate_ps.h"
@@ -28,6 +30,7 @@
 #include "shaders/present_reduce_vs.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -251,6 +254,7 @@ volatile bool g_swap_enabled = true;  // RemoteControl `dof 0/1` (all our post-p
 volatile LONG g_dof_force = 0;        // diagnostics: 1-3 shows only that blur level
 float g_dof_strength[4] = {1.0f, 0, 0, 0};  // DepthOfFieldStrength, to our composite's c202
 constexpr int kDofSwap = 0;
+constexpr int kNearSwap = 2;                  // the depth of field's near blur mask (kDofNearRate)
 constexpr int kPresentSwap = 3;               // the windowed scale-down (kGammaCopy)
 constexpr int kHdrSwap = 1;                   // the final composite (kHdrColAdj)
 bool g_float_scene = false;                   // HighPrecisionColor: the scene's colour targets are above 8 bits
@@ -1179,6 +1183,41 @@ bool viewport_size(IDirect3DDevice9* dev, float* out) {
     return true;
 }
 
+bool near2_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride, HRESULT* hr);
+
+// RemoteControl `neardump`: the near blur mask's alpha, right after it is drawn, into fpsu-near-N-{one,two}.raw next to
+// the game (8-bit, width x height; for comparing the one- and two-pass masks).
+volatile LONG g_near_dump = 0;
+volatile LONG g_near_force = 0;  // RemoteControl `nearforce 1`: the mask drawn with near blur from 0 to 50 m (tests)
+LONG g_near_dump_n = 0;
+void near_dump(IDirect3DDevice9* dev, bool two) {
+    IDirect3DSurface9* rt = nullptr;
+    D3DSURFACE_DESC d{};
+    if (FAILED(dev->GetRenderTarget(0, &rt)) || !rt) return;
+    IDirect3DSurface9* sys = nullptr;
+    if (SUCCEEDED(rt->GetDesc(&d)) && d.Format == D3DFMT_A8R8G8B8 &&
+        SUCCEEDED(dev->CreateOffscreenPlainSurface(d.Width, d.Height, d.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr)) &&
+        SUCCEEDED(dev->GetRenderTargetData(rt, sys))) {
+        D3DLOCKED_RECT lr{};
+        if (SUCCEEDED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "fpsu-near-%ld-%s.raw", ++g_near_dump_n, two ? "two" : "one");
+            FILE* f = std::fopen(name, "wb");
+            if (f) {
+                for (UINT y = 0; y < d.Height; ++y) {
+                    const auto* row = static_cast<const uint8_t*>(lr.pBits) + y * lr.Pitch;
+                    for (UINT x = 0; x < d.Width; ++x) std::fputc(row[x * 4 + 3], f);
+                }
+                std::fclose(f);
+            }
+            sys->UnlockRect();
+            LOG_INFO("neardump: %s (%ux%u)", name, d.Width, d.Height);
+        }
+    }
+    if (sys) sys->Release();
+    rt->Release();
+}
+
 // Our shader's draw: the sizes, bilinear (or point) and clamped reads on its stages, then the game's states back.
 HRESULT swap_draw(IDirect3DDevice9* dev, int swap, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
     const SwapDef& d = kSwaps[swap];
@@ -1214,7 +1253,20 @@ HRESULT swap_draw(IDirect3DDevice9* dev, int swap, D3DPRIMITIVETYPE type, UINT c
         alpha_stage_set(dev, 5, side, &side_saved_tex, side_saved);
         o_set_ps(dev, g_dof_side_ps);
     }
-    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    HRESULT hr = S_OK;
+    bool two = false;
+    float near_saved[4] = {};
+    const bool forced = swap == kNearSwap && g_near_force;
+    if (forced) {
+        dev->GetPixelShaderConstantF(10, near_saved, 1);
+        const float c10[4] = {0.0f, 50.0f, 1.0f, 0.0f};
+        dev->SetPixelShaderConstantF(10, c10, 1);
+    }
+    if (swap != kNearSwap || !(two = near2_draw(dev, type, count, data, stride, &hr))) {
+        hr = o_draw_up(dev, type, count, data, stride);
+    }
+    if (swap == kNearSwap && InterlockedExchange(&g_near_dump, 0)) near_dump(dev, two);
+    if (forced) dev->SetPixelShaderConstantF(10, near_saved, 1);
     if (side) {
         o_set_ps(dev, g_swap_ours[swap]);
         alpha_stage_restore(dev, 5, side_saved_tex, side_saved);
@@ -1400,6 +1452,109 @@ HRESULT area2_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DV
                  mid->w, mid->h);
     }
     return hr;
+}
+
+// The depth of field's near blur mask in two passes (shaders/dof_near_rate2.hlsl says why): along x into the same kind
+// of float target of ours (the mask's width, the depth's height), then along y with the game's draw. Called from
+// swap_draw with the stages and sizes set for dof_near_rate.hlsl (s1 the depth, point sampled). False: drawn in one
+// pass (RemoteControl `swapoff 0x100` too, with the averaging copies). Measured 2026-11-17 (Firelink 4K, 4x AA,
+// DXVK, RemoteControl gputime): the one-pass mask 0.22 ms a frame.
+IDirect3DPixelShader9* g_near_h = nullptr;
+IDirect3DPixelShader9* g_near_v = nullptr;
+IDirect3DDevice9* g_near_dev = nullptr;
+bool g_near_logged = false;
+
+bool near2_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride, HRESULT* hr) {
+    if (g_swap_off_mask & 0x100) return false;
+    if (g_near_dev != dev) {
+        if (g_near_h) g_near_h->Release();
+        if (g_near_v) g_near_v->Release();
+        g_near_h = g_near_v = nullptr;
+        g_near_dev = dev;
+        if (FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofNearRate2HPs), &g_near_h)) ||
+            FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofNearRate2VPs), &g_near_v))) {
+            if (g_near_h) g_near_h->Release();
+            g_near_h = nullptr;
+            g_near_v = nullptr;
+        }
+    }
+    if (!g_near_h || !g_near_v) return false;
+    IDirect3DBaseTexture9* depth = nullptr;
+    D3DSURFACE_DESC dd{};
+    D3DVIEWPORT9 vp{};
+    if (FAILED(dev->GetTexture(1, &depth)) || !depth) return false;
+    const bool ok = depth->GetType() == D3DRTYPE_TEXTURE &&
+                    SUCCEEDED(static_cast<IDirect3DTexture9*>(depth)->GetLevelDesc(0, &dd)) &&
+                    SUCCEEDED(dev->GetViewport(&vp)) && vp.Width && vp.Height && vp.Width < dd.Width;
+    Area2::Mid* mid = ok ? area2_mid(dev, vp.Width, dd.Height) : nullptr;
+    if (!mid) {
+        depth->Release();
+        return false;
+    }
+    IDirect3DSurface9* rt = nullptr;
+    dev->GetRenderTarget(0, &rt);
+    RECT scissor{};
+    dev->GetScissorRect(&scissor);
+    DWORD scissor_on = FALSE;
+    dev->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissor_on);
+    IDirect3DVertexShader9* game_vs = nullptr;
+    dev->GetVertexShader(&game_vs);
+    IDirect3DVertexDeclaration9* game_decl = nullptr;
+    dev->GetVertexDeclaration(&game_decl);
+    float game_c0[4] = {};
+    dev->GetVertexShaderConstantF(0, game_c0, 1);
+    IDirect3DPixelShader9* game_ps = nullptr;
+    dev->GetPixelShader(&game_ps);
+
+    // Pass 1 into ours (its colour writes all on: the game's mask pass writes alpha alone).
+    DWORD write_mask = 0xF;
+    dev->GetRenderState(D3DRS_COLORWRITEENABLE, &write_mask);
+    o_set_rt(dev, 0, mid->surf);
+    const D3DVIEWPORT9 whole{0, 0, mid->w, mid->h, 0.0f, 1.0f};
+    o_set_viewport(dev, &whole);
+    if (scissor_on) dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+    if (write_mask != 0xF) dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+    dev->SetVertexShader(g_area2.vs);
+    dev->SetVertexDeclaration(g_area2.decl);
+    const float half[4] = {-1.0f / mid->w, 1.0f / mid->h, 0, 0};
+    dev->SetVertexShaderConstantF(0, half, 1);
+    const float sizes1[8] = {static_cast<float>(dd.Width), static_cast<float>(dd.Height), 1.0f / dd.Width,
+                             1.0f / dd.Height, static_cast<float>(mid->w), static_cast<float>(mid->h), 1.0f / mid->w,
+                             1.0f / mid->h};
+    dev->SetPixelShaderConstantF(200, sizes1, 2);
+    o_set_ps(dev, g_near_h);
+    static const float kQuad[16] = {-1, 1, 0, 1, 1, 1, 0, 1, -1, -1, 0, 1, 1, -1, 0, 1};
+    o_draw_up(dev, D3DPT_TRIANGLESTRIP, 2, kQuad, 16);
+
+    // Pass 2: the game's draw into its mask, reading ours on stage 1.
+    o_set_rt(dev, 0, rt);
+    o_set_viewport(dev, &vp);
+    o_set_scissor(dev, &scissor);
+    if (scissor_on) dev->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+    if (write_mask != 0xF) dev->SetRenderState(D3DRS_COLORWRITEENABLE, write_mask);
+    dev->SetVertexShader(game_vs);
+    dev->SetVertexDeclaration(game_decl);
+    dev->SetVertexShaderConstantF(0, game_c0, 1);
+    o_set_texture(dev, 1, mid->tex);
+    const float sizes2[8] = {static_cast<float>(mid->w), static_cast<float>(mid->h), 1.0f / mid->w, 1.0f / mid->h,
+                             static_cast<float>(vp.Width), static_cast<float>(vp.Height), 1.0f / vp.Width,
+                             1.0f / vp.Height};
+    dev->SetPixelShaderConstantF(200, sizes2, 2);
+    o_set_ps(dev, g_near_v);
+    *hr = o_draw_up(dev, type, count, data, stride);
+    o_set_texture(dev, 1, depth);
+    o_set_ps(dev, game_ps);
+    if (game_ps) game_ps->Release();
+    if (game_vs) game_vs->Release();
+    if (game_decl) game_decl->Release();
+    if (rt) rt->Release();
+    depth->Release();
+    if (!g_near_logged) {
+        g_near_logged = true;
+        LOG_INFO("Resolution: the depth of field's near blur mask is made in two passes (along x into %ux%u, then "
+                 "along y)", mid->w, mid->h);
+    }
+    return true;
 }
 
 // The game's copy of a large render target into a small one, drawn with our averaging shader: the sizes to c200/c201,
@@ -2056,6 +2211,8 @@ void resolution_set_present_reduce(bool on) {
 void resolution_set_smooth_dof(bool on) { g_swap_enabled = on; }
 void resolution_force_dof_level(int level) { g_dof_force = level; }
 void resolution_set_dof_strength(float strength) { g_dof_strength[0] = strength; }
+void resolution_near_dump() { InterlockedExchange(&g_near_dump, 1); }
+void resolution_near_force(bool on) { InterlockedExchange(&g_near_force, on ? 1 : 0); }
 void resolution_set_dof_resolution(int percent, bool full) {
     g_dofhr_full = full ? 1 : 0;
     g_dofhr_pct = percent < 0 ? 0 : (percent > 400 ? 400 : percent);
