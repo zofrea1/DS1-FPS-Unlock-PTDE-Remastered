@@ -9,11 +9,15 @@
 #include "aspect.h"
 #include "layout.h"
 #include "shaders/area_reduce_ps.h"
+#include "shaders/area_reduce_side_ps.h"
 #include "shaders/dof_composite_ps.h"
+#include "shaders/dof_composite_side_ps.h"
 #include "shaders/dof_near_rate_ps.h"
 #include "shaders/dof_hr_blur_ps.h"
 #include "shaders/dof_hr_composite_ps.h"
+#include "shaders/dof_hr_composite_side_ps.h"
 #include "shaders/dof_hr_down_ps.h"
+#include "shaders/dof_hr_down_side_ps.h"
 #include "shaders/dof_hr_vs.h"
 #include "shaders/effects_composite_ps.h"
 #include "shaders/hdr_coladj_ps.h"
@@ -113,6 +117,7 @@ volatile bool g_copy_bound = false;
 IDirect3DBaseTexture9* volatile g_tex0 = nullptr;
 // Our averaging shader, once per device (a pixel shader outlives a reset).
 IDirect3DPixelShader9* g_area_ps = nullptr;
+IDirect3DPixelShader9* g_area_side_ps = nullptr;  // the same with the scene's alpha from ours (HighPrecisionColor 10bit)
 IDirect3DDevice9* g_area_device = nullptr;
 bool g_logged = false;
 
@@ -236,6 +241,7 @@ constexpr SwapDef kSwaps[] = {
 constexpr int kSwapCount = sizeof(kSwaps) / sizeof(kSwaps[0]);
 std::unordered_set<void*> g_swap_game[kSwapCount];       // the game's shaders, as it made them
 IDirect3DPixelShader9* g_swap_ours[kSwapCount] = {};     // ours, once per device (a pixel shader outlives a reset)
+IDirect3DPixelShader9* g_dof_side_ps = nullptr;          // the depth of field's, the scene's alpha from ours (10bit)
 IDirect3DDevice9* g_swap_device[kSwapCount] = {};
 volatile LONG g_swap_bound = -1;     // the swap whose shader (ours) is bound
 volatile LONG g_game_bound = -1;     // the swap whose game shader the game bound (ours in its place or not)
@@ -245,11 +251,14 @@ float g_dof_strength[4] = {1.0f, 0, 0, 0};  // DepthOfFieldStrength, to our comp
 constexpr int kDofSwap = 0;
 constexpr int kPresentSwap = 3;               // the windowed scale-down (kGammaCopy)
 constexpr int kHdrSwap = 1;                   // the final composite (kHdrColAdj)
-bool g_float_scene = false;                   // HighPrecisionColor: the scene's colour targets are 16-bit float
+bool g_float_scene = false;                   // HighPrecisionColor: the scene's colour targets are above 8 bits
+bool g_scene_10bit = false;                   // HighPrecisionColor = 10bit: they are 10-bit (their alpha 2 bits)
 const float kDither[4] = {1.0f / 255.0f, 0, 0, 0};
 const float kNoDither[4] = {0, 0, 0, 0};
 volatile bool g_present_swap_enabled = true;  // RemoteControl `reduce 0/1`
-volatile LONG g_swap_off_mask = 0;            // RemoteControl `swapoff MASK` (diagnostics): bit i = swap i, bit 7 = copies
+volatile LONG g_swap_off_mask = 0;            // RemoteControl `swapoff MASK` (diagnostics): bit i = swap i, bit 7 = copies,
+                                              // bit 6 = the 10-bit scene's alpha kept in the scene (none of ours),
+                                              // bit 4 = its draw not into ours, bit 5 = ours not read
 
 int swap_of(const DWORD* code) {
     for (int i = 0; i < kSwapCount; ++i) {
@@ -805,7 +814,130 @@ HRESULT fx_composite(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, c
     return hr;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// HighPrecisionColor = 10bit. The scene's colour targets are A2R10G10B10 (index 8 of the game's own format table):
+// the same 32 bits a pixel as the game's A8R8G8B8, so no more memory or bandwidth, with four times the steps per
+// colour (the scene is kept in the screen's gamma, where 10 bits fade smoothly once dithered into the final 8). Their
+// alpha has 2 bits, though, and the game keeps one value there: after the scene its depth of field's rate pass
+// (FRPG_Fil_Dof_DofRate, from the depth) draws the far blur rate into the scene's alpha alone (colour writes = alpha),
+// and the depth of field reads it back (its 512x360 copy of the scene, its composite). Nothing else reads the scene's
+// alpha (Firelink's frame log, 2026-11-16): the scene's own draws write colour only (colour writes = RGB), the
+// glare's bright pass makes its own alpha, the final composite reads colour. So that draw goes into an 8-bit texture
+// of ours of the scene's size (the game's own precision for it), and our shaders that read the rate (the averaging
+// copy into 512x360, the depth of field's levels and composite) take it from there. The depth of field's output stays
+// 16-bit float: the camera blur keeps the view depth in its alpha (FRPG_Fil_CameraBlurPower) and reads it back in the
+// game's own shader.
+struct SceneAlpha {
+    IDirect3DDevice9* dev = nullptr;
+    IDirect3DTexture9* tex = nullptr;
+    IDirect3DSurface9* surf = nullptr;
+    UINT w = 0, h = 0;
+    IDirect3DBaseTexture9* owner = nullptr;  // the game's texture whose alpha ours holds (the scene)
+    bool written = false;
+    bool failed = false;
+    bool logged = false;
+};
+SceneAlpha g_alpha;
+volatile bool g_rt0_10bit = false;  // render target 0 is a 10-bit texture of the game's (a scene target)
+
+void alpha_release() {
+    if (g_alpha.surf) g_alpha.surf->Release();
+    if (g_alpha.tex) g_alpha.tex->Release();
+    g_alpha.surf = nullptr;
+    g_alpha.tex = nullptr;
+    g_alpha.owner = nullptr;
+    g_alpha.written = false;
+}
+
+bool alpha_ready(IDirect3DDevice9* dev, UINT w, UINT h) {
+    if (g_alpha.dev != dev) {
+        alpha_release();
+        g_alpha.dev = dev;
+        g_alpha.failed = false;
+    }
+    if (g_alpha.failed) return false;
+    if (g_alpha.tex && (g_alpha.w != w || g_alpha.h != h)) alpha_release();
+    if (!g_alpha.tex) {
+        if (FAILED(dev->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_alpha.tex,
+                                      nullptr)) ||
+            !g_alpha.tex || FAILED(g_alpha.tex->GetSurfaceLevel(0, &g_alpha.surf))) {
+            alpha_release();
+            g_alpha.failed = true;
+            LOG_ERROR("HighPrecisionColor: no %ux%u texture for the scene's depth of field rate; it stays in the 10-bit "
+                      "scene's 2-bit alpha (the depth of field's distance blur in steps)", w, h);
+            return false;
+        }
+        g_alpha.w = w;
+        g_alpha.h = h;
+    }
+    return true;
+}
+
+// Ours, holding this texture's alpha; nullptr when it holds none.
+IDirect3DBaseTexture9* alpha_of(IDirect3DBaseTexture9* t) {
+    return t && g_alpha.written && g_alpha.tex && t == g_alpha.owner && !(g_swap_off_mask & 0x60) ? g_alpha.tex : nullptr;
+}
+
+// A draw into the alpha alone of a 10-bit target of the game's goes into ours, with the game's viewport and clipping
+// rectangle. False: not such a draw (or no target of ours), the caller draws as it is.
+bool alpha_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride,
+                HRESULT* result) {
+    DWORD mask = 0;
+    if (FAILED(dev->GetRenderState(D3DRS_COLORWRITEENABLE, &mask)) || mask != D3DCOLORWRITEENABLE_ALPHA) return false;
+    IDirect3DSurface9* rt = g_fx.rt0;
+    IDirect3DBaseTexture9* owner = container_of(rt);
+    D3DSURFACE_DESC d{};
+    if (!owner || FAILED(rt->GetDesc(&d)) || !alpha_ready(dev, d.Width, d.Height)) return false;
+    D3DVIEWPORT9 vp{};
+    RECT scissor{};
+    dev->GetViewport(&vp);
+    dev->GetScissorRect(&scissor);
+    o_set_rt(dev, 0, g_alpha.surf);
+    o_set_viewport(dev, &vp);
+    o_set_scissor(dev, &scissor);
+    *result = o_draw_up(dev, type, count, data, stride);
+    o_set_rt(dev, 0, rt);
+    o_set_viewport(dev, &vp);
+    o_set_scissor(dev, &scissor);
+    g_alpha.owner = owner;
+    g_alpha.written = SUCCEEDED(*result);
+    if (!g_alpha.logged && g_alpha.written) {
+        g_alpha.logged = true;
+        LOG_INFO("HighPrecisionColor: the depth of field's rate (the 10-bit scene's alpha) is kept in an 8-bit "
+                 "%ux%u texture of its own, as precise as the game's", d.Width, d.Height);
+    }
+    return true;
+}
+
+// Stage `stage` set up to read ours (bilinear, clamped, no mips, no sRGB) for one draw: what it held is saved in
+// `saved_tex` and `saved` for alpha_stage_restore.
+constexpr D3DSAMPLERSTATETYPE kAlphaStates[] = {D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER,
+                                                D3DSAMP_ADDRESSU,  D3DSAMP_ADDRESSV,  D3DSAMP_SRGBTEXTURE};
+constexpr DWORD kAlphaValues[] = {D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP,
+                                  FALSE};
+void alpha_stage_set(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* side, IDirect3DBaseTexture9** saved_tex,
+                     DWORD* saved) {
+    dev->GetTexture(stage, saved_tex);
+    o_set_texture(dev, stage, side);
+    for (int i = 0; i < 6; ++i) {
+        dev->GetSamplerState(stage, kAlphaStates[i], &saved[i]);
+        if (saved[i] != kAlphaValues[i]) dev->SetSamplerState(stage, kAlphaStates[i], kAlphaValues[i]);
+    }
+}
+void alpha_stage_restore(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* saved_tex, const DWORD* saved) {
+    for (int i = 0; i < 6; ++i) {
+        if (saved[i] != kAlphaValues[i]) dev->SetSamplerState(stage, kAlphaStates[i], saved[i]);
+    }
+    o_set_texture(dev, stage, saved_tex);
+    if (saved_tex) saved_tex->Release();
+}
+
 HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt) {
+    if (index == 0 && g_scene_10bit) {
+        D3DSURFACE_DESC d{};
+        g_rt0_10bit = rt && SUCCEEDED(rt->GetDesc(&d)) && d.Format == D3DFMT_A2R10G10B10 &&
+                      d.MultiSampleType == D3DMULTISAMPLE_NONE;
+    }
     if (index == 0) {
         g_water.bound = false;
         if (g_refl.bound) {
@@ -936,12 +1068,18 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
         g_copy_shaders.insert(*out);
         if (g_area_device != dev) {
             if (g_area_ps) g_area_ps->Release();
+            if (g_area_side_ps) g_area_side_ps->Release();
             g_area_ps = nullptr;
+            g_area_side_ps = nullptr;
             g_area_device = dev;
             if (FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kAreaReducePs), &g_area_ps))) {
                 g_area_ps = nullptr;
                 LOG_ERROR("Resolution: the averaging shader for the blur and glare copies could not be made; the "
                           "game's copy is used");
+            }
+            if (g_scene_10bit &&
+                FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kAreaReduceSidePs), &g_area_side_ps))) {
+                g_area_side_ps = nullptr;
             }
         }
     } else if (SUCCEEDED(hr) && out && *out && !g_scale_post) {
@@ -953,6 +1091,14 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
                 if (g_swap_ours[i]) g_swap_ours[i]->Release();
                 g_swap_ours[i] = nullptr;
                 g_swap_device[i] = dev;
+                if (i == kDofSwap) {
+                    if (g_dof_side_ps) g_dof_side_ps->Release();
+                    g_dof_side_ps = nullptr;
+                    if (g_scene_10bit &&
+                        FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofCompositeSidePs), &g_dof_side_ps))) {
+                        g_dof_side_ps = nullptr;
+                    }
+                }
                 if (FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kSwaps[i].ours), &g_swap_ours[i]))) {
                     g_swap_ours[i] = nullptr;
                     LOG_ERROR("Resolution: the smooth shader for %s could not be made; the game's is used",
@@ -1057,7 +1203,19 @@ HRESULT swap_draw(IDirect3DDevice9* dev, int swap, D3DPRIMITIVETYPE type, UINT c
             if (saved[s][i] != want[i]) dev->SetSamplerState(s, kStates[i], want[i]);
         }
     }
+    // HighPrecisionColor = 10bit: the depth of field's composite reads the scene's rate from ours (stage 5).
+    IDirect3DBaseTexture9* side = swap == kDofSwap && g_dof_side_ps ? alpha_of(g_tex0) : nullptr;
+    IDirect3DBaseTexture9* side_saved_tex = nullptr;
+    DWORD side_saved[6] = {};
+    if (side) {
+        alpha_stage_set(dev, 5, side, &side_saved_tex, side_saved);
+        o_set_ps(dev, g_dof_side_ps);
+    }
     const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    if (side) {
+        o_set_ps(dev, g_swap_ours[swap]);
+        alpha_stage_restore(dev, 5, side_saved_tex, side_saved);
+    }
     for (DWORD s = 0; s < 8; ++s) {
         if (!(mask & (1u << s))) continue;
         const DWORD* want = (d.point_mask & (1u << s)) ? kPoint : kSmooth;
@@ -1105,7 +1263,7 @@ HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseT
 // bilinear filtering (the shader reads pairs of pixels per fetch) and clamping on stage 0, then the game's shader and
 // states back.
 HRESULT area_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DVIEWPORT9& vp, D3DPRIMITIVETYPE type,
-                  UINT count, const void* data, UINT stride) {
+                  UINT count, const void* data, UINT stride, IDirect3DBaseTexture9* side) {
     const float sizes[8] = {static_cast<float>(src.Width), static_cast<float>(src.Height), 1.0f / src.Width,
                             1.0f / src.Height, static_cast<float>(vp.Width), static_cast<float>(vp.Height),
                             1.0f / vp.Width, 1.0f / vp.Height};
@@ -1120,10 +1278,16 @@ HRESULT area_draw(IDirect3DDevice9* dev, const D3DSURFACE_DESC& src, const D3DVI
     }
     IDirect3DPixelShader9* game = nullptr;
     dev->GetPixelShader(&game);
-    o_set_ps(dev, g_area_ps);
+    // HighPrecisionColor = 10bit: the scene's alpha (the depth of field's rate) from ours, stage 1.
+    if (!g_area_side_ps) side = nullptr;
+    IDirect3DBaseTexture9* side_saved_tex = nullptr;
+    DWORD side_saved[6] = {};
+    if (side) alpha_stage_set(dev, 1, side, &side_saved_tex, side_saved);
+    o_set_ps(dev, side ? g_area_side_ps : g_area_ps);
     const HRESULT hr = o_draw_up(dev, type, count, data, stride);
     o_set_ps(dev, game);
     if (game) game->Release();
+    if (side) alpha_stage_restore(dev, 1, side_saved_tex, side_saved);
     for (int i = 0; i < 5; ++i) {
         if (saved[i] != kValues[i]) dev->SetSamplerState(0, kStates[i], saved[i]);
     }
@@ -1150,6 +1314,8 @@ struct DofHr {
     IDirect3DPixelShader9* down = nullptr;
     IDirect3DPixelShader9* blur = nullptr;
     IDirect3DPixelShader9* comp = nullptr;
+    IDirect3DPixelShader9* down_side = nullptr;  // down and comp with the scene's rate from ours (10bit)
+    IDirect3DPixelShader9* comp_side = nullptr;
     IDirect3DVertexDeclaration9* decl = nullptr;
     IDirect3DStateBlock9* state = nullptr;
     // A, level 1, level 2 at half size (full: the render size); Q, Q2, level 3 at half of that.
@@ -1176,12 +1342,14 @@ void dofhr_release_targets() {
 bool dofhr_ready(IDirect3DDevice9* dev, UINT scene_w, UINT scene_h) {
     if (g_dofhr.dev != dev) {
         dofhr_release_targets();
-        IUnknown* objs[] = {g_dofhr.vs, g_dofhr.down, g_dofhr.blur, g_dofhr.comp, g_dofhr.decl};
+        IUnknown* objs[] = {g_dofhr.vs,   g_dofhr.down,      g_dofhr.blur,     g_dofhr.comp,
+                            g_dofhr.decl, g_dofhr.down_side, g_dofhr.comp_side};
         for (IUnknown* o : objs) {
             if (o) o->Release();
         }
         g_dofhr.vs = nullptr;
         g_dofhr.down = g_dofhr.blur = g_dofhr.comp = nullptr;
+        g_dofhr.down_side = g_dofhr.comp_side = nullptr;
         g_dofhr.decl = nullptr;
         g_dofhr.failed = false;
         g_dofhr.dev = dev;
@@ -1195,6 +1363,13 @@ bool dofhr_ready(IDirect3DDevice9* dev, UINT scene_w, UINT scene_h) {
             g_dofhr.failed = true;
             LOG_ERROR("Resolution: the shaders for DepthOfFieldResolution could not be made; the game's levels are "
                       "used");
+        }
+        if (!g_dofhr.failed && g_scene_10bit &&
+            (FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofHrDownSidePs), &g_dofhr.down_side)) ||
+             FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofHrCompositeSidePs), &g_dofhr.comp_side)))) {
+            if (g_dofhr.down_side) g_dofhr.down_side->Release();
+            if (g_dofhr.comp_side) g_dofhr.comp_side->Release();
+            g_dofhr.down_side = g_dofhr.comp_side = nullptr;
         }
     }
     if (g_dofhr.failed) return false;
@@ -1310,7 +1485,13 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
     // its texel centres: nothing to take off. Level 2's target is level 1's scratch, and A level 2's.
     const bool full = g_dofhr.hw == sd.Width;
     const float have1 = full ? 0.0f : 0.25f;
-    dofhr_pass(dev, kHrA, scene, sd.Width, sd.Height, g_dofhr.down, nullptr, nullptr);
+    // HighPrecisionColor = 10bit: the scene's rate from ours (stage 1; the state block puts the game's back).
+    IDirect3DBaseTexture9* side = g_dofhr.down_side && g_dofhr.comp_side ? alpha_of(scene) : nullptr;
+    if (side) {
+        o_set_texture(dev, 1, side);
+        for (int i = 0; i < 6; ++i) dev->SetSamplerState(1, kAlphaStates[i], kAlphaValues[i]);
+    }
+    dofhr_pass(dev, kHrA, scene, sd.Width, sd.Height, side ? g_dofhr.down_side : g_dofhr.down, nullptr, nullptr);
     dofhr_blur(dev, kHrA, kHrL2, kHrL1, inc_sigma(s1x, have1), inc_sigma(s1y, have1), false);
     dofhr_blur(dev, kHrL1, kHrA, kHrL2, inc_sigma(s2x, s1x * s1x), inc_sigma(s2y, s1y * s1y), true);
     // Level 3 at a quarter: level 2 averaged down (1/12), then read with a B-spline (1/3 instead of 1/6).
@@ -1334,7 +1515,10 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
     o_set_texture(dev, 1, g_dofhr.tex[kHrL1]);
     o_set_texture(dev, 2, g_dofhr.tex[kHrL2]);
     o_set_texture(dev, 3, g_dofhr.tex[kHrL3]);
-    o_set_ps(dev, g_dofhr.comp);
+    IDirect3DBaseTexture9* side_saved_tex = nullptr;
+    DWORD side_saved[6] = {};
+    if (side) alpha_stage_set(dev, 5, side, &side_saved_tex, side_saved);
+    o_set_ps(dev, side ? g_dofhr.comp_side : g_dofhr.comp);
     float sizes[8] = {static_cast<float>(g_dofhr.qw), static_cast<float>(g_dofhr.qh), 1.0f / g_dofhr.qw,
                       1.0f / g_dofhr.qh, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180};
     stage_size(dev, 4, sizes + 4);
@@ -1361,6 +1545,7 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
         o_set_texture(dev, s, game_tex[s]);
         if (game_tex[s]) game_tex[s]->Release();
     }
+    if (side) alpha_stage_restore(dev, 5, side_saved_tex, side_saved);
     o_set_ps(dev, bound);
     if (bound) bound->Release();
     scene->Release();
@@ -1374,6 +1559,10 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
 }
 
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    HRESULT alpha_hr = S_OK;
+    if (g_rt0_10bit && !(g_swap_off_mask & 0x50) && alpha_draw(dev, type, count, data, stride, &alpha_hr)) {
+        return alpha_hr;
+    }
     const LONG force = g_dof_force;
     const LONG swap = g_swap_bound;
     if (force >= 1 && force <= 3 && g_game_bound == kDofSwap) {
@@ -1427,7 +1616,7 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
         auto* src = static_cast<IDirect3DTexture9*>(tex);
         D3DSURFACE_DESC sd{};
         if (SUCCEEDED(src->GetLevelDesc(0, &sd)) && (sd.Usage & D3DUSAGE_RENDERTARGET) && sd.Width > kOriginalWidth &&
-            (sd.Format == D3DFMT_A8R8G8B8 || sd.Format == D3DFMT_A16B16G16R16F)) {
+            (sd.Format == D3DFMT_A8R8G8B8 || sd.Format == D3DFMT_A16B16G16R16F || sd.Format == D3DFMT_A2R10G10B10)) {
             IDirect3DSurface9* rt = nullptr;
             D3DSURFACE_DESC rd{};
             D3DVIEWPORT9 vp{};
@@ -1436,7 +1625,12 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
                                     vp.Height;
             if (rt) rt->Release();
             if (into_small && g_swap_enabled && !(g_swap_off_mask & 0x80) && g_area_ps && g_area_device == dev) {
-                const HRESULT hr = area_draw(dev, sd, vp, type, count, data, stride);
+                // The scene's rate (HighPrecisionColor = 10bit) only into the depth of field's 512x360 copy, and
+                // only where the game's own blur levels are used (they are made from it); ours are made from the scene.
+                const bool game_levels = g_dofhr_pct == 0 || g_dofhr.failed || !g_swap_enabled || (g_swap_off_mask & 1);
+                IDirect3DBaseTexture9* side = game_levels && vp.Width == kSmallW && vp.Height == kSmallH ? alpha_of(tex)
+                                                                                                         : nullptr;
+                const HRESULT hr = area_draw(dev, sd, vp, type, count, data, stride, side);
                 if (!g_logged) {
                     g_logged = true;
                     LOG_INFO("Resolution: the scene (%ux%u) is averaged into the game's %ux%u blur and glare targets "
@@ -1717,6 +1911,8 @@ void resolution_set_dof_resolution(int percent, bool full) {
 
 void resolution_reset() {
     g_tex0 = nullptr;
+    alpha_release();  // the default pool goes before a Reset; made again on the next use
+    g_rt0_10bit = false;
     release_ptr(g_reduce.state);  // made again on the next use
     fx_release_target();          // the default pool goes before a Reset; made again on the next use
     dofhr_release_targets();
@@ -1880,7 +2076,8 @@ void resolution_water_hook_device(IDirect3DDevice9* dev, int dof_override) {
 
 void resolution_bypass_dsfix(bool on) { g_bypass_dsfix = on; }
 
-// HighPrecisionColor. The scene's colour targets are 8-bit (A8R8G8B8): every layer of fog, smoke or glow blended into
+// HighPrecisionColor (the 10-bit mode, the default, is described at SceneAlpha above; this is the float mode, and the
+// sites both use). The scene's colour targets are 8-bit (A8R8G8B8): every layer of fog, smoke or glow blended into
 // them is rounded to 1/255, and the final composite then scales the scene (c56.z, 1.3 at Firelink) and grades it, so
 // thin fog and dark gradients show bands, and a pulsing glow's halo shows rings that crawl as it pulses. These
 // targets are made 16-bit float instead (A16B16G16R16F, by their format index in RenderTargetManImp's constructor:
@@ -1898,8 +2095,23 @@ struct FormatSite {
 constexpr FormatSite kSceneFormats[] = {
     {0x0100A9A7, 4}, {0x0100AD46, 4}, {0x0100AE18, 4}, {0x0100A6AB, 4}, {0x0100A5A8, 1},
 };
-constexpr uint32_t kFormatA8R8G8B8 = 6, kFormatA16B16G16R16F = 15;
-static bool g_want_float_scene = false;
+constexpr uint32_t kFormatA8R8G8B8 = 6, kFormatA2R10G10B10 = 8, kFormatA16B16G16R16F = 15;
+constexpr uint32_t kDofOutSite = 0x0100AE18;  // the depth of field's output: float in both modes (its alpha)
+static int g_want_float_scene = 0;  // 1 float, 2 10-bit
+
+// The format indexes into the sites: `scene` for the scene's own targets, `dof_out` for the depth of field's output.
+static bool write_scene_formats(uint32_t scene, uint32_t dof_out) {
+    for (const FormatSite& f : kSceneFormats) {
+        auto* p = reinterpret_cast<uint8_t*>(f.at);
+        DWORD old = 0;
+        if (!VirtualProtect(p, f.bytes, PAGE_EXECUTE_READWRITE, &old)) return false;
+        const uint32_t v = f.at == kDofOutSite ? dof_out : scene;
+        std::memcpy(p, &v, f.bytes);
+        DWORD ignored = 0;
+        VirtualProtect(p, f.bytes, old, &ignored);
+    }
+    return true;
+}
 
 static bool patch_scene_formats() {
     for (const FormatSite& f : kSceneFormats) {
@@ -1911,18 +2123,49 @@ static bool patch_scene_formats() {
             return false;
         }
     }
-    for (const FormatSite& f : kSceneFormats) {
-        auto* p = reinterpret_cast<uint8_t*>(f.at);
-        DWORD old = 0;
-        if (!VirtualProtect(p, f.bytes, PAGE_EXECUTE_READWRITE, &old)) return false;
-        std::memcpy(p, &kFormatA16B16G16R16F, f.bytes);
-        DWORD ignored = 0;
-        VirtualProtect(p, f.bytes, old, &ignored);
-    }
-    return true;
+    return write_scene_formats(g_want_float_scene == 2 ? kFormatA2R10G10B10 : kFormatA16B16G16R16F,
+                               kFormatA16B16G16R16F);
 }
 
-void resolution_set_high_precision_color(bool on) { g_want_float_scene = on; }
+void resolution_check_scene_format(IDirect3DDevice9* dev, int samples) {
+    if (!g_scene_10bit || !dev) return;
+    IDirect3D9* d3d = nullptr;
+    D3DDEVICE_CREATION_PARAMETERS cp{};
+    D3DDISPLAYMODE mode{};
+    if (FAILED(dev->GetDirect3D(&d3d)) || !d3d) return;
+    dev->GetCreationParameters(&cp);
+    const D3DFORMAT adapter = SUCCEEDED(dev->GetDisplayMode(0, &mode)) && mode.Format != D3DFMT_UNKNOWN
+                                  ? mode.Format
+                                  : D3DFMT_X8R8G8B8;
+    const auto msaa = static_cast<D3DMULTISAMPLE_TYPE>(samples >= 2 && samples <= 16 ? samples : 2);
+    // A target the scene's draws can blend into, read back filtered, and multisample (the game's anti-aliasing).
+    const auto can = [&](D3DFORMAT f) {
+        return d3d->CheckDeviceFormat(cp.AdapterOrdinal, D3DDEVTYPE_HAL, adapter,
+                                      D3DUSAGE_RENDERTARGET | D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING |
+                                          D3DUSAGE_QUERY_FILTER,
+                                      D3DRTYPE_TEXTURE, f) == D3D_OK &&
+               d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, f, TRUE, msaa, nullptr) == D3D_OK &&
+               d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, f, FALSE, msaa, nullptr) == D3D_OK;
+    };
+    const bool ten = can(D3DFMT_A2R10G10B10);
+    const bool fl = !ten && can(D3DFMT_A16B16G16R16F);
+    d3d->Release();
+    if (ten) return;
+    // Before the game makes its render targets (it does after the device exists).
+    g_scene_10bit = false;
+    if (fl) {
+        write_scene_formats(kFormatA16B16G16R16F, kFormatA16B16G16R16F);
+        LOG_ERROR("HighPrecisionColor: the graphics driver cannot blend into or multisample a 10-bit target here; the "
+                  "scene's colour targets are 16-bit float instead (smooth too, about 10%% of the frame rate)");
+        return;
+    }
+    write_scene_formats(kFormatA8R8G8B8, kFormatA8R8G8B8);
+    g_float_scene = false;
+    LOG_ERROR("HighPrecisionColor: the graphics driver can blend into neither a 10-bit nor a float target here; the "
+              "scene stays 8-bit as in the game");
+}
+
+void resolution_set_high_precision_color(int mode) { g_want_float_scene = mode; }
 
 bool resolution_install(int width, int height, bool scale_post) {
     g_scale_post = scale_post;
@@ -1954,8 +2197,10 @@ bool resolution_install(int width, int height, bool scale_post) {
     if (scale_post) g_fx_mode = 0;  // its effects target is already the scene's half size
     if (g_want_float_scene && !scale_post && !g_bypass_dsfix && patch_scene_formats()) {
         g_float_scene = true;
-        LOG_INFO("HighPrecisionColor: the scene's colour targets are 16-bit float (were 8-bit); the final picture is "
-                 "dithered into the screen's 8 bits, so fog, smoke, glows and dark gradients fade without bands");
+        g_scene_10bit = g_want_float_scene == 2;
+        LOG_INFO("HighPrecisionColor: the scene's colour targets are %s (were 8-bit); the final picture is "
+                 "dithered into the screen's 8 bits, so fog, smoke, glows and dark gradients fade without bands",
+                 g_want_float_scene == 2 ? "10-bit" : "16-bit float");
     }
     g_active = true;
     if (scale_post) {

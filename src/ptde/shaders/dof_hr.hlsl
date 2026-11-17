@@ -38,12 +38,20 @@ VsOut main_vs(float4 pos : POSITION) {
 }
 
 sampler2D gSrc : register(s0);
+#ifdef SIDE_ALPHA
+sampler2D gSrcAlpha : register(s1);     // the scene's far blur rate (HighPrecisionColor = 10bit), for main_down
+sampler2D gSceneAlpha : register(s5);   // the same, for main_composite
+#endif
 
 // --- 2x2 average into a target of half the size: one bilinear read between the four pixels ---------------------
 float4 gSrcTexel : register(c1);    // xy: 1 / source size
 float4 main_down(float2 uv : TEXCOORD0) : COLOR0 {
     // uv is the centre of the target pixel = the corner the four source pixels share. Clamped as the 8-bit scene was.
-    return saturate(tex2Dlod(gSrc, float4(uv, 0, 0)));
+    float4 c = saturate(tex2Dlod(gSrc, float4(uv, 0, 0)));
+#ifdef SIDE_ALPHA
+    c.a = tex2Dlod(gSrcAlpha, float4(uv, 0, 0)).a;  // HighPrecisionColor = 10bit: the scene's rate kept apart
+#endif
+    return c;
 }
 
 // --- separable Gaussian along one axis, the game's rate rule on every tap ----------------------------------------
@@ -106,6 +114,9 @@ float4 bspline(sampler2D s, float2 uv, float4 size) {
 float4 main_composite(float2 uv : TEXCOORD1) : COLOR0 {
     float nearBlur = bspline(gNear, uv, gNearSize).w;
     float4 src = saturate(tex2Dlod(gScene, float4(uv, 0, 0)));
+#ifdef SIDE_ALPHA
+    src.w = tex2Dlod(gSceneAlpha, float4(uv, 0, 0)).a;
+#endif
     float blurW = max(src.w, nearBlur) * gStrength.x;
     float4 w = saturate(blurW * gWeightScale + gWeightBias);
     float4 blend = float4(w.x, w.y - w.x, w.z - w.y, w.w - w.z);

@@ -28,7 +28,7 @@ float4 gC68 : register(c68);       // the game's DL_FREG_068: x the film grain's
 float4 gC71 : register(c71);       // the game's DL_FREG_071: y the bloom rate's top
 float4 gBloomSize : register(c200);  // s1: width, height, 1 / width, 1 / height (set by the DLL)
 float4 gShaftSize : register(c201);  // s3: the same
-float4 gDither : register(c203);     // x: the dither's size (1/255 with HighPrecisionColor's float scene, else 0)
+float4 gDither : register(c203);     // x: the dither's size (1/255 with HighPrecisionColor's 10-bit or float scene, else 0)
 
 // The 4x4 ordered (Bayer) dither index of a pixel, 0 to 15.
 float bayer4(float2 p) {

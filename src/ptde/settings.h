@@ -88,8 +88,9 @@ struct Settings {
     int effects_resolution = 3;
     // WaterResolution: the water's ripples at 0 the game's 512x360, 1 half the render size (default), 2 the render size.
     int water_resolution = 1;
-    // The scene's colour targets in 16-bit float, dithered into the 8-bit picture (resolution.h), with RenderResolution.
-    bool high_precision_color = true;
+    // HighPrecisionColor: the scene's colour targets at more than 8 bits, dithered into the 8-bit picture
+    // (resolution.h), with RenderResolution. 0 off (8-bit), 1 16-bit float (float), 2 10-bit (true, the default).
+    int high_precision_color = 2;
     int ui_scale_world = 100;      // UIScaleWorld: marks over things in the world (layout.h)
     bool even_frame_steps = true;  // EvenFrameSteps: the cap's schedule as the frames' clock (frame.cpp)
     // With the game's own anti-aliasing (multisampling) on: alpha-tested surfaces write coverage (atoc.h).

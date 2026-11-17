@@ -19,6 +19,12 @@
 // stage 0 to bilinear filtering and clamping for the draw.
 
 sampler2D gScene : register(s0);   // the scene at the render resolution
+#ifdef SIDE_ALPHA
+// HighPrecisionColor = 10bit: the scene's alpha (the depth of field's far blur rate) is kept in a texture of its own
+// (the 10-bit scene's alpha has 2 bits); this variant reads it from there, as the average of four bilinear reads over
+// the footprint (the game's own copy made one; one more read per tap of the loop doubled its cost).
+sampler2D gAlpha : register(s1);
+#endif
 float4 gSrcSize : register(c200);  // the scene: width, height, 1 / width, 1 / height (set by the DLL)
 float4 gDstSize : register(c201);  // the target: the same
 
@@ -51,5 +57,13 @@ float4 main(float2 uv : TEXCOORD1) : COLOR0 {
             total += w;
         }
     }
-    return sum / max(total, 1e-6);
+    float4 o = sum / max(total, 1e-6);
+#ifdef SIDE_ALPHA
+    float2 q = 0.25 * gDstSize.zw;
+    o.a = 0.25 * (tex2Dlod(gAlpha, float4(uv + float2(-q.x, -q.y), 0, 0)).a +
+                  tex2Dlod(gAlpha, float4(uv + float2(q.x, -q.y), 0, 0)).a +
+                  tex2Dlod(gAlpha, float4(uv + float2(-q.x, q.y), 0, 0)).a +
+                  tex2Dlod(gAlpha, float4(uv + float2(q.x, q.y), 0, 0)).a);
+#endif
+    return o;
 }

@@ -11,9 +11,13 @@ if not defined FXC (
 )
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kDofCompositePs /Fh src\ptde\shaders\dof_composite_ps.h src\ptde\shaders\dof_composite.hlsl
 if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main /O3 /D SIDE_ALPHA=1 /Vn kDofCompositeSidePs /Fh src\ptde\shaders\dof_composite_side_ps.h src\ptde\shaders\dof_composite.hlsl
+if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kHdrColAdjPs /Fh src\ptde\shaders\hdr_coladj_ps.h src\ptde\shaders\hdr_coladj.hlsl
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kAreaReducePs /Fh src\ptde\shaders\area_reduce_ps.h src\ptde\shaders\area_reduce.hlsl
+if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main /O3 /D SIDE_ALPHA=1 /Vn kAreaReduceSidePs /Fh src\ptde\shaders\area_reduce_side_ps.h src\ptde\shaders\area_reduce.hlsl
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kDofNearRatePs /Fh src\ptde\shaders\dof_near_rate_ps.h src\ptde\shaders\dof_near_rate.hlsl
 if errorlevel 1 exit /b 1
@@ -23,9 +27,13 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main_down /O3 /Vn kDofHrDownPs /Fh src\ptde\shaders\dof_hr_down_ps.h src\ptde\shaders\dof_hr.hlsl
 if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main_down /O3 /D SIDE_ALPHA=1 /Vn kDofHrDownSidePs /Fh src\ptde\shaders\dof_hr_down_side_ps.h src\ptde\shaders\dof_hr.hlsl
+if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main_blur /O3 /Vn kDofHrBlurPs /Fh src\ptde\shaders\dof_hr_blur_ps.h src\ptde\shaders\dof_hr.hlsl
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main_composite /O3 /Vn kDofHrCompositePs /Fh src\ptde\shaders\dof_hr_composite_ps.h src\ptde\shaders\dof_hr.hlsl
+if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main_composite /O3 /D SIDE_ALPHA=1 /Vn kDofHrCompositeSidePs /Fh src\ptde\shaders\dof_hr_composite_side_ps.h src\ptde\shaders\dof_hr.hlsl
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kEffectsCompositePs /Fh src\ptde\shaders\effects_composite_ps.h src\ptde\shaders\effects_composite.hlsl
 if errorlevel 1 exit /b 1

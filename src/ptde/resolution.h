@@ -51,9 +51,13 @@ void resolution_set_water(int mode);
 // The surface the water's reflection pass was really drawn into this frame (ours with WaterResolution), for a copy of it.
 IDirect3DSurface9* resolution_reflection_source(IDirect3DSurface9* game_surface);
 
-// HighPrecisionColor: the scene's colour targets in 16-bit float and the final picture dithered into 8 bits (smooth
-// fog, smoke and glows). Before resolution_install; not with RenderScalePost or DSfix.
-void resolution_set_high_precision_color(bool on);
+// HighPrecisionColor: the scene's colour targets above 8 bits and the final picture dithered into 8 bits (smooth fog,
+// smoke and glows): mode 2 10-bit (the depth of field's rate kept apart), 1 16-bit float, 0 the game's 8 bits. Before
+// resolution_install; not with RenderScalePost or DSfix.
+void resolution_set_high_precision_color(int mode);
+// After the device exists and before the game makes its targets: 10bit needs a target the scene can blend into,
+// filter and multisample at `samples` (AntialiasingSamples); else float, else the game's 8 bits.
+void resolution_check_scene_format(IDirect3DDevice9* dev, int samples);
 
 // Sun and moon with DSfix's render resolution. The lens flare (sun, moon) measures how much of a 24x24 pixel probe at the
 // sun is visible with an occlusion query, and takes a new count only while it is below 1.5 x the probe's expected

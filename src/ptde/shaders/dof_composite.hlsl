@@ -18,6 +18,11 @@ sampler2D gBlur1 : register(s1);   // 512x360: the scene reduced
 sampler2D gBlur2 : register(s2);   // 512x360: that blurred
 sampler2D gBlur3 : register(s3);   // 512x360: blurred more (from 256x180)
 sampler2D gNear : register(s4);    // 256x180: the near blur mask (alpha)
+#ifdef SIDE_ALPHA
+// HighPrecisionColor = 10bit: the scene's far blur weight is kept in a texture of its own (the 10-bit scene's alpha
+// has 2 bits).
+sampler2D gSceneAlpha : register(s5);
+#endif
 
 float4 gWeightScale : register(c66);   // the game's DL_FREG_066
 float4 gWeightBias : register(c67);    // the game's DL_FREG_067
@@ -49,6 +54,9 @@ float4 main(float2 uv : TEXCOORD1) : COLOR0 {
     float nearBlur = bspline(gNear, uv, gNearSize).w;
     // Clamped as the game's 8-bit scene was (HighPrecisionColor's float scene can go above 1).
     float4 src = saturate(tex2Dlod(gScene, float4(uv, 0, 0)));
+#ifdef SIDE_ALPHA
+    src.w = tex2Dlod(gSceneAlpha, float4(uv, 0, 0)).a;
+#endif
     // DepthOfFieldStrength scales the blur weight before the game's own mapping to its blur levels: 0.5 gives a far
     // area the level the game gives half its blur, 0 the in-focus weights everywhere; 1 is the game's exactly.
     float blurW = max(src.w, nearBlur) * gStrength.x;

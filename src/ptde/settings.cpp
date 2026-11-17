@@ -262,7 +262,9 @@ Settings settings_load(const wchar_t* dll_path) {
             const std::string v = lower(trim(val));
             s.water_resolution = (v == "full") ? 2 : (v == "game" || v == "off" || v == "false" || v == "0") ? 0 : 1;
         } else if (key == "highprecisioncolor") {
-            s.high_precision_color = parse_bool(val);
+            const std::string v = lower(trim(val));
+            // true (10-bit) or float (16-bit float); "10bit" names the first.
+            s.high_precision_color = v == "float" ? 1 : (parse_bool(val) || v == "10bit" || v == "10-bit" || v == "10") ? 2 : 0;
         } else if (key == "antialiasingsamples") {
             s.antialiasing_samples = std::atoi(val.c_str());
         } else if (key == "alphatocoverage") {
