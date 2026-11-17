@@ -266,8 +266,10 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "antialiasingsamples") {
             s.antialiasing_samples = std::atoi(val.c_str());
         } else if (key == "alphatocoverage") {
-            s.alpha_to_coverage_force = lower(trim(val)) == "force";
-            s.alpha_to_coverage = s.alpha_to_coverage_force || parse_bool(val);
+            // force (a 2.3.0 test value for the Steam Deck) counts as true.
+            s.alpha_to_coverage = parse_bool(val) || lower(trim(val)) == "force";
+        } else if (key == "fixantialiasingdepth") {
+            s.fix_antialiasing_depth = parse_bool(val);
         } else if (key == "fixstaminatick") {
             s.fix_stamina_tick = parse_bool(val);
         } else if (key == "fixslidecontact") {
@@ -432,6 +434,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"renderresolution", "off"}, {"supersampling", "1"}, {"depthoffieldstrength", "100"},
                 {"depthoffieldresolution", "game"}, {"effectsresolution", "game"}, {"waterresolution", "game"},
                 {"highprecisioncolor", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
+                {"fixantialiasingdepth", "false"},
                 {"shadowbias", "0"}, {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
                 {"fixsun", "false"}, {"fixwater", "false"}, {"gammaramp", "auto"}, {"dxvk", "false"},
                 {"borderlessfullscreen", "false"},

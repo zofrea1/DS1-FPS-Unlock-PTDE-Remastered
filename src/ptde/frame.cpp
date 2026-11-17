@@ -551,6 +551,10 @@ bool frame_install(const Settings& settings) {
         }
         // Before the game makes its render targets: its anti-aliasing's sample count (it multisamples only when on).
         atoc_set_msaa_samples(settings.antialiasing_samples);
+        // Its packed depth through the multisampling (not beside DSfix, which reads the game's depth its own way).
+        if (settings.fix_antialiasing_depth && !dsfix_loaded()) {
+            atoc_fix_depth_install(settings.antialiasing_samples);
+        }
         shadowmap_set_resolution(settings.shadow_map_resolution);
         int rw = settings.render_width, rh = settings.render_height;
         // YieldToDSFix: DSfix's renderWidth/renderHeight decide, and with them its anti-aliasing, SSAO and depth of

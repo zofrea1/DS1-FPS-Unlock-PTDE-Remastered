@@ -301,8 +301,9 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         if (settings().fix_water_with_dsfix && dsfix_dof_override() > 0 && !resolution_is_active()) {
             resolution_water_hook_device(*out, dsfix_dof_override());
         }
+        atoc_fix_depth_check(*out);
         if (settings().alpha_to_coverage) {
-            atoc_hook_device(*out, settings().alpha_to_coverage_force);
+            atoc_hook_device(*out);
         }
         // Last, so the draws it leaves out reach no other hook.
         // Not beside DSfix: it puts textures back through state blocks, which the watch for reads does not see.

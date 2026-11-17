@@ -293,7 +293,7 @@ constexpr uintptr_t kMsaaTable = 0x010D38CC;
 
 }  // namespace
 
-void atoc_hook_device(IDirect3DDevice9* dev, bool force) {
+void atoc_hook_device(IDirect3DDevice9* dev) {
     if (!dev) return;
     IDirect3D9* d3d = nullptr;
     D3DDEVICE_CREATION_PARAMETERS cp{};
@@ -309,11 +309,6 @@ void atoc_hook_device(IDirect3DDevice9* dev, bool force) {
     };
     g_method = supported(kNvOn) ? Method::Nvidia : (supported(kAmdOn) ? Method::Amd : Method::None);
     d3d->Release();
-    if (g_method == Method::None && force) {
-        g_method = Method::Nvidia;
-        LOG_INFO("AlphaToCoverage = force: the graphics driver reports neither NVIDIA's nor AMD's switch; NVIDIA's is "
-                 "used anyway (if the edges of grass and leaves do not get smoother, the driver ignores it)");
-    }
     if (g_method == Method::None) {
         LOG_INFO("AlphaToCoverage: the graphics driver offers neither NVIDIA's nor AMD's switch for it; not used");
         return;
@@ -348,4 +343,105 @@ bool atoc_set_msaa_samples(int samples) {
     LOG_INFO("AntialiasingSamples: the game's anti-aliasing (when on) multisamples the scene %dx (the game's own: 2x)",
              samples);
     return true;
+}
+
+// FixAntialiasingDepth. With the game's own anti-aliasing on, the depth that the post-processing reads is drawn in a
+// pre-pass into a multisampled 8-bit target (created at 0x100A740: the frame log's R3, with the multisampled depth
+// buffer D4 that the scene's colour pass then reuses), as z/w in three base-256 digits (ps_c5b09a80 and its kind: R
+// and G whole numbers over 255, B the rest). StretchRect resolves it into T12 (created from the descriptor written at
+// 0x100AAFC), averaging each pixel's samples channel by channel into 8 bits, and every reader decodes it as
+// dot(rgb, (255/256, 255/65536, 255/16777216)) (FRPG_Fil_DepthCopy_MSAA into the depth buffer, the low-resolution
+// effects' depth copy and their upsample, the depth of field). Where a pixel's samples lie on both sides of a step of
+// the top digit, the averaged R and G are rounded to 8 bits and decode up to 1/512 of z/w past both samples. With
+// the near plane at 0.05 m, z/w crosses those steps 12.8, 6.4, 4.3, 3.2 ... m from the camera, so at the edges of
+// grass blades in a ring around the player the depth was off by up to several metres (6 m at the 12.8 m ring), and
+// the low-resolution effects (Firelink's mist) laid back over the scene by that depth left black specks there
+// (2026-11-16, Firelink at 4K: a grid of them with the game's 512x360 effects, finer ones with ours). The game as
+// shipped does it too. Both targets get 16 bits a channel instead (format index 6 -> 14 of the game's table at
+// 0x10D3670, A16B16G16R16): a whole number over 255 is exact in 16 bits (x 257), so the samples' average decodes to
+// the average of their depths, as the game's shaders meant. Without the anti-aliasing the pre-pass draws into T12
+// directly and the digits come out as before.
+namespace {
+constexpr uintptr_t kFormatTable = 0x010D3670;
+constexpr uint32_t kIndexA8R8G8B8 = 6, kIndexA16B16G16R16 = 14;
+struct DepthFormatSite {
+    uintptr_t at;    // the format index: imm8 of a push or imm32 of a mov
+    uint32_t bytes;  // 1 or 4
+    const char* what;
+};
+constexpr DepthFormatSite kDepthFormats[] = {
+    {0x0100A741, 1, "the multisampled depth target"},
+    {0x0100AAFF, 4, "the depth texture it is resolved into"},
+};
+bool g_depth_fix = false;
+int g_depth_samples = 2;
+
+bool write_format_index(const DepthFormatSite& f, uint32_t index) {
+    auto* p = reinterpret_cast<uint8_t*>(f.at);
+    DWORD old = 0;
+    if (!VirtualProtect(p, f.bytes, PAGE_EXECUTE_READWRITE, &old)) return false;
+    std::memcpy(p, &index, f.bytes);
+    DWORD ignored = 0;
+    VirtualProtect(p, f.bytes, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), p, f.bytes);
+    return true;
+}
+}  // namespace
+
+bool atoc_fix_depth_install(int samples) {
+    const auto* table = reinterpret_cast<const uint32_t*>(kFormatTable);
+    if (table[kIndexA8R8G8B8] != D3DFMT_A8R8G8B8 || table[kIndexA16B16G16R16] != D3DFMT_A16B16G16R16) {
+        LOG_ERROR("FixAntialiasingDepth: the game's format table at %08X holds %u and %u, not %u and %u in this build. "
+                  "Not changing it.", static_cast<unsigned>(kFormatTable), table[kIndexA8R8G8B8],
+                  table[kIndexA16B16G16R16], static_cast<unsigned>(D3DFMT_A8R8G8B8),
+                  static_cast<unsigned>(D3DFMT_A16B16G16R16));
+        return false;
+    }
+    for (const DepthFormatSite& f : kDepthFormats) {
+        uint32_t v = 0;
+        std::memcpy(&v, reinterpret_cast<const void*>(f.at), f.bytes);
+        if (v != kIndexA8R8G8B8) {
+            LOG_ERROR("FixAntialiasingDepth: the format of %s at %08X is %u, not %u in this build. Not changing it.",
+                      f.what, static_cast<unsigned>(f.at), v, kIndexA8R8G8B8);
+            return false;
+        }
+    }
+    for (const DepthFormatSite& f : kDepthFormats) {
+        if (!write_format_index(f, kIndexA16B16G16R16)) return false;
+    }
+    g_depth_fix = true;
+    g_depth_samples = samples == 4 || samples == 8 ? samples : 2;
+    return true;
+}
+
+void atoc_fix_depth_check(IDirect3DDevice9* dev) {
+    if (!g_depth_fix || !dev) return;
+    IDirect3D9* d3d = nullptr;
+    D3DDEVICE_CREATION_PARAMETERS cp{};
+    D3DDISPLAYMODE mode{};
+    if (FAILED(dev->GetDirect3D(&d3d)) || !d3d) return;
+    dev->GetCreationParameters(&cp);
+    const D3DFORMAT adapter = SUCCEEDED(dev->GetDisplayMode(0, &mode)) && mode.Format != D3DFMT_UNKNOWN
+                                  ? mode.Format
+                                  : D3DFMT_X8R8G8B8;
+    const bool texture = d3d->CheckDeviceFormat(cp.AdapterOrdinal, D3DDEVTYPE_HAL, adapter, D3DUSAGE_RENDERTARGET,
+                                                D3DRTYPE_TEXTURE, D3DFMT_A16B16G16R16) == D3D_OK;
+    const auto msaa = static_cast<D3DMULTISAMPLE_TYPE>(g_depth_samples);
+    const bool multisampled =
+        d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, D3DFMT_A16B16G16R16, TRUE, msaa, nullptr) ==
+            D3D_OK &&
+        d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, D3DFMT_A16B16G16R16, FALSE, msaa, nullptr) ==
+            D3D_OK;
+    d3d->Release();
+    if (texture && multisampled) {
+        LOG_INFO("FixAntialiasingDepth: with the game's anti-aliasing on, the depth the effects and the depth of field "
+                 "read is kept in 16 bits a channel through the multisampling (was 8), so it stays right at the edges "
+                 "of grass and leaves (no black specks in a ring around the player)");
+        return;
+    }
+    // Before the game makes its render targets (it does after the device exists): back to the game's 8 bits.
+    for (const DepthFormatSite& f : kDepthFormats) write_format_index(f, kIndexA8R8G8B8);
+    g_depth_fix = false;
+    LOG_ERROR("FixAntialiasingDepth: the graphics driver cannot %s a 16-bit (A16B16G16R16) target%s; the depth stays "
+              "8-bit as in the game", texture ? "multisample" : "render into", texture ? "" : " texture");
 }

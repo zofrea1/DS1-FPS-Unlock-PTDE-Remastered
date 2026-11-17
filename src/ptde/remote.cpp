@@ -420,7 +420,10 @@ void save_surface_png(IDirect3DDevice9* dev, IDirect3DSurface9* src, const std::
     }
     HRESULT hr = o_get_rt_data ? o_get_rt_data(dev, src, sys) : dev->GetRenderTargetData(src, sys);
     const bool bmp = path.size() > 4 && path.compare(path.size() - 4, 4, L".bmp") == 0;
-    if (SUCCEEDED(hr) && x_save_surface) hr = x_save_surface(path.c_str(), bmp ? 0 : kPng, sys, nullptr, nullptr);
+    const bool dds = path.size() > 4 && path.compare(path.size() - 4, 4, L".dds") == 0;  // keeps the format's bits
+    if (SUCCEEDED(hr) && x_save_surface) {
+        hr = x_save_surface(path.c_str(), bmp ? 0 : (dds ? 4 : kPng), sys, nullptr, nullptr);
+    }
     sys->Release();
     if (FAILED(hr)) out("  saving failed, hr 0x%08lX", static_cast<unsigned long>(hr));
 }
@@ -504,13 +507,17 @@ void seq_tick(IDirect3DDevice9* dev) {
     tex->Release();
 }
 
+// rtdump NAME [ID]: every render target texture (or only T<ID>), 8-bit ones as BMP, others as DDS (all their bits).
+int g_dump_id = -1;
+
 void dump_targets(IDirect3DDevice9* dev, const std::string& name) {
     // A reference each while the list is locked: a texture leaves the list only on its last Release.
     std::vector<std::pair<IDirect3DTexture9*, Res>> list;
     {
         std::lock_guard<std::mutex> lock(g_res_lock);
         for (const auto& kv : g_res) {
-            if (kv.second.kind == 'T' && (kv.second.usage & D3DUSAGE_RENDERTARGET)) {
+            if (kv.second.kind == 'T' && (kv.second.usage & D3DUSAGE_RENDERTARGET) &&
+                (g_dump_id < 0 || kv.second.id == g_dump_id)) {
                 auto* t = static_cast<IDirect3DTexture9*>(kv.first);
                 t->AddRef();
                 list.emplace_back(t, kv.second);
@@ -523,7 +530,10 @@ void dump_targets(IDirect3DDevice9* dev, const std::string& name) {
         if (SUCCEEDED(kv.first->GetSurfaceLevel(0, &s)) && s) {
             char tag[32];
             std::snprintf(tag, sizeof(tag), "-T%d", kv.second.id);
-            save_surface_png(dev, s, shot_path(name + tag, L".bmp"));
+            D3DSURFACE_DESC sd{};
+            const bool eight = SUCCEEDED(s->GetDesc(&sd)) &&
+                               (sd.Format == D3DFMT_A8R8G8B8 || sd.Format == D3DFMT_X8R8G8B8);
+            save_surface_png(dev, s, shot_path(name + tag, eight ? L".bmp" : L".dds"));
             s->Release();
             ++saved;
         }
@@ -2227,6 +2237,7 @@ void run(const std::string& line) {
         g_shot_requested = true;
     } else if (c == "rtdump" && t.size() > 1) {
         g_dump_name = t[1];
+        g_dump_id = t.size() > 2 ? static_cast<int>(num(2, -1)) : -1;
         g_dump_requested = true;
     } else if (c == "frame" && t.size() > 1) {
         g_frame_name = t[1];
