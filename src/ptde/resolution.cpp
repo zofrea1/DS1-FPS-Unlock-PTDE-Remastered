@@ -12,6 +12,7 @@
 #include "shaders/area_reduce_side_ps.h"
 #include "shaders/area_reduce2_h_ps.h"
 #include "shaders/area_reduce2_v_ps.h"
+#include "shaders/copy_rgb_ps.h"
 #include "shaders/dof_near_rate2_h_ps.h"
 #include "shaders/dof_near_rate2_v_ps.h"
 #include "shaders/dof_composite_ps.h"
@@ -118,6 +119,12 @@ DrawUPFn o_draw_up = nullptr;
 
 std::mutex g_lock;
 std::unordered_set<void*> g_copy_shaders;
+std::unordered_set<void*> g_cam_power_shaders, g_cam_blur_shaders;
+volatile LONG g_cam_bound = 0;   // 1 the camera blur's depth pass bound, 2 the blur
+bool g_cam_off = false;          // the blur's weights were all 0 when it was last drawn (render thread)
+IDirect3DPixelShader9* g_cam_copy_ps = nullptr;
+IDirect3DDevice9* g_cam_copy_dev = nullptr;
+bool g_cam_logged = false;
 volatile bool g_copy_bound = false;
 IDirect3DBaseTexture9* volatile g_tex0 = nullptr;
 // Our averaging shader, once per device (a pixel shader outlives a reset).
@@ -169,6 +176,55 @@ bool same_instructions(const DWORD* code, const DWORD* want, size_t n) {
     }
     return false;
 }
+
+// The game's camera blur (FRPG_Fil_CameraBlur): FRPG_Fil_CameraBlurPower (ps_61939c9a) writes the view depth / 32
+// into the depth of field's output's alpha alone (from the packed depth, s0), then FRPG_Fil_CameraBlur (ps_da76a458)
+// draws that target (s0) into the scene with nine reads along the camera's motion, each weighted by c38.y..w and
+// c39.x..w (where its depth is behind the centre's), the centre's colour taking the rest. While the camera blur is off
+// (those weights 0: c38 = (1, 0, 0, 0), c39 = 0 at Firelink, 2026-11-17) the result is the centre texel as it is: the
+// depth pass is not needed at all and the blur is a copy. Then the depth pass is skipped (when the blur was off in the
+// frame before: its weights are set after the depth pass is drawn) and the blur drawn with one read (copy_rgb.hlsl).
+// Firelink 4K (RemoteControl gputime): the depth pass 0.106 ms, the blur 0.103 ms a frame. RemoteControl
+// `swapoff 0x200` draws them as the game does. Their instructions, comment blocks left out:
+constexpr DWORD kCameraBlurPower[] = {
+    0xFFFF0300, 0x05000051, 0xA00F0000, 0x3F7F0000, 0x3B7F0000, 0x377F0000, 0x3D000000, 0x0200001F, 0x80010005,
+    0x90030000, 0x0200001F, 0x90000000, 0xA00F0800, 0x03000042, 0x800F0000, 0x90E40000, 0xA0E40800, 0x03000008,
+    0x80010000, 0x80E40000, 0xA0E40000, 0x04000004, 0x80010000, 0x80000000, 0xA0AA0008, 0xA0550008, 0x02000006,
+    0x80010000, 0x80000000, 0x03000005, 0x80010000, 0x80000000, 0xA0FF0008, 0x03000005, 0x802F0800, 0x80000000,
+    0xA0FF0000, 0x0000FFFF,
+};
+constexpr DWORD kCameraBlur[] = {
+    0xFFFF0300, 0x05000051, 0xA00F0000, 0x3F7F0000, 0x3B7F0000, 0x377F0000, 0xBEFEFF19, 0x05000051, 0xA00F0001,
+    0x3E000000, 0x3E800000, 0x3EC00000, 0x3F000000, 0x05000051, 0xA00F0002, 0x3F200000, 0x3F400000, 0x00000000,
+    0x00000000, 0x05000051, 0xA00F0003, 0x3F800000, 0x00000000, 0x40000000, 0x3F600000, 0x0200001F, 0x80010005,
+    0x90030000, 0x0200001F, 0x90000000, 0xA00F0800, 0x0200001F, 0x90000000, 0xA00F0801, 0x0200001F, 0x90000000,
+    0xA00F0802, 0x03000042, 0x800F0000, 0x90E40000, 0xA0E40801, 0x03000008, 0x80040000, 0x80E40000, 0xA0E40000,
+    0x04000004, 0x800B0000, 0x90240000, 0xA0600003, 0xA0250003, 0x03000009, 0x80010001, 0x80E40000, 0xA0E4003D,
+    0x02000006, 0x80010001, 0x80000001, 0x03000009, 0x80010002, 0x80E40000, 0xA0E4003A, 0x03000009, 0x80020002,
+    0x80E40000, 0xA0E4003B, 0x04000004, 0x80030000, 0x80E40002, 0x81000001, 0x90E40000, 0x03000042, 0x800F0001,
+    0x90E40000, 0xA0E40802, 0x03000002, 0x800C0000, 0x80440001, 0xA0FF0000, 0x04000004, 0x80030000, 0x80EE0000,
+    0xA0AA0003, 0x80E40000, 0x03000005, 0x80030000, 0x80E40000, 0xA0000039, 0x04000004, 0x800F0002, 0x80440000,
+    0xA0500001, 0x90440000, 0x03000042, 0x802F0003, 0x80E40002, 0xA0E40800, 0x03000042, 0x802F0002, 0x80EE0002,
+    0xA0E40800, 0x03000002, 0x80040000, 0x81AA0001, 0x80FF0003, 0x02000001, 0x80020001, 0xA0550003, 0x04000058,
+    0x80280004, 0x80AA0000, 0xA0550026, 0x80550001, 0x03000005, 0x80270004, 0x80E40003, 0x80FF0004, 0x03000002,
+    0x80040000, 0x81AA0001, 0x80FF0002, 0x04000058, 0x80280003, 0x80AA0000, 0xA0AA0026, 0x80550001, 0x03000005,
+    0x80270003, 0x80E40002, 0x80FF0003, 0x03000002, 0x802F0002, 0x80E40003, 0x80E40004, 0x04000004, 0x800F0003,
+    0x80440000, 0xA0FA0001, 0x90440000, 0x03000042, 0x802F0004, 0x80E40003, 0xA0E40800, 0x03000042, 0x802F0003,
+    0x80EE0003, 0xA0E40800, 0x03000002, 0x80040000, 0x81AA0001, 0x80FF0004, 0x04000058, 0x80280005, 0x80AA0000,
+    0xA0FF0026, 0x80550001, 0x03000005, 0x80270005, 0x80E40004, 0x80FF0005, 0x03000002, 0x802F0002, 0x80E40002,
+    0x80E40005, 0x03000002, 0x80040000, 0x81AA0001, 0x80FF0003, 0x04000058, 0x80280004, 0x80AA0000, 0xA0000027,
+    0x80550001, 0x03000005, 0x80270004, 0x80E40003, 0x80FF0004, 0x03000002, 0x802F0002, 0x80E40002, 0x80E40004,
+    0x04000004, 0x800F0003, 0x80440000, 0xA0500002, 0x90440000, 0x04000004, 0x80030000, 0x80E40000, 0xA0FF0003,
+    0x90E40000, 0x03000042, 0x802F0000, 0x80E40000, 0xA0E40800, 0x03000042, 0x802F0004, 0x80E40003, 0xA0E40800,
+    0x03000042, 0x802F0003, 0x80EE0003, 0xA0E40800, 0x03000002, 0x80010001, 0x81AA0001, 0x80FF0004, 0x04000058,
+    0x80280005, 0x80000001, 0xA0550027, 0x80550001, 0x03000005, 0x80270005, 0x80E40004, 0x80FF0005, 0x03000002,
+    0x802F0002, 0x80E40002, 0x80E40005, 0x03000002, 0x80010001, 0x81AA0001, 0x80FF0003, 0x03000002, 0x80080000,
+    0x81AA0001, 0x80FF0000, 0x04000058, 0x80280004, 0x80FF0000, 0xA0FF0027, 0x80550001, 0x04000058, 0x80280001,
+    0x80000001, 0xA0AA0027, 0x80550001, 0x03000005, 0x80270001, 0x80FF0001, 0x80E40003, 0x03000002, 0x802F0001,
+    0x80E40001, 0x80E40002, 0x03000005, 0x80270004, 0x80E40000, 0x80FF0004, 0x03000002, 0x802F0000, 0x80E40004,
+    0x80E40001, 0x03000002, 0x80080000, 0x81FF0000, 0xA0000003, 0x03000042, 0x802F0001, 0x90E40000, 0xA0E40800,
+    0x04000004, 0x80270800, 0x80E40001, 0x80FF0000, 0x80E40000, 0x02000001, 0x80280800, 0xA0000003, 0x0000FFFF,
+};
 
 bool is_copy_shader(const DWORD* code) {
     return same_instructions(code, kCopyShader, sizeof(kCopyShader) / sizeof(kCopyShader[0]));
@@ -265,7 +321,8 @@ volatile bool g_present_swap_enabled = true;  // RemoteControl `reduce 0/1`
 volatile LONG g_swap_off_mask = 0;            // RemoteControl `swapoff MASK` (diagnostics): bit i = swap i, bit 7 = copies,
                                               // bit 6 = the 10-bit scene's alpha kept in the scene (none of ours),
                                               // bit 4 = its draw not into ours, bit 5 = ours not read,
-                                              // bit 8 = the averaging copies in one pass
+                                              // bit 8 = the averaging copies in one pass,
+                                              // bit 9 = the camera blur drawn as the game does when it is off
 
 int swap_of(const DWORD* code) {
     for (int i = 0; i < kSwapCount; ++i) {
@@ -1070,6 +1127,21 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
         std::lock_guard<std::mutex> lock(g_lock);
         g_bilateral_shaders.insert(*out);
     }
+    if (SUCCEEDED(hr) && out && *out &&
+        same_instructions(code, kCameraBlurPower, sizeof(kCameraBlurPower) / sizeof(kCameraBlurPower[0]))) {
+        std::lock_guard<std::mutex> lock(g_lock);
+        g_cam_power_shaders.insert(*out);
+    }
+    if (SUCCEEDED(hr) && out && *out && same_instructions(code, kCameraBlur, sizeof(kCameraBlur) / sizeof(kCameraBlur[0]))) {
+        std::lock_guard<std::mutex> lock(g_lock);
+        g_cam_blur_shaders.insert(*out);
+        if (g_cam_copy_dev != dev) {
+            if (g_cam_copy_ps) g_cam_copy_ps->Release();
+            g_cam_copy_ps = nullptr;
+            g_cam_copy_dev = dev;
+            if (FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kCopyRgbPs), &g_cam_copy_ps))) g_cam_copy_ps = nullptr;
+        }
+    }
     if (SUCCEEDED(hr) && out && *out && is_copy_shader(code)) {
         std::lock_guard<std::mutex> lock(g_lock);
         g_copy_shaders.insert(*out);
@@ -1133,6 +1205,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     if (ps) {
         std::lock_guard<std::mutex> lock(g_lock);
         copy = g_copy_shaders.count(ps) != 0;
+        g_cam_bound = g_cam_power_shaders.count(ps) ? 1 : g_cam_blur_shaders.count(ps) ? 2 : 0;
         bilateral = g_bilateral_shaders.count(ps) != 0;
         for (int i = 0; i < kSwapCount && game < 0; ++i) {
             if (g_swap_game[i].count(ps)) game = i;
@@ -1869,6 +1942,28 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
     HRESULT alpha_hr = S_OK;
     if (g_rt0_10bit && !(g_swap_off_mask & 0x50) && alpha_draw(dev, type, count, data, stride, &alpha_hr)) {
         return alpha_hr;
+    }
+    // The camera blur while it is off (see kCameraBlur).
+    if (g_cam_bound == 1 && g_cam_off && !(g_swap_off_mask & 0x200)) return S_OK;
+    if (g_cam_bound == 2) {
+        float w[8] = {};
+        dev->GetPixelShaderConstantF(38, w, 2);
+        g_cam_off = w[1] == 0.0f && w[2] == 0.0f && w[3] == 0.0f && w[4] == 0.0f && w[5] == 0.0f && w[6] == 0.0f &&
+                    w[7] == 0.0f;
+        if (g_cam_off && g_cam_copy_ps && g_cam_copy_dev == dev && !(g_swap_off_mask & 0x200)) {
+            IDirect3DPixelShader9* game = nullptr;
+            dev->GetPixelShader(&game);
+            o_set_ps(dev, g_cam_copy_ps);
+            const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+            o_set_ps(dev, game);
+            if (game) game->Release();
+            if (!g_cam_logged) {
+                g_cam_logged = true;
+                LOG_INFO("Resolution: the camera blur is off (its weights 0): its depth pass is skipped and the blur "
+                         "drawn as a copy");
+            }
+            return hr;
+        }
     }
     const LONG force = g_dof_force;
     const LONG swap = g_swap_bound;
