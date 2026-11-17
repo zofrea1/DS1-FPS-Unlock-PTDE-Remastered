@@ -61,11 +61,24 @@ bool g_amd_on = false;        // AMD's switch as we last set it (POINTSIZE does 
 IDirect3DPixelShader9* g_game_ps = nullptr;  // the pixel shader the game bound
 bool g_logged_target = false;
 bool g_logged_on = false;
+// FixAntialiasingDepth (see below): the packed depth's targets are a float (R32F) and the shaders drawing into them
+// are given converted copies; render target 0 is one of them.
+bool g_depth_float = false;
+bool g_depth_target = false;
+constexpr UINT kDepthConst = 211;  // the conversion's constants (a def in the converted copy)
+constexpr UINT kEncodeConst = 212, kDecodeConst = 213;  // the depth copy's re-encoding (defs in its copy)
+IDirect3DPixelShader9* g_copy_swap = nullptr;  // the bound shader's re-encoding copy, when it is the depth copy
 
-// The sharpened copies, by the game's shader (held, so its address is not reused for another). nullptr: not copyable.
+// The copies of a game shader (held, so its address is not reused for another), by kind: 1 the float depth, 2 the
+// sharpened alpha, 3 both, 4 the depth copy re-encoding the float depth. nullptr: not copyable (or, for 4, not the
+// depth copy).
+struct Variants {
+    IDirect3DPixelShader9* made[5] = {};
+    bool tried[5] = {};
+};
 std::mutex g_lock;
-std::unordered_map<IDirect3DPixelShader9*, IDirect3DPixelShader9*> g_variants;
-LONG g_made = 0, g_refused = 0;
+std::unordered_map<IDirect3DPixelShader9*, Variants> g_variants;
+LONG g_made = 0, g_refused = 0, g_depth_made = 0, g_depth_refused = 0;
 
 // --- ps_3_0 bytecode -----------------------------------------------------------------------------------------------
 constexpr DWORD kEnd = 0x0000FFFF;
@@ -149,27 +162,226 @@ bool sharpen(const DWORD* code, size_t count, std::vector<DWORD>& out) {
     return true;
 }
 
-IDirect3DPixelShader9* variant_of(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
+DWORD float_bits(float f) {
+    DWORD d = 0;
+    std::memcpy(&d, &f, sizeof(d));
+    return d;
+}
+
+// The game's ps_3_0 drawing the packed depth, writing it as one float instead (FixAntialiasingDepth): oC0 written to
+// a spare temporary rN (the game's red, green and blue digits of the depth, and its alpha), then at the end
+// red + green / 256 + blue / 65536 - (1/256 + 1/65536) to red, green and blue of oC0 and the alpha as it was. The
+// game's readers decode dot(rgb, (255/256, 255/65536, 255/16777216)), and a float target reads back (x, 1, 1), so
+// they get the depth the digits held, whole. False when the shader is not one this can copy.
+bool depth_float(const DWORD* code, size_t count, std::vector<DWORD>& out) {
+    if (count < 2 || code[0] != 0xFFFF0300) return false;
+    int max_temp = -1;
+    bool writes = false;
+    size_t end = 0;
+    for (size_t i = 1; i < count;) {
+        const DWORD tok = code[i];
+        if (tok == kEnd) {
+            end = i;
+            break;
+        }
+        const DWORD op = tok & 0xFFFF;
+        if (op == 0xFFFE) {
+            i += 1 + ((tok >> 16) & 0x7FFF);
+            continue;
+        }
+        const DWORD len = (tok >> 24) & 0xF;
+        if (op == 0x19 || op == 0x1A || op == 0x1C || op == 0x1E) return false;  // call, callnz, ret, label
+        for (DWORD k = 1; k <= len && i + k < count; ++k) {
+            const DWORD p = code[i + k];
+            if ((op == 0x51 || op == 0x30 || op == 0x2F) && k > 1) continue;
+            if (op == 0x1F && k == 1) continue;
+            const DWORD type = reg_type(p);
+            if (type == kRegTemp) max_temp = max_temp > static_cast<int>(p & 0x7FF) ? max_temp : static_cast<int>(p & 0x7FF);
+            if (type == kRegConst && (p & 0x7FF) == kDepthConst) return false;  // our register in use
+            if (type == kRegColorOut && (p & 0x7FF) == 0) writes = true;
+        }
+        i += 1 + len;
+    }
+    if (!end || !writes || max_temp + 1 > 31) return false;
+    const DWORD n = static_cast<DWORD>(max_temp + 1);
+    out.clear();
+    out.push_back(code[0]);
+    const DWORD def[] = {0x05000051, dst(kRegConst, kDepthConst, 0xF), float_bits(1.0f), float_bits(1.0f / 256.0f),
+                         float_bits(1.0f / 65536.0f), float_bits(-(1.0f / 256.0f + 1.0f / 65536.0f))};
+    out.insert(out.end(), std::begin(def), std::end(def));
+    const size_t body = out.size();
+    out.insert(out.end(), code + 1, code + end);
+    for (size_t i = body; i < out.size();) {
+        const DWORD tok = out[i];
+        const DWORD op = tok & 0xFFFF;
+        if (op == 0xFFFE) {
+            i += 1 + ((tok >> 16) & 0x7FFF);
+            continue;
+        }
+        const DWORD len = (tok >> 24) & 0xF;
+        for (DWORD k = 1; k <= len && i + k < out.size(); ++k) {
+            DWORD& p = out[i + k];
+            if ((op == 0x51 || op == 0x30 || op == 0x2F) && k > 1) continue;
+            if (op == 0x1F && k == 1) continue;
+            if (reg_type(p) == kRegColorOut && (p & 0x7FF) == 0) {
+                // oC0 -> rN, keeping the write mask; full precision (a _pp here would round the digits to 16 bits).
+                p = (p & ~(0x70000000u | 0x00001800u | 0x7FFu | 0x00200000u)) | n;
+            }
+        }
+        i += 1 + len;
+    }
+    const DWORD tail[] = {
+        0x03000008, dst(kRegTemp, n, 1), src(kRegTemp, n, kXYZW), src(kRegConst, kDepthConst, kXYZW),  // dp3 n.x
+        0x03000002, dst(kRegColorOut, 0, 7), src(kRegTemp, n, kX), src(kRegConst, kDepthConst, kW),     // + offset
+        0x02000001, dst(kRegColorOut, 0, 8), src(kRegTemp, n, kW),                                     // alpha
+    };
+    out.insert(out.end(), std::begin(tail), std::end(tail));
+    out.push_back(kEnd);
+    return true;
+}
+
+// The game's depth copy (FRPG_Fil_DepthCopy, ps_599aa31f: texld r0 ; dp3 oDepth, r0, (the decode) ; mov oC0, r0)
+// copies the packed depth's texel into the 512x360 colour target that the low-resolution effects (their soft edges)
+// and their upsample read as packed depth. From the float target that texel is (x, 1, 1): its copy, oC0 written to a
+// spare rN and at the end the depth decoded from rN and encoded again in the game's three digits (the pre-pass
+// shaders' own steps: R = floor(d * 255.999985), G = floor(rest * 256), B the rest, over 255 and 255/256), so the
+// copy holds what it held from the 8-bit target. False for any other shader.
+bool depth_copy_encode(const DWORD* code, size_t count, std::vector<DWORD>& out) {
+    if (count < 2 || code[0] != 0xFFFF0300) return false;
+    constexpr DWORD kRegDepthOut = 9;
+    int max_temp = -1;
+    int moved = -1, decoded = -1;
+    size_t end = 0;
+    for (size_t i = 1; i < count;) {
+        const DWORD tok = code[i];
+        if (tok == kEnd) {
+            end = i;
+            break;
+        }
+        const DWORD op = tok & 0xFFFF;
+        if (op == 0xFFFE) {
+            i += 1 + ((tok >> 16) & 0x7FFF);
+            continue;
+        }
+        const DWORD len = (tok >> 24) & 0xF;
+        if (op == 0x19 || op == 0x1A || op == 0x1C || op == 0x1E) return false;
+        if (i + len >= count) return false;
+        if (op == 0x01 && len == 2 && reg_type(code[i + 1]) == kRegColorOut && (code[i + 1] & 0x7FF) == 0 &&
+            ((code[i + 1] >> 16) & 0xF) == 0xF && reg_type(code[i + 2]) == kRegTemp &&
+            ((code[i + 2] >> 16) & 0xFF) == kXYZW && ((code[i + 2] >> 24) & 0xF) == 0) {
+            moved = static_cast<int>(code[i + 2] & 0x7FF);  // mov oC0, rK
+        }
+        if (op == 0x08 && len == 3 && reg_type(code[i + 1]) == kRegDepthOut && reg_type(code[i + 2]) == kRegTemp) {
+            decoded = static_cast<int>(code[i + 2] & 0x7FF);  // dp3 oDepth, rK, c
+        }
+        for (DWORD k = 1; k <= len; ++k) {
+            const DWORD p = code[i + k];
+            if ((op == 0x51 || op == 0x30 || op == 0x2F) && k > 1) continue;
+            if (op == 0x1F && k == 1) continue;
+            const DWORD type = reg_type(p);
+            if (type == kRegTemp) max_temp = max_temp > static_cast<int>(p & 0x7FF) ? max_temp : static_cast<int>(p & 0x7FF);
+            if (type == kRegConst && ((p & 0x7FF) == kEncodeConst || (p & 0x7FF) == kDecodeConst)) return false;
+        }
+        i += 1 + len;
+    }
+    if (!end || moved < 0 || moved != decoded || max_temp + 2 > 31) return false;
+    const DWORD n = static_cast<DWORD>(max_temp + 1), u = static_cast<DWORD>(max_temp + 2);
+    out.clear();
+    out.push_back(code[0]);
+    const DWORD defs[] = {
+        0x05000051, dst(kRegConst, kEncodeConst, 0xF), float_bits(255.999985f), float_bits(256.0f),
+        float_bits(1.0f / 255.0f), float_bits(256.0f / 255.0f),
+        0x05000051, dst(kRegConst, kDecodeConst, 0xF), float_bits(0.99609375f), float_bits(0.00389099121f),
+        float_bits(1.51991844e-005f), float_bits(0.0f),
+    };
+    out.insert(out.end(), std::begin(defs), std::end(defs));
+    const size_t body = out.size();
+    out.insert(out.end(), code + 1, code + end);
+    for (size_t i = body; i < out.size();) {
+        const DWORD tok = out[i];
+        const DWORD op = tok & 0xFFFF;
+        if (op == 0xFFFE) {
+            i += 1 + ((tok >> 16) & 0x7FFF);
+            continue;
+        }
+        const DWORD len = (tok >> 24) & 0xF;
+        for (DWORD k = 1; k <= len && i + k < out.size(); ++k) {
+            DWORD& p = out[i + k];
+            if ((op == 0x51 || op == 0x30 || op == 0x2F) && k > 1) continue;
+            if (op == 0x1F && k == 1) continue;
+            if (reg_type(p) == kRegColorOut && (p & 0x7FF) == 0) {
+                p = (p & ~(0x70000000u | 0x00001800u | 0x7FFu | 0x00200000u)) | n;
+            }
+        }
+        i += 1 + len;
+    }
+    const DWORD E = kEncodeConst;
+    const DWORD tail[] = {
+        0x03000008, dst(kRegTemp, u, 1), src(kRegTemp, n, kXYZW), src(kRegConst, kDecodeConst, kXYZW),  // d
+        0x03000005, dst(kRegTemp, u, 2), src(kRegTemp, u, kX), src(kRegConst, E, kX),                   // d * 255.99
+        0x02000013, dst(kRegTemp, u, 4), src(kRegTemp, u, kY),                                         // frc
+        0x03000002, dst(kRegTemp, u, 2), src(kRegTemp, u, kY), src(kRegTemp, u, kZ, kNeg),            // R
+        0x04000004, dst(kRegTemp, u, 1), src(kRegTemp, u, kX), src(kRegConst, E, kX),
+        src(kRegTemp, u, kY, kNeg),                                                                    // rest
+        0x03000005, dst(kRegTemp, u, 4), src(kRegTemp, u, kX), src(kRegConst, E, kY),                   // * 256
+        0x02000013, dst(kRegTemp, u, 8), src(kRegTemp, u, kZ),                                         // frc
+        0x03000002, dst(kRegTemp, u, 4), src(kRegTemp, u, kZ), src(kRegTemp, u, kW, kNeg),            // G
+        0x04000004, dst(kRegTemp, u, 8), src(kRegTemp, u, kX), src(kRegConst, E, kY),
+        src(kRegTemp, u, kZ, kNeg),                                                                    // B
+        0x03000005, dst(kRegColorOut, 0, 1), src(kRegTemp, u, kY), src(kRegConst, E, kZ),              // R / 255
+        0x03000005, dst(kRegColorOut, 0, 2), src(kRegTemp, u, kZ), src(kRegConst, E, kZ),              // G / 255
+        0x03000005, dst(kRegColorOut, 0, 4), src(kRegTemp, u, kW), src(kRegConst, E, kW),              // B * 256/255
+        0x02000001, dst(kRegColorOut, 0, 8), src(kRegTemp, n, kW),                                     // alpha
+    };
+    out.insert(out.end(), std::begin(tail), std::end(tail));
+    out.push_back(kEnd);
+    return true;
+}
+
+// kind: 1 the float depth, 2 the sharpened alpha, 3 both (the float depth's copy, sharpened), 4 the depth copy.
+IDirect3DPixelShader9* variant_of(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps, int kind) {
     std::lock_guard<std::mutex> lock(g_lock);
     auto it = g_variants.find(ps);
-    if (it != g_variants.end()) return it->second;
+    if (it == g_variants.end()) {
+        ps->AddRef();
+        it = g_variants.emplace(ps, Variants{}).first;
+    }
+    Variants& v = it->second;
+    if (v.tried[kind]) return v.made[kind];
+    v.tried[kind] = true;
     IDirect3DPixelShader9* made = nullptr;
     UINT size = 0;
     if (SUCCEEDED(ps->GetFunction(nullptr, &size)) && size >= 8 && size % 4 == 0) {
-        std::vector<DWORD> code(size / 4), out;
-        if (SUCCEEDED(ps->GetFunction(code.data(), &size)) && sharpen(code.data(), code.size(), out) &&
-            SUCCEEDED(dev->CreatePixelShader(out.data(), &made)) && made) {
-            ++g_made;
-        } else {
-            made = nullptr;
-            ++g_refused;
+        std::vector<DWORD> code(size / 4), a, b;
+        bool ok = SUCCEEDED(ps->GetFunction(code.data(), &size));
+        const std::vector<DWORD>* final = &a;
+        if (ok && kind == 2) ok = sharpen(code.data(), code.size(), a);
+        if (ok && kind == 1) ok = depth_float(code.data(), code.size(), a);
+        if (ok && kind == 3) {
+            ok = depth_float(code.data(), code.size(), a) && sharpen(a.data(), a.size(), b);
+            final = &b;
         }
+        if (ok && kind == 4) ok = depth_copy_encode(code.data(), code.size(), a);
+        if (!ok || FAILED(dev->CreatePixelShader(final->data(), &made))) made = nullptr;
     }
-    ps->AddRef();
-    g_variants[ps] = made;
-    if (g_made + g_refused <= 3 || (g_made + g_refused) % 50 == 0) {
-        LOG_INFO("AlphaToCoverage: %ld alpha-tested pixel shaders sharpened, %ld given plain coverage", g_made,
-                 g_refused);
+    v.made[kind] = made;
+    if (kind == 4) {
+        if (made) LOG_INFO("FixAntialiasingDepth: the game's depth copy (into the effects' low-resolution depth) writes "
+                           "the float depth in the game's three digits");
+        return made;
+    }
+    if (kind == 2) {
+        ++(made ? g_made : g_refused);
+        if (g_made + g_refused <= 3 || (g_made + g_refused) % 50 == 0) {
+            LOG_INFO("AlphaToCoverage: %ld alpha-tested pixel shaders sharpened, %ld given plain coverage", g_made,
+                     g_refused);
+        }
+    } else {
+        ++(made ? g_depth_made : g_depth_refused);
+        if (!made || g_depth_made + g_depth_refused <= 2 || (g_depth_made + g_depth_refused) % 10 == 0) {
+            LOG_INFO("FixAntialiasingDepth: %ld shaders drawing the depth write it as a float, %ld could not%s",
+                     g_depth_made, g_depth_refused, made ? "" : " (that one's surfaces get a wrong depth)");
+        }
     }
     return made;
 }
@@ -186,9 +398,20 @@ DWORD render_state(IDirect3DDevice9* dev, D3DRENDERSTATETYPE state) {
 
 // Before a draw: coverage on or off, and the sharpened shader in place (true: the game's goes back after the draw).
 bool before_draw(IDirect3DDevice9* dev) {
-    if (g_method == Method::None) return false;
+    if (g_copy_swap && o_set_ps) {
+        o_set_ps(dev, g_copy_swap);
+        return true;
+    }
     const LONG mode = g_mode;
     bool want = false;
+    const bool depth = g_depth_float && g_depth_target;
+    if (g_method == Method::None) {
+        if (!depth || !g_game_ps || !o_set_ps) return false;
+        IDirect3DPixelShader9* conv = variant_of(dev, g_game_ps, 1);
+        if (!conv) return false;
+        o_set_ps(dev, conv);
+        return true;
+    }
     if (g_multisampled && mode) {
         want = render_state(dev, D3DRS_ALPHATESTENABLE) && !render_state(dev, D3DRS_ALPHABLENDENABLE);
     }
@@ -204,15 +427,25 @@ bool before_draw(IDirect3DDevice9* dev) {
         g_logged_on = true;
         LOG_INFO("AlphaToCoverage: alpha-tested surfaces now write coverage (first draw)");
     }
-    if (!want || mode != 2 || !g_game_ps || !o_set_ps) return false;
-    const DWORD func = render_state(dev, D3DRS_ALPHAFUNC);
-    if (func != D3DCMP_GREATEREQUAL && func != D3DCMP_GREATER) return false;
-    IDirect3DPixelShader9* sharp = variant_of(dev, g_game_ps);
-    if (!sharp) return false;
-    const DWORD ref = render_state(dev, D3DRS_ALPHAREF);
-    const float c[4] = {static_cast<float>(ref & 0xFF) / 255.0f, 1.0f / 1024.0f, 0.5f, 0.0f};
-    dev->SetPixelShaderConstantF(kSharpenConst, c, 1);
-    o_set_ps(dev, sharp);
+    if (!g_game_ps || !o_set_ps) return false;
+    bool sharpen_it = want && mode == 2;
+    if (sharpen_it) {
+        const DWORD func = render_state(dev, D3DRS_ALPHAFUNC);
+        sharpen_it = func == D3DCMP_GREATEREQUAL || func == D3DCMP_GREATER;
+    }
+    if (!sharpen_it && !depth) return false;
+    IDirect3DPixelShader9* copy = variant_of(dev, g_game_ps, (depth ? 1 : 0) | (sharpen_it ? 2 : 0));
+    if (!copy && depth && sharpen_it) {
+        copy = variant_of(dev, g_game_ps, 1);  // the depth right, the edge plain coverage
+        sharpen_it = false;
+    }
+    if (!copy) return false;
+    if (sharpen_it) {
+        const DWORD ref = render_state(dev, D3DRS_ALPHAREF);
+        const float c[4] = {static_cast<float>(ref & 0xFF) / 255.0f, 1.0f / 1024.0f, 0.5f, 0.0f};
+        dev->SetPixelShaderConstantF(kSharpenConst, c, 1);
+    }
+    o_set_ps(dev, copy);
     return true;
 }
 
@@ -223,7 +456,10 @@ void after_draw(IDirect3DDevice9* dev, bool swapped) {
 HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt) {
     if (index == 0) {
         D3DSURFACE_DESC d{};
-        g_multisampled = rt && SUCCEEDED(rt->GetDesc(&d)) && d.MultiSampleType != D3DMULTISAMPLE_NONE;
+        const bool got = rt && SUCCEEDED(rt->GetDesc(&d));
+        g_multisampled = got && d.MultiSampleType != D3DMULTISAMPLE_NONE;
+        // The game's own R32F targets are 64x64 and smaller (its exposure); the depth's are the scene's size.
+        g_depth_target = got && d.Format == D3DFMT_R32F && d.Width >= 256;
         if (g_multisampled && !g_logged_target) {
             g_logged_target = true;
             const int samples = d.MultiSampleType == D3DMULTISAMPLE_NONMASKABLE ? 0 : static_cast<int>(d.MultiSampleType);
@@ -237,6 +473,7 @@ HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* 
 
 HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     g_game_ps = ps;
+    g_copy_swap = g_depth_float && ps ? variant_of(dev, ps, 4) : nullptr;
     return o_set_ps(dev, ps);
 }
 
@@ -291,6 +528,15 @@ void hook(IDirect3DDevice9* dev, int slot, void* ours, Fn& original) {
 // The game's multisample types by its setting (0x10D38CC: none, 2x, 4x, ...); its Antialiasing option uses entry 1.
 constexpr uintptr_t kMsaaTable = 0x010D38CC;
 
+void install_hooks(IDirect3DDevice9* dev) {
+    hook(dev, 37, reinterpret_cast<void*>(&hk_set_rt), o_set_rt);
+    hook(dev, 107, reinterpret_cast<void*>(&hk_set_ps), o_set_ps);
+    hook(dev, 81, reinterpret_cast<void*>(&hk_draw), o_draw);
+    hook(dev, 82, reinterpret_cast<void*>(&hk_draw_indexed), o_draw_indexed);
+    hook(dev, 83, reinterpret_cast<void*>(&hk_draw_up), o_draw_up);
+    hook(dev, 84, reinterpret_cast<void*>(&hk_draw_indexed_up), o_draw_indexed_up);
+}
+
 }  // namespace
 
 void atoc_hook_device(IDirect3DDevice9* dev) {
@@ -313,12 +559,7 @@ void atoc_hook_device(IDirect3DDevice9* dev) {
         LOG_INFO("AlphaToCoverage: the graphics driver offers neither NVIDIA's nor AMD's switch for it; not used");
         return;
     }
-    hook(dev, 37, reinterpret_cast<void*>(&hk_set_rt), o_set_rt);
-    hook(dev, 107, reinterpret_cast<void*>(&hk_set_ps), o_set_ps);
-    hook(dev, 81, reinterpret_cast<void*>(&hk_draw), o_draw);
-    hook(dev, 82, reinterpret_cast<void*>(&hk_draw_indexed), o_draw_indexed);
-    hook(dev, 83, reinterpret_cast<void*>(&hk_draw_up), o_draw_up);
-    hook(dev, 84, reinterpret_cast<void*>(&hk_draw_indexed_up), o_draw_indexed_up);
+    install_hooks(dev);
     LOG_INFO("AlphaToCoverage: ready (%s switch, edges sharpened around the alpha test); takes effect when the game's "
              "anti-aliasing is on (Antialiasing = 1 in DarkSouls.ini, or the in-game option)",
              g_method == Method::Nvidia ? "NVIDIA's" : "AMD's");
@@ -357,13 +598,18 @@ bool atoc_set_msaa_samples(int samples) {
 // grass blades in a ring around the player the depth was off by up to several metres (6 m at the 12.8 m ring), and
 // the low-resolution effects (Firelink's mist) laid back over the scene by that depth left black specks there
 // (2026-11-16, Firelink at 4K: a grid of them with the game's 512x360 effects, finer ones with ours). The game as
-// shipped does it too. Both targets get 16 bits a channel instead (format index 6 -> 14 of the game's table at
-// 0x10D3670, A16B16G16R16): a whole number over 255 is exact in 16 bits (x 257), so the samples' average decodes to
-// the average of their depths, as the game's shaders meant. Without the anti-aliasing the pre-pass draws into T12
-// directly and the digits come out as before.
+// shipped does it too.
+//
+// Both targets become one 32-bit float a pixel (R32F, format index 13 of the game's table at 0x10D3670: the same size
+// as the game's 8-bit target), and the shaders that draw into them get copies that write the depth their digits hold
+// as that float (depth_float above), so the resolve averages the samples' depths exactly and the game's readers,
+// which see (x, 1, 1) from a float target, decode it unchanged. The first version (2.4.2 test 13) kept the digits in
+// 16 bits a channel (A16B16G16R16, index 14), exact too but twice the memory at four samples a pixel: 4K with 4x
+// went from about 203 to 179 FPS on an RTX 3090. That stays as the fallback for a driver that cannot multisample or
+// filter a float target. Without the anti-aliasing the pre-pass draws into T12 directly, the same way.
 namespace {
 constexpr uintptr_t kFormatTable = 0x010D3670;
-constexpr uint32_t kIndexA8R8G8B8 = 6, kIndexA16B16G16R16 = 14;
+constexpr uint32_t kIndexA8R8G8B8 = 6, kIndexR32F = 13, kIndexA16B16G16R16 = 14;
 struct DepthFormatSite {
     uintptr_t at;    // the format index: imm8 of a push or imm32 of a mov
     uint32_t bytes;  // 1 or 4
@@ -386,15 +632,20 @@ bool write_format_index(const DepthFormatSite& f, uint32_t index) {
     FlushInstructionCache(GetCurrentProcess(), p, f.bytes);
     return true;
 }
+
+void write_depth_format(uint32_t index) {
+    for (const DepthFormatSite& f : kDepthFormats) write_format_index(f, index);
+}
 }  // namespace
 
 bool atoc_fix_depth_install(int samples) {
     const auto* table = reinterpret_cast<const uint32_t*>(kFormatTable);
-    if (table[kIndexA8R8G8B8] != D3DFMT_A8R8G8B8 || table[kIndexA16B16G16R16] != D3DFMT_A16B16G16R16) {
-        LOG_ERROR("FixAntialiasingDepth: the game's format table at %08X holds %u and %u, not %u and %u in this build. "
-                  "Not changing it.", static_cast<unsigned>(kFormatTable), table[kIndexA8R8G8B8],
-                  table[kIndexA16B16G16R16], static_cast<unsigned>(D3DFMT_A8R8G8B8),
-                  static_cast<unsigned>(D3DFMT_A16B16G16R16));
+    if (table[kIndexA8R8G8B8] != D3DFMT_A8R8G8B8 || table[kIndexR32F] != D3DFMT_R32F ||
+        table[kIndexA16B16G16R16] != D3DFMT_A16B16G16R16) {
+        LOG_ERROR("FixAntialiasingDepth: the game's format table at %08X holds %u, %u and %u, not %u, %u and %u in this "
+                  "build. Not changing it.", static_cast<unsigned>(kFormatTable), table[kIndexA8R8G8B8],
+                  table[kIndexR32F], table[kIndexA16B16G16R16], static_cast<unsigned>(D3DFMT_A8R8G8B8),
+                  static_cast<unsigned>(D3DFMT_R32F), static_cast<unsigned>(D3DFMT_A16B16G16R16));
         return false;
     }
     for (const DepthFormatSite& f : kDepthFormats) {
@@ -406,9 +657,8 @@ bool atoc_fix_depth_install(int samples) {
             return false;
         }
     }
-    for (const DepthFormatSite& f : kDepthFormats) {
-        if (!write_format_index(f, kIndexA16B16G16R16)) return false;
-    }
+    // The float targets until the device says otherwise (atoc_fix_depth_check, before the game makes them).
+    write_depth_format(kIndexR32F);
     g_depth_fix = true;
     g_depth_samples = samples == 4 || samples == 8 ? samples : 2;
     return true;
@@ -424,24 +674,36 @@ void atoc_fix_depth_check(IDirect3DDevice9* dev) {
     const D3DFORMAT adapter = SUCCEEDED(dev->GetDisplayMode(0, &mode)) && mode.Format != D3DFMT_UNKNOWN
                                   ? mode.Format
                                   : D3DFMT_X8R8G8B8;
-    const bool texture = d3d->CheckDeviceFormat(cp.AdapterOrdinal, D3DDEVTYPE_HAL, adapter, D3DUSAGE_RENDERTARGET,
-                                                D3DRTYPE_TEXTURE, D3DFMT_A16B16G16R16) == D3D_OK;
     const auto msaa = static_cast<D3DMULTISAMPLE_TYPE>(g_depth_samples);
-    const bool multisampled =
-        d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, D3DFMT_A16B16G16R16, TRUE, msaa, nullptr) ==
-            D3D_OK &&
-        d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, D3DFMT_A16B16G16R16, FALSE, msaa, nullptr) ==
-            D3D_OK;
+    const auto can = [&](D3DFORMAT f, bool filter) {
+        return d3d->CheckDeviceFormat(cp.AdapterOrdinal, D3DDEVTYPE_HAL, adapter, D3DUSAGE_RENDERTARGET,
+                                      D3DRTYPE_TEXTURE, f) == D3D_OK &&
+               (!filter || d3d->CheckDeviceFormat(cp.AdapterOrdinal, D3DDEVTYPE_HAL, adapter, D3DUSAGE_QUERY_FILTER,
+                                                  D3DRTYPE_TEXTURE, f) == D3D_OK) &&
+               d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, f, TRUE, msaa, nullptr) == D3D_OK &&
+               d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, f, FALSE, msaa, nullptr) == D3D_OK;
+    };
+    const bool fl = can(D3DFMT_R32F, true);
+    const bool u16 = !fl && can(D3DFMT_A16B16G16R16, false);
     d3d->Release();
-    if (texture && multisampled) {
+    if (fl) {
+        g_depth_float = true;
+        install_hooks(dev);
         LOG_INFO("FixAntialiasingDepth: with the game's anti-aliasing on, the depth the effects and the depth of field "
-                 "read is kept in 16 bits a channel through the multisampling (was 8), so it stays right at the edges "
+                 "read is one float per sample (was three 8-bit digits, the same size), so it stays right at the edges "
                  "of grass and leaves (no black specks in a ring around the player)");
         return;
     }
+    if (u16) {
+        write_depth_format(kIndexA16B16G16R16);
+        LOG_INFO("FixAntialiasingDepth: the graphics driver cannot multisample or filter a float target; the depth's "
+                 "three digits are kept in 16 bits a channel instead (right at the edges of grass too, twice the "
+                 "memory)");
+        return;
+    }
     // Before the game makes its render targets (it does after the device exists): back to the game's 8 bits.
-    for (const DepthFormatSite& f : kDepthFormats) write_format_index(f, kIndexA8R8G8B8);
+    write_depth_format(kIndexA8R8G8B8);
     g_depth_fix = false;
-    LOG_ERROR("FixAntialiasingDepth: the graphics driver cannot %s a 16-bit (A16B16G16R16) target%s; the depth stays "
-              "8-bit as in the game", texture ? "multisample" : "render into", texture ? "" : " texture");
+    LOG_ERROR("FixAntialiasingDepth: the graphics driver can multisample neither a float nor a 16-bit target here; "
+              "the depth stays 8-bit as in the game");
 }

@@ -12,9 +12,10 @@ void atoc_set_mode(int mode);
 // AntialiasingSamples: the samples of the game's anti-aliasing (2 = the game's, 4 or 8). Before the game makes its
 // render targets. False when the game's table does not match this build.
 bool atoc_set_msaa_samples(int samples);
-// FixAntialiasingDepth: the game's multisampled packed depth and the texture it is resolved into get 16 bits a channel
-// (see atoc.cpp), so the resolve's average decodes to the right depth at the edges of grass and leaves. Install before
-// the game makes its render targets (samples: AntialiasingSamples); check once the device exists (puts the game's
-// format back when the driver cannot multisample it).
+// FixAntialiasingDepth: the game's multisampled packed depth and the texture it is resolved into hold one float a
+// sample, written by converted copies of the shaders that draw it (16 bits a channel where the driver cannot use a
+// float target; see atoc.cpp), so the resolve's average is the right depth at the edges of grass and leaves. Install
+// before the game makes its render targets (samples: AntialiasingSamples); check once the device exists (picks the
+// format, hooks the draws, or puts the game's format back).
 bool atoc_fix_depth_install(int samples);
 void atoc_fix_depth_check(IDirect3DDevice9* dev);

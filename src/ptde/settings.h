@@ -94,8 +94,8 @@ struct Settings {
     bool even_frame_steps = true;  // EvenFrameSteps: the cap's schedule as the frames' clock (frame.cpp)
     // With the game's own anti-aliasing (multisampling) on: alpha-tested surfaces write coverage (atoc.h).
     bool alpha_to_coverage = true;
-    // With it on: the depth the effects and the depth of field read keeps 16 bits a channel through the
-    // multisampling, so it stays right at the edges of grass (atoc.h).
+    // With it on: the depth the effects and the depth of field read stays exact through the multisampling (one
+    // float a sample), so it stays right at the edges of grass (atoc.h).
     bool fix_antialiasing_depth = true;
     // The samples of the game's own anti-aliasing when it is on: 2 (the game's), 4 or 8 (atoc.h).
     int antialiasing_samples = 2;
