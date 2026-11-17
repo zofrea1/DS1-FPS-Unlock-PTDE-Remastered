@@ -266,18 +266,21 @@ FrameState g_frame;
 float g_mouse_s = 1.0f;  // the menus' scale while they are up (the mouse's place in them, cursor_after)
 float g_mouse_ax = 640.0f, g_mouse_ay = 360.0f;  // and the point they are scaled about
 
-// The menus' anchors (1280x720 layout), each kind of menu toward its own: a screen (the inventory, Level Up, a shop, the
-// message box 'F22') about the middle of the screen; the start menu on its own toward its box's top right corner
-// ('R00_bg' at 828,52 - 1177,178); the list of choices at a bonfire or with a character toward its box's top left
-// corner ('F04_bg' at 67,64 - 497,664); what a character says keeps its place and width, its letters scaled (its
-// backdrop darkens the whole bottom of the screen). The button guide 'R04' and
-// the icon layers go with the kind of menu shown (this frame's when known, else the last one's).
-enum View { kViewNone, kViewStart, kViewTalk, kViewScreen };
+// The menus' anchors (1280x720 layout), each kind of menu toward its own: a screen (the inventory, Level Up, a shop)
+// about the middle of the screen; the start menu on its own toward its box's top right corner ('R00_bg' at 828,52 -
+// 1177,178); the list of choices at a bonfire or with a character toward its box's top left corner ('F04_bg' at
+// 67,64 - 497,664); the message box 'F22' (99,478 - 1185,548, its OK below) toward the bottom edge; what a character
+// says keeps its place and width, its letters scaled (its backdrop darkens the whole bottom of the screen). The button
+// guide 'R04' and the icon layers go with the kind of menu shown (this frame's when known, else the last one's).
+enum View { kViewNone, kViewStart, kViewTalk, kViewMessage, kViewScreen };
 const Rule kMenuRule = {"", kMenu, 640.0f, 360.0f};
 const Rule kStartRule = {"", kMenu, 1177.0f, 52.0f};
 const Rule kTalkRule = {"", kMenu, 67.0f, 64.0f};
+const Rule kMessageRule = {"", kMenu, 640.0f, 720.0f};
 const Rule kSubtitleRule = {"", kMenuText, 640.0f, 720.0f};
-const Rule* view_rule(int v) { return v == kViewStart ? &kStartRule : v == kViewTalk ? &kTalkRule : &kMenuRule; }
+const Rule* view_rule(int v) {
+    return v == kViewStart ? &kStartRule : v == kViewTalk ? &kTalkRule : v == kViewMessage ? &kMessageRule : &kMenuRule;
+}
 
 void top_level_drawn(uintptr_t dlg) {
     FrameState& f = g_frame;
@@ -410,6 +413,9 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
                     // On its own toward its corner; with a screen open (drawn after it: the last frame's) as the screen.
                     rule = fs.view_prev == kViewScreen ? &kMenuRule : &kStartRule;
                     if (shown && fs.view < kViewStart) fs.view = kViewStart;
+                } else if (name == L"F22") {
+                    rule = &kMessageRule;
+                    if (shown && fs.view < kViewMessage) fs.view = kViewMessage;
                 } else if (name == L"R04" || name == L"Icon") {
                     rule = view_rule(fs.view != kViewNone ? fs.view : fs.view_prev);
                 } else {
