@@ -222,11 +222,13 @@ int menu_pct() {
 // anchor on the screen; `ox`, `oy` where that puts it: x' = x * s + ox (the anchor's ax * (1 - s), plus a move of its
 // own; its clipping rectangles are mapped so); `a`, `bx`, `by` the change its first read of the transform (its parent)
 // gets: x * a + bx, y * a + by (the scale itself, or the place of the dialog around it undone and then its own); `ts`
-// the size of the letters of a text written in it.
+// the size of the letters of a text written in it; `screen`: a menu (what the game parks off its screen in it stays
+// out of view).
 struct Active {
     bool on = false;
     bool pending = false;
     bool container = false;
+    bool screen = false;
     float s = 1.0f, ax = 0.0f, ay = 0.0f;
     float ox = 0.0f, oy = 0.0f;
     float a = 1.0f, bx = 0.0f, by = 0.0f;
@@ -250,7 +252,9 @@ constexpr float kBossGap = 6.0f;
 struct FrameState {
     uintptr_t seen[32] = {};
     int n = 0;
-    bool menu = false, menu_prev = false;                // the start menu is up (this frame, the last one)
+    bool world = false;                                  // the HUD 'F20' was drawn (in the world, not the title)
+    bool back = false;                                   // the back plate 'R11' was drawn: the menus' layers follow
+    bool menu = false, menu_prev = false;                // a menu is up (this frame, the last one)
     float menu_s = 1.0f;                                 // its scale
     float boss_top = kNoBoss, boss_top_prev = kNoBoss;   // the top of the highest boss bar shown
     float lift = 0.0f, lift_prev = 0.0f;                 // how far the prompt was moved up
@@ -267,8 +271,11 @@ void top_level_drawn(uintptr_t dlg) {
             LOG_INFO("menuprobe frame: %08X again (seen %d of %d)", static_cast<unsigned>(dlg), i, f.n);
         }
         f.n = 0;
+        f.world = false;
+        f.back = false;
         f.menu_prev = f.menu;
         f.menu = false;
+        f.menu_s = menu_pct() / 100.0f;
         f.boss_top_prev = f.boss_top;
         f.boss_top = kNoBoss;
         f.lift_prev = f.lift;
@@ -281,14 +288,20 @@ void top_level_drawn(uintptr_t dlg) {
     if (f.n < 32) f.seen[f.n++] = dlg;
 }
 
-// A part of the in-game menu: drawn after the start menu 'R00' in the frame (the screen it opened: the items 'I01',
-// the equipment 'I02', the status 'R02', the system 'I06', the options 'R01', their submenus, the icon layer drawn
-// with them), but not the field's layers ('F...': the prompts and item windows are the HUD's), the movie 'R06' or the
-// save icon 'R08'; or the button guide and help line 'R04' (drawn first in the frame: with the start menu up in the
-// last one; shared with the other menus, scaled only with this one).
+// A part of the in-game menus. In the world (the HUD 'F20' drawn) everything the game draws after the back plate 'R11'
+// is a menu's layer, apart from the field's own ('F...': prompts, item windows) and the movie 'R06': the start menu
+// 'R00' with the screen it opened (the items 'I01', the equipment 'I02', the status 'R02', the system 'I06', the
+// options 'R01', the brightness 'T07', their submenus), the bonfire's and the shops' screens (Level Up 'C01', Attune
+// Magic 'C05', the Bottomless Box 'C07', Repair 'S01', ...), the icon layers drawn with them (before or after);
+// plus the talk group 'F04' (the bonfire's and the characters' lists of choices 'F04-01', what a character says
+// 'F04-00'), the one field layer that is a menu; and the button guide and help line 'R04' (drawn first in the frame,
+// so with a menu up in the last one). Seen 2026-11-17: in the field the frame ends 'R11' 'F03' 'F05' 'F22' 'R06'; the
+// bonfire's screens come before 'F03' (Attune Magic, the box) or after it (Level Up, Repair).
 bool menu_member(const std::wstring& n, const FrameState& f) {
     if (n == L"R04") return f.menu || f.menu_prev;
-    if (!f.menu || n.empty() || n[0] == L'F') return false;
+    if (!f.world || !f.back || n.empty()) return false;
+    if (n.compare(0, 3, L"F04") == 0) return true;
+    if (n[0] == L'F') return false;
     return n != L"R06" && n != L"R08" && n != L"R11" && n != L"black";
 }
 
@@ -339,22 +352,43 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
     } nest(info_of(base).name.c_str());
     const Rule* rule = info_of(base).rule;
     const Active outer = t_active;
+    // Inside a scaled menu: a dialog the game parks wholly off its screen (Repair's second cursor at -63,-123) is not
+    // drawn, since the menu scaled toward the middle would bring it into view. Its rectangle is in its parent's units,
+    // which the context's transform (its parent's, the menu's scale on it) places; the menu's scale is undone for the
+    // game's own place.
+    if (outer.on && outer.screen && t_depth > 1) {
+        float r[4] = {};
+        float m[16];
+        if (read_bytes(base + 0x78, r, sizeof(r))) {
+            std::memcpy(m, static_cast<const char*>(dc) + 0x30, sizeof(m));
+            const float s = outer.s > 0.0f ? outer.s : 1.0f;
+            const auto gx = [&](float x, float y) { return (x * m[0] + y * m[4] + m[12] - outer.ox) / s; };
+            const auto gy = [&](float x, float y) { return (x * m[1] + y * m[5] + m[13] - outer.oy) / s; };
+            const float x0 = gx(r[0], r[1]), x1 = gx(r[2], r[3]), y0 = gy(r[0], r[1]), y1 = gy(r[2], r[3]);
+            const float left = x0 < x1 ? x0 : x1, right = x0 < x1 ? x1 : x0;
+            const float top = y0 < y1 ? y0 : y1, bottom = y0 < y1 ? y1 : y0;
+            if (right <= 0.0f || left >= 1280.0f || bottom <= 0.0f || top >= 720.0f) return nullptr;
+        }
+    }
     FrameState& fs = g_frame;
     // A top-level dialog: the frame's bookkeeping, and the in-game menu's screens by their names.
     static const Rule kMenuRule = {"", kMenu, 640.0f, 360.0f};
+    // What a character says ('F04-00'): a strip of subtitles along the bottom edge, scaled toward it.
+    static const Rule kSubtitleRule = {"", kMenu, 640.0f, 720.0f};
     if (t_depth == 1) {
         top_level_drawn(base);
         if (!rule) {
             const std::wstring name = dialog_name(base);
-            if (name == L"R00") {
+            if (menu_member(name, fs)) {
+                rule = name == L"F04-00" ? &kSubtitleRule : &kMenuRule;
+                // A menu is up while one of its dialogs is shown (the button guide and the icon layers only go with
+                // one): the button guide next frame and the mouse follow it.
                 uint32_t vis = 0;
                 read32(base + 0x98, &vis);
-                fs.menu = (vis & 0xFF) != 0;
-                fs.menu_s = menu_pct() / 100.0f;
-                if (fs.menu) rule = &kMenuRule;
-            } else if (menu_member(name, fs)) {
-                rule = &kMenuRule;
+                if ((vis & 0xFF) && name != L"R04" && name != L"Icon") fs.menu = true;
             }
+            if (name == L"F20") fs.world = true;
+            if (name == L"R11") fs.back = true;
             if (g_probe_dialogs.load(std::memory_order_relaxed) > 0) {
                 LOG_INFO("menuprobe top '%ls' menu %d (last frame %d) -> %s", name.c_str(), fs.menu ? 1 : 0,
                          fs.menu_prev ? 1 : 0, rule ? "menu scale" : "-");
@@ -418,6 +452,7 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
     a.a = a.s / os;
     a.bx = -oox * a.s / os + a.ox;
     a.by = -ooy * a.s / os + a.oy;
+    a.screen = (rule && rule->kind == kMenu) || (outer.on && outer.screen);
     float parent[16];
     std::memcpy(parent, static_cast<const char*>(dc) + 0x30, sizeof(parent));
     t_active = a;
