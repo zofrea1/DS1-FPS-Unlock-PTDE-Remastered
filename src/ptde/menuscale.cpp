@@ -135,8 +135,9 @@ std::wstring dialog_name(uintptr_t dlg) {
 // ---------------------------------------------------------------------------------------------------------------
 // The scaled dialogs.
 // kMenu: the in-game menu's screens (UIScaleMenus), about the middle of the screen; found by their names in the menu
-// file (menu_member), not by class (each is a plain EzMenuDialog holding the screen's dialogs).
-enum Kind { kNone, kHud, kMark, kMenu };
+// file (menu_member), not by class (each is a plain EzMenuDialog holding the screen's dialogs). kMenuText: a menu's
+// letters only (what a character says: its backdrop keeps the screen's width).
+enum Kind { kNone, kHud, kMark, kMenu, kMenuText };
 // FixBossBarOverlap: the prompt (and the item windows above it) moved up while a boss's health bar is shown.
 enum Lift { kLiftNone, kLiftPrompt, kLiftItems, kBossBar };
 struct Rule {
@@ -255,6 +256,7 @@ struct FrameState {
     bool world = false;                                  // the HUD 'F20' was drawn (in the world, not the title)
     bool back = false;                                   // the back plate 'R11' was drawn: the menus' layers follow
     bool menu = false, menu_prev = false;                // a menu is up (this frame, the last one)
+    int view = 0, view_prev = 0;                         // which kind of menu (View; this frame, the last one)
     float menu_s = 1.0f;                                 // its scale
     float boss_top = kNoBoss, boss_top_prev = kNoBoss;   // the top of the highest boss bar shown
     float lift = 0.0f, lift_prev = 0.0f;                 // how far the prompt was moved up
@@ -262,6 +264,20 @@ struct FrameState {
 };
 FrameState g_frame;
 float g_mouse_s = 1.0f;  // the menus' scale while they are up (the mouse's place in them, cursor_after)
+float g_mouse_ax = 640.0f, g_mouse_ay = 360.0f;  // and the point they are scaled about
+
+// The menus' anchors (1280x720 layout), each kind of menu toward its own: a screen (the inventory, Level Up, a shop, the
+// message box 'F22') about the middle of the screen; the start menu on its own toward its box's top right corner
+// ('R00_bg' at 828,52 - 1177,178); the list of choices at a bonfire or with a character toward its box's top left
+// corner ('F04_bg' at 67,64 - 497,664); what a character says keeps its place and width, its letters scaled (its
+// backdrop darkens the whole bottom of the screen). The button guide 'R04' and
+// the icon layers go with the kind of menu shown (this frame's when known, else the last one's).
+enum View { kViewNone, kViewStart, kViewTalk, kViewScreen };
+const Rule kMenuRule = {"", kMenu, 640.0f, 360.0f};
+const Rule kStartRule = {"", kMenu, 1177.0f, 52.0f};
+const Rule kTalkRule = {"", kMenu, 67.0f, 64.0f};
+const Rule kSubtitleRule = {"", kMenuText, 640.0f, 720.0f};
+const Rule* view_rule(int v) { return v == kViewStart ? &kStartRule : v == kViewTalk ? &kTalkRule : &kMenuRule; }
 
 void top_level_drawn(uintptr_t dlg) {
     FrameState& f = g_frame;
@@ -275,6 +291,8 @@ void top_level_drawn(uintptr_t dlg) {
         f.back = false;
         f.menu_prev = f.menu;
         f.menu = false;
+        f.view_prev = f.view;
+        f.view = kViewNone;
         f.menu_s = menu_pct() / 100.0f;
         f.boss_top_prev = f.boss_top;
         f.boss_top = kNoBoss;
@@ -283,6 +301,8 @@ void top_level_drawn(uintptr_t dlg) {
         f.prompt_prev = f.prompt;
         f.prompt = false;
         g_mouse_s = f.menu_prev ? f.menu_s : 1.0f;
+        g_mouse_ax = view_rule(f.view_prev)->ax;
+        g_mouse_ay = view_rule(f.view_prev)->ay;
         break;
     }
     if (f.n < 32) f.seen[f.n++] = dlg;
@@ -294,13 +314,14 @@ void top_level_drawn(uintptr_t dlg) {
 // options 'R01', the brightness 'T07', their submenus), the bonfire's and the shops' screens (Level Up 'C01', Attune
 // Magic 'C05', the Bottomless Box 'C07', Repair 'S01', ...), the icon layers drawn with them (before or after);
 // plus the talk group 'F04' (the bonfire's and the characters' lists of choices 'F04-01', what a character says
-// 'F04-00'), the one field layer that is a menu; and the button guide and help line 'R04' (drawn first in the frame,
-// so with a menu up in the last one). Seen 2026-11-17: in the field the frame ends 'R11' 'F03' 'F05' 'F22' 'R06'; the
-// bonfire's screens come before 'F03' (Attune Magic, the box) or after it (Level Up, Repair).
+// 'F04-00') and the message box with its OK ('F22', FrpgMenuDlgRecall: "X has died"), the field layers that are
+// menus; and the button guide and help line 'R04' (drawn first in the frame, so with a menu up in the last one). Seen
+// 2026-11-17: in the field the frame ends 'R11' 'F03' 'F05' 'F22' 'R06'; the bonfire's screens come before 'F03'
+// (Attune Magic, the box) or after it (Level Up, Repair).
 bool menu_member(const std::wstring& n, const FrameState& f) {
     if (n == L"R04") return f.menu || f.menu_prev;
     if (!f.world || !f.back || n.empty()) return false;
-    if (n.compare(0, 3, L"F04") == 0) return true;
+    if (n.compare(0, 3, L"F04") == 0 || n == L"F22") return true;
     if (n[0] == L'F') return false;
     return n != L"R06" && n != L"R08" && n != L"R11" && n != L"black";
 }
@@ -372,20 +393,32 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
     }
     FrameState& fs = g_frame;
     // A top-level dialog: the frame's bookkeeping, and the in-game menu's screens by their names.
-    static const Rule kMenuRule = {"", kMenu, 640.0f, 360.0f};
-    // What a character says ('F04-00'): a strip of subtitles along the bottom edge, scaled toward it.
-    static const Rule kSubtitleRule = {"", kMenu, 640.0f, 720.0f};
     if (t_depth == 1) {
         top_level_drawn(base);
         if (!rule) {
             const std::wstring name = dialog_name(base);
             if (menu_member(name, fs)) {
-                rule = name == L"F04-00" ? &kSubtitleRule : &kMenuRule;
-                // A menu is up while one of its dialogs is shown (the button guide and the icon layers only go with
-                // one): the button guide next frame and the mouse follow it.
                 uint32_t vis = 0;
                 read32(base + 0x98, &vis);
-                if ((vis & 0xFF) && name != L"R04" && name != L"Icon") fs.menu = true;
+                const bool shown = (vis & 0xFF) != 0;
+                if (name == L"F04-00") {
+                    rule = &kSubtitleRule;
+                } else if (name.compare(0, 3, L"F04") == 0) {
+                    rule = &kTalkRule;
+                    if (shown && fs.view < kViewTalk) fs.view = kViewTalk;
+                } else if (name == L"R00") {
+                    // On its own toward its corner; with a screen open (drawn after it: the last frame's) as the screen.
+                    rule = fs.view_prev == kViewScreen ? &kMenuRule : &kStartRule;
+                    if (shown && fs.view < kViewStart) fs.view = kViewStart;
+                } else if (name == L"R04" || name == L"Icon") {
+                    rule = view_rule(fs.view != kViewNone ? fs.view : fs.view_prev);
+                } else {
+                    rule = &kMenuRule;
+                    if (shown) fs.view = kViewScreen;
+                }
+                // A menu is up while one of its dialogs is shown (the button guide and the icon layers only go with
+                // one; a character's line is not one to point at): the button guide next frame and the mouse follow.
+                if (shown && name != L"R04" && name != L"Icon" && name != L"F04-00") fs.menu = true;
             }
             if (name == L"F20") fs.world = true;
             if (name == L"R11") fs.back = true;
@@ -422,11 +455,19 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
     // Inside a scaled dialog: one without a rule of its own goes with it (or keeps the game's size inside a container).
     if (!rule && (!outer.on || !outer.container)) return draw(dlg, dc);
     int pct = 100;
-    if (rule) pct = rule->kind == kMark ? g_world_pct.load() : rule->kind == kMenu ? menu_pct() : g_scale_pct.load();
+    if (rule) {
+        pct = rule->kind == kMark       ? g_world_pct.load()
+              : rule->kind == kMenu     ? menu_pct()
+              : rule->kind == kMenuText ? 100
+                                        : g_scale_pct.load();
+    }
     if (pct < 25 || pct > 200) pct = 100;
     // A dialog inside a container without a rule of its own keeps the game's size, its letters too; a menu's letters
     // go with the menu.
-    const float ts = !rule ? 1.0f : rule->kind == kMenu ? pct / 100.0f : text_scale_for(pct / 100.0f);
+    const float ts = !rule                      ? 1.0f
+                     : rule->kind == kMenu      ? pct / 100.0f
+                     : rule->kind == kMenuText ? menu_pct() / 100.0f
+                                                : text_scale_for(pct / 100.0f);
     if (!outer.on && pct == 100 && ts == 1.0f && lift == 0.0f) return draw(dlg, dc);
     Active a;
     a.on = true;
@@ -635,13 +676,13 @@ void __cdecl cursor_after(uintptr_t st, uint32_t read) {
     auto* p = reinterpret_cast<int32_t*>(st);
     const int x = p[0x20 / 4], y = p[0x24 / 4];
     const int px = g_raw_valid ? g_raw_x : x, py = g_raw_valid ? g_raw_y : y;
-    const float s = g_mouse_s;
+    const float s = g_mouse_s, ax = g_mouse_ax, ay = g_mouse_ay;
     if (s != 1.0f || g_mouse_applied != 1.0f) {
         const auto back = [s](int v, float c) { return static_cast<int32_t>(std::floor(c + (v - c) / s + 0.5f)); };
-        p[0x20 / 4] = back(x, 640.0f);
-        p[0x24 / 4] = back(y, 360.0f);
-        p[0x28 / 4] = back(px, 640.0f);
-        p[0x2C / 4] = back(py, 360.0f);
+        p[0x20 / 4] = back(x, ax);
+        p[0x24 / 4] = back(y, ay);
+        p[0x28 / 4] = back(px, ax);
+        p[0x2C / 4] = back(py, ay);
         *reinterpret_cast<uint8_t*>(st + 0x38) = (x != px || y != py) ? 1 : 0;
     }
     g_mouse_applied = s;
