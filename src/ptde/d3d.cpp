@@ -326,8 +326,11 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         // UIScale and UIScaleWorld at the menus' source (menuscale.cpp: each dialog of the HUD scaled by the game's
         // own transform); the layout's draws are then refit for FixAspectUI only. Its position rules are the fallback
         // where the menus' code is not as this build's.
-        const bool at_source = (ui_scale != 100 || world_scale != 100) && menuscale_install();
-        if (at_source) menuscale_set(ui_scale, world_scale);
+        // UIScaleText: the letters of the HUD's texts with their part (auto, 0) or at a size of their own.
+        const int text_scale = dsfix_yields() ? 0 : settings().ui_scale_text;
+        const bool text_own = text_scale >= 25 && text_scale <= 200 && text_scale != 100;
+        const bool at_source = (ui_scale != 100 || world_scale != 100 || text_own) && menuscale_install();
+        if (at_source) menuscale_set(ui_scale, world_scale, text_scale);
         layout_configure(settings().fix_aspect_ui, at_source ? 100 : ui_scale);
         layout_set_world_scale(at_source ? 100 : world_scale);
         if ((settings().fix_aspect_ui && aspect_is_active()) || (!at_source && (ui_scale < 100 || world_scale < 100))) {

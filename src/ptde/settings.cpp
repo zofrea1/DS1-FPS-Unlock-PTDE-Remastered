@@ -228,6 +228,12 @@ Settings settings_load(const wchar_t* dll_path) {
             s.ui_scale = std::atoi(val.c_str());
         } else if (key == "uiscaleworld") {
             s.ui_scale_world = std::atoi(val.c_str());
+        } else if (key == "uiscaletext") {
+            // auto (or true): each text at its part's size; false (or game): the game's size; else a percent.
+            const std::string v = lower(trim(val));
+            s.ui_scale_text = (v == "auto" || v == "true" || v == "on" || v == "yes") ? 0
+                              : (v == "false" || v == "off" || v == "no" || v == "game") ? 100
+                                                                                           : std::atoi(val.c_str());
         } else if (key == "shadowbias") {
             s.shadow_bias = static_cast<float>(std::atof(val.c_str()));
         } else if (key == "anisotropicfiltering") {
@@ -442,6 +448,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"borderlessfullscreen", "false"},
                 // The screen's shape and the HUD.
                 {"fixaspect", "false"}, {"fixaspectui", "false"}, {"uiscale", "100"}, {"uiscaleworld", "100"},
+                {"uiscaletext", "auto"},
                 // Direct3D-level and render-code speed-ups.
                 {"asyncreadback", "false"}, {"filtersamplerstates", "false"}, {"filtershaderconstants", "false"},
                 {"skipunusedreflection", "false"}, {"reusesurfaces", "false"}, {"preloadtextures", "false"},

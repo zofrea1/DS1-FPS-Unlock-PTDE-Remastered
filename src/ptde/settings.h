@@ -109,6 +109,8 @@ struct Settings {
     bool fix_aspect_ui = true;
     // The HUD's corner groups at this size, percent (50..100).
     int ui_scale = 100;
+    // UIScaleText: the letters of the HUD's texts (and the marks') at 0 their part's size (auto), else this percent.
+    int ui_scale_text = 0;
     // The shadow map's side: 2048 (the game's), 4096 or 8192 (shadowbias.h).
     int shadow_map_resolution = 4096;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).

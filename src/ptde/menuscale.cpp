@@ -37,6 +37,16 @@
 // for a mark over something in the world), so everything in it (its images, its texts, its child dialogs) is placed
 // smaller by the game's own arithmetic, and the context's transform is set back to the true parent after it. Which
 // dialog a piece belongs to is the game's own answer, wherever it lies on the screen and whatever overlaps it.
+//
+// Text (UIScaleText): the transform places a text's box, not the size of its letters. A text is written through
+// NS_FRPG::FrpgMenuFontPrinter (vtable 0x11D05BC): slot 0x04 (0xFA6700) begins a run in one of the game's 13 font
+// sizes (a "begin text" command, 0xF4B150, which sets the text renderer's letter scale from the table at 0x12E3BA8:
+// 10/24 to 36/24 of the font's 24 units, and the line height = that scale * 24), slot 0x34 (0xFA6630) sets the line
+// height (command 0xF4A630), slot 0x0C (0xFA6AC0) writes a text into a box (placed through the transform). The
+// renderer's state ([[buffer+0x20]+0x38] when played back): +0x5C, +0x60 the letter scale x, y; +0x6C the font's
+// units (24); +0xB8 the line height; written under its lock (+0xC4, slots 0x08 lock(-1) and 0x10 unlock). In a scaled
+// dialog a command of ours follows each begin (and each line height) and multiplies those by the text's scale, so the
+// letters, the button icons inside a text and the lines' spacing shrink with the box they are written in.
 
 namespace {
 
@@ -50,6 +60,9 @@ constexpr uintptr_t kDraw = 0x00786560, kDrawAlt = 0x00787720;
 // a trampoline), drawn with the context's transform as its parent set it.
 constexpr uintptr_t kPieceDraw = 0x00788D80;
 constexpr size_t kPieceDrawMoved = 7;
+constexpr uintptr_t kPrinterVtable = 0x011D05BC;  // NS_FRPG::FrpgMenuFontPrinter
+constexpr int kSlotPrinterBegin = 0x04 / 4;       // 0xFA6700: begin a run of text in a font size (0..12)
+constexpr int kSlotPrinterLine = 0x34 / 4;        // 0xFA6630: the line height (a short)
 constexpr uintptr_t kTextLo = 0x00401000, kTextHi = 0x010CBE00;
 constexpr uintptr_t kRdataLo = 0x010CC000, kRdataHi = 0x012A9600;
 constexpr uintptr_t kDataLo = 0x012AA000, kDataHi = 0x014118BC;
@@ -60,9 +73,12 @@ using SetTransformFn = void*(__thiscall*)(void*, const float*);
 using GetTransformFn = float*(__thiscall*)(void*, float*);
 using SetClipFn = void*(__thiscall*)(void*, const float*);
 using DrawFn = void*(__thiscall*)(void*, void*);
+using PrinterFn = uint32_t(__thiscall*)(void*, uint32_t);
 SetTransformFn o_set_transform = nullptr;
 GetTransformFn o_get_transform = nullptr;
 SetClipFn o_set_clip = nullptr;
+PrinterFn o_printer_begin = nullptr;
+PrinterFn o_printer_line = nullptr;
 
 std::atomic<int> g_probe{0};
 std::atomic<int> g_probe_dialogs{0};
@@ -171,18 +187,26 @@ const ClassInfo& info_of(uintptr_t dlg) {
 
 std::atomic<int> g_scale_pct{100};
 std::atomic<int> g_world_pct{100};
+std::atomic<int> g_text_pct{0};  // UIScaleText: 0 = each text at its dialog's scale, else percent of the game's size
 
 // A dialog being drawn smaller (or a dialog inside one drawn at another scale): `s`, `ax`, `ay` its scale about its
 // anchor on the screen (its clipping rectangles are mapped so); `a`, `bx`, `by` the change its first read of the
 // transform (its parent) gets: x * a + bx, y * a + by (the scale itself, or the scale of the dialog around it undone
-// and then its own).
+// and then its own); `ts` the size of the letters of a text written in it.
 struct Active {
     bool on = false;
     bool pending = false;
     bool container = false;
     float s = 1.0f, ax = 0.0f, ay = 0.0f;
     float a = 1.0f, bx = 0.0f, by = 0.0f;
+    float ts = 1.0f;
 };
+
+// The size of the letters in a dialog drawn at `s` (UIScaleText): its own scale, or the setting's.
+float text_scale_for(float s) {
+    const int pct = g_text_pct.load(std::memory_order_relaxed);
+    return pct >= 25 && pct <= 200 ? pct / 100.0f : s;
+}
 thread_local Active t_active;
 thread_local int t_depth = 0;                 // dialogs being drawn (nesting)
 thread_local const char* t_parent = nullptr;  // the class of the dialog drawing this one (probe)
@@ -229,12 +253,15 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
     int pct = 100;
     if (rule) pct = rule->kind == kMark ? g_world_pct.load() : g_scale_pct.load();
     if (pct < 25 || pct > 200) pct = 100;
-    if (!outer.on && pct == 100) return draw(dlg, dc);
+    // A dialog inside a container without a rule of its own keeps the game's size, its letters too.
+    const float ts = rule ? text_scale_for(pct / 100.0f) : 1.0f;
+    if (!outer.on && pct == 100 && ts == 1.0f) return draw(dlg, dc);
     Active a;
     a.on = true;
     a.pending = true;
     a.container = rule && rule->container;
     a.s = pct / 100.0f;
+    a.ts = ts;
     if (rule && rule->kind == kMark) {
         float r[4] = {};
         read_bytes(base + 0x78, r, sizeof(r));
@@ -329,6 +356,7 @@ void* __fastcall hk_piece_draw(void* piece, void*, void* dc) {
     Active a = outer;
     a.container = false;
     a.s = rule->keep ? 1.0f : outer.s;
+    a.ts = rule->keep ? 1.0f : outer.ts;
     a.ax = rule->ax;
     a.ay = rule->ay;
     const float k = a.s / outer.s;
@@ -345,6 +373,70 @@ void* __fastcall hk_piece_draw(void* piece, void*, void* dc) {
     t_active = outer;
     o_set_transform(dc, placed);
     return ret;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The letters' size (UIScaleText). Our command in the menus' command buffer (the context's +0x24: +0x14 the write
+// (and, played back, read) position, +0x18 + +0x1C its end; each command the address of its function, 4-aligned,
+// then its arguments, played back as fn(ecx = the buffer)): the text renderer's letter scale and line height times
+// `ts` (what & 1: the letters and the line height, after a begin; what & 2: the line height alone, after the game set
+// it).
+enum : uint32_t { kTextLetters = 1, kTextLine = 2 };
+
+void __fastcall cmd_text_scale(uintptr_t buf) {
+    auto* pos = reinterpret_cast<uint32_t*>(buf + 0x14);
+    const uint32_t at = (*pos + 3) & ~3u;
+    const uint32_t what = *reinterpret_cast<const uint32_t*>(at);
+    const float ts = *reinterpret_cast<const float*>(at + 4);
+    *pos = at + 8;
+    const uintptr_t st = *reinterpret_cast<const uintptr_t*>(*reinterpret_cast<const uintptr_t*>(buf + 0x20) + 0x38);
+    void* lock = *reinterpret_cast<void* const*>(st + 0xC4);
+    void* const* lvt = *reinterpret_cast<void* const* const*>(lock);
+    reinterpret_cast<void(__thiscall*)(void*, int)>(lvt[2])(lock, -1);
+    auto* f = reinterpret_cast<float*>(st);
+    if (what & kTextLetters) {
+        f[0x5C / 4] *= ts;
+        f[0x60 / 4] *= ts;
+    }
+    f[0xB8 / 4] *= ts;
+    reinterpret_cast<void(__thiscall*)(void*)>(lvt[4])(lock);
+}
+
+void record_text_scale(void* printer, uint32_t what, float ts) {
+    const uintptr_t dc = *reinterpret_cast<const uintptr_t*>(static_cast<const char*>(printer) + 4);
+    const uintptr_t buf = dc ? *reinterpret_cast<const uintptr_t*>(dc + 0x24) : 0;
+    if (!buf) return;
+    auto* pos = reinterpret_cast<uint32_t*>(buf + 0x14);
+    const uint32_t end = *reinterpret_cast<const uint32_t*>(buf + 0x18) + *reinterpret_cast<const uint32_t*>(buf + 0x1C);
+    const uint32_t at = (*pos + 3) & ~3u;
+    if (at + 12 >= end) return;  // no room: the text keeps the game's size (the game's own next command fails anyway)
+    *reinterpret_cast<uint32_t*>(at) = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&cmd_text_scale));
+    *reinterpret_cast<uint32_t*>(at + 4) = what;
+    *reinterpret_cast<float*>(at + 8) = ts;
+    *pos = at + 12;
+}
+
+std::atomic<int> g_probe_text{0};
+
+uint32_t __fastcall hk_printer_begin(void* printer, void*, uint32_t font) {
+    const uint32_t r = o_printer_begin(printer, font);
+    if (t_active.on && t_active.ts != 1.0f) record_text_scale(printer, kTextLetters | kTextLine, t_active.ts);
+    if (g_probe_text.load(std::memory_order_relaxed) > 0 && g_probe_text.fetch_sub(1) > 0) {
+        LOG_INFO("menuprobe text: font size %u in %s, letters at %.2f (dialog at %.2f) from %p", font,
+                 t_parent ? t_parent : "-", t_active.on ? t_active.ts : 1.0f, t_active.on ? t_active.s : 1.0f,
+                 _ReturnAddress());
+    }
+    return r;
+}
+
+uint32_t __fastcall hk_printer_line(void* printer, void*, uint32_t height) {
+    const uint32_t r = o_printer_line(printer, height);
+    if (t_active.on && t_active.ts != 1.0f) record_text_scale(printer, kTextLine, t_active.ts);
+    if (g_probe_text.load(std::memory_order_relaxed) > 0 && g_probe_text.fetch_sub(1) > 0) {
+        LOG_INFO("menuprobe text: line height %d in %s from %p", static_cast<int16_t>(height & 0xFFFF),
+                 t_parent ? t_parent : "-", _ReturnAddress());
+    }
+    return r;
 }
 
 bool make_piece_trampoline() {
@@ -415,23 +507,53 @@ bool menuscale_install() {
                   write_jmp(kDrawThunk, reinterpret_cast<const void*>(&hk_dialog_draw)) && make_piece_trampoline() &&
                   write_jmp(kPieceDraw, reinterpret_cast<const void*>(&hk_piece_draw));
     LOG_INFO("MenuScale: menu hooks %s", g_installed ? "installed" : "FAILED");
+    // The letters (UIScaleText): the font printer's begin and line height, and the text renderer's state as found
+    // (the begin command 0xF4B150 reading the size table 0x12E3BA8 into +0x5C/+0x60 of the state, written through
+    // the state at esi = state + 0x24: `mov [esi+0x38], eax; mov [esi+0x3C], ecx`).
+    static const uint8_t kBeginCmd[] = {0x89, 0x46, 0x38, 0x89, 0x4E, 0x3C};
+    static const uint8_t kLineCmd[] = {0xF3, 0x0F, 0x11, 0x86, 0x94, 0x00, 0x00, 0x00};
+    uint32_t pb = 0, pl = 0;
+    if (g_installed && read32(kPrinterVtable + 4 * kSlotPrinterBegin, &pb) && pb == 0x00FA6700 &&
+        read32(kPrinterVtable + 4 * kSlotPrinterLine, &pl) && pl == 0x00FA6630 &&
+        std::memcmp(reinterpret_cast<const void*>(0x00F4B308), kBeginCmd, sizeof(kBeginCmd)) == 0 &&
+        std::memcmp(reinterpret_cast<const void*>(0x00F4A679), kLineCmd, sizeof(kLineCmd)) == 0) {
+        o_printer_begin = reinterpret_cast<PrinterFn>(
+            patch_vtable(kPrinterVtable, kSlotPrinterBegin, reinterpret_cast<void*>(&hk_printer_begin)));
+        o_printer_line = reinterpret_cast<PrinterFn>(
+            patch_vtable(kPrinterVtable, kSlotPrinterLine, reinterpret_cast<void*>(&hk_printer_line)));
+    }
+    if (g_installed && (!o_printer_begin || !o_printer_line)) {
+        LOG_ERROR("MenuScale: the font printer is not what it is in this build (%08X %08X); the HUD's letters keep "
+                  "the game's size", pb, pl);
+    }
     return g_installed;
 }
 
 bool menuscale_installed() { return g_installed; }
 
-void menuscale_set(int ui_scale, int ui_scale_world) {
+void menuscale_set(int ui_scale, int ui_scale_world, int ui_scale_text) {
     if (ui_scale >= 0) g_scale_pct.store(ui_scale);
     if (ui_scale_world >= 0) g_world_pct.store(ui_scale_world);
+    if (ui_scale_text >= 0) g_text_pct.store(ui_scale_text);
     ui_scale = g_scale_pct.load();
     ui_scale_world = g_world_pct.load();
-    LOG_INFO("UIScale: the HUD's dialogs are drawn at %d%% (the marks over things in the world at %d%%) by the game's "
-             "own placement: each dialog toward its corner or edge, whatever overlaps it; the menus keep their size",
-             ui_scale, ui_scale_world);
+    ui_scale_text = g_text_pct.load();
+    char text[96];
+    if (!o_printer_begin) {
+        std::snprintf(text, sizeof(text), "their letters at the game's size (no font printer hooks)");
+    } else if (ui_scale_text >= 25 && ui_scale_text <= 200) {
+        std::snprintf(text, sizeof(text), "their letters at %d%% (UIScaleText)", ui_scale_text);
+    } else {
+        std::snprintf(text, sizeof(text), "their letters with them");
+    }
+    LOG_INFO("UIScale: the HUD's dialogs are drawn at %d%% (the marks over things in the world at %d%%), %s, by the "
+             "game's own placement: each dialog toward its corner or edge, whatever overlaps it; the menus keep their "
+             "size", ui_scale, ui_scale_world, text);
 }
 
 void menuscale_probe(int n) { g_probe.store(n); }
 void menuscale_probe_dialogs(int n) {
     g_probe_dialogs.store(n);
     g_probe_pieces.store(n);
+    g_probe_text.store(n);
 }

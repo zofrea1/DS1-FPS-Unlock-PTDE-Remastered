@@ -2385,9 +2385,15 @@ void run(const std::string& line) {
         menuscale_probe_dialogs(t.size() > 1 ? static_cast<int>(num(1, 200)) : 200);
         out("menudlg");
     } else if (c == "menuscale" && t.size() > 1) {
-        // menuscale PCT [WORLD]: UIScale (and UIScaleWorld) at the menus' source for this session.
-        menuscale_set(static_cast<int>(num(1, 100)), static_cast<int>(num(2, num(1, 100))));
-        out("menuscale %ld %ld", num(1, 100), num(2, num(1, 100)));
+        // menuscale PCT [WORLD [TEXT]]: UIScale (and UIScaleWorld, UIScaleText: 0 = with each part) at the menus'
+        // source for this session.
+        menuscale_set(static_cast<int>(num(1, 100)), static_cast<int>(num(2, num(1, 100))),
+                      t.size() > 3 ? static_cast<int>(num(3, 0)) : -1);
+        out("menuscale %ld %ld %ld", num(1, 100), num(2, num(1, 100)), t.size() > 3 ? num(3, 0) : -1L);
+    } else if (c == "uiscaletext" && t.size() > 1) {
+        // uiscaletext N: the HUD's letters at N percent of the game's size (0 = with each part) for this session.
+        menuscale_set(-1, -1, static_cast<int>(num(1, 0)));
+        out("uiscaletext %ld", num(1, 0));
     } else if (c == "uidump") {
         // uidump [N]: the next N (default 300) draws of the HUD and menu layout in the log, with the game code that
         // drew them (needs UIScale below 100 or FixAspectUI active).
