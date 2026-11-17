@@ -4,6 +4,7 @@
 #include "atoc.h"
 #include "shadowbias.h"
 #include "layout.h"
+#include "menuscale.h"
 #include "passcull.h"
 #include "d3dperf.h"
 #include "surfpool.h"
@@ -321,9 +322,15 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         }
         // YieldToDSFix: DSfix's HUD mod (enableHudMod, hudScaleFactor) decides the HUD's size.
         const int ui_scale = dsfix_yields() ? 100 : settings().ui_scale;
-        layout_configure(settings().fix_aspect_ui, ui_scale);
-        layout_set_world_scale(settings().ui_scale_world);
-        if ((settings().fix_aspect_ui && aspect_is_active()) || ui_scale < 100 || settings().ui_scale_world < 100) {
+        const int world_scale = settings().ui_scale_world;
+        // UIScale and UIScaleWorld at the menus' source (menuscale.cpp: each dialog of the HUD scaled by the game's
+        // own transform); the layout's draws are then refit for FixAspectUI only. Its position rules are the fallback
+        // where the menus' code is not as this build's.
+        const bool at_source = (ui_scale != 100 || world_scale != 100) && menuscale_install();
+        if (at_source) menuscale_set(ui_scale, world_scale);
+        layout_configure(settings().fix_aspect_ui, at_source ? 100 : ui_scale);
+        layout_set_world_scale(at_source ? 100 : world_scale);
+        if ((settings().fix_aspect_ui && aspect_is_active()) || (!at_source && (ui_scale < 100 || world_scale < 100))) {
             layout_hook_device(*out, !resolution_is_active());
         }
         if (resolution_is_active() || (settings().fix_aspect_ui && aspect_is_active())) layout_patch_scissor_sites();

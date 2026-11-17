@@ -25,6 +25,7 @@
 #include "shadowbias.h"
 #include "dsfix.h"
 #include "resolution.h"
+#include "menuscale.h"
 #include "script.h"
 #include "sfx.h"
 #include "slidecontact.h"
@@ -653,6 +654,7 @@ bool frame_install(const Settings& settings) {
         remote_set_shader_dumps(settings.remote_shader_dumps);
         remote_set_device_hooks(settings.remote_device_hooks);
         remote_start();
+        menuscale_install();
     }
     return true;
 }

@@ -11,6 +11,7 @@
 #include "atoc.h"
 #include "shadowbias.h"
 #include "layout.h"
+#include "menuscale.h"
 #include "eventwaits.h"
 #include "passcull.h"
 #include "surfpool.h"
@@ -2175,15 +2176,36 @@ void run(const std::string& line) {
         eventwaits_set(num(1, 1) != 0);
         out("eventwaits %s", num(1, 1) != 0 ? "fixed" : "the game's own");
     } else if (c == "uiscale" && t.size() > 1) {
-        // uiscale N: the HUD's corner groups at N percent for this session (needs UIScale below 100 or FixAspectUI
-        // active at start for the hooks).
-        layout_set_scale(static_cast<int>(num(1, 100)));
+        // uiscale N: the HUD at N percent for this session (at the menus' source, menuscale.cpp; else the layout's
+        // corner groups, which need UIScale below 100 or FixAspectUI active at start for their hooks).
+        if (menuscale_installed()) {
+            menuscale_set(static_cast<int>(num(1, 100)), -1);
+        } else {
+            layout_set_scale(static_cast<int>(num(1, 100)));
+        }
         out("uiscale %ld", num(1, 100));
     } else if (c == "uiscaleworld" && t.size() > 1) {
-        // uiscaleworld N: the marks over things in the world at N percent for this session (needs the layout hooks:
-        // UIScale or UIScaleWorld below 100, or FixAspectUI active, at start).
-        layout_set_world_scale(static_cast<int>(num(1, 100)));
+        // uiscaleworld N: the marks over things in the world at N percent for this session (at the menus' source; else
+        // the layout's, which needs its hooks: UIScale or UIScaleWorld below 100, or FixAspectUI active, at start).
+        if (menuscale_installed()) {
+            menuscale_set(-1, static_cast<int>(num(1, 100)));
+        } else {
+            layout_set_world_scale(static_cast<int>(num(1, 100)));
+        }
         out("uiscaleworld %ld", num(1, 100));
+    } else if (c == "menuprobe") {
+        // menuprobe [N]: the next N (default 400) calls of the menu context's transform and clipping methods in the
+        // log, with the classes of the objects on the stack (menuscale.cpp).
+        menuscale_probe(t.size() > 1 ? static_cast<int>(num(1, 400)) : 400);
+        out("menuprobe");
+    } else if (c == "menudlg") {
+        // menudlg [N]: the next N (default 200) dialog draws in the log: class, current and file rectangles.
+        menuscale_probe_dialogs(t.size() > 1 ? static_cast<int>(num(1, 200)) : 200);
+        out("menudlg");
+    } else if (c == "menuscale" && t.size() > 1) {
+        // menuscale PCT [WORLD]: UIScale (and UIScaleWorld) at the menus' source for this session.
+        menuscale_set(static_cast<int>(num(1, 100)), static_cast<int>(num(2, num(1, 100))));
+        out("menuscale %ld %ld", num(1, 100), num(2, num(1, 100)));
     } else if (c == "uidump") {
         // uidump [N]: the next N (default 300) draws of the HUD and menu layout in the log, with the game code that
         // drew them (needs UIScale below 100 or FixAspectUI active).

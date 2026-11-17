@@ -30,6 +30,7 @@ src\ptde\remote.cpp
 src\ptde\resolution.cpp
 src\ptde\atoc.cpp
 src\ptde\layout.cpp
+src\ptde\menuscale.cpp
 src\ptde\scanwatch.cpp
 src\ptde\shadowbias.cpp
 src\ptde\trace.cpp
