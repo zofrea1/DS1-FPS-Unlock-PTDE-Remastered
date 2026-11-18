@@ -588,10 +588,19 @@ bool frame_install(const Settings& settings) {
             resolution_set_dof_resolution(settings.dof_resolution != 0 ? 100 : 0, settings.dof_resolution == 2);
             resolution_set_effects(settings.effects_resolution);
             resolution_set_water(settings.water_resolution);
-            // DSfix's own post-processing expects the game's 8-bit scene.
-            resolution_set_high_precision_color(dsfix_loaded() ? 0 : settings.high_precision_color);
-            if (settings.high_precision_color && dsfix_loaded()) {
-                LOG_INFO("HighPrecisionColor: off while DSfix is loaded (its post-processing expects the 8-bit scene)");
+            // Beside DSfix: kept unless DSfix's SMAA runs on this scene. Its last pass reads the scene with sRGB
+            // decoding (DSfix's SMAA.fx: SRGBTexture true, SRGBWriteEnable true), which a 10-bit or float target does
+            // not have, so the gamma went on twice: Firelink at 1600x900 (2026-11-17, DSfix 3.0) 2.3 times as bright,
+            // washed out. DSfix's FXAA and SSAO on the 10-bit scene, and DSfix at another size (its effects then never
+            // find the scene: they check its size), gave the same picture as the 8-bit scene.
+            const bool dsfix_smaa = dsfix_smaa_on_scene(rw, rh);
+            resolution_set_high_precision_color(dsfix_smaa ? 0 : settings.high_precision_color);
+            if (settings.high_precision_color && dsfix_smaa) {
+                LOG_INFO("HighPrecisionColor: off beside DSfix's SMAA, which runs on this mod's %dx%d scene (DSfix.ini "
+                         "renderWidth x renderHeight is the same size): it needs the 8-bit scene's sRGB reads. DSfix's "
+                         "FXAA, or another DSfix size, keeps it on", rw, rh);
+            } else if (settings.high_precision_color && dsfix_loaded()) {
+                LOG_INFO("HighPrecisionColor: on beside DSfix (its SMAA does not run on this mod's scene)");
             }
             if (resolution_install(rw, rh, settings.render_scale_post) && dsfix_loaded()) {
                 resolution_bypass_dsfix(!settings.render_scale_post);

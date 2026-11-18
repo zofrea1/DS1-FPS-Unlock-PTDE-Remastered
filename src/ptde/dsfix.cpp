@@ -56,6 +56,12 @@ void dsfix_render_size(int* width, int* height) {
 }
 
 int dsfix_dof_override() { return dsfix_loaded() ? g_last.dof_override : 0; }
+bool dsfix_smaa_on_scene(int width, int height) {
+    if (!dsfix_loaded() || g_last.aa_quality <= 0 || !g_last.aa_smaa) return false;
+    // DSfix makes 1024x720 textures its render size and 1280x720 ones its present size: the scene then has its size.
+    return (width == g_last.render_width && height == g_last.render_height) || (width == 1024 && height == 720) ||
+           (width == 1280 && height == 720);
+}
 
 DsfixInfo dsfix_probe_impl(const wchar_t* game_dir);
 
@@ -94,6 +100,10 @@ DsfixInfo dsfix_probe_impl(const wchar_t* game_dir) {
                 info.render_height = std::atoi(value.c_str());
             } else if (key == "dofOverrideResolution") {
                 info.dof_override = std::atoi(value.c_str());
+            } else if (key == "aaQuality") {
+                info.aa_quality = std::atoi(value.c_str());
+            } else if (key == "aaType") {
+                info.aa_smaa = _stricmp(value.c_str(), "FXAA") != 0;
             } else if (key == "skipIntro") {
                 info.skip_intro = std::atoi(value.c_str()) != 0;
             }
