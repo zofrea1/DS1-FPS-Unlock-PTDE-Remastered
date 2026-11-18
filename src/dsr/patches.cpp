@@ -4264,8 +4264,9 @@ bool patch_sfx_distortion() {
 // Swaying effect particles (FixSfxSway) on the native frame grid. The effect library's swaying movements
 // (FXClusterMovement_Yurayura, node type 84, and FXClusterMovement_PartialFollow, type 105) turn every particle by a
 // random angle once a counter passes the node's limit (5 in most effects), and the counter (+0x20) goes up once a
-// frame in the cluster's per-call function (0x140F69750, 0x140F6A280). Remastered kept the original game's limits, so
-// its particles turned twice as often at 60 FPS as at 30, and four times as often again at 240. Before each per-call
+// frame in the cluster's per-call function (0x140F69750, 0x140F6A280). Remastered rebuilt most swaying effects for its
+// 60 FPS (mostly with lower limits), so its own particles turned as made only at 60 FPS, the original game's (the PTDE
+// effects mod) only at 30, and at 240 FPS every particle turned four times as often as at 60. Before each per-call
 // function adds its one, the counter moves by the native frames (1/30 s with SfxSwayPtdeSpeed, else 1/60 s) the
 // frame's step crossed, less one. A small cave at each entry: mov eax, [cell] ; add [rcx+20h], eax ; the moved
 // instructions ; jmp back.

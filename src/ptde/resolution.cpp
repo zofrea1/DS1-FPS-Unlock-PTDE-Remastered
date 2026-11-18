@@ -122,6 +122,7 @@ std::unordered_set<void*> g_copy_shaders;
 std::unordered_set<void*> g_cam_power_shaders, g_cam_blur_shaders;
 volatile LONG g_cam_bound = 0;   // 1 the camera blur's depth pass bound, 2 the blur
 bool g_cam_off = false;          // the blur's weights were all 0 when it was last drawn (render thread)
+bool g_cam_skipped = false;      // this frame's depth pass was skipped (render thread)
 IDirect3DPixelShader9* g_cam_copy_ps = nullptr;
 IDirect3DDevice9* g_cam_copy_dev = nullptr;
 bool g_cam_logged = false;
@@ -183,7 +184,8 @@ bool same_instructions(const DWORD* code, const DWORD* want, size_t n) {
 // c39.x..w (where its depth is behind the centre's), the centre's colour taking the rest. While the camera blur is off
 // (those weights 0: c38 = (1, 0, 0, 0), c39 = 0 at Firelink, 2026-11-17) the result is the centre texel as it is: the
 // depth pass is not needed at all and the blur is a copy. Then the depth pass is skipped (when the blur was off in the
-// frame before: its weights are set after the depth pass is drawn) and the blur drawn with one read (copy_rgb.hlsl).
+// frame before: its weights are set after the depth pass is drawn) and the blur drawn with one read (copy_rgb.hlsl),
+// also in the frame the camera starts moving (its depth was not written: one frame without the blur).
 // Firelink 4K (RemoteControl gputime): the depth pass 0.106 ms, the blur 0.103 ms a frame. RemoteControl
 // `swapoff 0x200` draws them as the game does. Their instructions, comment blocks left out:
 constexpr DWORD kCameraBlurPower[] = {
@@ -1207,10 +1209,11 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     bool bilateral = false;
     int game = -1;
     int swap = -1;
+    LONG cam = 0;
     if (ps) {
         std::lock_guard<std::mutex> lock(g_lock);
         copy = g_copy_shaders.count(ps) != 0;
-        g_cam_bound = g_cam_power_shaders.count(ps) ? 1 : g_cam_blur_shaders.count(ps) ? 2 : 0;
+        cam = g_cam_power_shaders.count(ps) ? 1 : g_cam_blur_shaders.count(ps) ? 2 : 0;
         bilateral = g_bilateral_shaders.count(ps) != 0;
         for (int i = 0; i < kSwapCount && game < 0; ++i) {
             if (g_swap_game[i].count(ps)) game = i;
@@ -1221,6 +1224,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
         }
     }
     g_copy_bound = copy;
+    g_cam_bound = cam;
     g_bilateral_bound = bilateral;
     g_game_bound = game;
     g_swap_bound = swap;
@@ -1949,13 +1953,20 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
         return alpha_hr;
     }
     // The camera blur while it is off (see kCameraBlur).
-    if (g_cam_bound == 1 && g_cam_off && !(g_swap_off_mask & 0x200)) return S_OK;
+    if (g_cam_bound == 1) {
+        g_cam_skipped = g_cam_off && g_cam_copy_ps && g_cam_copy_dev == dev && !(g_swap_off_mask & 0x200);
+        if (g_cam_skipped) return S_OK;
+    }
     if (g_cam_bound == 2) {
         float w[8] = {};
         dev->GetPixelShaderConstantF(38, w, 2);
         g_cam_off = w[1] == 0.0f && w[2] == 0.0f && w[3] == 0.0f && w[4] == 0.0f && w[5] == 0.0f && w[6] == 0.0f &&
                     w[7] == 0.0f;
-        if (g_cam_off && g_cam_copy_ps && g_cam_copy_dev == dev && !(g_swap_off_mask & 0x200)) {
+        // A frame whose depth pass was skipped draws the copy even when the camera starts moving in it: the nine
+        // reads would weigh a depth that was not written this frame.
+        const bool skipped = g_cam_skipped;
+        g_cam_skipped = false;
+        if ((skipped || (g_cam_off && !(g_swap_off_mask & 0x200))) && g_cam_copy_ps && g_cam_copy_dev == dev) {
             IDirect3DPixelShader9* game = nullptr;
             dev->GetPixelShader(&game);
             o_set_ps(dev, g_cam_copy_ps);
