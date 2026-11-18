@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cwchar>
 #include <mutex>
+#include <new>
 #include <string>
 #include <unordered_map>
 
@@ -334,9 +335,30 @@ float text_scale_for(float s) {
     const int pct = g_text_pct.load(std::memory_order_relaxed);
     return pct >= 25 && pct <= 200 ? pct / 100.0f : s;
 }
-thread_local Active t_active;
-thread_local int t_depth = 0;                 // dialogs being drawn (nesting)
-thread_local const char* t_parent = nullptr;  // the class of the dialog drawing this one (probe)
+// Per thread: the scale of the dialog being drawn, how deep the dialogs nest and the class of the one drawing. Kept in
+// a TlsAlloc slot rather than in thread_local variables, so the DLL has no static TLS section (as sfx.cpp).
+struct ThreadState {
+    Active active;
+    int depth = 0;                 // dialogs being drawn (nesting)
+    const char* parent = nullptr;  // the class of the dialog drawing this one (probe)
+};
+DWORD g_tls_slot = TLS_OUT_OF_INDEXES;  // made by menuscale_install before any hook is placed
+
+// This thread's state, made on its first draw; the game's last error is kept (TlsGetValue clears it). Should that
+// allocation fail, the thread shares a spare state, set back to unscaled first.
+ThreadState& thread_state() {
+    const DWORD error = GetLastError();
+    auto* t = static_cast<ThreadState*>(TlsGetValue(g_tls_slot));
+    if (!t) {
+        t = new (std::nothrow) ThreadState();
+        if (t) TlsSetValue(g_tls_slot, t);
+    }
+    SetLastError(error);
+    if (t) return *t;
+    static ThreadState spare;
+    spare = ThreadState();
+    return spare;
+}
 
 // m = m * F, F: x' = x * a + bx, y' = y * a + by in the layout's plane.
 void map_after(float* m, float a, float bx, float by) {
@@ -349,6 +371,7 @@ void map_after(float* m, float a, float bx, float by) {
 }
 
 void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
+    ThreadState& th = thread_state();
     uint32_t alt = 0;
     read32(reinterpret_cast<uintptr_t>(dlg) + 0xA0, &alt);
     const auto draw = reinterpret_cast<DrawFn>(alt ? kDrawAlt : kDraw);
@@ -360,27 +383,28 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
         read32(base + 0x98, &vis);
         LOG_INFO("menuprobe dialog %p %s '%ls' vis %u alt %u cur %.1f,%.1f-%.1f,%.1f file %.1f,%.1f-%.1f,%.1f depth %d "
                  "in %s%s", dlg, info_of(base).name.c_str(), dialog_name(base).c_str(), vis & 0xFF, alt, r[0], r[1],
-                 r[2], r[3], r[4], r[5], r[6], r[7], t_depth, t_parent ? t_parent : "-",
-                 t_active.on ? " (in a scaled dialog)" : "");
+                 r[2], r[3], r[4], r[5], r[6], r[7], th.depth, th.parent ? th.parent : "-",
+                 th.active.on ? " (in a scaled dialog)" : "");
     }
     struct Nest {
+        ThreadState& th;
         const char* saved;
-        Nest(const char* name) : saved(t_parent) {
-            ++t_depth;
-            t_parent = name;
+        Nest(ThreadState& state, const char* name) : th(state), saved(state.parent) {
+            ++th.depth;
+            th.parent = name;
         }
         ~Nest() {
-            --t_depth;
-            t_parent = saved;
+            --th.depth;
+            th.parent = saved;
         }
-    } nest(info_of(base).name.c_str());
+    } nest(th, info_of(base).name.c_str());
     const Rule* rule = info_of(base).rule;
-    const Active outer = t_active;
+    const Active outer = th.active;
     // Inside a scaled menu: a dialog the game parks wholly off its screen (Repair's second cursor at -63,-123) is not
     // drawn, since the menu scaled toward the middle would bring it into view. Its rectangle is in its parent's units,
     // which the context's transform (its parent's, the menu's scale on it) places; the menu's scale is undone for the
     // game's own place.
-    if (outer.on && outer.screen && t_depth > 1) {
+    if (outer.on && outer.screen && th.depth > 1) {
         float r[4] = {};
         float m[16];
         if (read_bytes(base + 0x78, r, sizeof(r))) {
@@ -396,7 +420,7 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
     }
     FrameState& fs = g_frame;
     // A top-level dialog: the frame's bookkeeping, and the in-game menu's screens by their names.
-    if (t_depth == 1) {
+    if (th.depth == 1) {
         top_level_drawn(base);
         if (!rule) {
             const std::wstring name = dialog_name(base);
@@ -502,26 +526,28 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
     a.screen = (rule && rule->kind == kMenu) || (outer.on && outer.screen);
     float parent[16];
     std::memcpy(parent, static_cast<const char*>(dc) + 0x30, sizeof(parent));
-    t_active = a;
+    th.active = a;
     void* ret = draw(dlg, dc);
-    t_active = outer;
+    th.active = outer;
     o_set_transform(dc, parent);  // the context as before the dialog (it set back its scaled parent)
     return ret;
 }
 
 void* __fastcall hk_set_transform(void* dc, void*, const float* m) {
+    ThreadState& th = thread_state();
     if (g_probe.load(std::memory_order_relaxed) > 0 && g_probe.fetch_sub(1) > 0) {
         LOG_INFO("menuprobe set dc %p m %.3f %.3f %.3f %.3f t %.1f %.1f from %p%s", dc, m[0], m[1], m[4], m[5], m[12],
-                 m[13], _ReturnAddress(), t_active.on ? " (scaled dialog)" : "");
+                 m[13], _ReturnAddress(), th.active.on ? " (scaled dialog)" : "");
     }
     return o_set_transform(dc, m);
 }
 
 float* __fastcall hk_get_transform(void* dc, void*, float* out) {
+    ThreadState& th = thread_state();
     float* r = o_get_transform(dc, out);
-    if (t_active.on && t_active.pending && out) {
-        t_active.pending = false;
-        map_after(out, t_active.a, t_active.bx, t_active.by);
+    if (th.active.on && th.active.pending && out) {
+        th.active.pending = false;
+        map_after(out, th.active.a, th.active.bx, th.active.by);
     }
     if (g_probe.load(std::memory_order_relaxed) > 0 && g_probe.fetch_sub(1) > 0) {
         LOG_INFO("menuprobe get dc %p from %p", dc, _ReturnAddress());
@@ -530,13 +556,15 @@ float* __fastcall hk_get_transform(void* dc, void*, float* out) {
 }
 
 void* __fastcall hk_set_clip(void* dc, void*, const float* r) {
+    ThreadState& th = thread_state();
     if (g_probe.load(std::memory_order_relaxed) > 0 && g_probe.fetch_sub(1) > 0) {
         LOG_INFO("menuprobe clip dc %p %.1f,%.1f-%.1f,%.1f from %p%s", dc, r[0], r[1], r[2], r[3], _ReturnAddress(),
-                 t_active.on ? " (scaled dialog)" : "");
+                 th.active.on ? " (scaled dialog)" : "");
     }
-    if (t_active.on && r) {
-        const float s = t_active.s;
-        float q[4] = {r[0] * s + t_active.ox, r[1] * s + t_active.oy, r[2] * s + t_active.ox, r[3] * s + t_active.oy};
+    if (th.active.on && r) {
+        const float s = th.active.s;
+        const float ox = th.active.ox, oy = th.active.oy;
+        float q[4] = {r[0] * s + ox, r[1] * s + oy, r[2] * s + ox, r[3] * s + oy};
         return o_set_clip(dc, q);
     }
     return o_set_clip(dc, r);
@@ -552,29 +580,31 @@ std::wstring piece_name(uintptr_t piece) {
 }
 
 // The rule for a piece of a scaled container, or null (it goes with the container).
-const PieceRule* piece_rule(uintptr_t piece) {
-    if (!t_parent) return nullptr;
+const PieceRule* piece_rule(uintptr_t piece, const char* parent) {
+    if (!parent) return nullptr;
     uint32_t holder = 0, text = 0;
     if (!read32(piece + 0x1C, &holder) || !holder || !read32(holder, &text) || !text) return nullptr;
     wchar_t name[32] = {};
     if (!read_bytes(text, name, sizeof(name) - sizeof(wchar_t))) return nullptr;
     for (const PieceRule& r : kPieceRules) {
-        if (std::strcmp(t_parent, r.dlg) == 0 && std::wcsncmp(name, r.prefix, std::wcslen(r.prefix)) == 0) return &r;
+        if (std::strcmp(parent, r.dlg) == 0 && std::wcsncmp(name, r.prefix, std::wcslen(r.prefix)) == 0) return &r;
     }
     return nullptr;
 }
 
 void* __fastcall hk_piece_draw(void* piece, void*, void* dc) {
-    if (t_active.on && g_probe_pieces.load(std::memory_order_relaxed) > 0 && g_probe_pieces.fetch_sub(1) > 0) {
+    ThreadState& th = thread_state();
+    if (th.active.on && g_probe_pieces.load(std::memory_order_relaxed) > 0 && g_probe_pieces.fetch_sub(1) > 0) {
         const float* m = reinterpret_cast<const float*>(static_cast<const char*>(dc) + 0x30);
         LOG_INFO("menuprobe piece %ls in %s (scope s %.2f%s) at %.1f,%.1f scale %.3f", piece_name(
-                     reinterpret_cast<uintptr_t>(piece)).c_str(), t_parent ? t_parent : "-", t_active.s,
-                 t_active.container ? ", container" : "", m[12], m[13], m[0]);
+                     reinterpret_cast<uintptr_t>(piece)).c_str(), th.parent ? th.parent : "-", th.active.s,
+                 th.active.container ? ", container" : "", m[12], m[13], m[0]);
     }
-    const PieceRule* rule = t_active.on && t_active.container ? piece_rule(reinterpret_cast<uintptr_t>(piece)) : nullptr;
+    const PieceRule* rule =
+        th.active.on && th.active.container ? piece_rule(reinterpret_cast<uintptr_t>(piece), th.parent) : nullptr;
     if (!rule) return g_piece_trampoline(piece, dc);
     // Its place as its container set it carries the container's scale: undone, then the piece's own.
-    const Active outer = t_active;
+    const Active outer = th.active;
     Active a = outer;
     a.container = false;
     a.s = rule->keep ? 1.0f : outer.s;
@@ -592,9 +622,9 @@ void* __fastcall hk_piece_draw(void* piece, void*, void* dc) {
     map_after(m, k, bx, by);
     o_set_transform(dc, m);
     a.pending = false;
-    t_active = a;
+    th.active = a;
     void* ret = g_piece_trampoline(piece, dc);
-    t_active = outer;
+    th.active = outer;
     o_set_transform(dc, placed);
     return ret;
 }
@@ -643,22 +673,24 @@ void record_text_scale(void* printer, uint32_t what, float ts) {
 std::atomic<int> g_probe_text{0};
 
 uint32_t __fastcall hk_printer_begin(void* printer, void*, uint32_t font) {
+    ThreadState& th = thread_state();
     const uint32_t r = o_printer_begin(printer, font);
-    if (t_active.on && t_active.ts != 1.0f) record_text_scale(printer, kTextLetters | kTextLine, t_active.ts);
+    if (th.active.on && th.active.ts != 1.0f) record_text_scale(printer, kTextLetters | kTextLine, th.active.ts);
     if (g_probe_text.load(std::memory_order_relaxed) > 0 && g_probe_text.fetch_sub(1) > 0) {
         LOG_INFO("menuprobe text: font size %u in %s, letters at %.2f (dialog at %.2f) from %p", font,
-                 t_parent ? t_parent : "-", t_active.on ? t_active.ts : 1.0f, t_active.on ? t_active.s : 1.0f,
+                 th.parent ? th.parent : "-", th.active.on ? th.active.ts : 1.0f, th.active.on ? th.active.s : 1.0f,
                  _ReturnAddress());
     }
     return r;
 }
 
 uint32_t __fastcall hk_printer_line(void* printer, void*, uint32_t height) {
+    ThreadState& th = thread_state();
     const uint32_t r = o_printer_line(printer, height);
-    if (t_active.on && t_active.ts != 1.0f) record_text_scale(printer, kTextLine, t_active.ts);
+    if (th.active.on && th.active.ts != 1.0f) record_text_scale(printer, kTextLine, th.active.ts);
     if (g_probe_text.load(std::memory_order_relaxed) > 0 && g_probe_text.fetch_sub(1) > 0) {
         LOG_INFO("menuprobe text: line height %d in %s from %p", static_cast<int16_t>(height & 0xFFFF),
-                 t_parent ? t_parent : "-", _ReturnAddress());
+                 th.parent ? th.parent : "-", _ReturnAddress());
     }
     return r;
 }
@@ -782,6 +814,11 @@ bool g_cursor_ok = true;  // the mouse's place can follow a scaled menu (else th
 
 bool menuscale_install() {
     if (g_installed) return true;
+    if (g_tls_slot == TLS_OUT_OF_INDEXES) g_tls_slot = TlsAlloc();
+    if (g_tls_slot == TLS_OUT_OF_INDEXES) {
+        LOG_ERROR("MenuScale: no thread slot (%lu); UIScale stays off", GetLastError());
+        return false;
+    }
     // This build's code: the context's slots hold the functions found by RE (0xC24420, 0x516340, 0xC23F00), and the
     // dialogs' draw is `cmp dword [ecx+0xA0], 0; jne +5; jmp 0x786560; jmp 0x787720`.
     static const uint8_t kThunk[] = {0x83, 0xB9, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x75, 0x05, 0xE9};
