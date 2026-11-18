@@ -203,6 +203,7 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     surfpool_reset();
     resolution_reset();
     passcull_reset();
+    atoc_reset();
     const HRESULT hr = g_reset(device, pp);
     if (SUCCEEDED(hr) && aspect_is_active()) {
         aspect_hook_device(device);

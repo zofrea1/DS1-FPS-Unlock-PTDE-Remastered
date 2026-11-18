@@ -19,3 +19,5 @@ bool atoc_set_msaa_samples(int samples);
 // format, hooks the draws, or puts the game's format back).
 bool atoc_fix_depth_install(int samples);
 void atoc_fix_depth_check(IDirect3DDevice9* dev);
+// Before a device Reset: our float copy of a depth resolved into an 8-bit texture goes (made again when needed).
+void atoc_reset();

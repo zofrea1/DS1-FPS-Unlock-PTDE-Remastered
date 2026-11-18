@@ -69,6 +69,18 @@ bool g_depth_target = false;
 constexpr UINT kDepthConst = 211;  // the conversion's constants (a def in the converted copy)
 constexpr UINT kEncodeConst = 212, kDecodeConst = 213;  // the depth copy's re-encoding (defs in its copy)
 IDirect3DPixelShader9* g_copy_swap = nullptr;  // the bound shader's re-encoding copy, when it is the depth copy
+// The depth resolved into an 8-bit texture of the game's (see hk_stretch_depth).
+using StretchFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DSurface9*, const RECT*, IDirect3DSurface9*, const RECT*,
+                                   D3DTEXTUREFILTERTYPE);
+using SetTextureFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DBaseTexture9*);
+StretchFn o_stretch = nullptr;
+SetTextureFn o_set_texture = nullptr;
+IDirect3DTexture9* g_alias = nullptr;           // ours: R32F, the size of the last such copy
+IDirect3DSurface9* g_alias_surface = nullptr;   // its level 0
+UINT g_alias_w = 0, g_alias_h = 0;
+IDirect3DBaseTexture9* g_aliased = nullptr;     // the game's 8-bit texture whose depth is in ours (not held)
+IDirect3DSurface9* g_aliased_surface = nullptr; // its level 0 (not held)
+LONG g_alias_copies = 0;
 
 // The copies of a game shader (held, so its address is not reused for another), by kind: 1 the float depth, 2 the
 // sharpened alpha, 3 both, 4 the depth copy re-encoding the float depth. nullptr: not copyable (or, for 4, not the
@@ -475,6 +487,10 @@ void after_draw(IDirect3DDevice9* dev, bool swapped) {
 }
 
 HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt) {
+    if (rt && rt == g_aliased_surface) {  // the game draws into the texture whose depth was in ours
+        g_aliased = nullptr;
+        g_aliased_surface = nullptr;
+    }
     if (index == 0) {
         D3DSURFACE_DESC d{};
         const bool got = rt && SUCCEEDED(rt->GetDesc(&d));
@@ -544,6 +560,70 @@ template <typename Fn>
 void hook(IDirect3DDevice9* dev, int slot, void* ours, Fn& original) {
     void* p = patch_slot(dev, slot, ours);
     if (p && !original) original = reinterpret_cast<Fn>(p);
+}
+
+// FixAntialiasingDepth: the depth resolved into an 8-bit texture. The game resolves the depth (the float target)
+// into T12 for its readers, but where T12 is already taken in that frame it takes another texture of the screen's
+// size from its pool, an 8-bit one: the depth of field's copy did so wherever a water surface in view had read the
+// depth first (2026-11-18, Undead Burg, the invader's view onto a roof with water in it). From the float target the
+// copy into 8 bits kept the depth only to 1/256 (z/w steps 6.4 m, 12.8 m and then infinity at the near plane of
+// 0.05 m), so the depth of field blurred everything past about 13 m behind a hard line. The game's own 8-bit digits
+// survive such a copy, so the game as shipped is right. The copy now also goes into a float texture of ours of that
+// size, which the game's readers get in that texture's place until the game draws into it or copies something else
+// into it: the depth they decode is the one T12 would have held.
+
+void alias_release() {
+    if (g_alias_surface) g_alias_surface->Release();
+    if (g_alias) g_alias->Release();
+    g_alias_surface = nullptr;
+    g_alias = nullptr;
+    g_alias_w = g_alias_h = 0;
+    g_aliased = nullptr;
+    g_aliased_surface = nullptr;
+}
+
+HRESULT WINAPI hk_stretch_depth(IDirect3DDevice9* dev, IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst,
+                                const RECT* dr, D3DTEXTUREFILTERTYPE filter) {
+    if (g_depth_float && src && dst) {
+        if (dst == g_aliased_surface) {  // something else goes into it now
+            g_aliased = nullptr;
+            g_aliased_surface = nullptr;
+        }
+        D3DSURFACE_DESC s{}, d{};
+        if (SUCCEEDED(src->GetDesc(&s)) && s.Format == D3DFMT_R32F && s.Width >= 256 && SUCCEEDED(dst->GetDesc(&d)) &&
+            d.Format != D3DFMT_R32F && d.Width == s.Width && d.Height == s.Height) {
+            IDirect3DTexture9* tex = nullptr;
+            if (SUCCEEDED(dst->GetContainer(__uuidof(IDirect3DTexture9), reinterpret_cast<void**>(&tex))) && tex) {
+                if (!g_alias || g_alias_w != d.Width || g_alias_h != d.Height) {
+                    alias_release();
+                    if (SUCCEEDED(dev->CreateTexture(d.Width, d.Height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F,
+                                                     D3DPOOL_DEFAULT, &g_alias, nullptr)) &&
+                        g_alias && SUCCEEDED(g_alias->GetSurfaceLevel(0, &g_alias_surface))) {
+                        g_alias_w = d.Width;
+                        g_alias_h = d.Height;
+                    } else {
+                        alias_release();
+                    }
+                }
+                if (g_alias_surface && SUCCEEDED(o_stretch(dev, src, sr, g_alias_surface, dr, filter))) {
+                    g_aliased = tex;
+                    g_aliased_surface = dst;
+                    if (InterlockedIncrement(&g_alias_copies) == 1) {
+                        LOG_INFO("FixAntialiasingDepth: the depth was resolved into an 8-bit %ux%u texture (the usual "
+                                 "one was taken in that frame); a float copy is read in its place, so the depth of "
+                                 "field and the effects get the whole depth there too", d.Width, d.Height);
+                    }
+                }
+                tex->Release();
+            }
+        }
+    }
+    return o_stretch(dev, src, sr, dst, dr, filter);
+}
+
+HRESULT WINAPI hk_set_texture_depth(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex) {
+    if (tex && tex == g_aliased && g_alias) return o_set_texture(dev, stage, g_alias);
+    return o_set_texture(dev, stage, tex);
 }
 
 // The game's multisample types by its setting (0x10D38CC: none, 2x, 4x, ...); its Antialiasing option uses entry 1.
@@ -710,6 +790,8 @@ void atoc_fix_depth_check(IDirect3DDevice9* dev) {
     if (fl) {
         g_depth_float = true;
         install_hooks(dev);
+        hook(dev, 34, reinterpret_cast<void*>(&hk_stretch_depth), o_stretch);
+        hook(dev, 65, reinterpret_cast<void*>(&hk_set_texture_depth), o_set_texture);
         LOG_INFO("FixAntialiasingDepth: with the game's anti-aliasing on, the depth the effects and the depth of field "
                  "read is one float per sample (was three 8-bit digits, the same size), so it stays right at the edges "
                  "of grass and leaves (no black specks in a ring around the player)");
@@ -727,4 +809,8 @@ void atoc_fix_depth_check(IDirect3DDevice9* dev) {
     g_depth_fix = false;
     LOG_ERROR("FixAntialiasingDepth: the graphics driver can multisample neither a float nor a 16-bit target here; "
               "the depth stays 8-bit as in the game");
+}
+
+void atoc_reset() {
+    alias_release();
 }
