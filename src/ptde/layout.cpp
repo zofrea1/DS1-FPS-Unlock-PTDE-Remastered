@@ -10,6 +10,7 @@
 #include <d3d9.h>
 
 #include <intrin.h>
+#include <emmintrin.h>
 
 #include <atomic>
 #include <cmath>
@@ -108,6 +109,10 @@ bool g_premapped = false;    // the render thread's: a call site of the game map
 
 SRWLOCK g_lock = SRWLOCK_INIT;
 std::unordered_map<IDirect3DVertexShader9*, uint8_t> g_kinds;
+// hk_set_vs's answer without the lock: shader, the map's generation and its kind in one aligned 8-byte word per slot
+// (as hk_set_ps in resolution.cpp); every change of g_kinds bumps the generation.
+volatile LONG g_vs_gen = 1;
+__declspec(align(64)) uint64_t g_vs_cache[4096];
 
 // The render thread's.
 uint8_t g_bound = kOther;
@@ -268,6 +273,7 @@ HRESULT WINAPI hk_create_vs(IDirect3DDevice9* dev, const DWORD* code, IDirect3DV
         } else {
             g_kinds.erase(*out);
         }
+        InterlockedIncrement(&g_vs_gen);
         ReleaseSRWLockExclusive(&g_lock);
     }
     return hr;
@@ -277,10 +283,21 @@ HRESULT WINAPI hk_set_vs(IDirect3DDevice9* dev, IDirect3DVertexShader9* vs) {
     const HRESULT hr = o_set_vs(dev, vs);
     uint8_t kind = kOther;
     if (vs) {
-        AcquireSRWLockShared(&g_lock);
-        const auto it = g_kinds.find(vs);
-        if (it != g_kinds.end()) kind = it->second;
-        ReleaseSRWLockShared(&g_lock);
+        const uint32_t key = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(vs));
+        uint64_t* slot = &g_vs_cache[(key * 2654435761u) >> 20];
+        const uint16_t gen = static_cast<uint16_t>(g_vs_gen);
+        uint64_t e;  // one 8-byte read (movq)
+        _mm_storel_epi64(reinterpret_cast<__m128i*>(&e), _mm_loadl_epi64(reinterpret_cast<const __m128i*>(slot)));
+        if (static_cast<uint32_t>(e) == key && static_cast<uint16_t>(e >> 32) == gen) {
+            kind = static_cast<uint8_t>(e >> 48);
+        } else {
+            AcquireSRWLockShared(&g_lock);
+            const auto it = g_kinds.find(vs);
+            if (it != g_kinds.end()) kind = it->second;
+            ReleaseSRWLockShared(&g_lock);
+            const uint64_t n = key | (static_cast<uint64_t>(gen) << 32) | (static_cast<uint64_t>(kind) << 48);
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(slot), _mm_loadl_epi64(reinterpret_cast<const __m128i*>(&n)));
+        }
     }
     g_bound = kind;
     if (g_layout) {

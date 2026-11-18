@@ -25,6 +25,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <emmintrin.h>
 #include <d3d9.h>
 
 #include <cstring>
@@ -78,6 +79,11 @@ struct Variants {
 };
 std::mutex g_lock;
 std::unordered_map<IDirect3DPixelShader9*, Variants> g_variants;
+// variant_of's answers without the lock: (shader | kind - 1, variant) in one aligned 8-byte word per slot. An answer
+// never changes once worked out (g_variants keeps a reference to the shader and is never cleared), so a slot's
+// entry stays right until another shader takes the slot. 2026-11-18: variant_of runs on every SetPixelShader while
+// FixAntialiasingDepth is on, and before draws into the depth.
+__declspec(align(64)) uint64_t g_variant_cache[8192];
 LONG g_made = 0, g_refused = 0, g_depth_made = 0, g_depth_refused = 0;
 
 // --- ps_3_0 bytecode -----------------------------------------------------------------------------------------------
@@ -339,7 +345,21 @@ bool depth_copy_encode(const DWORD* code, size_t count, std::vector<DWORD>& out)
 }
 
 // kind: 1 the float depth, 2 the sharpened alpha, 3 both (the float depth's copy, sharpened), 4 the depth copy.
+IDirect3DPixelShader9* variant_slow(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps, int kind);
+
 IDirect3DPixelShader9* variant_of(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps, int kind) {
+    const uint32_t key = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ps)) | static_cast<uint32_t>(kind - 1);
+    uint64_t* slot = &g_variant_cache[(key * 2654435761u) >> 19];
+    uint64_t e;  // one 8-byte read (movq)
+    _mm_storel_epi64(reinterpret_cast<__m128i*>(&e), _mm_loadl_epi64(reinterpret_cast<const __m128i*>(slot)));
+    if (static_cast<uint32_t>(e) == key) return reinterpret_cast<IDirect3DPixelShader9*>(static_cast<uintptr_t>(e >> 32));
+    IDirect3DPixelShader9* made = variant_slow(dev, ps, kind);
+    const uint64_t n = key | (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(made)) << 32);
+    _mm_storel_epi64(reinterpret_cast<__m128i*>(slot), _mm_loadl_epi64(reinterpret_cast<const __m128i*>(&n)));
+    return made;
+}
+
+IDirect3DPixelShader9* variant_slow(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps, int kind) {
     std::lock_guard<std::mutex> lock(g_lock);
     auto it = g_variants.find(ps);
     if (it == g_variants.end()) {

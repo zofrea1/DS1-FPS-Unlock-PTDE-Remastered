@@ -119,13 +119,14 @@ SetTextureFn o_set_texture = nullptr;
 DrawUPFn o_draw_up = nullptr;
 
 std::mutex g_lock;
-// hk_set_ps's answer per shader without the lock: a direct-mapped table of the shader, the sets' generation and its
+// hk_set_ps's answer per shader without the lock: a direct-mapped table (4096 slots) of the shader, the sets' generation and its
 // classification (bit 0 copy, bits 1-2 camera blur pass, bit 3 bilateral, bits 4-6 the game's shader index + 1), one
 // aligned 8-byte word each (read and written whole). Every insert into the sets below bumps the generation, so an entry
 // made before it no longer matches. 2026-11-18, Demon Ruins: the lock and the eight set lookups per SetPixelShader were
 // 0.9% of the render thread.
 volatile LONG g_ps_gen = 1;
-__declspec(align(64)) uint64_t g_ps_cache[256];
+__declspec(align(64)) uint64_t g_ps_cache[4096];
+inline uint32_t shader_slot(uint32_t key) { return (key * 2654435761u) >> 20; }  // 12 bits of a Fibonacci hash
 inline void ps_sets_changed() { InterlockedIncrement(&g_ps_gen); }
 std::unordered_set<void*> g_copy_shaders;
 std::unordered_set<void*> g_cam_power_shaders, g_cam_blur_shaders;
@@ -1226,7 +1227,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     LONG cam = 0;
     if (ps) {
         const uint32_t key = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ps));
-        uint64_t* slot = &g_ps_cache[(key >> 4) & 255];
+        uint64_t* slot = &g_ps_cache[shader_slot(key)];
         const uint16_t gen = static_cast<uint16_t>(g_ps_gen);
         uint64_t e;  // one 8-byte read of the slot (movq), whole even while another thread writes it
         _mm_storel_epi64(reinterpret_cast<__m128i*>(&e), _mm_loadl_epi64(reinterpret_cast<const __m128i*>(slot)));
