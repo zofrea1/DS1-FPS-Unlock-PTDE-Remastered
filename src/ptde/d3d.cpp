@@ -320,21 +320,25 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
                 passcull_hook_device(*out);
             }
         }
-        // YieldToDSFix: DSfix's HUD mod (enableHudMod, hudScaleFactor) decides the HUD's size.
-        const int ui_scale = dsfix_yields() ? 100 : settings().ui_scale;
-        const int world_scale = settings().ui_scale_world;
+        // YieldToDSFix: the HUD and the menus are DSfix's (its HUD mod: hudScale*, menuScale, listWindowScale,
+        // promptScale, subtitleScale). None of ours is placed, so the game draws them as it does without this mod:
+        // DSfix 3.0 finds the HUD's parts, windows, prompts and weapon slots by where and how large the game draws them
+        // (its HUD mod, weaponWearBars), which UIScale, UIScaleWorld, UIScaleMenus and FixBossBarOverlap would move.
+        const bool yield_hud = dsfix_yields();
+        const int ui_scale = yield_hud ? 100 : settings().ui_scale;
+        const int world_scale = yield_hud ? 100 : settings().ui_scale_world;
         // UIScale and UIScaleWorld at the menus' source (menuscale.cpp: each dialog of the HUD scaled by the game's
         // own transform); the layout's draws are then refit for FixAspectUI only. Its position rules are the fallback
         // where the menus' code is not as this build's.
         // UIScaleText: the letters of the HUD's texts with their part (auto, 0) or at a size of their own.
-        const int text_scale = dsfix_yields() ? 0 : settings().ui_scale_text;
+        const int text_scale = yield_hud ? 0 : settings().ui_scale_text;
         const bool text_own = text_scale >= 25 && text_scale <= 200 && text_scale != 100;
         // UIScaleMenus: the in-game menu's screens about the middle of the screen (auto: as UIScale). FixBossBarOverlap:
         // the prompts moved up over a boss's health bar.
-        const int menus_scale = settings().ui_scale_menus;
+        const int menus_scale = yield_hud ? 100 : settings().ui_scale_menus;
         const int menus_eff = menus_scale == 0 ? ui_scale : menus_scale;
         const bool menus_own = menus_eff >= 25 && menus_eff <= 200 && menus_eff != 100;
-        const bool fix_boss = settings().fix_boss_bar_overlap;
+        const bool fix_boss = !yield_hud && settings().fix_boss_bar_overlap;
         const bool hooks = ui_scale != 100 || world_scale != 100 || text_own || menus_own || fix_boss;
         const bool at_source = hooks && menuscale_install();
         if (at_source) {

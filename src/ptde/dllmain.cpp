@@ -113,9 +113,11 @@ DWORD WINAPI worker(void*) {
     dsfix_set_yield(settings.yield_to_dsfix);
     if (dsfix_yields()) {
         LOG_INFO("YieldToDSFix: DSfix decides the picture where it has settings of its own: RenderResolution, "
-                 "Supersampling, DepthOfFieldStrength, DepthOfFieldResolution, EffectsResolution, WaterResolution, HighPrecisionColor, "
-                 "AnisotropicFiltering and UIScale are off (DSfix's renderWidth/renderHeight, presentWidth/presentHeight, "
-                 "dof settings, filteringOverride and HUD mod apply)");
+                 "Supersampling, DepthOfFieldStrength, DepthOfFieldResolution, EffectsResolution, WaterResolution, "
+                 "HighPrecisionColor and AnisotropicFiltering are off (DSfix's renderWidth/renderHeight, "
+                 "presentWidth/presentHeight, dof settings and filteringOverride apply), and the HUD and menus are the "
+                 "game's for DSfix's HUD mod: UIScale, UIScaleWorld, UIScaleText, UIScaleMenus and FixBossBarOverlap "
+                 "are off");
     } else if (settings.yield_to_dsfix) {
         LOG_INFO("YieldToDSFix: DSfix is not loaded (no DINPUT8.dll with DSfix.ini beside the game); nothing to yield to");
     }
