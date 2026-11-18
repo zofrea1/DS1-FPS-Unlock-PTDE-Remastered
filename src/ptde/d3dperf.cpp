@@ -316,6 +316,28 @@ DWORD effective_min(int i) {
     return (g_game_min[i] == D3DTEXF_LINEAR && g_game_mip[i] != D3DTEXF_NONE) ? D3DTEXF_ANISOTROPIC : g_game_min[i];
 }
 
+// A pixel sampler's MINFILTER, MIPFILTER or MAXANISOTROPY set again while the anisotropic upgrade is on: answered when
+// the full path in hook_set_sampler would leave everything as it is (the game's own value unchanged, the device
+// already holding the min filter it works out and, for an anisotropic one, the level). The full path would have sent
+// the same values through set_sampler_cached, which answers each as a repeat; this is that answer without the three
+// calls. 2026-11-18, Demon Ruins with AnisotropicFiltering = 16: the filter's own work was 4.8% of the render thread.
+inline bool aniso_repeat(DWORD s, DWORD t, DWORD value) {
+    const uint32_t known = g_known[s];
+    const DWORD aniso = static_cast<DWORD>(g_aniso);
+    if (t == D3DSAMP_MAXANISOTROPY) return ((known >> D3DSAMP_MAXANISOTROPY) & 1) && g_value[s][D3DSAMP_MAXANISOTROPY] == aniso;
+    if (t == D3DSAMP_MINFILTER) {
+        if (g_game_min[s] != value) return false;
+    } else if (t == D3DSAMP_MIPFILTER) {
+        if (g_game_mip[s] != value || !((known >> D3DSAMP_MIPFILTER) & 1) || g_value[s][D3DSAMP_MIPFILTER] != value) return false;
+    } else {
+        return false;
+    }
+    const DWORD min = effective_min(static_cast<int>(s));
+    if (!((known >> D3DSAMP_MINFILTER) & 1) || g_value[s][D3DSAMP_MINFILTER] != min) return false;
+    return min != D3DTEXF_ANISOTROPIC ||
+           (((known >> D3DSAMP_MAXANISOTROPY) & 1) && g_value[s][D3DSAMP_MAXANISOTROPY] == aniso);
+}
+
 int sampler_index(DWORD sampler) {
     if (sampler < 16) {
         return static_cast<int>(sampler);
@@ -332,7 +354,7 @@ HRESULT set_sampler_cached(IDirect3DDevice9* device, DWORD sampler, int index, D
 // read from the thread block (fs:[0x24], what GetCurrentThreadId returns) and nothing else done. A call it does not
 // answer goes the full way. RemoteControl `d3dfast 0|1` turns it off and on for comparisons.
 volatile bool g_quick = true;
-volatile int g_wrap_quick = 2;  // the sampler wrappers' own quick answer (see ss_wrapper)
+volatile int g_wrap_quick = 3;  // the sampler wrappers' own quick answer (see ss_wrapper); 3: aniso_repeat too
 
 }  // namespace
 
@@ -390,12 +412,15 @@ HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMP
     // Quick answer: a pixel sampler's state set again to what it holds, outside the anisotropic filtering upgrade
     // (whose states the full path below works out).
     const DWORD t = static_cast<DWORD>(type);
-    if (g_quick && sampler < 16 && t - 1 < static_cast<DWORD>(kTypes - 1) && ((g_known[sampler] >> t) & 1) &&
-        g_value[sampler][t] == value && __readfsdword(0x24) == g_owner && !g_recording && g_ss_enabled &&
-        !(g_aniso > 1 && (t == D3DSAMP_MINFILTER || t == D3DSAMP_MIPFILTER || t == D3DSAMP_MAXANISOTROPY))) {
-        g_seen = g_seen + 1;
-        g_filtered = g_filtered + 1;
-        return D3D_OK;
+    if (g_quick && sampler < 16 && t - 1 < static_cast<DWORD>(kTypes - 1) && __readfsdword(0x24) == g_owner &&
+        !g_recording && g_ss_enabled) {
+        const bool upgraded = g_aniso > 1 && (t == D3DSAMP_MINFILTER || t == D3DSAMP_MIPFILTER || t == D3DSAMP_MAXANISOTROPY);
+        if (upgraded ? (g_wrap_quick >= 3 && aniso_repeat(sampler, t, value))
+                     : (((g_known[sampler] >> t) & 1) && g_value[sampler][t] == value)) {
+            g_seen = g_seen + 1;
+            g_filtered = g_filtered + 1;
+            return D3D_OK;
+        }
     }
     g_seen = g_seen + 1;
     const int index = sampler_index(sampler);
@@ -445,12 +470,16 @@ HRESULT WINAPI hook_set_sampler(IDirect3DDevice9* device, DWORD sampler, D3DSAMP
 template <DWORD Type, uint32_t Table>
 HRESULT __cdecl ss_wrapper(IDirect3DDevice9* device, DWORD sampler, DWORD arg) {
     const DWORD value = Table ? reinterpret_cast<const DWORD*>(Table)[arg] : arg;
-    if (g_wrap_quick >= 2 && device == g_filter_device && sampler < 16 && ((g_known[sampler] >> Type) & 1) &&
-        g_value[sampler][Type] == value && __readfsdword(0x24) == g_owner && !g_recording && g_ss_enabled &&
-        !(g_aniso > 1 && (Type == D3DSAMP_MINFILTER || Type == D3DSAMP_MIPFILTER || Type == D3DSAMP_MAXANISOTROPY))) {
-        g_seen = g_seen + 1;
-        g_filtered = g_filtered + 1;
-        return D3D_OK;
+    if (g_wrap_quick >= 2 && device == g_filter_device && sampler < 16 && __readfsdword(0x24) == g_owner &&
+        !g_recording && g_ss_enabled) {
+        const bool upgraded =
+            g_aniso > 1 && (Type == D3DSAMP_MINFILTER || Type == D3DSAMP_MIPFILTER || Type == D3DSAMP_MAXANISOTROPY);
+        if (upgraded ? (g_wrap_quick >= 3 && aniso_repeat(sampler, Type, value))
+                     : (((g_known[sampler] >> Type) & 1) && g_value[sampler][Type] == value)) {
+            g_seen = g_seen + 1;
+            g_filtered = g_filtered + 1;
+            return D3D_OK;
+        }
     }
     using Fn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, D3DSAMPLERSTATETYPE, DWORD);
     return reinterpret_cast<Fn>((*reinterpret_cast<void***>(device))[kSetSamplerSlot])(
