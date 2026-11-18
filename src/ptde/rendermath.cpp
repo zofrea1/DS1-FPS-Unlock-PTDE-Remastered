@@ -1104,8 +1104,35 @@ uint64_t __cdecl ffx_curve4(uint32_t* out, const uint32_t* t, uintptr_t* stream)
     return reinterpret_cast<uintptr_t>(out) | static_cast<uint64_t>(res[2]) << 32;
 }
 
+// Relaxed (render thread), one lane as curve4_relaxed: the same key and segment; the differences, the reciprocal, the
+// products and the sum in float in registers (the original goes through double and the x87 stack). 2026-11-18, Demon
+// Ruins: ffx_curve1 was 2% of the render thread.
+namespace {
+inline uint64_t curve1_relaxed(uint32_t* out, const uint32_t* t, const CurveKeys& c) {
+    const float* keys = reinterpret_cast<const float*>(c.keys);
+    const float* vals = reinterpret_cast<const float*>(c.vals);
+    const float tl = bits_f(*t);
+    int j = c.n - 1;
+    while (j > 0 && !(keys[j] <= tl)) --j;
+    const float t0 = keys[j], v0 = vals[j];
+    float t1 = tl, v1 = v0;
+    if (j + 1 < c.n) {
+        t1 = keys[j + 1];
+        v1 = vals[j + 1];
+    }
+    const __m128 r = _mm_div_ss(_mm_set_ss(1.0f), _mm_set_ss(t1 - t0));
+    const __m128i ri = _mm_and_si128(_mm_castps_si128(r), _mm_set1_epi32(0x7FFFFFFF));
+    const __m128 inf = _mm_castsi128_ps(_mm_cmpeq_epi32(ri, _mm_set1_epi32(0x7F800000)));
+    const __m128 w = _mm_mul_ss(_mm_set_ss(tl - t0), _mm_andnot_ps(inf, r));
+    const __m128 res = _mm_add_ss(_mm_mul_ss(_mm_set_ss(v1 - v0), w), _mm_set_ss(v0));
+    _mm_store_ss(reinterpret_cast<float*>(out), res);
+    return reinterpret_cast<uintptr_t>(out) | static_cast<uint64_t>(reinterpret_cast<uintptr_t>(out)) << 32;
+}
+}  // namespace
+
 uint64_t __cdecl ffx_curve1(uint32_t* out, const uint32_t* t, uintptr_t* stream) {
     const CurveKeys c = curve_open(stream);
+    if (g_rx_loops && relaxed_here()) return curve1_relaxed(out, t, c);
     uint32_t t0, t1, v0, v1;
     curve_segment(c, *t, t0, t1, v0, v1);
     const uint32_t d = sub_dbl(*t, t0);

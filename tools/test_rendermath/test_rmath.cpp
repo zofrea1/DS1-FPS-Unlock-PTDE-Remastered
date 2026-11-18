@@ -1094,6 +1094,46 @@ static void test_particle_loop() {
 // The relaxed four-lane keyframe curve against the exact one (both ffx_curve4) on finite streams: within a tolerance
 // relative to max(|result|, 1) (before the first key the curve extrapolates, far past the values), and the stream
 // moved on the same.
+// The relaxed one-lane keyframe curve (ffx_curve1) against the exact one, as test_curve_relaxed.
+static float rnd_unit(float scale);
+static void test_curve1_relaxed() {
+    const uint32_t tid = GetCurrentThreadId();
+    alignas(16) uint32_t buf[1 + 16], t[4], o1[4], o2[4];
+    long lanes = 0, identical = 0;
+    double worst = 0.0;
+    for (int it = 0; it < 300000; ++it) {
+        const int n = 1 + rng() % 8;
+        buf[0] = n;
+        float key = rnd_unit(2.0f);
+        for (int i = 0; i < n; ++i) {
+            key += static_cast<float>(rng() % 100) / 37.0f;
+            std::memcpy(&buf[1 + i], &key, 4);
+            const float v = rnd_unit(50.0f);
+            std::memcpy(&buf[1 + n + i], &v, 4);
+        }
+        const float f = rnd_unit(1.0f) * (key + 3.0f);
+        std::memcpy(&t[0], &f, 4);
+        uintptr_t s1 = reinterpret_cast<uintptr_t>(buf), s2 = s1;
+        g_relaxed_tid = 0;
+        ffx_curve1(o1, t, &s1);
+        g_relaxed_tid = tid;
+        ffx_curve1(o2, t, &s2);
+        g_relaxed_tid = 0;
+        if (s1 != s2) { if (g_fail < 20) std::printf("relaxed curve1 stream differs at %d\n", it); ++g_fail; }
+        ++lanes;
+        if (o1[0] == o2[0]) { ++identical; continue; }
+        float a, b;
+        std::memcpy(&a, &o1[0], 4);
+        std::memcpy(&b, &o2[0], 4);
+        if (!(a == a) || !(b == b)) { if (g_fail < 20) std::printf("relaxed curve1 NaN at %d\n", it); ++g_fail; continue; }
+        const double e = std::fabs(static_cast<double>(a) - b) / (std::max)(1.0, (std::max)(std::fabs(static_cast<double>(a)), std::fabs(static_cast<double>(b))));
+        if (e > worst) worst = e;
+    }
+    std::printf("relaxed keyframe curve (one lane): %ld lanes, %.1f%% identical, worst %.3g relative (%.1f units of 2^-23); "
+                "%d mismatches so far\n", lanes, 100.0 * identical / lanes, worst, worst * 8388608.0, g_fail);
+    if (worst * 8388608.0 > 64.0) { std::printf("relaxed curve1: worst difference above 64 units\n"); ++g_fail; }
+}
+
 static float rnd_unit(float scale);
 static void test_curve_relaxed() {
     const uint32_t tid = GetCurrentThreadId();
@@ -1837,5 +1877,6 @@ int main(int argc, char** argv) {
     test_update_relaxed();
     test_particle_relaxed();
     test_curve_relaxed();
+    test_curve1_relaxed();
     return g_fail ? 1 : 0;
 }
