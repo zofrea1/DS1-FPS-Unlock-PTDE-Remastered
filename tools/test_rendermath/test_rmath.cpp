@@ -802,6 +802,58 @@ static void glue_compare(const char* what, int it, const uint8_t* o1, const uint
         ++g_fail;
     }
 }
+// The four forwarding wrappers done directly (fwd_xor4, fwd_select4, fwd_shl4, fwd_msub4) vs the game's wrappers
+// (0x985120, 0x9855C0, 0x9851E0, 0x9B5A50, through the game's own helpers): random bits (floats with NaN, infinity,
+// denormals and zeros mixed in), out apart and out the same as an input.
+static uint32_t rnd_bits_mixed() {
+    switch (rng() % 8) {
+    case 0: return 0x7F800000u | (rng() & 0x807FFFFFu);  // inf / NaN
+    case 1: return rng() & 0x807FFFFFu;                  // denormal / zero
+    default: return static_cast<uint32_t>(rng());
+    }
+}
+static void test_fwd_direct() {
+    using F2 = uint32_t*(__cdecl*)(uint32_t*, uint32_t, uint32_t);
+    using F3 = uint32_t*(__cdecl*)(uint32_t*, uint32_t, uint32_t, uint32_t);
+    struct Case { const char* name; uintptr_t game; const void* ours; int args; };
+    const Case cases[] = {
+        {"xor", 0x985120, reinterpret_cast<const void*>(&fwd_xor4), 2},
+        {"select", 0x9855C0, reinterpret_cast<const void*>(&fwd_select4), 3},
+        {"shift left", 0x9851E0, reinterpret_cast<const void*>(&fwd_shl4), 2},
+        {"c - a * b", 0x9B5A50, reinterpret_cast<const void*>(&fwd_msub4), 3},
+    };
+    for (const Case& c : cases) {
+        int bad = 0;
+        for (int it = 0; it < 200000; ++it) {
+            alignas(16) uint32_t in[3][4], g[3][4], o[3][4], og[4], oo[4];
+            for (int k = 0; k < 3; ++k)
+                for (int i = 0; i < 4; ++i) in[k][i] = rnd_bits_mixed();
+            std::memcpy(g, in, sizeof(g));
+            std::memcpy(o, in, sizeof(o));
+            const int alias = rng() % 4;  // 0: out apart, 1..3: out is input alias-1
+            uint32_t* outg = alias ? g[alias - 1] : og;
+            uint32_t* outo = alias ? o[alias - 1] : oo;
+            uint32_t* rg;
+            uint32_t* ro;
+            if (c.args == 2) {
+                rg = reinterpret_cast<F2>(c.game)(outg, reinterpret_cast<uint32_t>(g[0]), reinterpret_cast<uint32_t>(g[1]));
+                ro = reinterpret_cast<F2>(c.ours)(outo, reinterpret_cast<uint32_t>(o[0]), reinterpret_cast<uint32_t>(o[1]));
+            } else {
+                rg = reinterpret_cast<F3>(c.game)(outg, reinterpret_cast<uint32_t>(g[0]), reinterpret_cast<uint32_t>(g[1]),
+                                                  reinterpret_cast<uint32_t>(g[2]));
+                ro = reinterpret_cast<F3>(c.ours)(outo, reinterpret_cast<uint32_t>(o[0]), reinterpret_cast<uint32_t>(o[1]),
+                                                  reinterpret_cast<uint32_t>(o[2]));
+            }
+            const bool same_ret = (rg == outg) == (ro == outo);
+            if (std::memcmp(outg, outo, 16) != 0 || std::memcmp(g, o, sizeof(g)) != 0 || !same_ret) {
+                if (++bad <= 3) { std::printf("MISMATCH %s (iteration %d, alias %d)\n", c.name, it, alias); for (int i = 0; i < 4; ++i) std::printf("  lane %d: a %08X b %08X c %08X game %08X ours %08X\n", i, in[0][i], in[1][i], in[2][i], outg[i], outo[i]); }
+            }
+        }
+        g_fail += bad;
+        std::printf("forwarding wrapper %s: 200000 cases, %d mismatches\n", c.name, bad);
+    }
+}
+
 static void test_glue() {
     static uint8_t in[0x400], o1[0x400], o2[0x400];
     for (int it = 0; it < 200000; ++it) {
@@ -1867,6 +1919,7 @@ int main(int argc, char** argv) {
             test_eased_real();
         }
         test_glue();
+        test_fwd_direct();
         test_box();
         test_arrays();
         test_particle_loop();
