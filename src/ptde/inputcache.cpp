@@ -133,9 +133,10 @@ int find_and_hook() {
 
 void inputcache_configure(int mode) {
     g_mode = mode;
-    const bool wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
-    g_on = mode == 1 || (mode == 2 && wine);
-    if (mode == 2 && !wine) LOG_INFO("CacheInputReads: auto, not under Wine: the game's own reads");
+    // auto: on everywhere since 2.6.0. Under Wine each read also looked for new input events (2.5 ms a frame on a
+    // phone); on Windows the four reads cost 0.04 ms a frame (a Blighttown view at 1280x720, where the game thread is
+    // the limit, 2026-11-18: 510 -> 520 FPS with them cached).
+    g_on = mode == 1 || mode == 2;
 }
 
 void inputcache_game_frame() {
