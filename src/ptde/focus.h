@@ -5,5 +5,6 @@
 // does the same for the window object). focus_install wraps that import (0x010CC2BC) and logs each change of the
 // answer: the game leaving the foreground and which window took it, and its return. Under Wine (Proton, GameNative)
 // a window manager that does not hand the focus back after the game was paused leaves the gamepad dead until the
-// game window is clicked; the log shows that case.
+// game window is clicked; the log shows that case. Under Wine its desktop window (or no window) in front, with the
+// game's window shown, counts as the game's (keep_under_wine): the gamepad keeps working.
 void focus_install();

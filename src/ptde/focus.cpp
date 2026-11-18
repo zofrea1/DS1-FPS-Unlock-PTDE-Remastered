@@ -44,8 +44,49 @@ void describe(HWND h, char* out, size_t n) {
                   pid == GetCurrentProcessId() ? "(this process)" : "(another process)");
 }
 
+// Under Wine (GameNative, Winlator, Proton) Wine can hand the foreground to its own desktop window (class #32769) or
+// to no window at all while the game's window is still shown, with nothing on screen to click it back: on the phone,
+// 12 minutes into a session the game window lost the foreground to the desktop with no Android event at the time,
+// and every button was ignored from then on while the game ran on (2026-11-18 13:17). Under Wine the desktop or no
+// window in front, with the game's window shown and not minimized, counts as the game's: it keeps reading its input.
+// A real window of another program in front still counts as leaving. Windows itself is unaffected.
+bool under_wine() {
+    static int cached = -1;
+    if (cached < 0) {
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        cached = ntdll && GetProcAddress(ntdll, "wine_get_version") ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+int g_kept = 0;        // times the desktop (or no window) in front was answered with the game's window
+bool g_keeping = false;
+
+HWND keep_under_wine(HWND h) {
+    if (!under_wine() || (h && h != GetDesktopWindow())) {
+        if (g_keeping) {
+            g_keeping = false;
+            if (g_kept <= kMaxLogged) LOG_INFO("Focus: Wine's desktop is no longer in front");
+        }
+        return h;
+    }
+    const HWND game = game_window();
+    if (!game || !IsWindowVisible(game) || IsIconic(game)) return h;
+    if (!g_keeping) {
+        g_keeping = true;
+        if (++g_kept <= kMaxLogged) {
+            char what[256];
+            describe(h, what, sizeof(what));
+            LOG_INFO("Focus: Wine put %s in front of the game's window; the game keeps reading the keyboard, mouse and "
+                     "gamepads (under Wine its desktop or no window in front counts as the game's)",
+                     what);
+        }
+    }
+    return game;
+}
+
 HWND WINAPI watched_foreground() {
-    const HWND h = g_real();
+    const HWND h = keep_under_wine(g_real());
     // The first answer, whatever it is (a game that is in front from the start logs no change at all).
     static bool first = true;
     if (first) {
