@@ -20,6 +20,12 @@ namespace {
 
 using SetPsConstFn = HRESULT(WINAPI*)(IDirect3DDevice9*, UINT, const float*, UINT);
 SetPsConstFn o_set_ps_const = nullptr;
+SetPsConstFn o_set_vs_const = nullptr;
+// The last perspective camera's near and far clip, from a vertex shader's c0..c3 (the world-view-projection rows: the
+// depth row is A * the w row + B, A = f / (f - n), B = -n * A), when it looks like the scene's (far over 100).
+float g_cam_near = 0.0f, g_cam_far = 0.0f;
+int g_mismatch_lines = 0;
+ULONGLONG g_mismatch_at = 0;
 float g_last[16] = {};
 bool g_have = false;
 int g_lines = 0;
@@ -33,7 +39,40 @@ bool differs(const float* a, const float* b) {
     return false;
 }
 
+HRESULT WINAPI hk_set_vs_const(IDirect3DDevice9* dev, UINT start, const float* v, UINT count) {
+    if (v && start == 0 && count >= 4) {
+        const float* z = v + 8;
+        const float* w = v + 12;
+        const int k = std::fabs(w[0]) > std::fabs(w[2]) ? 0 : 2;
+        if (std::fabs(w[k]) > 1e-4f) {
+            const float a = z[k] / w[k];
+            const float b = z[3] - a * w[3];
+            if (a > 1.0f && a < 2.0f && b < 0.0f) {
+                const float n = -b / a, f = a * n / (a - 1.0f);
+                if (n > 0.0005f && n < 10.0f && f > 100.0f) {
+                    g_cam_near = n;
+                    g_cam_far = f;
+                }
+            }
+        }
+    }
+    return o_set_vs_const(dev, start, v, count);
+}
+
 HRESULT WINAPI hk_set_ps_const(IDirect3DDevice9* dev, UINT start, const float* v, UINT count) {
+    if (v && start == 7 && count == 65 && g_cam_near > 0.0f && g_mismatch_lines < 300) {
+        // The depth of field turns the depth back into metres with c8's near clip: a scene drawn with another near
+        // clip scales every distance by about c8 near / scene near.
+        const float n8 = v[4];
+        const ULONGLONG now = GetTickCount64();
+        if (n8 > 0.0f && std::fabs(n8 - g_cam_near) > 0.02f * n8 && now - g_mismatch_at >= 1000) {
+            g_mismatch_at = now;
+            ++g_mismatch_lines;
+            LOG_INFO("DofWatch: the scene's camera clips at %.4f / %.1f, the depth of field decodes the depth with %.4f / "
+                     "%.1f: distances read %.2fx",
+                     g_cam_near, g_cam_far, n8, v[5], n8 / g_cam_near);
+        }
+    }
     if (v && start == 7 && count == 65 && g_lines < 300) {  // the game's own block for the depth of field passes
         const float* c = v + (8 - start) * 4;
         const ULONGLONG now = GetTickCount64();
@@ -70,6 +109,8 @@ void dofwatch_hook_device(IDirect3DDevice9* dev) {
     if (!dev) return;
     void* p = patch_slot(dev, 109, reinterpret_cast<void*>(&hk_set_ps_const));
     if (p && !o_set_ps_const) o_set_ps_const = reinterpret_cast<SetPsConstFn>(p);
+    p = patch_slot(dev, 94, reinterpret_cast<void*>(&hk_set_vs_const));
+    if (p && !o_set_vs_const) o_set_vs_const = reinterpret_cast<SetPsConstFn>(p);
 }
 #else
 void dofwatch_hook_device(IDirect3DDevice9*) {}
