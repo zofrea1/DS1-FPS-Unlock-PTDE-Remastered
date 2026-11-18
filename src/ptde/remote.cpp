@@ -9,7 +9,6 @@
 #include "limiter.h"
 #include "profile.h"
 #include "atoc.h"
-#include "shadowbias.h"
 #include "layout.h"
 #include "menuscale.h"
 #include "eventwaits.h"
@@ -2461,11 +2460,6 @@ void run(const std::string& line) {
         // drew them (needs UIScale below 100 or FixAspectUI active).
         layout_dump(t.size() > 1 ? static_cast<int>(num(1, 300)) : 300);
         out("uidump");
-    } else if (c == "shadowbias" && t.size() > 1) {
-        // shadowbias B: the ShadowBias amount for this session (0 = the game's comparison; needs ShadowBias > 0 in the
-        // INI at start for the hooks).
-        shadowbias_set(static_cast<float>(std::atof(t[1].c_str())));
-        out("shadowbias %s", t[1].c_str());
     } else if (c == "atoc") {
         // atoc 0/1/2: AlphaToCoverage off, plain coverage, sharpened coverage (the default) for this session.
         atoc_set_mode(static_cast<int>(num(1, 2)));

@@ -2,7 +2,6 @@
 
 #include "aspect.h"
 #include "atoc.h"
-#include "shadowbias.h"
 #include "layout.h"
 #include "menuscale.h"
 #include "passcull.h"
@@ -351,9 +350,14 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             layout_hook_device(*out, !resolution_is_active());
         }
         if (resolution_is_active() || (settings().fix_aspect_ui && aspect_is_active())) layout_patch_scissor_sites();
-        shadowbias_set(settings().shadow_bias);
-        if (settings().shadow_bias > 0.0f) {
-            shadowbias_hook_device(*out);
+        if (settings().shadow_bias_listed) {
+            static bool told = false;
+            if (!told) {
+                told = true;
+                LOG_INFO("ShadowBias is no longer a setting (2.6.0): it erased real shadows on characters and objects "
+                         "close to the camera, which lit up as they crossed the shadow map's slices. The game's own "
+                         "shadow comparison is used; ShadowMapResolution keeps the texel weave fine");
+            }
         }
     }
     if (SUCCEEDED(hr) && out && *out && remote_enabled()) {

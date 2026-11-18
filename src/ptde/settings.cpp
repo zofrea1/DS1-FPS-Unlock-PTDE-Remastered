@@ -243,7 +243,7 @@ Settings settings_load(const wchar_t* dll_path) {
                               : (v == "false" || v == "off" || v == "no" || v == "game") ? 100
                                                                                            : std::atoi(val.c_str());
         } else if (key == "shadowbias") {
-            s.shadow_bias = static_cast<float>(std::atof(val.c_str()));
+            s.shadow_bias_listed = true;  // removed in 2.6.0 (shadowmap.cpp)
         } else if (key == "anisotropicfiltering") {
             s.anisotropic_filtering = std::atoi(val.c_str());
         } else if (key == "renderscalepost") {
@@ -453,7 +453,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"depthoffieldresolution", "game"}, {"effectsresolution", "game"}, {"waterresolution", "game"},
                 {"highprecisioncolor", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
                 {"fixantialiasingdepth", "false"},
-                {"shadowbias", "0"}, {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
+                {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
                 {"fixsun", "false"}, {"fixwater", "false"}, {"gammaramp", "auto"}, {"dxvk", "false"},
                 {"borderlessfullscreen", "false"},
                 // The screen's shape and the HUD.

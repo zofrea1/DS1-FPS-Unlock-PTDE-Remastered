@@ -22,7 +22,7 @@
 
 #include <intrin.h>
 #include "atoc.h"
-#include "shadowbias.h"
+#include "shadowmap.h"
 #include "dsfix.h"
 #include "resolution.h"
 #include "menuscale.h"

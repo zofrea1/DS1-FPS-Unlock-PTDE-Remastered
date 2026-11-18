@@ -103,8 +103,8 @@ struct Settings {
     bool render_scale_post = false;  // experiment: scale the post-processing targets too
     // Anisotropic filtering level for surface textures (0/1 = the game's own filtering).
     int anisotropic_filtering = 16;
-    // Taken off the light's clip depth in the characters' and objects' shadow comparison (shadowbias.h). 0 = off.
-    float shadow_bias = 0.006f;
+    // The INI still lists ShadowBias (removed in 2.6.0, shadowmap.cpp): told once in the log.
+    bool shadow_bias_listed = false;
     // With FixAspect active: the HUD and menus keep their 16:9 shape instead of stretching with the screen (layout.h).
     bool fix_aspect_ui = true;
     // The HUD's corner groups at this size, percent (50..100).
@@ -116,7 +116,7 @@ struct Settings {
     int ui_scale_menus = 0;
     // FixBossBarOverlap: the prompts and the item windows above them go up over a boss's health bar while one is shown.
     bool fix_boss_bar_overlap = true;
-    // The shadow map's side: 2048 (the game's), 4096 or 8192 (shadowbias.h).
+    // The shadow map's side: 2048 (the game's), 4096 or 8192 (shadowmap.h).
     int shadow_map_resolution = 4096;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;
