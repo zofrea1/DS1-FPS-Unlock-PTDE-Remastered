@@ -38,6 +38,7 @@
 #include <unordered_set>
 
 #include <intrin.h>
+#include <emmintrin.h>
 #pragma intrinsic(_ReturnAddress)
 
 namespace {
@@ -118,6 +119,14 @@ SetTextureFn o_set_texture = nullptr;
 DrawUPFn o_draw_up = nullptr;
 
 std::mutex g_lock;
+// hk_set_ps's answer per shader without the lock: a direct-mapped table of the shader, the sets' generation and its
+// classification (bit 0 copy, bits 1-2 camera blur pass, bit 3 bilateral, bits 4-6 the game's shader index + 1), one
+// aligned 8-byte word each (read and written whole). Every insert into the sets below bumps the generation, so an entry
+// made before it no longer matches. 2026-11-18, Demon Ruins: the lock and the eight set lookups per SetPixelShader were
+// 0.9% of the render thread.
+volatile LONG g_ps_gen = 1;
+__declspec(align(64)) uint64_t g_ps_cache[256];
+inline void ps_sets_changed() { InterlockedIncrement(&g_ps_gen); }
 std::unordered_set<void*> g_copy_shaders;
 std::unordered_set<void*> g_cam_power_shaders, g_cam_blur_shaders;
 volatile LONG g_cam_bound = 0;   // 1 the camera blur's depth pass bound, 2 the blur
@@ -1133,15 +1142,18 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
     if (SUCCEEDED(hr) && out && *out && same_instructions(code, kBilateral, sizeof(kBilateral) / sizeof(kBilateral[0]))) {
         std::lock_guard<std::mutex> lock(g_lock);
         g_bilateral_shaders.insert(*out);
+        ps_sets_changed();
     }
     if (SUCCEEDED(hr) && out && *out &&
         same_instructions(code, kCameraBlurPower, sizeof(kCameraBlurPower) / sizeof(kCameraBlurPower[0]))) {
         std::lock_guard<std::mutex> lock(g_lock);
         g_cam_power_shaders.insert(*out);
+        ps_sets_changed();
     }
     if (SUCCEEDED(hr) && out && *out && same_instructions(code, kCameraBlur, sizeof(kCameraBlur) / sizeof(kCameraBlur[0]))) {
         std::lock_guard<std::mutex> lock(g_lock);
         g_cam_blur_shaders.insert(*out);
+        ps_sets_changed();
         if (g_cam_copy_dev != dev) {
             if (g_cam_copy_ps) g_cam_copy_ps->Release();
             g_cam_copy_ps = nullptr;
@@ -1152,6 +1164,7 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
     if (SUCCEEDED(hr) && out && *out && is_copy_shader(code)) {
         std::lock_guard<std::mutex> lock(g_lock);
         g_copy_shaders.insert(*out);
+        ps_sets_changed();
         if (g_area_device != dev) {
             if (g_area_ps) g_area_ps->Release();
             if (g_area_side_ps) g_area_side_ps->Release();
@@ -1173,6 +1186,7 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
         if (i >= 0) {
             std::lock_guard<std::mutex> lock(g_lock);
             g_swap_game[i].insert(*out);
+            ps_sets_changed();
             if (g_swap_device[i] != dev) {
                 if (g_swap_ours[i]) g_swap_ours[i]->Release();
                 g_swap_ours[i] = nullptr;
@@ -1211,13 +1225,32 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     int swap = -1;
     LONG cam = 0;
     if (ps) {
-        std::lock_guard<std::mutex> lock(g_lock);
-        copy = g_copy_shaders.count(ps) != 0;
-        cam = g_cam_power_shaders.count(ps) ? 1 : g_cam_blur_shaders.count(ps) ? 2 : 0;
-        bilateral = g_bilateral_shaders.count(ps) != 0;
-        for (int i = 0; i < kSwapCount && game < 0; ++i) {
-            if (g_swap_game[i].count(ps)) game = i;
+        const uint32_t key = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ps));
+        uint64_t* slot = &g_ps_cache[(key >> 4) & 255];
+        const uint16_t gen = static_cast<uint16_t>(g_ps_gen);
+        uint64_t e;  // one 8-byte read of the slot (movq), whole even while another thread writes it
+        _mm_storel_epi64(reinterpret_cast<__m128i*>(&e), _mm_loadl_epi64(reinterpret_cast<const __m128i*>(slot)));
+        uint32_t flags;
+        if (static_cast<uint32_t>(e) == key && static_cast<uint16_t>(e >> 32) == gen) {
+            flags = static_cast<uint32_t>(e >> 48);
+        } else {
+            std::lock_guard<std::mutex> lock(g_lock);
+            flags = g_copy_shaders.count(ps) ? 1u : 0u;
+            flags |= (g_cam_power_shaders.count(ps) ? 1u : g_cam_blur_shaders.count(ps) ? 2u : 0u) << 1;
+            flags |= g_bilateral_shaders.count(ps) ? 8u : 0u;
+            for (int i = 0; i < kSwapCount; ++i) {
+                if (g_swap_game[i].count(ps)) {
+                    flags |= static_cast<uint32_t>(i + 1) << 4;
+                    break;
+                }
+            }
+            const uint64_t n = key | (static_cast<uint64_t>(gen) << 32) | (static_cast<uint64_t>(flags) << 48);
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(slot), _mm_loadl_epi64(reinterpret_cast<const __m128i*>(&n)));
         }
+        copy = (flags & 1u) != 0;
+        cam = static_cast<LONG>((flags >> 1) & 3u);
+        bilateral = (flags & 8u) != 0;
+        game = static_cast<int>((flags >> 4) & 7u) - 1;
         if (game >= 0 && g_swap_enabled && g_swap_ours[game] && g_swap_device[game] == dev &&
             (game != kPresentSwap || g_present_swap_enabled) && !(g_swap_off_mask & (1 << game))) {
             swap = game;
