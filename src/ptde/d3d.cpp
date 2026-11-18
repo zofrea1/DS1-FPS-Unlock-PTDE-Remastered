@@ -20,6 +20,7 @@
 #include "remote.h"
 #include "remixdisplay.h"
 #include "dsfix.h"
+#include "dofwatch.h"
 #include "resolution.h"
 #include "settings.h"
 
@@ -359,6 +360,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
                          "shadow comparison is used; ShadowMapResolution keeps the texel weave fine");
             }
         }
+        dofwatch_hook_device(*out);
     }
     if (SUCCEEDED(hr) && out && *out && remote_enabled()) {
         remote_hook_device(*out);
