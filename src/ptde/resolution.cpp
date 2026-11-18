@@ -2714,7 +2714,10 @@ bool resolution_install(int width, int height, bool scale_post) {
     g_render_w = static_cast<int>(scaled(1024, width, height));
     g_render_h = static_cast<int>(scaled(720, width, height));
     if (scale_post) g_fx_mode = 0;  // its effects target is already the scene's half size
-    if (g_want_float_scene && !scale_post && !g_bypass_dsfix && patch_scene_formats()) {
+    // Beside DSfix, frame.cpp has decided already (dsfix_smaa_on_scene: off only where DSfix's SMAA runs on this
+    // scene). The post targets made beside DSfix's wrapper (g_bypass_dsfix, set after this) are no reason: this scene
+    // with them gave the 8-bit scene's picture beside DSfix 3.0's FXAA and SSAO (2026-11-17).
+    if (g_want_float_scene && !scale_post && patch_scene_formats()) {
         g_float_scene = true;
         g_scene_10bit = g_want_float_scene == 2;
         LOG_INFO("HighPrecisionColor: the scene's colour targets are %s (were 8-bit); the final picture is "
