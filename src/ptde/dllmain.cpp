@@ -10,6 +10,7 @@
 #include "rendermath.h"
 #include "rwlock.h"
 #include "mutex.h"
+#include "menuscale.h"
 #include "texpreload.h"
 #include "frame.h"
 #include "gauge.h"
@@ -246,6 +247,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             CloseHandle(thread);
         }
     } else if (reason == DLL_PROCESS_DETACH) {
+        menuscale_detach();
         log_close();
     }
     return TRUE;

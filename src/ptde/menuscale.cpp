@@ -344,20 +344,22 @@ struct ThreadState {
 };
 DWORD g_tls_slot = TLS_OUT_OF_INDEXES;  // made by menuscale_install before any hook is placed
 
-// This thread's state, made on its first draw; the game's last error is kept (TlsGetValue clears it). Should that
-// allocation fail, the thread shares a spare state, set back to unscaled first.
-ThreadState& thread_state() {
+// This thread's state, made on its first draw; the game's last error is kept (TlsGetValue clears it). Null when it
+// cannot be made or kept in the slot (or the slot is gone): the hook then leaves that call unscaled. One state shared
+// for such threads would not do, since nested dialog draws re-enter here and would find it reset mid-draw.
+ThreadState* thread_state() {
+    if (g_tls_slot == TLS_OUT_OF_INDEXES) return nullptr;
     const DWORD error = GetLastError();
     auto* t = static_cast<ThreadState*>(TlsGetValue(g_tls_slot));
     if (!t) {
         t = new (std::nothrow) ThreadState();
-        if (t) TlsSetValue(g_tls_slot, t);
+        if (t && !TlsSetValue(g_tls_slot, t)) {
+            delete t;
+            t = nullptr;
+        }
     }
     SetLastError(error);
-    if (t) return *t;
-    static ThreadState spare;
-    spare = ThreadState();
-    return spare;
+    return t;
 }
 
 // m = m * F, F: x' = x * a + bx, y' = y * a + by in the layout's plane.
@@ -371,10 +373,12 @@ void map_after(float* m, float a, float bx, float by) {
 }
 
 void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
-    ThreadState& th = thread_state();
     uint32_t alt = 0;
     read32(reinterpret_cast<uintptr_t>(dlg) + 0xA0, &alt);
     const auto draw = reinterpret_cast<DrawFn>(alt ? kDrawAlt : kDraw);
+    ThreadState* const state = thread_state();
+    if (!state) return draw(dlg, dc);
+    ThreadState& th = *state;
     const auto base = reinterpret_cast<uintptr_t>(dlg);
     if (g_probe_dialogs.load(std::memory_order_relaxed) > 0 && g_probe_dialogs.fetch_sub(1) > 0) {
         float r[8] = {};
@@ -534,7 +538,9 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
 }
 
 void* __fastcall hk_set_transform(void* dc, void*, const float* m) {
-    ThreadState& th = thread_state();
+    ThreadState* const state = thread_state();
+    if (!state) return o_set_transform(dc, m);
+    ThreadState& th = *state;
     if (g_probe.load(std::memory_order_relaxed) > 0 && g_probe.fetch_sub(1) > 0) {
         LOG_INFO("menuprobe set dc %p m %.3f %.3f %.3f %.3f t %.1f %.1f from %p%s", dc, m[0], m[1], m[4], m[5], m[12],
                  m[13], _ReturnAddress(), th.active.on ? " (scaled dialog)" : "");
@@ -543,7 +549,9 @@ void* __fastcall hk_set_transform(void* dc, void*, const float* m) {
 }
 
 float* __fastcall hk_get_transform(void* dc, void*, float* out) {
-    ThreadState& th = thread_state();
+    ThreadState* const state = thread_state();
+    if (!state) return o_get_transform(dc, out);
+    ThreadState& th = *state;
     float* r = o_get_transform(dc, out);
     if (th.active.on && th.active.pending && out) {
         th.active.pending = false;
@@ -556,7 +564,9 @@ float* __fastcall hk_get_transform(void* dc, void*, float* out) {
 }
 
 void* __fastcall hk_set_clip(void* dc, void*, const float* r) {
-    ThreadState& th = thread_state();
+    ThreadState* const state = thread_state();
+    if (!state) return o_set_clip(dc, r);
+    ThreadState& th = *state;
     if (g_probe.load(std::memory_order_relaxed) > 0 && g_probe.fetch_sub(1) > 0) {
         LOG_INFO("menuprobe clip dc %p %.1f,%.1f-%.1f,%.1f from %p%s", dc, r[0], r[1], r[2], r[3], _ReturnAddress(),
                  th.active.on ? " (scaled dialog)" : "");
@@ -593,7 +603,9 @@ const PieceRule* piece_rule(uintptr_t piece, const char* parent) {
 }
 
 void* __fastcall hk_piece_draw(void* piece, void*, void* dc) {
-    ThreadState& th = thread_state();
+    ThreadState* const state = thread_state();
+    if (!state) return g_piece_trampoline(piece, dc);
+    ThreadState& th = *state;
     if (th.active.on && g_probe_pieces.load(std::memory_order_relaxed) > 0 && g_probe_pieces.fetch_sub(1) > 0) {
         const float* m = reinterpret_cast<const float*>(static_cast<const char*>(dc) + 0x30);
         LOG_INFO("menuprobe piece %ls in %s (scope s %.2f%s) at %.1f,%.1f scale %.3f", piece_name(
@@ -673,7 +685,9 @@ void record_text_scale(void* printer, uint32_t what, float ts) {
 std::atomic<int> g_probe_text{0};
 
 uint32_t __fastcall hk_printer_begin(void* printer, void*, uint32_t font) {
-    ThreadState& th = thread_state();
+    ThreadState* const state = thread_state();
+    if (!state) return o_printer_begin(printer, font);
+    ThreadState& th = *state;
     const uint32_t r = o_printer_begin(printer, font);
     if (th.active.on && th.active.ts != 1.0f) record_text_scale(printer, kTextLetters | kTextLine, th.active.ts);
     if (g_probe_text.load(std::memory_order_relaxed) > 0 && g_probe_text.fetch_sub(1) > 0) {
@@ -685,7 +699,9 @@ uint32_t __fastcall hk_printer_begin(void* printer, void*, uint32_t font) {
 }
 
 uint32_t __fastcall hk_printer_line(void* printer, void*, uint32_t height) {
-    ThreadState& th = thread_state();
+    ThreadState* const state = thread_state();
+    if (!state) return o_printer_line(printer, height);
+    ThreadState& th = *state;
     const uint32_t r = o_printer_line(printer, height);
     if (th.active.on && th.active.ts != 1.0f) record_text_scale(printer, kTextLine, th.active.ts);
     if (g_probe_text.load(std::memory_order_relaxed) > 0 && g_probe_text.fetch_sub(1) > 0) {
@@ -872,6 +888,14 @@ bool menuscale_install() {
 }
 
 bool menuscale_installed() { return g_installed; }
+
+void menuscale_detach() {
+    // The process is ending (DLL_PROCESS_DETACH): the slot back; a hook still called finds no state and draws unscaled.
+    if (g_tls_slot == TLS_OUT_OF_INDEXES) return;
+    const DWORD slot = g_tls_slot;
+    g_tls_slot = TLS_OUT_OF_INDEXES;
+    TlsFree(slot);
+}
 
 void menuscale_set(int ui_scale, int ui_scale_world, int ui_scale_text, int ui_scale_menus) {
     if (ui_scale >= 0) g_scale_pct.store(ui_scale);

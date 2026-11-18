@@ -1,10 +1,16 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-rem The version from src\common\fpsu_version.h (it was typed here, and 2.4.0 nearly shipped named 2.3.0).
+rem The versions from src\common\fpsu_version.h (they were typed here, and 2.4.0 nearly shipped named 2.3.0):
+rem Prepare to Die Edition's and Remastered's, each zip named after its own.
 for /f "tokens=3 delims= " %%v in ('findstr /c:"#define FPSU_VERSION_STR" src\common\fpsu_version.h') do set VERSION=%%~v
 if "%VERSION%"=="" (
     echo No FPSU_VERSION_STR in src\common\fpsu_version.h
+    exit /b 1
+)
+for /f "tokens=3 delims= " %%v in ('findstr /c:"#define FPSU_DSR_VERSION_STR" src\common\fpsu_version.h') do set DSR_VERSION=%%~v
+if "%DSR_VERSION%"=="" (
+    echo No FPSU_DSR_VERSION_STR in src\common\fpsu_version.h
     exit /b 1
 )
 set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
@@ -47,6 +53,6 @@ if errorlevel 1 exit /b 1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\release_ini.ps1 -In PTDE-FPS-Unlock.ini -Out build\release\ptde\PTDE-FPS-Unlock.ini
 if errorlevel 1 exit /b 1
 
-powershell -NoProfile -Command "Compress-Archive -Path build\release\remastered\* -DestinationPath build\release\DS1-FPS-Unlock-v%VERSION%-REMASTERED-DX11.zip; Compress-Archive -Path build\release\ptde\* -DestinationPath build\release\DS1-FPS-Unlock-v%VERSION%-PTDE-DX9.zip"
+powershell -NoProfile -Command "Compress-Archive -Path build\release\remastered\* -DestinationPath build\release\DS1-FPS-Unlock-v%DSR_VERSION%-REMASTERED-DX11.zip; Compress-Archive -Path build\release\ptde\* -DestinationPath build\release\DS1-FPS-Unlock-v%VERSION%-PTDE-DX9.zip"
 if errorlevel 1 exit /b 1
-echo Packaged build\release\DS1-FPS-Unlock-v%VERSION%-REMASTERED-DX11.zip and DS1-FPS-Unlock-v%VERSION%-PTDE-DX9.zip
+echo Packaged build\release\DS1-FPS-Unlock-v%DSR_VERSION%-REMASTERED-DX11.zip and DS1-FPS-Unlock-v%VERSION%-PTDE-DX9.zip

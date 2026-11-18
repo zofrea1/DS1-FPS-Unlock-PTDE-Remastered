@@ -4,6 +4,8 @@
 // and the dialogs' draw (EzMenuDialog::Draw). False when this build's code is not as expected.
 bool menuscale_install();
 bool menuscale_installed();
+// DLL_PROCESS_DETACH: frees the thread slot menuscale_install made.
+void menuscale_detach();
 // UIScale and UIScaleWorld (percent, 100 = the game's size, 25..200 taken; a negative value keeps that one), and
 // UIScaleText: the letters of the texts in those dialogs (0 = at their dialog's size, else percent of the game's),
 // and UIScaleMenus: the in-game menu's screens about the middle of the screen (0 = as UIScale, else percent).

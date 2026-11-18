@@ -593,12 +593,13 @@ bool frame_install(const Settings& settings) {
             // not have, so the gamma went on twice: Firelink at 1600x900 (2026-11-17, DSfix 3.0) 2.3 times as bright,
             // washed out. DSfix's FXAA and SSAO on the 10-bit scene, and DSfix at another size (its effects then never
             // find the scene: they check its size), gave the same picture as the 8-bit scene.
-            const bool dsfix_smaa = dsfix_smaa_on_scene(rw, rh);
+            const char* dsfix_match = nullptr;
+            const bool dsfix_smaa = dsfix_smaa_on_scene(rw, rh, &dsfix_match);
             resolution_set_high_precision_color(dsfix_smaa ? 0 : settings.high_precision_color);
             if (settings.high_precision_color && dsfix_smaa) {
-                LOG_INFO("HighPrecisionColor: off beside DSfix's SMAA, which runs on this mod's %dx%d scene (DSfix.ini "
-                         "renderWidth x renderHeight is the same size): it needs the 8-bit scene's sRGB reads. DSfix's "
-                         "FXAA, or another DSfix size, keeps it on", rw, rh);
+                LOG_INFO("HighPrecisionColor: off beside DSfix's SMAA, which runs on this mod's %dx%d scene (%s): it "
+                         "needs the 8-bit scene's sRGB reads. DSfix's FXAA, or another DSfix size, keeps it on", rw, rh,
+                         dsfix_match);
             } else if (settings.high_precision_color && dsfix_loaded()) {
                 LOG_INFO("HighPrecisionColor: on beside DSfix (its SMAA does not run on this mod's scene)");
             }
