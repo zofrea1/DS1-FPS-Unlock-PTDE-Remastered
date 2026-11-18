@@ -50,6 +50,9 @@ HRESULT WINAPI hk_set_vs_const(IDirect3DDevice9* dev, UINT start, const float* v
             if (a > 1.0f && a < 2.0f && b < 0.0f) {
                 const float n = -b / a, f = a * n / (a - 1.0f);
                 if (n > 0.0005f && n < 10.0f && f > 100.0f) {
+                    if (g_cam_near == 0.0f) {
+                        LOG_INFO("DofWatch: the scene's camera clips at %.4f / %.1f (first seen)", n, f);
+                    }
                     g_cam_near = n;
                     g_cam_far = f;
                 }
