@@ -73,7 +73,7 @@ int contended(Fast* f, LONG me, DWORD timeout) {
         _mm_pause();
         if (take(f, me)) return 0;
     }
-    const DWORD error = GetLastError();  // the original's WaitForSingleObject leaves it alone when it succeeds
+    const DWORD error = GetLastError();  // WaitForSingleObject leaves it alone on success and on a timeout
     const ULONGLONG start = timeout == INFINITE ? 0 : GetTickCount64();
     InterlockedIncrement(&f->waiters);
     int result = 0;
@@ -98,7 +98,7 @@ int contended(Fast* f, LONG me, DWORD timeout) {
         g_wait_on_address(&f->owner, &seen, sizeof(seen), slice);
     }
     InterlockedDecrement(&f->waiters);
-    SetLastError(result == 0 ? error : WAIT_TIMEOUT);
+    SetLastError(error);
     return result;
 }
 

@@ -348,6 +348,7 @@ bool depth_copy_encode(const DWORD* code, size_t count, std::vector<DWORD>& out)
 IDirect3DPixelShader9* variant_slow(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps, int kind);
 
 IDirect3DPixelShader9* variant_of(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps, int kind) {
+    if (reinterpret_cast<uintptr_t>(ps) & 3u) return variant_slow(dev, ps, kind);  // the kind goes in those bits
     const uint32_t key = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ps)) | static_cast<uint32_t>(kind - 1);
     uint64_t* slot = &g_variant_cache[(key * 2654435761u) >> 19];
     uint64_t e;  // one 8-byte read (movq)
