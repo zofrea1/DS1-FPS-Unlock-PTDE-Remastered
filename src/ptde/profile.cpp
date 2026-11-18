@@ -26,6 +26,7 @@
 #include <psapi.h>
 
 #include <algorithm>
+#include <map>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -1361,6 +1362,29 @@ void capture() {
         // Every game code block with two samples or more, for adding up by function offline (the profile of the
         // effects library is flat: many small functions under 1% each).
         if (p.tid == g_render_thread_id || p.tid == g_game_thread_id) {
+            // The same for this DLL (its offsets, 16-byte blocks), for its .map file.
+            HMODULE self = nullptr;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(&profile_request_capture), &self);
+            if (self) {
+                std::map<uint32_t, int> own;
+                const uint32_t base = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(self));
+                for (int k = 0; k < n; ++k) {
+                    const Sample& s2 = g_samples[k];
+                    if (s2.thread == ti && mc.of(s2.eip) == self) ++own[(s2.eip - base) & ~0xFu];
+                }
+                char oh[400];
+                int ol = 0;
+                for (auto& e : own) {
+                    if (e.second < 2) continue;
+                    ol += std::snprintf(oh + ol, sizeof(oh) - ol, " %X:%d", e.first, e.second);
+                    if (ol > 330) {
+                        LOG_INFO("[prof]   own hist%s", oh);
+                        ol = 0;
+                    }
+                }
+                if (ol) LOG_INFO("[prof]   own hist%s", oh);
+            }
             std::vector<std::pair<uint32_t, int>> blocks;
             for (auto& e : exclusive)
                 if (!(e.first & 1u) && e.second >= 2) blocks.push_back(e);
