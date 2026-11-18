@@ -253,6 +253,11 @@ float* __cdecl vec4_rsqrt(float* out, const float* in) {
 // esi, edi and ebp are kept like the original; edx is scratch, as are xmm0 and xmm1. Each entry pushes ecx and loads
 // K2 | K1 << 16 into it for the shared body.
 __declspec(naked) void mat_set_core() {
+    // 2026-11-18: the matrix's rows are read once into xmm0..xmm2 and, where the places cannot overlap, copied with
+    // 16-byte moves and passed to the registers from there, and the three dirty bits set with one OR when they share a
+    // word (they do unless the first is one of a word's last two). Where the matrix overlaps the block's rows, or the
+    // registers the rows, everything goes the original's way (8-byte copies in order, the rows read back). The same
+    // memory and the same eax either way. The Demon Ruins: 5.8% of the render thread before.
     __asm {
         // [esp] = the caller's ecx, [esp+4] = return, [esp+8] = block, [esp+12] = matrix; eax = index, ecx = K2 | K1 << 16
         push esi
@@ -267,27 +272,103 @@ __declspec(naked) void mat_set_core() {
         add eax, esi
         shl eax, 4
         lea esi, [eax + edx]
-        movups xmm0, [esi]
-        movups xmm1, [ecx]
-        cmpeqps xmm0, xmm1
-        movmskps eax, xmm0
+        movups xmm0, [ecx]
+        movups xmm3, [esi]
+        cmpeqps xmm3, xmm0
+        movmskps eax, xmm3
         cmp eax, 15
         jne copy
-        movups xmm0, [esi + 16]
         movups xmm1, [ecx + 16]
-        cmpeqps xmm0, xmm1
-        movmskps eax, xmm0
+        movups xmm3, [esi + 16]
+        cmpeqps xmm3, xmm1
+        movmskps eax, xmm3
         cmp eax, 15
         jne copy
-        movups xmm0, [esi + 32]
-        movups xmm1, [ecx + 32]
-        cmpeqps xmm0, xmm1
-        movmskps eax, xmm0
+        movups xmm2, [ecx + 32]
+        movups xmm3, [esi + 32]
+        cmpeqps xmm3, xmm2
+        movmskps eax, xmm3
         cmp eax, 15
         jne copy
         xor eax, eax  // as the original: the last not-equal's false
         jmp done
     copy:
+        // The matrix [ecx, ecx+48) and the rows [esi, esi+48) msc_apart: 16-byte moves; else the original's order.
+        lea eax, [ecx + 48]
+        cmp eax, esi
+        jbe msc_apart
+        lea eax, [esi + 48]
+        cmp eax, ecx
+        jbe msc_apart
+        jmp msc_in_order
+    msc_apart:
+        movups xmm0, [ecx]
+        movups xmm1, [ecx + 16]
+        movups xmm2, [ecx + 32]
+        movups [esi], xmm0
+        movups [esi + 16], xmm1
+        movups [esi + 32], xmm2
+        lea eax, [ecx + 32]  // as the original without a setter
+        mov edx, [edx + 0x10]
+        test edx, edx
+        jz done
+        add edx, 0x10
+        shr ebx, 16
+        lea edi, [edi + edi * 2]
+        add edi, ebx
+        mov ecx, edi
+        and ecx, 31
+        cmp ecx, 29
+        ja msc_bits3
+        mov eax, edi
+        shr eax, 5
+        mov ebx, 0xE0000000
+        shr ebx, cl
+        or [edx + eax * 4], ebx
+        jmp msc_bits_done
+    msc_bits3:
+        mov eax, edi
+        shr eax, 5
+        mov ebx, 0x80000000
+        shr ebx, cl
+        or [edx + eax * 4], ebx
+        lea ecx, [edi + 1]
+        mov eax, ecx
+        shr eax, 5
+        and ecx, 31
+        mov ebx, 0x80000000
+        shr ebx, cl
+        or [edx + eax * 4], ebx
+        lea ecx, [edi + 2]
+        mov eax, ecx
+        shr eax, 5
+        and ecx, 31
+        mov ebx, 0x80000000
+        shr ebx, cl
+        or [edx + eax * 4], ebx
+    msc_bits_done:
+        shl edi, 4
+        lea eax, [edx + edi + 0x40]
+        // The registers [eax, eax+48) msc_apart from the rows: from xmm0..xmm2 (what the rows now hold); else read back.
+        lea ecx, [eax + 48]
+        cmp ecx, esi
+        jbe msc_regs_apart
+        lea ecx, [esi + 48]
+        cmp ecx, eax
+        jbe msc_regs_apart
+        movups xmm0, [esi]
+        movups [eax], xmm0
+        movups xmm0, [esi + 16]
+        movups [eax + 16], xmm0
+        movups xmm0, [esi + 32]
+        movups [eax + 32], xmm0
+        jmp done
+    msc_regs_apart:
+        movups [eax], xmm0
+        movups [eax + 16], xmm1
+        movups [eax + 32], xmm2
+        jmp done
+    msc_in_order:
         movq xmm0, qword ptr [ecx]
         movq qword ptr [esi], xmm0
         movq xmm0, qword ptr [ecx + 8]
