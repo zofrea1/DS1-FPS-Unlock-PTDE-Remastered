@@ -207,6 +207,8 @@ struct Settings {
     bool skip_unused_reflection = true;  // SkipUnusedReflection (passcull.h)
     // The game's read locks count without kernel calls (rwlock.h).
     bool fast_read_locks = true;
+    // The game's mutexes (DLPlainMutex) without kernel calls (mutex.h).
+    bool fast_mutexes = true;
     // Textures go to the graphics card on the loading thread as they are made, not at their first draw (texpreload.h).
     bool preload_textures = true;
     // The loader's drive type question (GetDriveTypeW for every file, asked while it holds the locks the game thread
