@@ -558,7 +558,7 @@ bool frame_install(const Settings& settings) {
             atoc_fix_depth_install(settings.antialiasing_samples);
         }
         shadowmap_set_resolution(settings.shadow_map_resolution);
-        drawdist_install(settings.draw_all_map_parts, settings.lod_distance);
+        drawdist_install(settings.draw_map_pieces, settings.lod_distance);
         int rw = settings.render_width, rh = settings.render_height;
         // YieldToDSFix: DSfix's renderWidth/renderHeight decide, and with them its anti-aliasing, SSAO and depth of
         // field; ours (Supersampling, the depth of field's and effects' resolution, HighPrecisionColor) stay off.

@@ -220,8 +220,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_water_with_dsfix = parse_bool(val);
         } else if (key == "hidemousecursor") {
             s.hide_mouse_cursor = parse_bool(val);
-        } else if (key == "drawallmapparts") {
-            s.draw_all_map_parts = parse_bool(val);
+        } else if (key == "drawmappieces") {
+            std::string v = val;
+            for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            s.draw_map_pieces = (v == "all") ? 2 : (v == "adjacent") ? 1 : 0;
         } else if (key == "effectloddistance") {
             s.effect_lod_distance = std::atoi(val.c_str());
         } else if (key == "loddistance") {
@@ -460,7 +462,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"highprecisioncolor", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
                 {"fixantialiasingdepth", "false"},
                 {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
-                {"drawallmapparts", "false"}, {"loddistance", "100"}, {"effectloddistance", "100"},
+                {"drawmappieces", "game"}, {"loddistance", "100"}, {"effectloddistance", "100"},
                 {"fixsun", "false"}, {"fixwater", "false"}, {"gammaramp", "auto"}, {"dxvk", "false"},
                 {"borderlessfullscreen", "false"},
                 // The screen's shape and the HUD.

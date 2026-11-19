@@ -2461,9 +2461,9 @@ void run(const std::string& line) {
         // drew them (needs UIScale below 100 or FixAspectUI active).
         layout_dump(t.size() > 1 ? static_cast<int>(num(1, 300)) : 300);
         out("uidump");
-    } else if (c == "drawall") {
-        drawdist_set_all(num(1, 1) != 0);
-        out("drawall %ld", num(1, 1));
+    } else if (c == "drawmode") {
+        drawdist_set_mode(static_cast<int>(num(1, 1)));
+        out("drawmode %ld", num(1, 1));
     } else if (c == "lodpct") {
         drawdist_set_lod(static_cast<int>(num(1, 100)));
         out("lodpct %ld", num(1, 100));
