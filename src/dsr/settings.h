@@ -113,6 +113,9 @@ struct Settings {
     // Scales the ground step-down allowance to the frame rate (ledge/lip drop
     // boost and ladder fall-through at high FPS). Set false to A/B test.
     bool fix_step_down = true;
+    // A slide down a ladder takes as long as at 60 FPS at any frame rate (each of its short
+    // animations cost a frame, so it ran faster the higher the frame rate). Set false to A/B test.
+    bool fix_ladder_slide = true;
     // Makes the lock-on camera pan (target switches, locking onto an enemy near the edge of the
     // screen) take the same time at any frame rate. Set false to A/B test.
     bool fix_camera = true;

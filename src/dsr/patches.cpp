@@ -5,6 +5,7 @@
 #include "profile.h"
 #include "effectlife.h"
 #include "eventwait.h"
+#include "ladder.h"
 #include "rollhistory.h"
 #include "state.h"
 #include "stickflick.h"
@@ -4863,6 +4864,7 @@ void hook_sim(void* step, float frame_time) {
     try_delayed_patches();
     update_speed_factors();
     const float corrected = scaled_frame(frame_time);
+    ladder_update(corrected);
     if (g_sim_logged.exchange(1) == 0) {
         LOG_INFO("Simulation step: incoming=%.9f corrected=%.9f target=%u variable=%d", frame_time, corrected,
                  g_target_fps.load(), g_variable_dt.load());

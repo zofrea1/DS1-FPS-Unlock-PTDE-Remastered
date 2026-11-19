@@ -173,6 +173,8 @@ Settings settings_read(const wchar_t* dll_path) {
             s.trace = parse_bool(val);
         } else if (key == "fixstepdown") {
             s.fix_step_down = parse_bool(val);
+        } else if (key == "fixladderslide") {
+            s.fix_ladder_slide = parse_bool(val);
         } else if (key == "lockonptdespeed" || key == "cameraptdespeed") {
             s.camera_ptde_speed = parse_bool(val);
         } else if (key == "slidefrictionptde") {
