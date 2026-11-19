@@ -306,6 +306,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_slide_contact = parse_bool(val);
         } else if (key == "fixslidesteer") {
             s.fix_slide_steer = parse_bool(val);
+        } else if (key == "fixladderslide") {
+            s.fix_ladder_slide = parse_bool(val);
         } else if (key == "fixcutscenecamera") {
             s.fix_cutscene_camera = parse_bool(val);
         } else if (key == "fixsoulcounter") {

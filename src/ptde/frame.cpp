@@ -32,6 +32,7 @@
 #include "sfx.h"
 #include "slidecontact.h"
 #include "slidesteer.h"
+#include "ladder.h"
 #include "snap.h"
 #include "bullettrace.h"
 #include "sfxsway.h"
@@ -267,6 +268,7 @@ void frame_boundary() {
         drawdist_tick();
         footik_update(step);
         slidesteer_update(step);
+        ladder_update(step);
         ghost_frame(step);
         script_sample();
     }
@@ -636,6 +638,7 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_slide_steer) {
             slidesteer_install();
         }
+        ladder_configure(settings.fix_ladder_slide);
         if (settings.fix_cutscene_camera) {
             cutscenecam_install();
         }

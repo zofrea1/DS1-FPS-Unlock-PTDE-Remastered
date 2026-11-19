@@ -51,6 +51,7 @@ src\ptde\ghost.cpp
 src\ptde\sfx.cpp
 src\ptde\slidecontact.cpp
 src\ptde\slidesteer.cpp
+src\ptde\ladder.cpp
 src\ptde\cutscenecam.cpp
 src\ptde\soulcounter.cpp
 src\ptde\bullettrace.cpp

@@ -152,6 +152,8 @@ struct Settings {
     bool fix_slide_contact = true;
     // Slide steering: scale Havok's root-motion threshold for a one-frame-old turn layer (see slidesteer.h).
     bool fix_slide_steer = true;
+    // Ladder slides take as long as at 30 FPS: the slide's segments play slower by the frame each loses (see ladder.h).
+    bool fix_ladder_slide = true;
     // In-engine cutscene cameras blend between their 30 FPS keys (see cutscenecam.h).
     bool fix_cutscene_camera = true;
     // HUD soul counter steps with the frame time, at most four of the game's steps per update (see soulcounter.h).
