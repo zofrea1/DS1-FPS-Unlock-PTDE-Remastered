@@ -158,6 +158,23 @@ void mesh_weights(const std::vector<Vtx>& vs, const std::vector<uint32_t>& tris,
         double h = std::sin(rx * 12.9898 + rz * 78.233) * 43758.5453;
         h -= std::floor(h);
         const uint8_t ph = static_cast<uint8_t>(std::min(255.0, std::floor(h * 256.0)));
+        if (kind >= 4 && kind <= 8) {  // along one texture axis within the plant (8: single-triangle leaves only)
+            if (kind == 8 && m.size() != 3) continue;
+            const bool along_v = kind == 4 || kind == 5 || kind == 8;
+            const float sign = (kind == 5 || kind == 7) ? -1.0f : 1.0f;
+            float lo = 1e30f, hi = -1e30f;
+            for (uint32_t i : m) {
+                const float a = sign * (along_v ? vs[i].v : vs[i].u);
+                lo = std::min(lo, a);
+                hi = std::max(hi, a);
+            }
+            for (uint32_t i : m) {
+                const float a = sign * (along_v ? vs[i].v : vs[i].u);
+                amp[i] = amp_byte(hi - lo < 1e-5f ? 0.0f : (a - lo) / (hi - lo));
+                phase[i] = ph;
+            }
+            continue;
+        }
         if (kind == 0 && lin) {
             for (uint32_t i : m) {
                 float a = lin->a + lin->b * vs[i].u + lin->c * vs[i].v;
@@ -266,7 +283,15 @@ void process_flver(uint8_t* d, const std::string& model) {
         }
         if (diffuse.empty() || !g_textures.count(diffuse)) continue;
         const auto pair = g_pairs.find(model + "|" + diffuse);
-        if (pair == g_pairs.end()) continue;
+        if (pair == g_pairs.end()) {
+            static std::atomic<int> told{0};
+            if (told < 40) {
+                ++told;
+                LOG_INFO("FoliageSway: %s mesh %d (%s) is foliage in no Remastered model of this name", model.c_str(), mi,
+                         diffuse.c_str());
+            }
+            continue;
+        }
         const int kind = pair->second;
         const auto lin_it = g_linear.find(diffuse);
         const foliage_data::Linear* lin = lin_it == g_linear.end() ? nullptr : lin_it->second;
