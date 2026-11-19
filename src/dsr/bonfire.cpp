@@ -108,43 +108,12 @@ bool is_sit(int anim) {
     return anim == 7701 || anim == 7711 || anim == 7721;
 }
 
-// Bytes of address that are committed and readable, capped at size. Never raises.
-size_t readable_bytes(uintptr_t address, size_t size) {
-    if (address < kMinPointer || address > kMaxPointer || size < 4) {
-        return 0;
-    }
-    MEMORY_BASIC_INFORMATION info{};
-    if (!VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info))) {
-        return 0;
-    }
-    if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD)) {
-        return 0;
-    }
-    const DWORD protect = info.Protect & 0xFF;
-    const bool readable = protect == PAGE_READONLY || protect == PAGE_READWRITE || protect == PAGE_WRITECOPY ||
-                          protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE ||
-                          protect == PAGE_EXECUTE_WRITECOPY;
-    if (!readable) {
-        return 0;
-    }
-    const uintptr_t region = reinterpret_cast<uintptr_t>(info.BaseAddress);
-    const uintptr_t end = region + info.RegionSize;
-    if (address < region || address >= end) {
-        return 0;
-    }
-    const size_t room = static_cast<size_t>(end - address);
-    return room < size ? room : size;
-}
-
+// Every read is an exception-guarded load (no VirtualQuery: in this process it walks the page tables of the large
+// heap region the player lives in to report its size, about 84 us a call, measured 2026-11-19), and a pointer outside
+// [16 MB, user space] is not followed.
 bool follow(uintptr_t base, uint32_t offset, uintptr_t* out) {
-    if (readable_bytes(base + offset, sizeof(uintptr_t)) < sizeof(uintptr_t)) {
-        return false;
-    }
     uintptr_t next = 0;
     if (!read_ptr(base + offset, &next) || next < kMinPointer || next > kMaxPointer) {
-        return false;
-    }
-    if (readable_bytes(next, 0x10) < 0x10) {
         return false;
     }
     *out = next;
@@ -153,7 +122,7 @@ bool follow(uintptr_t base, uint32_t offset, uintptr_t* out) {
 
 int read_int(uintptr_t address) {
     uint32_t value = 0;
-    if (readable_bytes(address, sizeof(value)) < sizeof(value) || !read_u32(address, &value)) {
+    if (address < kMinPointer || address > kMaxPointer || !read_u32(address, &value)) {
         return -1;
     }
     return static_cast<int>(value);
@@ -184,9 +153,10 @@ uintptr_t local_player(uintptr_t image) {
     return follow(world, kPlayerOffset, &player) ? player : 0;
 }
 
-// Five times a second: the player's animation id (+0x16C) and the menus' open flags, a dozen guarded reads. Up to
-// 2.5.0 each pass also scanned six blocks of the player (about 2,100 words, a VirtualQuery before every read: 2.2 ms
-// a pass, about 1% of a core) to log where else the sit id showed up, which was only needed to find this word.
+// Five times a second: the player's animation id (+0x16C) and the menus' open flags, a couple of dozen guarded reads.
+// Up to 2.5.0 each pass also scanned six blocks of the player (about 2,100 words, a VirtualQuery before every read) to
+// log where else the sit id showed up, which was only needed to find this word: in the game that cost about 176 ms of
+// CPU a pass, 88% of a core (measured with v2.4.2 at 60 FPS, 2026-11-19; a user saw +10% CPU and +25 C on a 7600X).
 DWORD WINAPI bonfire_thread(void*) {
     const uintptr_t image = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     Sleep(2000);
