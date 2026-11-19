@@ -36,13 +36,14 @@
 //
 // Prepare to Die Edition's models have no second UV set, so the sway is worked out here as a model loads
 // (FlverModel's constructor 0xF33D40, ecx = the model's name, [esp+8] = the FLVER in memory, before the game builds its
-// vertex buffers): for each mesh Remastered made sway (its model and diffuse texture, foliage_data.h), each plant (the
-// vertices its triangles join) gets a random phase, and an amplitude from 0 at its root to 1 at its tip, either by the
-// texture's own rule (where Remastered's amplitudes are a + b u + c v of the texture coordinates) or along the texture
-// axis that follows the plant's height (from its lowest point, or its highest for hanging ivy). Checked against
-// Remastered's own amplitudes on its models: Firelink's textures within 0.02 on average, 75% of all foliage vertices
-// within 0.15. They go into the three bytes of the vertex's bone indices the static map models leave 0 (the shaders
-// read only the first): amplitude, phase, and 165 to mark the vertex.
+// vertex buffers), for each mesh Remastered made sway (its model and diffuse texture, foliage_data.h), by the rule that
+// comes closest to Remastered's own amplitudes for that mesh: the texture's linear rule (a + b u + c v of its texture
+// coordinates), per plant (the vertices its triangles join) from 0 at its root to 1 at its tip along the texture axis that
+// follows its height (the root its lowest point, or its highest for hanging ivy), or Remastered's exporter's copy of the
+// texture coordinates (amplitude u, phase v). Plants get a random phase each, as in Remastered. Checked against
+// Remastered's own amplitudes on its models: Firelink's textures within 0.02 on average, 79% of all foliage vertices
+// within 0.15. They go into the three bytes of the vertex's bone indices that every map model leaves 0 (the shaders read
+// only the first): amplitude (0..2), phase, and 165 to mark the vertex.
 //
 // Every static model vertex shader (one that reads bone indices and no bone weights) is drawn with a copy that first
 // moves the position as above when its bone indices' last byte is 165 (a branch; everything else draws as before),
@@ -61,8 +62,9 @@ constexpr float kPhaseScale = 0.5f;
 constexpr float kDirX = 1.0f, kDirZ = 0.0f;
 
 uint32_t g_ctor_back = kFlverCtor + 7;
-std::unordered_set<std::string> g_pairs;  // "model|texture"
-std::unordered_map<std::string, const foliage_data::Rule*> g_rules;
+std::unordered_map<std::string, int> g_pairs;  // "model|texture" -> the weight rule (foliage_data.h)
+std::unordered_map<std::string, const foliage_data::Linear*> g_linear;
+std::unordered_set<std::string> g_textures;
 std::atomic<int> g_models{0}, g_meshes{0}, g_vertices{0}, g_names_logged{0};
 
 // --- the FLVER (FLVER2, 0x2000C) -------------------------------------------------------------------------------------
@@ -115,9 +117,14 @@ uint32_t find_root(std::vector<uint32_t>& parent, uint32_t a) {
     return a;
 }
 
-// Amplitude and phase for one mesh's vertices.
-void mesh_weights(const std::vector<Vtx>& vs, const std::vector<uint32_t>& tris, const foliage_data::Rule& rule,
-                  std::vector<uint8_t>& amp, std::vector<uint8_t>& phase) {
+uint8_t amp_byte(float a) {  // 0..2 in 255 steps
+    a = a < 0.0f ? 0.0f : (a > 2.0f ? 2.0f : a);
+    return static_cast<uint8_t>(a * 127.5f + 0.5f);
+}
+
+// Amplitude and phase for one mesh's vertices (kind and linear rule from foliage_data.h).
+void mesh_weights(const std::vector<Vtx>& vs, const std::vector<uint32_t>& tris, int kind,
+                  const foliage_data::Linear* lin, std::vector<uint8_t>& amp, std::vector<uint8_t>& phase) {
     const size_t n = vs.size();
     std::vector<uint32_t> parent(n);
     for (uint32_t i = 0; i < n; ++i) parent[i] = i;
@@ -131,9 +138,17 @@ void mesh_weights(const std::vector<Vtx>& vs, const std::vector<uint32_t>& tris,
     for (uint32_t i = 0; i < n; ++i) plants[find_root(parent, i)].push_back(i);
     amp.assign(n, 0);
     phase.assign(n, 0);
+    if (kind == 3) {  // Remastered's exporter copied the texture coordinates into the sway: amplitude u, phase v
+        for (size_t i = 0; i < n; ++i) {
+            amp[i] = amp_byte(vs[i].u);
+            const float f = vs[i].v - std::floor(vs[i].v);
+            phase[i] = static_cast<uint8_t>(std::min(255.0f, f * 256.0f));
+        }
+        return;
+    }
     for (const auto& kv : plants) {
         const auto& m = kv.second;
-        const bool top = rule.kind == 2;
+        const bool top = kind == 2;
         // The plant's root: its lowest point (its highest for hanging ivy).
         uint32_t root = m[0];
         for (uint32_t i : m) {
@@ -143,11 +158,11 @@ void mesh_weights(const std::vector<Vtx>& vs, const std::vector<uint32_t>& tris,
         double h = std::sin(rx * 12.9898 + rz * 78.233) * 43758.5453;
         h -= std::floor(h);
         const uint8_t ph = static_cast<uint8_t>(std::min(255.0, std::floor(h * 256.0)));
-        if (rule.kind == 0) {
+        if (kind == 0 && lin) {
             for (uint32_t i : m) {
-                float a = rule.a + rule.b * vs[i].u + rule.c * vs[i].v;
+                float a = lin->a + lin->b * vs[i].u + lin->c * vs[i].v;
                 a = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a);
-                amp[i] = static_cast<uint8_t>(a * 255.0f + 0.5f);
+                amp[i] = amp_byte(a);
                 phase[i] = ph;
             }
             continue;
@@ -189,7 +204,7 @@ void mesh_weights(const std::vector<Vtx>& vs, const std::vector<uint32_t>& tris,
             const float u = best_axis ? vs[i].v : vs[i].u;
             float a = hi - lo < 1e-5f ? 0.0f : (best_c > 0 ? (u - lo) / (hi - lo) : (hi - u) / (hi - lo));
             a = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a);
-            amp[i] = static_cast<uint8_t>(a * 255.0f + 0.5f);
+            amp[i] = amp_byte(a);
             phase[i] = ph;
         }
     }
@@ -249,10 +264,12 @@ void process_flver(uint8_t* d, const std::string& model) {
                 break;
             }
         }
-        if (diffuse.empty()) continue;
-        const auto rule = g_rules.find(diffuse);
-        if (rule == g_rules.end()) continue;
-        if (!model.empty() && !g_pairs.count(model + "|" + diffuse)) continue;
+        if (diffuse.empty() || !g_textures.count(diffuse)) continue;
+        const auto pair = g_pairs.find(model + "|" + diffuse);
+        if (pair == g_pairs.end()) continue;
+        const int kind = pair->second;
+        const auto lin_it = g_linear.find(diffuse);
+        const foliage_data::Linear* lin = lin_it == g_linear.end() ? nullptr : lin_it->second;
         // Its first vertex buffer and its layout.
         int32_t vbi;
         if (!rd(d, size, static_cast<size_t>(vb_idx_off), &vbi) || vbi < 0 || vbi >= vbufs) continue;
@@ -335,7 +352,7 @@ void process_flver(uint8_t* d, const std::string& model) {
             }
         }
         std::vector<uint8_t> amp, phase;
-        mesh_weights(vs, tris, *rule->second, amp, phase);
+        mesh_weights(vs, tris, kind, lin, amp, phase);
         for (int i = 0; i < vcount; ++i) {
             uint8_t* b = d + vbase + static_cast<size_t>(i) * vsize + bi;
             b[1] = amp[i];
@@ -465,7 +482,8 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
     out.clear();
     out.push_back(code[0]);
     const DWORD defs[] = {
-        op(0x51, 5), dst(kConst, kK0, 0xF), fbits(0.1f), fbits(1.0f / 255.0f), fbits(static_cast<float>(kMark)), 0,
+        op(0x51, 5), dst(kConst, kK0, 0xF), fbits(0.1f), fbits(2.0f / 255.0f), fbits(static_cast<float>(kMark)),
+        fbits(1.0f / 255.0f),
         op(0x51, 5), dst(kConst, kK1, 0xF), fbits(3.0f), fbits(5.0f), fbits(7.0f), fbits(0.5f),
         op(0x51, 5), dst(kConst, kK2, 0xF), fbits(1.0f), fbits(1.5f), fbits(2.5f), fbits(3.5f),
         op(0x51, 5), dst(kConst, kK3, 0xF), fbits(1.0f / two_pi), fbits(0.5f), fbits(two_pi), fbits(-3.14159265359f),
@@ -480,8 +498,8 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
         op(0x04, 4), dst(kTemp, B, 1), src(kConst, kWind0, kY), src(kInput, P, kZ), src(kTemp, B, kX),  // + W0.y pos.z
         op(0x05, 3), dst(kTemp, B, 1), src(kTemp, B, kX), src(kConst, kK0, kX),         // * 0.1
         op(0x04, 4), dst(kTemp, B, 1), src(kConst, kWind1, kX), src(kConst, kWind0, kZ), src(kTemp, B, kX),  // + t speed
-        op(0x05, 3), dst(kTemp, B, 2), src(kInput, I, kY), src(kConst, kK0, kY),        // B.y = amplitude 0..1
-        op(0x05, 3), dst(kTemp, B, 4), src(kInput, I, kZ), src(kConst, kK0, kY),        // B.z = phase 0..1
+        op(0x05, 3), dst(kTemp, B, 2), src(kInput, I, kY), src(kConst, kK0, kY),        // B.y = amplitude 0..2
+        op(0x05, 3), dst(kTemp, B, 4), src(kInput, I, kZ), src(kConst, kK0, kW),        // B.z = phase 0..1
         op(0x04, 4), dst(kTemp, B, 1), src(kTemp, B, kZ), src(kConst, kWind1, kW), src(kTemp, B, kX),  // p += phase scale
         op(0x05, 3), dst(kTemp, B, 2), src(kTemp, B, kY), src(kConst, kWind1, kY),     // a = amplitude strength
         op(0x05, 3), dst(kTemp, C, 0xF), src(kTemp, B, kX), src(kConst, kK1, kXYZW),   // C = p (3, 5, 7, 0.5)
@@ -684,8 +702,11 @@ bool foliage_install() {
     if (!g_on) return false;
     QueryPerformanceFrequency(&g_freq);
     QueryPerformanceCounter(&g_t0);
-    for (const auto& p : foliage_data::kPairs) g_pairs.insert(std::string(p[0]) + "|" + p[1]);
-    for (const auto& r : foliage_data::kRules) g_rules[r.texture] = &r;
+    for (const auto& p : foliage_data::kPairs) {
+        g_pairs[std::string(p.model) + "|" + p.texture] = p.kind;
+        g_textures.insert(p.texture);
+    }
+    for (const auto& l : foliage_data::kLinear) g_linear[l.texture] = &l;
     auto* site = reinterpret_cast<uint8_t*>(kFlverCtor);
     if (std::memcmp(site, kCtorHead, sizeof(kCtorHead)) != 0) {
         LOG_ERROR("FoliageSway: the model loader at %08X does not match this build; foliage does not sway",
