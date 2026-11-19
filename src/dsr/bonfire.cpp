@@ -8,9 +8,11 @@
 
 #include <cstdio>
 
-// Same rule as Prepare to Die Edition (src/ptde/ui.cpp): if an idle bonfire sit is still set
-// and no menu has been open for a second, write 0 over that animation id so the character stands.
-// The 32-bit addresses do not exist here. There is no separate check for Reverse Hollowing.
+// Same rule as Prepare to Die Edition (src/ptde/ui.cpp): if an idle bonfire sit is still set, no menu is open for a
+// second, and no menu or prompt has been open for 10 seconds, write 0 over that animation id so the character stands.
+// The 10 seconds outlast Reverse Hollowing and Kindle (about 6.3 s each with the menu closed): with one second alone,
+// Prepare to Die Edition once stood a character up in the middle of Reverse Hollowing (see src/ptde/ui.cpp). The
+// 32-bit addresses do not exist here. There is no separate check for Reverse Hollowing.
 //
 // The sits were read from this install's own c0000.anibnd (a00.tae), not from a PTDE list.
 // The three idle loops are a00_7701, a00_7711 and a00_7721, each 2.667 seconds, and each has a
@@ -46,6 +48,9 @@ constexpr uint32_t kAnimOffset = 0x16C;
 // Heap objects in this process sit well above 16 MB. Smaller values are counts and flags.
 constexpr uintptr_t kMinPointer = 0x1000000;
 constexpr uintptr_t kMaxPointer = 0x00007FFFFFFFFFFFull;
+// Seated with no menu this long, and no menu or prompt open for this long, before stepping in.
+constexpr ULONGLONG kSeatedMs = 1000;
+constexpr ULONGLONG kNoMenuMs = 10000;
 
 // Dwords that mean a menu is open when nonzero. The first fourteen are the mask's own
 // compares. The rest are menu ids that same mask, and the any-menu check next to it,
@@ -128,19 +133,23 @@ int read_int(uintptr_t address) {
     return static_cast<int>(value);
 }
 
-// The menu manager's open flags (see the top): all clear means no menu is on screen.
-bool menus_clear(uintptr_t image) {
+// The menu manager's open flags (see the top): 1 when a menu or prompt is on screen, 0 when none is, -1 when they
+// cannot be read.
+int menu_open(uintptr_t image) {
     uintptr_t menus = 0;
     if (!follow(image, kMenuManRva, &menus)) {
-        return false;
+        return -1;
     }
     for (uint32_t offset : kMenuFlags) {
         uint32_t flag = 0;
-        if (!read_u32(menus + offset, &flag) || flag != 0) {
-            return false;
+        if (!read_u32(menus + offset, &flag)) {
+            return -1;
+        }
+        if (flag != 0) {
+            return 1;
         }
     }
-    return true;
+    return 0;
 }
 
 // The local player's ChrIns, or 0 while a level loads.
@@ -161,22 +170,28 @@ DWORD WINAPI bonfire_thread(void*) {
     const uintptr_t image = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     Sleep(2000);
     ULONGLONG since = 0;
+    ULONGLONG menu_seen = 0;  // when a menu or prompt was last open
     int fixed = 0;
     while (GetModuleHandleW(nullptr)) {
         Sleep(200);
+        const ULONGLONG now = GetTickCount64();
+        const int menu = menu_open(image);
+        if (menu == 1) {
+            menu_seen = now;
+        }
         const uintptr_t player = local_player(image);
-        if (!player || !is_sit(read_int(player + kAnimOffset)) || !menus_clear(image)) {
+        if (!player || !is_sit(read_int(player + kAnimOffset)) || menu != 0) {
             since = 0;
             continue;
         }
-        const ULONGLONG now = GetTickCount64();
         if (since == 0) {
             since = now;
             continue;
         }
-        if (now - since < 1000) {
+        if (now - since < kSeatedMs || now - menu_seen < kNoMenuMs) {
             continue;
         }
+        const double seated_s = (now - since) / 1000.0, no_menu_s = (now - menu_seen) / 1000.0;
         since = 0;
         // The word can change during the one-second wait. Only clear it if it is still a sit.
         const int anim = read_int(player + kAnimOffset);
@@ -185,8 +200,8 @@ DWORD WINAPI bonfire_thread(void*) {
         }
         if (write_u32(player + kAnimOffset, 0)) {
             ++fixed;
-            LOG_INFO("Bonfire softlock: no menu open for a second while seated; told the character to stand (%d, "
-                     "animation %d)", fixed, anim);
+            LOG_INFO("Bonfire softlock: seated for %.1f s with no menu open for %.1f s; told the character to stand "
+                     "(%d, animation %d)", seated_s, no_menu_s, fixed, anim);
         } else {
             LOG_ERROR("Bonfire softlock: could not write the animation id");
         }

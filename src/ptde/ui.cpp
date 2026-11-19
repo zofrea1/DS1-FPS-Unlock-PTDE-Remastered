@@ -279,8 +279,8 @@ uint32_t animation_address() {
     return b + 0xFC;
 }
 
-// True when the character is seated at a bonfire with no bonfire menu or dialog open.
-bool stuck_at_bonfire(uint32_t* anim_address) {
+// True when the character is seated at a bonfire (the idle sit is its animation id).
+bool seated_at_bonfire(uint32_t* anim_address) {
     uint32_t status_block = 0;
     if (!read_u32(kPlayerStatusPtr, &status_block) || status_block < 0x10000) return false;
     uint32_t status = 0;
@@ -292,40 +292,62 @@ bool stuck_at_bonfire(uint32_t* anim_address) {
     uint32_t anim = 0;
     if (!read_u32(address, &anim)) return false;
     if (anim != 7701 && anim != 7711 && anim != 7721) return false;  // the three bonfire sit animations
-
-    uint32_t menus = 0;
-    if (!read_u32(kMenuState, &menus) || menus < 0x10000) return false;
-    for (uint32_t offset : kMenuFlags) {
-        uint8_t open = 0;
-        if (!read_u8(menus + offset, &open)) return false;
-        if (open) return false;
-    }
     *anim_address = address;
     return true;
 }
 
+// 1 when a menu or dialog is open (the bonfire menu, or its Reverse Hollowing / Kindle prompt), 0 when none is,
+// -1 when the menu block cannot be read.
+int menu_open() {
+    uint32_t menus = 0;
+    if (!read_u32(kMenuState, &menus) || menus < 0x10000) return -1;
+    for (uint32_t offset : kMenuFlags) {
+        uint8_t open = 0;
+        if (!read_u8(menus + offset, &open)) return -1;
+        if (open) return 1;
+    }
+    return 0;
+}
+
+// When to step in. Reverse Hollowing (animation 7697) and Kindle (7699) each play about 6.3 s with the menu closed,
+// and then the character sits again and the menu comes back (measured 2026-11-19 at 60, 90 and 144 FPS: 6.37 s and
+// 6.32 s, the menu back 0.02-0.4 s later). Up to v2.6.0 a second of "seated, no menu" was enough, and once that
+// stepped in during Reverse Hollowing itself (Steam Deck log 2026-11-18, 90 FPS: 1.2 s after YES, the prompt answered
+// as the sit-down ended): the sit id was the character's animation while the action played, so the write stood the
+// character up mid-action, the player could walk around while "HUMANITY RESTORED" played, and the bonfire then sat
+// the character back down with its menu (reproduced by cutting the request off the same way). The softlock this is
+// for came at the end of the action (two logs, 2026-11-06 and 11-07: 7.5 s after YES, the menu never returned). So the
+// character must be seated with no menu for a second, and no menu or prompt may have been open for 10 s: longer
+// than either action, and a softlock is still undone about 10 s after YES (it was 7.5 s).
+constexpr ULONGLONG kSeatedMs = 1000;
+constexpr ULONGLONG kNoMenuMs = 10000;
+
 DWORD WINAPI bonfire_thread(void*) {
     Sleep(2000);
     ULONGLONG since = 0;
+    ULONGLONG menu_seen = 0;  // when a menu was last open
     int fixed = 0;
     while (GetModuleHandleW(nullptr)) {
         Sleep(200);
+        const ULONGLONG now = GetTickCount64();
+        const int menu = menu_open();
+        if (menu == 1) menu_seen = now;
         uint32_t address = 0;
-        if (!stuck_at_bonfire(&address)) {
+        if (menu != 0 || !seated_at_bonfire(&address)) {
             since = 0;
             continue;
         }
-        const ULONGLONG now = GetTickCount64();
         if (since == 0) {
             since = now;
             continue;
         }
-        if (now - since < 1000) continue;
+        if (now - since < kSeatedMs || now - menu_seen < kNoMenuMs) continue;
         __try {
             *reinterpret_cast<uint32_t*>(address) = 0;
             ++fixed;
-            LOG_INFO("Bonfire softlock: no menu open for a second while seated; told the character to stand (%d)",
-                     fixed);
+            LOG_INFO("Bonfire softlock: seated for %.1f s with no menu open for %.1f s; told the character to stand "
+                     "(%d)",
+                     (now - since) / 1000.0, (now - menu_seen) / 1000.0, fixed);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             LOG_ERROR("Bonfire softlock: could not write the animation id");
         }
