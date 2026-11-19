@@ -159,6 +159,22 @@ void mesh_weights(const std::vector<Vtx>& vs, const std::vector<uint32_t>& tris,
         double h = std::sin(rx * 12.9898 + rz * 78.233) * 43758.5453;
         h -= std::floor(h);
         const uint8_t ph = static_cast<uint8_t>(std::min(255.0, std::floor(h * 256.0)));
+        if (kind == 9 || kind == 10) {  // by height above the plant's lowest point, or by distance from it
+            const Vtx& r = vs[root];
+            float hi = 0.0f;
+            for (uint32_t i : m) {
+                const float dx = vs[i].x - r.x, dy = vs[i].y - r.y, dz = vs[i].z - r.z;
+                const float a = kind == 9 ? dy : std::sqrt(dx * dx + dy * dy + dz * dz);
+                hi = std::max(hi, a);
+            }
+            for (uint32_t i : m) {
+                const float dx = vs[i].x - r.x, dy = vs[i].y - r.y, dz = vs[i].z - r.z;
+                const float a = kind == 9 ? dy : std::sqrt(dx * dx + dy * dy + dz * dz);
+                amp[i] = amp_byte(hi < 1e-4f ? 0.0f : a / hi);
+                phase[i] = ph;
+            }
+            continue;
+        }
         if (kind >= 4 && kind <= 8) {  // along one texture axis within the plant (8: single-triangle leaves only)
             if (kind == 8 && m.size() != 3) continue;
             const bool along_v = kind == 4 || kind == 5 || kind == 8;
