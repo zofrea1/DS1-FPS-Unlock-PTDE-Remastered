@@ -16,13 +16,17 @@
 // Burg (ladder o1215, 9.4 m, 2026-11-19): 2.43 s to the bottom at 30 FPS, 2.23 at 60, 1.93 at 120, 2.01 at 240; the
 // higher the frame rate, the faster and smoother the slide.
 //
+// The frame "that moves nothing" is the segment's last: after a whole number of frames float rounding leaves its time
+// just short of 0.1 s, so one more frame plays the sliver left, and the script starts the next segment after it. A
+// segment at speed k thus lasts floor(0.1 / (k dt)) + 1 frames (4 at 30 FPS, 7 at 60, 25 at 240: as measured).
+//
 // While the player plays one of the two segments, its animation set's speed ([ChrCtrl + 0x14] + 0x64, the one the
-// co-op mod sets to 0 to hold a pose; 1 otherwise) is set to 0.1 / (0.1 + 1/30 - dt), so a segment and the frame that
-// starts the next take 0.133 s as at 30 FPS: the same speed and time to the bottom, played smoothly (not the 30 FPS
-// pause every fourth frame). At 30 FPS and below the factor is 1 and nothing changes. The value is only written while
-// it is the game's 1 (a pose held by the co-op mod or anything else is left alone) and put back to 1 afterwards.
-// Measured with this rule at 240 FPS: 2.48 s, as at 30 FPS for the same height (2.55 s; the 30 FPS run started 0.45 m
-// lower).
+// co-op mod sets to 0 to hold a pose; 1 otherwise) is set so that a segment lasts n frames, n the whole number nearest
+// to the 30 FPS segment's 4/30 s: k = 0.1 / ((n - 0.5) dt), half a frame clear of the rounding (a first try with
+// 0.1 / (0.1 + 1/30 - dt) landed on whole frames at 60 FPS, and every other segment dropped its last frame). The slide
+// then takes as long as at 30 FPS, played smoothly: each segment's last frame moves half a frame's worth instead of the
+// 30 FPS pause every fourth frame. At 30 FPS and below k is 1 and nothing changes. The value is only written while it
+// is the game's 1 (a pose held by the co-op mod or anything else is left alone) and put back to 1 afterwards.
 namespace {
 
 constexpr uint32_t kWorldChrMan = 0x0137DC70;  // [[[+0] + 4]] = the local player's ChrIns (as the remote control)
@@ -89,8 +93,18 @@ void ladder_update(double dt) {
         return;
     }
     if (g_set && g_set != set) release();
+    // A segment lasts floor(0.1 / (k dt)) + 1 frames: its last frame plays what is left of it (at a whole number of
+    // frames that is a sliver, as float rounding leaves it just short: the frame "that moves nothing"). n frames, the
+    // nearest to the 30 FPS segment (4/30 s), come from k with 0.1 / (k dt) = n - 0.5, clear of the rounding.
     float k = 1.0f;
-    if (dt > 0.0 && dt < kRetailFrame) k = static_cast<float>(kSegment / (kSegment + kRetailFrame - dt));
+    if (dt > 0.0 && dt < kRetailFrame * 0.98) {
+        const double want = (kSegment + kRetailFrame) / dt;            // 4/30 s in frames
+        double n = static_cast<double>(static_cast<long>(want + 0.5));  // nearest whole frame
+        const double fewest = static_cast<double>(static_cast<long>(kSegment / dt)) + 1.0;
+        if (n < fewest) n = fewest;
+        k = static_cast<float>(kSegment / ((n - 0.5) * dt));
+        if (k > 1.0f) k = 1.0f;
+    }
     const float now = read_float(set + kSetSpeed);
     // Ours from the last frame, or the game's own 1: anything else is someone else's (a held pose).
     if (now != 1.0f && !(g_set == set && now == g_written)) return;
