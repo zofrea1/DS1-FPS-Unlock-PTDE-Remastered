@@ -30,6 +30,8 @@ RegisterFn g_orig = nullptr;
 std::atomic<int> g_effects{0};
 std::atomic<int> g_raised{0};
 bool g_raise = true;  // FixSfxSpawnRate; the hook also serves SfxWatch alone
+int g_level_percent = 100;  // EffectLodDistance
+std::atomic<int> g_levels{0};
 
 uint32_t rd32(const uint8_t* d, uint32_t o) {
     uint32_t v;
@@ -83,12 +85,56 @@ int raise_intervals(uint8_t* d, uint32_t size) {
     return raised;
 }
 
+// EffectLodDistance. The fires' level of detail (torches, bonfires, braziers: the 181 effects built on template
+// effect 2117, and 2116 and 2118 for 70 more) is chosen by the effect's level: 2117 goes to one of five states by the
+// level conditions CheckLevel (data3 type 138: level below n, n = 5, 6, 7, 8), ResetLevelSingle (139) and ResetLevel
+// (140: outside [a, b)), and each state gives the effect its detail (the embers only in the nearest). Those 17
+// conditions (all in those three files: checked against a full decode of the 3,849 PTDE effects) have their bounds
+// scaled by EffectLodDistance percent as the effect loads. Found through the same pointer table: a pointer field
+// whose target starts with type 138, 139 or 140 (each target once).
+int scale_levels(uint8_t* d, uint32_t size) {
+    if (!d || size < 0x20 || std::memcmp(d, "FXR\0", 4) != 0) return 0;
+    const uint32_t table = rd32(d, 0x0C);
+    const uint32_t count = rd32(d, 0x10);
+    if (table > size || count > (size - table) / 4) return 0;
+    std::vector<uint32_t> done;
+    int scaled = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t o = rd32(d, table + i * 4);
+        if (o > size - 4) continue;
+        const uint32_t target = rd32(d, o);
+        if (target > size - 12) continue;
+        const uint32_t type = rd32(d, target);
+        if (type < 138 || type > 140) continue;
+        if (std::find(done.begin(), done.end(), target) != done.end()) continue;
+        done.push_back(target);
+        const int bounds = type == 140 ? 2 : 1;
+        for (int b = 0; b < bounds; ++b) {
+            int32_t v;
+            std::memcpy(&v, d + target + 4 + b * 4, 4);
+            if (v <= 0 || v > 1000) continue;
+            const int32_t nv = (v * g_level_percent + 50) / 100;
+            std::memcpy(d + target + 4 + b * 4, &nv, 4);
+        }
+        ++scaled;
+    }
+    return scaled;
+}
+
 void* __stdcall hk_register(const void* name, uint8_t* data, uint32_t size) {
     int raised = 0;
     bool watching = false;
     __try {
         watching = sfxwatch_before_load(data, size);
         raised = g_raise ? raise_intervals(data, size) : 0;
+        if (g_level_percent != 100) {
+            const int levels = scale_levels(data, size);
+            if (levels) {
+                const int total_levels = (g_levels += levels);
+                LOG_INFO("EffectLodDistance: %d level conditions scaled to %d%% (%d so far)", levels, g_level_percent,
+                         total_levels);
+            }
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         raised = 0;
     }
@@ -690,8 +736,11 @@ void sfx_trails_tick() {
              full ? sum / 1000.0 / full : 0.0, full ? least / 1000.0 : 0.0);
 }
 
-bool sfx_install(bool raise) {
+bool sfx_install(bool raise, int level_percent) {
     g_raise = raise;
+    if (level_percent < 25) level_percent = 25;
+    if (level_percent > 1000) level_percent = 1000;
+    g_level_percent = level_percent;
     // mov eax,[0x013787C8] ; push esi ; push edi
     static const uint8_t kExpect[7] = {0xA1, 0xC8, 0x87, 0x37, 0x01, 0x56, 0x57};
     auto* site = reinterpret_cast<uint8_t*>(kRegisterEffect);
