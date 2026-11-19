@@ -66,6 +66,7 @@ std::unordered_map<std::string, int> g_pairs;  // "model|texture" -> the weight 
 std::unordered_map<std::string, const foliage_data::Linear*> g_linear;
 std::unordered_set<std::string> g_textures;
 std::atomic<int> g_models{0}, g_meshes{0}, g_vertices{0}, g_names_logged{0};
+std::atomic<long long> g_work_ticks{0};  // QueryPerformanceCounter ticks spent in on_flver (the loading threads)
 
 // --- the FLVER (FLVER2, 0x2000C) -------------------------------------------------------------------------------------
 template <typename T>
@@ -419,10 +420,14 @@ void on_flver_work(uint8_t* data, const void* name) {
 
 void __cdecl on_flver(uint8_t* data, const void* name) {
     if (!g_on || !data) return;
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
     __try {
         on_flver_work(data, name);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+    QueryPerformanceCounter(&t1);
+    g_work_ticks += t1.QuadPart - t0.QuadPart;
 }
 
 __declspec(naked) void flver_ctor_entry() {
@@ -787,7 +792,8 @@ void foliage_hook_device(IDirect3DDevice9* dev) {
 }
 
 void foliage_log_stats() {
-    LOG_INFO("FoliageSway: %d models loaded, %d meshes sway (%d vertices); %d vertex shaders have a swaying copy, %d "
-             "refused by the device",
-             g_models.load(), g_meshes.load(), g_vertices.load(), g_patched.load(), g_refused.load());
+    const double ms = g_freq.QuadPart ? static_cast<double>(g_work_ticks.load()) * 1000.0 / g_freq.QuadPart : 0.0;
+    LOG_INFO("FoliageSway: %d models loaded, %d meshes sway (%d vertices, %.1f ms on the loading threads); %d vertex "
+             "shaders have a swaying copy, %d refused by the device",
+             g_models.load(), g_meshes.load(), g_vertices.load(), ms, g_patched.load(), g_refused.load());
 }
