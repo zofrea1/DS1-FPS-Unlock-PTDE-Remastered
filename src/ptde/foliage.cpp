@@ -437,8 +437,11 @@ DWORD op(DWORD code, DWORD len) { return code | (len << 24); }
 
 // A copy of a static model's vertex shader with the sway in front. False when it is not one (no bone indices, bone
 // weights, or our registers in use).
+std::atomic<int> g_why_logged{0};
+
 bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
     if (count < 2 || code[0] != 0xFFFE0300) return false;
+    const char* why = nullptr;
     int pos = -1, bi = -1, max_temp = -1;
     bool weights = false;
     size_t after_dcl = 0, end = 0;
@@ -454,7 +457,7 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
             continue;
         }
         const DWORD len = (tok >> 24) & 0xF;
-        if (o == 0x19 || o == 0x1A || o == 0x1C || o == 0x1E) return false;  // call, callnz, ret, label
+        if (o == 0x19 || o == 0x1A || o == 0x1C || o == 0x1E) why = "subroutines";  // call, callnz, ret, label
         if (o == 0x1F && i + 2 < count) {
             const DWORD usage = code[i + 1], reg = code[i + 2];
             if (reg_type(reg) == kInput) {
@@ -471,11 +474,19 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
             if (o == 0x1F && k == 1) continue;                               // dcl usage
             const DWORD type = reg_type(p), num = p & 0x7FF;
             if (type == kTemp) max_temp = std::max(max_temp, static_cast<int>(num));
-            if (type == kConst && num >= kWind0) return false;
+            if (type == kConst && num >= kWind0) why = "constants c250-c255";
         }
         i += 1 + len;
     }
-    if (!end || pos < 0 || bi < 0 || weights || !after_dcl || max_temp + 5 > 31) return false;
+    if (!end || pos < 0 || bi < 0 || weights || !after_dcl) return false;
+    if (!why && max_temp + 5 > 31) why = "temporaries";
+    if (why) {
+        if (g_why_logged < 12) {
+            ++g_why_logged;
+            LOG_INFO("FoliageSway: a static model vertex shader (%zu tokens) has no swaying copy: %s", count, why);
+        }
+        return false;
+    }
     const DWORD A = max_temp + 1, B = max_temp + 2, C = max_temp + 3, D = max_temp + 4, E = max_temp + 5;
     const DWORD P = static_cast<DWORD>(pos), I = static_cast<DWORD>(bi);
     const float two_pi = 6.28318530718f;
@@ -566,8 +577,13 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
 // --- the device ------------------------------------------------------------------------------------------------------
 using CreateVsFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const DWORD*, IDirect3DVertexShader9**);
 using SetVsFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexShader9*);
+using PresentFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
 CreateVsFn o_create_vs = nullptr;
 SetVsFn o_set_vs = nullptr;
+PresentFn o_present = nullptr;
+// The wind's time for the frame being drawn, taken at each Present: every pass of a frame (the depth pre-pass, the
+// colour pass that draws only where its depth equals the pre-pass's, the shadows) has to move a blade the same.
+volatile double g_frame_t = 0.0;
 
 SRWLOCK g_lock = SRWLOCK_INIT;
 std::unordered_map<IDirect3DVertexShader9*, IDirect3DVertexShader9*> g_swaps;
@@ -641,10 +657,15 @@ HRESULT WINAPI hk_create_vs(IDirect3DDevice9* dev, const DWORD* code, IDirect3DV
     return hr;
 }
 
-void send_wind(IDirect3DDevice9* dev) {
+HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, HWND w, const RGNDATA* r) {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    double t = static_cast<double>(now.QuadPart - g_t0.QuadPart) / static_cast<double>(g_freq.QuadPart);
+    g_frame_t = static_cast<double>(now.QuadPart - g_t0.QuadPart) / static_cast<double>(g_freq.QuadPart);
+    return o_present(dev, a, b, w, r);
+}
+
+void send_wind(IDirect3DDevice9* dev) {
+    double t = g_frame_t;
     const float speed = g_speed;
     if (speed > 1e-6f) {
         const double period = 4.0 * 3.14159265358979 / speed;  // every cosine back where it started
@@ -736,6 +757,8 @@ void foliage_hook_device(IDirect3DDevice9* dev) {
     if (p && !o_create_vs) o_create_vs = reinterpret_cast<CreateVsFn>(p);
     p = patch_slot_here(dev, 92, reinterpret_cast<void*>(&hk_set_vs));
     if (p && !o_set_vs) o_set_vs = reinterpret_cast<SetVsFn>(p);
+    p = patch_slot_here(dev, 17, reinterpret_cast<void*>(&hk_present));
+    if (p && !o_present) o_present = reinterpret_cast<PresentFn>(p);
 }
 
 void foliage_log_stats() {
