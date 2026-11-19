@@ -119,11 +119,11 @@ struct Settings {
     // The shadow map's side: 2048 (the game's), 4096 or 8192 (shadowmap.h).
     int shadow_map_resolution = 4096;
     // DrawMapPieces: 0 game, 1 adjacent (the rooms next to the player's too), 2 all (drawdist.h).
-    int draw_map_pieces = 1;
+    int draw_map_pieces = 0;
     // The level-of-detail switch distances in percent of the game's (drawdist.h).
     int lod_distance = 100;
     // The fires' (torches, bonfires) level-of-detail distances in percent of the game's (drawdist.h).
-    int effect_lod_distance = 200;
+    int effect_lod_distance = 100;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.
