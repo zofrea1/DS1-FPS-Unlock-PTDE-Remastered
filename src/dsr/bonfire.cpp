@@ -8,11 +8,13 @@
 
 #include <cstdio>
 
-// Same rule as Prepare to Die Edition (src/ptde/ui.cpp): if an idle bonfire sit is still set, no menu is open for a
-// second, and no menu or prompt has been open for 10 seconds, write 0 over that animation id so the character stands.
-// The 10 seconds outlast Reverse Hollowing and Kindle (about 6.3 s each with the menu closed): with one second alone,
-// Prepare to Die Edition once stood a character up in the middle of Reverse Hollowing (see src/ptde/ui.cpp). The
-// 32-bit addresses do not exist here. There is no separate check for Reverse Hollowing.
+// Like Prepare to Die Edition (src/ptde/ui.cpp): if an idle bonfire sit is still set, no menu is open for a second,
+// and no menu or prompt has been open for 8 seconds, write 0 over that animation id so the character stands. The 8
+// seconds outlast Reverse Hollowing and Kindle (about 6.3 s each with the menu closed): with one second alone, Prepare
+// to Die Edition once stood a character up in the middle of Reverse Hollowing. There the 8 s count only after the
+// yes/no prompt those two start from (its flag was read in game); here the prompt's flag was not checked in game, so
+// they count after any menu. A normal Leave plays a stand-up (7702/7712/7722), not a sit, so it never waits. The
+// 32-bit addresses do not exist here.
 //
 // The sits were read from this install's own c0000.anibnd (a00.tae), not from a PTDE list.
 // The three idle loops are a00_7701, a00_7711 and a00_7721, each 2.667 seconds, and each has a
@@ -50,7 +52,7 @@ constexpr uintptr_t kMinPointer = 0x1000000;
 constexpr uintptr_t kMaxPointer = 0x00007FFFFFFFFFFFull;
 // Seated with no menu this long, and no menu or prompt open for this long, before stepping in.
 constexpr ULONGLONG kSeatedMs = 1000;
-constexpr ULONGLONG kNoMenuMs = 10000;
+constexpr ULONGLONG kNoMenuMs = 8000;
 
 // Dwords that mean a menu is open when nonzero. The first fourteen are the mask's own
 // compares. The rest are menu ids that same mask, and the any-menu check next to it,

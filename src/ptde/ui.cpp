@@ -296,42 +296,54 @@ bool seated_at_bonfire(uint32_t* anim_address) {
     return true;
 }
 
+// The yes/no prompt's flag: 8 while "Offer humanity and reverse Hollowing?" or "...kindle flame?" is open, 21 while it
+// closes (measured 2026-11-19).
+constexpr uint32_t kPromptFlag = 0x60;
+
 // 1 when a menu or dialog is open (the bonfire menu, or its Reverse Hollowing / Kindle prompt), 0 when none is,
-// -1 when the menu block cannot be read.
-int menu_open() {
+// -1 when the menu block cannot be read. *prompt: the yes/no prompt is open.
+int menu_open(bool* prompt) {
+    *prompt = false;
     uint32_t menus = 0;
     if (!read_u32(kMenuState, &menus) || menus < 0x10000) return -1;
+    int any = 0;
     for (uint32_t offset : kMenuFlags) {
         uint8_t open = 0;
         if (!read_u8(menus + offset, &open)) return -1;
-        if (open) return 1;
+        if (open) {
+            any = 1;
+            if (offset == kPromptFlag) *prompt = true;
+        }
     }
-    return 0;
+    return any;
 }
 
-// When to step in. Reverse Hollowing (animation 7697) and Kindle (7699) each play about 6.3 s with the menu closed,
-// and then the character sits again and the menu comes back (measured 2026-11-19 at 60, 90 and 144 FPS: 6.37 s and
-// 6.32 s, the menu back 0.02-0.4 s later). Up to v2.6.0 a second of "seated, no menu" was enough, and once that
-// stepped in during Reverse Hollowing itself (Steam Deck log 2026-11-18, 90 FPS: 1.2 s after YES, the prompt answered
-// as the sit-down ended): the sit id was the character's animation while the action played, so the write stood the
-// character up mid-action, the player could walk around while "HUMANITY RESTORED" played, and the bonfire then sat
-// the character back down with its menu (reproduced by cutting the request off the same way). The softlock this is
-// for came at the end of the action (two logs, 2026-11-06 and 11-07: 7.5 s after YES, the menu never returned). So the
-// character must be seated with no menu for a second, and no menu or prompt may have been open for 10 s: longer
-// than either action, and a softlock is still undone about 10 s after YES (it was 7.5 s).
+// When to step in. Reverse Hollowing (animation 7697) and Kindle (7699) start from a yes/no prompt and each play about
+// 6.3 s with the menu closed, and then the character sits again and the menu comes back (measured 2026-11-19 at 60, 90
+// and 144 FPS: 6.37 s and 6.32 s, the menu back 0.02-0.4 s later). Up to v2.6.0 a second of "seated, no menu" was
+// enough, and once that stepped in during Reverse Hollowing itself (Steam Deck log 2026-11-18, 90 FPS: 1.2 s after YES,
+// the prompt answered as the sit-down ended): the sit id was the character's animation while the action played, so
+// the write stood the character up mid-action, the player could walk around while "HUMANITY RESTORED" played, and the
+// bonfire then sat the character back down with its menu (reproduced by cutting the request off the same way). The
+// softlock this is for came at the end of the action (two logs, 2026-11-06 and 11-07: 7.5 s after YES, the menu never
+// returned). So the character must be seated with no menu for a second, and if the prompt was open in the last 8 s,
+// until 8 s after it: longer than either action (with room for a hitch), and a softlock after one is undone about
+// 1.6 s after the character sits again. After a plain menu (Leave plays a stand-up, 7702/7712/7722, which is not a
+// sit) the second alone is enough, as before.
 constexpr ULONGLONG kSeatedMs = 1000;
-constexpr ULONGLONG kNoMenuMs = 10000;
+constexpr ULONGLONG kAfterPromptMs = 8000;
 
 DWORD WINAPI bonfire_thread(void*) {
     Sleep(2000);
     ULONGLONG since = 0;
-    ULONGLONG menu_seen = 0;  // when a menu was last open
+    ULONGLONG prompt_seen = 0;  // when the yes/no prompt was last open
     int fixed = 0;
     while (GetModuleHandleW(nullptr)) {
         Sleep(200);
         const ULONGLONG now = GetTickCount64();
-        const int menu = menu_open();
-        if (menu == 1) menu_seen = now;
+        bool prompt = false;
+        const int menu = menu_open(&prompt);
+        if (prompt) prompt_seen = now;
         uint32_t address = 0;
         if (menu != 0 || !seated_at_bonfire(&address)) {
             since = 0;
@@ -341,13 +353,18 @@ DWORD WINAPI bonfire_thread(void*) {
             since = now;
             continue;
         }
-        if (now - since < kSeatedMs || now - menu_seen < kNoMenuMs) continue;
+        if (now - since < kSeatedMs || (prompt_seen && now - prompt_seen < kAfterPromptMs)) continue;
         __try {
             *reinterpret_cast<uint32_t*>(address) = 0;
             ++fixed;
-            LOG_INFO("Bonfire softlock: seated for %.1f s with no menu open for %.1f s; told the character to stand "
-                     "(%d)",
-                     (now - since) / 1000.0, (now - menu_seen) / 1000.0, fixed);
+            if (prompt_seen && now - prompt_seen < 60000) {
+                LOG_INFO("Bonfire softlock: seated for %.1f s with no menu open, %.1f s after a prompt; told the "
+                         "character to stand (%d)",
+                         (now - since) / 1000.0, (now - prompt_seen) / 1000.0, fixed);
+            } else {
+                LOG_INFO("Bonfire softlock: seated for %.1f s with no menu open; told the character to stand (%d)",
+                         (now - since) / 1000.0, fixed);
+            }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             LOG_ERROR("Bonfire softlock: could not write the animation id");
         }
