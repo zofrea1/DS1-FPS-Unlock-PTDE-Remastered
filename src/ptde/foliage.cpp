@@ -32,7 +32,13 @@
 //   a = W1.y * amplitude
 //   h = cos(p) cos(3p) cos(5p) cos(7p),  v = cos(0.5p) cos(1.5p) cos(2.5p) cos(3.5p)
 //   pos -= (h a W0.x, v a W1.z, h a W0.y)
-// with W0 = (wind direction x, z, speed), W1 = (time, strength, verticality, phase scale).
+// with W0 = (wind direction x, z, time, the previous frame's time) and W1 = the material's (speed, strength,
+// verticality, phase scale). Read from the running game (Remastered 1.03.1, 2026-11-19): every wind draw had
+// W0.xy = (1, -0), W0.z = seconds (1.000 per second of real time, taken once a frame; W0.w = the frame before's, for the
+// motion vectors) and W1 = (0.3, 0.1, 0.4, 0.5) unchanged, so the graphics settings behind it ("Wind Angle", "Wind Time
+// Scale", "Wind Intensity", beside the LOD bias and MSAA in its debug menu; the same in every map) are at 0, 1 and 1.
+// Every material its map models use has those four values (the one with phase scale 0.4, M_2Foliage[DSBT][L]_Edge, is
+// used by none).
 //
 // Prepare to Die Edition's models have no second UV set, so the sway is worked out here as a model loads
 // (FlverModel's constructor 0xF33D40, ecx = the model's name, [esp+8] = the FLVER in memory, before the game builds its
@@ -41,13 +47,14 @@
 // coordinates), per plant (the vertices its triangles join) from 0 at its root to 1 at its tip along the texture axis that
 // follows its height (the root its lowest point, or its highest for hanging ivy), or Remastered's exporter's copy of the
 // texture coordinates (amplitude u, phase v). Plants get a random phase each, as in Remastered. Checked against
-// Remastered's own amplitudes on its models: Firelink's textures within 0.02 on average, 79% of all foliage vertices
+// Remastered's own amplitudes on its models: Firelink's textures within 0.02 on average, 84% of all foliage vertices
 // within 0.15. They go into the three bytes of the vertex's bone indices that every map model leaves 0 (the shaders read
 // only the first): amplitude (0..2), phase, and 165 to mark the vertex.
 //
 // Every static model vertex shader (one that reads bone indices and no bone weights) is drawn with a copy that first
 // moves the position as above when its bone indices' last byte is 165 (a branch; everything else draws as before),
-// with the wind in c250/c251 (no shader of the game's uses c242-c245 or c249-c255) and its constants in c252-c255.
+// with the wind in c250/c251 as Remastered's W0/W1 (no shader of the game's uses c242-c245 or c249-c255) and its
+// constants in c252-c255.
 namespace {
 
 constexpr uint32_t kFlverCtor = 0x00F33D40;
@@ -59,7 +66,7 @@ float g_strength = 0.1f;  // Remastered's g_WindStrength
 float g_speed = 0.3f;     // g_WindSpeed
 constexpr float kVerticality = 0.4f;
 constexpr float kPhaseScale = 0.5f;
-constexpr float kDirX = 1.0f, kDirZ = 0.0f;
+constexpr float kDirX = 1.0f, kDirZ = 0.0f;  // Remastered's wind direction (its "Wind Angle" 0)
 
 uint32_t g_ctor_back = kFlverCtor + 7;
 std::unordered_map<std::string, int> g_pairs;  // "model|texture" -> the weight rule (foliage_data.h)
@@ -554,7 +561,7 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
         op(0x05, 3), dst(kTemp, B, 1), src(kConst, kWind0, kX), src(kInput, P, kX),     // B.x = W0.x pos.x
         op(0x04, 4), dst(kTemp, B, 1), src(kConst, kWind0, kY), src(kInput, P, kZ), src(kTemp, B, kX),  // + W0.y pos.z
         op(0x05, 3), dst(kTemp, B, 1), src(kTemp, B, kX), src(kConst, kK0, kX),         // * 0.1
-        op(0x04, 4), dst(kTemp, B, 1), src(kConst, kWind1, kX), src(kConst, kWind0, kZ), src(kTemp, B, kX),  // + t speed
+        op(0x04, 4), dst(kTemp, B, 1), src(kConst, kWind1, kX), src(kConst, kWind0, kZ), src(kTemp, B, kX),  // + speed t
         op(0x05, 3), dst(kTemp, B, 2), src(kInput, I, kY), src(kConst, kK0, kY),        // B.y = amplitude 0..2
         op(0x05, 3), dst(kTemp, B, 4), src(kInput, I, kZ), src(kConst, kK0, kW),        // B.z = phase 0..1
         op(0x04, 4), dst(kTemp, B, 1), src(kTemp, B, kZ), src(kConst, kWind1, kW), src(kTemp, B, kX),  // p += phase scale
@@ -717,7 +724,9 @@ void send_wind(IDirect3DDevice9* dev) {
         const double period = 4.0 * 3.14159265358979 / speed;  // every cosine back where it started
         t = std::fmod(t, period);
     }
-    const float c[8] = {kDirX, kDirZ, speed, 0.0f, static_cast<float>(t), g_strength, kVerticality, kPhaseScale};
+    // Remastered's W0 = (direction x, z, time, previous time: not drawn here) and W1 = (speed, strength, verticality,
+    // phase scale).
+    const float c[8] = {kDirX, kDirZ, static_cast<float>(t), 0.0f, speed, g_strength, kVerticality, kPhaseScale};
     dev->SetVertexShaderConstantF(kWind0, c, 2);
 }
 
