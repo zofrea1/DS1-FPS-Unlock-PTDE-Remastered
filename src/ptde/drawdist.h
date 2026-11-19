@@ -8,6 +8,9 @@
 // game's; Remastered raised the default row's from 15/30 m to 25/50 m, about 167).
 // EffectLodDistance: the distances at which fires (torches, bonfires) drop their embers and other detail, in percent.
 bool drawdist_install(int mode, int lod_percent, int effect_percent);
+// Once a frame (game thread): with adjacent or all, a map piece that would be drawn over a twin of the same surfaces
+// (a detailed piece and its stand-in) is hidden while the twin is the player's room's own; put back otherwise.
+void drawdist_tick();
 // RemoteControl: `drawmode 0|1|2` for this session (takes effect within a few seconds: the floor is applied again);
 // `lodpct N`.
 void drawdist_set_mode(int mode);

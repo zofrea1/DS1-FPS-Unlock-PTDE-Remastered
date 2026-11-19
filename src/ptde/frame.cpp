@@ -264,6 +264,7 @@ void frame_boundary() {
         sfx_trails_tick();
         sfx_jitter_tick();
         sfx_actions_tick();
+        drawdist_tick();
         footik_update(step);
         slidesteer_update(step);
         ghost_frame(step);

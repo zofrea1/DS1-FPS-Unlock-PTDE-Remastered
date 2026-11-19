@@ -1,5 +1,6 @@
 #include "drawdist.h"
 
+#include "drawdist_twins.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -28,6 +29,19 @@
 // camera) picks level 0, 1 or 2 from the row's lv01/lv12 border distances and margins (default row 0: 15/30 m in
 // Prepare to Die Edition, 25/50 m in Remastered). The distance is scaled by 100 / LodDistance on entry, so every
 // border moves out by LodDistance percent.
+//
+// Stand-ins. In five maps some surfaces exist twice: a detailed piece drawn from the rooms that look at it up close
+// and a cheaper stand-in of the same surfaces drawn from the rooms that see it from afar (Anor Londo's m2200B1 and its
+// stand-in m8010B1; m8000B1 stands in for ten of the cathedral's pieces). The game never draws both, as no room lists
+// both, but adjacent (or all) adds a neighbouring room's pieces, so the two were drawn in the same place and fought
+// over the depth (z-fighting: the terraces flickered, Anor Londo 2026-11-19). The pairs (drawdist_twins.h, found from
+// the maps' own data: pieces with no draw group in common whose triangles share planes and overlap, at least 0.25 m^2)
+// are checked once a frame: a piece that would be drawn only because of a neighbouring room is hidden while its twin
+// is drawn by the player's own room, and of two twins both drawn only because of neighbours the one with fewer
+// vertices stays. Hidden means its draw groups cleared in the map piece manager ([0x137D5F4]: +0x1C the blocks' count,
+// +0x20 the blocks, 0x5C each, one per map in a fixed order; a block's +0x2C its pieces' count, +0x30 its pieces,
+// 0x50 each: +0x04 the id (block << 24 | index), +0x08 the draw groups the frame's culling tests), put back as soon as
+// that no longer holds. Nothing the game itself draws from the player's room is ever hidden.
 //
 // EffectLodDistance. The fires' level of detail (torches, bonfires, braziers: the 181 effects built on template
 // effect 2117, and 2116 and 2118 for 70 more) moves between states by level checks: CheckLevel (data3 type 138,
@@ -193,6 +207,116 @@ bool redirect_call(uint32_t site, uint32_t from, const void* to) {
     return write_bytes(site, code, 5);
 }
 
+// --- stand-ins (see the top) -----------------------------------------------------------------------------------
+constexpr uint32_t kPieceMan = 0x0137D5F4;
+constexpr uint32_t kWorldChrMan = 0x0137D644;  // +0x3C the player, whose +0x29C is the floor record underfoot
+constexpr size_t kTwinPieces = sizeof(drawdist_twins::kPieces) / sizeof(drawdist_twins::kPieces[0]);
+constexpr size_t kTwinPairs = sizeof(drawdist_twins::kPairs) / sizeof(drawdist_twins::kPairs[0]);
+bool g_hidden[kTwinPieces] = {};
+volatile LONG g_hidden_count = 0;
+volatile LONG g_hides = 0;  // pieces hidden so far (for the log)
+
+// The live draw groups of a table piece, or null when its map is not loaded or does not match the table.
+uint32_t* live_groups(const drawdist_twins::Piece& p) {
+    const uint32_t man = *reinterpret_cast<const uint32_t*>(kPieceMan);
+    if (!man) return nullptr;
+    const uint32_t blocks = *reinterpret_cast<const uint32_t*>(man + 0x20);
+    const int count = *reinterpret_cast<const int*>(man + 0x1C);
+    if (!blocks || p.block >= count) return nullptr;
+    const uint32_t block = blocks + p.block * 0x5C;
+    const int pieces = *reinterpret_cast<const int*>(block + 0x2C);
+    const uint32_t arr = *reinterpret_cast<const uint32_t*>(block + 0x30);
+    if (!arr || pieces != p.map_pieces || p.index >= pieces) return nullptr;
+    const uint32_t obj = arr + p.index * 0x50;
+    const uint32_t id = *reinterpret_cast<const uint32_t*>(obj + 4);
+    if ((id >> 24) != p.block || (id & 0xFFFF) != p.index) return nullptr;
+    return reinterpret_cast<uint32_t*>(obj + 8);
+}
+
+bool groups_are(const uint32_t* g, const uint32_t* want) {
+    return g[0] == want[0] && g[1] == want[1] && g[2] == want[2] && g[3] == want[3];
+}
+
+bool any_of(const uint32_t* g, const uint32_t* mask) {
+    return (g[0] & mask[0]) | (g[1] & mask[1]) | (g[2] & mask[2]) | (g[3] & mask[3]);
+}
+
+void show_all_twins() {
+    for (size_t i = 0; i < kTwinPieces; ++i) {
+        if (!g_hidden[i]) continue;
+        uint32_t* g = live_groups(drawdist_twins::kPieces[i]);
+        static const uint32_t zero[4] = {};
+        if (g && groups_are(g, zero)) std::memcpy(g, drawdist_twins::kPieces[i].groups, 16);
+        g_hidden[i] = false;
+    }
+    g_hidden_count = 0;
+}
+
+void twins_tick_body() {
+    const LONG mode = g_mode;
+    if (mode == 0) {
+        if (g_hidden_count) show_all_twins();
+        return;
+    }
+    const uint32_t wcm = *reinterpret_cast<const uint32_t*>(kWorldChrMan);
+    const uint32_t chr = wcm ? *reinterpret_cast<const uint32_t*>(wcm + 0x3C) : 0;
+    const uint32_t floor = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x29C) : 0;
+    if (!floor) return;  // loading or no floor yet: keep what is set
+    uint32_t own[4], seen[4];
+    std::memcpy(own, reinterpret_cast<const void*>(floor + 0x20), 16);
+    if (mode == 2) {
+        for (int k = 0; k < 4; ++k) seen[k] = 0xFFFFFFFFu;
+    } else {
+        const auto* nbr = reinterpret_cast<const uint32_t*>(floor + 0x10);
+        for (int k = 0; k < 4; ++k) seen[k] = own[k] | nbr[k];
+    }
+    bool hide[kTwinPieces] = {};
+    for (size_t k = 0; k < kTwinPairs; ++k) {
+        const auto& pr = drawdist_twins::kPairs[k];
+        const auto& a = drawdist_twins::kPieces[pr.a];
+        const auto& b = drawdist_twins::kPieces[pr.b];
+        if (!any_of(a.groups, seen) || !any_of(b.groups, seen)) continue;
+        const bool a_own = any_of(a.groups, own), b_own = any_of(b.groups, own);
+        if (a_own && b_own) continue;  // the game's own picture
+        if (a_own) {
+            hide[pr.b] = true;
+        } else if (b_own) {
+            hide[pr.a] = true;
+        } else {
+            const bool keep_a = a.verts < b.verts || (a.verts == b.verts && a.index < b.index);
+            hide[keep_a ? pr.b : pr.a] = true;
+        }
+    }
+    static const uint32_t zero[4] = {};
+    LONG hidden = 0;
+    for (size_t i = 0; i < kTwinPieces; ++i) {
+        const auto& p = drawdist_twins::kPieces[i];
+        uint32_t* g = live_groups(p);
+        if (!g) {
+            g_hidden[i] = false;  // its map is gone (or not this build's): nothing of ours is left there
+            continue;
+        }
+        if (hide[i] && !g_hidden[i] && groups_are(g, p.groups)) {
+            std::memcpy(g, zero, 16);
+            g_hidden[i] = true;
+            InterlockedIncrement(&g_hides);
+            static bool told[kTwinPieces] = {};
+            if (!told[i]) {
+                told[i] = true;
+                LOG_INFO("DrawMapPieces: %s (map %s) hidden while a twin of the same surfaces is drawn (no z-fighting)",
+                         p.name, p.map);
+            }
+        } else if (!hide[i] && g_hidden[i]) {
+            if (groups_are(g, zero)) std::memcpy(g, p.groups, 16);
+            g_hidden[i] = false;
+        }
+        hidden += g_hidden[i] ? 1 : 0;
+    }
+    g_hidden_count = hidden;
+}
+
+bool g_twins_on = false;
+
 bool install_lod() {
     if (std::memcmp(reinterpret_cast<const void*>(kLodFn), kLodHead, sizeof(kLodHead)) != 0) return false;
     uint8_t code[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};
@@ -202,6 +326,14 @@ bool install_lod() {
 }
 
 }  // namespace
+
+void drawdist_tick() {
+    if (!g_twins_on) return;
+    __try {
+        twins_tick_body();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
 
 void drawdist_set_mode(int mode) {
     if (mode < 0 || mode > 2) mode = 0;
@@ -261,6 +393,7 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent) {
         step = redirect_call(site, kGetDisp, reinterpret_cast<const void*>(&get_disp_any)) && step;
     }
     g_lod_on = install_lod();
+    g_twins_on = load && step;
     if (!load || !step) {
         LOG_ERROR("DrawMapPieces: the game's code at %08X/%08X does not match this build; not used",
                   static_cast<unsigned>(kLoadSite), static_cast<unsigned>(kStepSite));
