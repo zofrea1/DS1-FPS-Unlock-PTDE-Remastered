@@ -118,6 +118,10 @@ struct Settings {
     bool fix_boss_bar_overlap = true;
     // The shadow map's side: 2048 (the game's), 4096 or 8192 (shadowmap.h).
     int shadow_map_resolution = 4096;
+    // Every map piece of the loaded maps drawn wherever the player stands (drawdist.h).
+    bool draw_all_map_parts = false;
+    // The level-of-detail switch distances in percent of the game's (drawdist.h).
+    int lod_distance = 100;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.

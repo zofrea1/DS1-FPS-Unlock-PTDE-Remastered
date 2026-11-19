@@ -5,6 +5,7 @@
 #if FPSU_DIAGNOSTICS
 
 #include "frame.h"
+#include "drawdist.h"
 #include "dxgipresent.h"
 #include "limiter.h"
 #include "profile.h"
@@ -2460,6 +2461,12 @@ void run(const std::string& line) {
         // drew them (needs UIScale below 100 or FixAspectUI active).
         layout_dump(t.size() > 1 ? static_cast<int>(num(1, 300)) : 300);
         out("uidump");
+    } else if (c == "drawall") {
+        drawdist_set_all(num(1, 1) != 0);
+        out("drawall %ld", num(1, 1));
+    } else if (c == "lodpct") {
+        drawdist_set_lod(static_cast<int>(num(1, 100)));
+        out("lodpct %ld", num(1, 100));
     } else if (c == "atoc") {
         // atoc 0/1/2: AlphaToCoverage off, plain coverage, sharpened coverage (the default) for this session.
         atoc_set_mode(static_cast<int>(num(1, 2)));

@@ -220,6 +220,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_water_with_dsfix = parse_bool(val);
         } else if (key == "hidemousecursor") {
             s.hide_mouse_cursor = parse_bool(val);
+        } else if (key == "drawallmapparts") {
+            s.draw_all_map_parts = parse_bool(val);
+        } else if (key == "loddistance") {
+            s.lod_distance = std::atoi(val.c_str());
         } else if (key == "shadowmapresolution") {
             s.shadow_map_resolution = std::atoi(val.c_str());
         } else if (key == "fixaspectui") {
@@ -454,6 +458,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"highprecisioncolor", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
                 {"fixantialiasingdepth", "false"},
                 {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
+                {"drawallmapparts", "false"}, {"loddistance", "100"},
                 {"fixsun", "false"}, {"fixwater", "false"}, {"gammaramp", "auto"}, {"dxvk", "false"},
                 {"borderlessfullscreen", "false"},
                 // The screen's shape and the HUD.
