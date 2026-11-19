@@ -558,7 +558,16 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_antialiasing_depth && !dsfix_loaded()) {
             atoc_fix_depth_install(settings.antialiasing_samples);
         }
-        shadowmap_set_resolution(settings.shadow_map_resolution);
+        // YieldToDSFix: the game's own 2048 map (DSfix decides the picture). Beside DSfix otherwise, the larger map's
+        // scissor rectangles are put back beneath DSfix's device (shadowmap.cpp).
+        if (dsfix_yields()) {
+            if (settings.shadow_map_resolution != 2048) {
+                LOG_INFO("ShadowMapResolution: the game's own 2048x2048 map while YieldToDSFix is on (DSfix decides "
+                         "the picture)");
+            }
+        } else {
+            shadowmap_set_resolution(settings.shadow_map_resolution);
+        }
         drawdist_install(settings.draw_map_pieces, settings.lod_distance, settings.effect_lod_distance);
         foliage_configure(settings.foliage_sway, settings.foliage_sway_strength, settings.foliage_sway_speed);
         foliage_install();
