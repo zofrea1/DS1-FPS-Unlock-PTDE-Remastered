@@ -357,7 +357,8 @@ DWORD WINAPI bonfire_thread(void*) {
         __try {
             *reinterpret_cast<uint32_t*>(address) = 0;
             ++fixed;
-            if (prompt_seen && now - prompt_seen < 60000) {
+            // The prompt is named only when it set the wait (the flag is also set by other dialogs, e.g. on a respawn).
+            if (prompt_seen && now - prompt_seen < kAfterPromptMs + 1000) {
                 LOG_INFO("Bonfire softlock: seated for %.1f s with no menu open, %.1f s after a prompt; told the "
                          "character to stand (%d)",
                          (now - since) / 1000.0, (now - prompt_seen) / 1000.0, fixed);
