@@ -9,22 +9,38 @@
 #include <cstdint>
 #include <cstring>
 
-// DrawMapPieces. A map piece is drawn when one of its draw groups (MSB part +0x38, 128 bits) is among the display
-// groups of the frame, which the game takes from the collision the player stands on (its MSB part's +0x48, kept in
-// the collision's record at +0x20 and read by 0x4569D0: ecx = record + 8, eax = out): when a map loads (0xDE85D0
-// writes them into the draw state's +0x48 at 0xDE862A), when the player steps onto a floor of another block (the
-// in-game step 0xEFD2F0 at 0xEFDEE3, into [step+0x38]+0x48), and into the per-block masks rebuilt from the floor
-// (0xDE2AE0, 0xDE2C60 -> 0x4791C0 ORs them in), which the pieces' visibility takes too. Each collision is one room:
-// it displays its own group, and its draw groups (record +0x10) list the rooms it is shown from, its neighbours.
-// Firelink's ledge grass (m5060B2..m5064B2, groups 0-2) showed only from inside the shrine, not from the overlook
-// above it (h0027B2: displays group 27, neighbours 0, 1, 2, 11 and 28; 2026-11-18, tested by giving that collision
-// groups 0-2: the grass came in a few seconds later).
-//  adjacent: those four reads answer the floor's display groups and its draw groups: the pieces seen from this room
-//            and from the rooms next to it (the ledge grass from the overlook). Rooms farther away stay culled.
+// DrawMapPieces. A map piece is drawn when one of its draw groups (MSB part +0x38, 128 bits) meets its block's masks,
+// which the game builds from the collision the player stands on (its MSB part's +0x48, kept in the collision's record
+// at +0x20 and read by 0x4569D0: ecx = record + 8, eax = out). Each collision is one room: it displays its own group,
+// and its draw groups (record +0x10) list the rooms it is shown from, its neighbours. Firelink's ledge grass
+// (m5060B2..m5064B2, groups 0-2) showed only from inside the shrine, not from the overlook above it (h0027B2: displays
+// group 27, neighbours 0, 1, 2, 11 and 28; 2026-11-18, tested by giving that collision groups 0-2: the grass came in a
+// few seconds later). Every block has two masks, and the same two go to every world manager by block index:
+//  - the draw mask (+0x0C), rebuilt when the floor or the map changes (0xDE2C60, from 0xDE85D0 at 0xDE8615: the
+//    floor's groups at 0xDE2C9F, the linked blocks' from the map's connections), written to the map pieces
+//    (WorldMapManImp [0x137D5F4]), characters, objects, collisions, map effects, sounds and point lights;
+//  - the streaming mask (+0x1C), rebuilt every frame (0xDE7C30: the floors at FieldArea+0x3C and +0x44..+0x60, each
+//    through 0xDE2AE0 at 0xDE807C / 0xDE8096, the floor's groups at 0xDE2AFA), which decides what is in the scene at
+//    all: a map piece only while its groups meet it (0xE9CB80), a character is asked for (loaded and made active,
+//    [chr+0xC]+0xC = 2, 0xE3E870 at 0xDE81F0) only while its floor's groups meet it, and likewise objects and the
+//    collisions in the physics world.
+// The two options widen what the player's floor adds to its block's two masks, for the map pieces alone: the floor's
+// contribution is noted as the game reads it (0xDE2C9F, 0xDE2AFA) and ORed into the map piece manager's masks after
+// the game has written them (after 0xDE2C60 returns; before 0xE9BD70 at 0xDE8198, right after the streaming masks are
+// written). Characters, objects, collisions, effects, sounds and lights keep the game's own masks.
+//  adjacent: the floor's display groups and its draw groups: the pieces seen from this room and from the rooms next to
+//            it (the ledge grass from the overlook). Rooms farther away stay culled.
 //  all:      every group: every piece of the loaded maps wherever the player stands (the view's own culling still
 //            applies). Measured 2026-11-18 at 4K: Demon Ruins +3.5 ms game and +4.2 ms render thread a frame (about
 //            300 -> 134 FPS: it draws Lost Izalith behind the walls, same map file), Blighttown +2.4 / +0.6 ms,
-//            Firelink +0.5 / +0.6 ms.
+//            Firelink +0.5 / +0.6 ms (before 2.7.1, with every other manager's masks widened as well).
+// Up to 2.7.0 the four reads themselves answered the widened groups, so every manager got them: in the whole block
+// (all) or the next rooms (adjacent) every character was asked for and active, and with it the map's events that wait
+// for one to be loaded. The Undead Burg's 11015100 places Solaire's summon sign at the Bell Gargoyles once his summon
+// (6540, beside their fog) is loaded and the player is human, and disables his Undead Burg self (6001): with all it ran
+// at the Undead Burg bonfire and Solaire was gone from his place past the Taurus Demon (user report 2026-11-19;
+// reproduced: flag 11015100 on and 6001 disabled within a second of being human there; not with game). An infinite
+// draw distance mod for Remastered was reported to do the same.
 // LodDistance. 0xF61CD0 (ecx = the model, esi = its LodBank row, al = its current level, xmm1 = its distance from the
 // camera) picks level 0, 1 or 2 from the row's lv01/lv12 border distances and margins (default row 0: 15/30 m in
 // Prepare to Die Edition, 25/50 m in Remastered). The distance is scaled by 100 / LodDistance on entry, so every
@@ -53,11 +69,19 @@
 namespace {
 
 constexpr uint32_t kGetDisp = 0x004569D0;
-constexpr uint32_t kLoadSite = 0x00DE8625;  // call 0x4569D0 (a map's load: the draw state's display groups)
-constexpr uint32_t kStepSite = 0x00EFDEDE;  // call 0x4569D0 (a floor of another block underfoot)
-// The per-block masks rebuilt from every floor of the block (0xDE2AE0, 0xDE2C60 -> 0x4791C0 ORs them in), which
-// the pieces' visibility takes too: a floor's own groups alone in the draw state changed nothing (2026-11-18).
-constexpr uint32_t kBlockSites[] = {0x00DE2AFA, 0x00DE2C9F};
+constexpr uint32_t kDrawGetSite = 0x00DE2C9F;    // call 0x4569D0 in 0xDE2C60 (the draw masks): the floor's groups
+constexpr uint32_t kStreamGetSite = 0x00DE2AFA;  // call 0x4569D0 in 0xDE2AE0 (a floor's streaming groups)
+constexpr uint32_t kBuildDraw = 0x00DE2C60;      // stdcall(FieldArea), eax = the floor: every block's draw mask
+constexpr uint32_t kBuildDrawSite = 0x00DE8615;  // its call in FieldArea's update 0xDE85D0
+constexpr uint32_t kStreamFloor = 0x00DE2AE0;    // stdcall(FieldArea, masks), eax = a floor: adds its groups
+constexpr uint32_t kStreamFloorSites[] = {0x00DE807C, 0x00DE8096};  // its calls in the streaming update 0xDE7C30
+constexpr uint32_t kStreamDone = 0x00E9BD70;     // called by 0xDE7C30 right after it wrote the streaming masks
+constexpr uint32_t kStreamDoneSite = 0x00DE8198;
+constexpr uint32_t kPieceManVar = 0x0137D5F4;    // WorldMapManImp, the map pieces' manager
+constexpr uint32_t kMapBlockSize = 0x5C;         // its +0x20: one per block (count +0x1C)
+constexpr uint32_t kMapBlockDraw = 0x0C;         // the block's draw mask (16 bytes)
+constexpr uint32_t kMapBlockStream = 0x1C;       // the block's streaming mask
+constexpr int kMaxBlocks = 32;
 constexpr uint32_t kLodFn = 0x00F61CD0;
 // EffectLodDistance: the effect level checks' call to _ftol on the camera distance (CheckLevel 0xA33600,
 // ResetLevelSingle 0xA33720, ResetLevel 0xA33890, DistanceFromCamera 0xA48A00).
@@ -67,103 +91,125 @@ constexpr uint8_t kLodHead[9] = {0x51, 0xF3, 0x0F, 0x10, 0x81, 0x50, 0x02, 0x00,
 
 volatile LONG g_mode = 0;  // DrawMapPieces: 0 game, 1 adjacent, 2 all
 uint32_t g_get = kGetDisp;
-// 0x4569D0 leaves ecx (the floor record + 8) as it was: its draw groups (the neighbouring rooms) are at ecx + 8.
-uint32_t g_state = 0;  // the map's draw state ([ebx+0x10] at kLoadSite, [ebx+0x38] at kStepSite): +0x48 its groups
+uint32_t g_build_draw = kBuildDraw;
+uint32_t g_stream_floor = kStreamFloor;
+uint32_t g_stream_done = kStreamDone;
 float g_lod_inv = 1.0f;
 float g_fx_inv = 1.0f;
 uint32_t g_ftol = kFtol;
 uint32_t g_lod_back = kLodFn + 9;
 bool g_lod_on = false;
 
-__declspec(naked) void get_disp_load() {
+// What the floors add for the map pieces alone, per block, until it is ORed into the map piece manager's masks (the
+// game thread: FieldArea's update and the streaming update run there, one after the other).
+uint32_t g_extra_draw[kMaxBlocks][4] = {};
+uint32_t g_extra_stream[kMaxBlocks][4] = {};
+bool g_any_draw = false;
+bool g_any_stream = false;
+volatile LONG g_in_stream = 0;  // inside the streaming update's floor calls (0xDE2AE0 has other callers: load checks)
+
+// A floor's groups as the game reads them (rec8 = the floor's record + 8, the ecx of 0x4569D0): its block (record
+// +0x0F) gets its draw groups (record +0x10, the rooms next to it) with adjacent, or every group with all.
+void __cdecl note_floor(uint32_t rec8, int stream) {
+    __try {
+        const int block = *reinterpret_cast<const int8_t*>(rec8 + 7);
+        if (block < 0 || block >= kMaxBlocks) return;
+        uint32_t* e = stream ? g_extra_stream[block] : g_extra_draw[block];
+        const auto* nbr = reinterpret_cast<const uint32_t*>(rec8 + 8);
+        for (int k = 0; k < 4; ++k) e[k] |= g_mode == 2 ? 0xFFFFFFFFu : nbr[k];
+        (stream ? g_any_stream : g_any_draw) = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// The noted groups ORed into every block's mask at `off` in the map piece manager, then forgotten.
+void apply_extra(uint32_t (*extra)[4], bool* any, uint32_t off) {
+    if (!*any) return;
+    *any = false;
+    __try {
+        const uint32_t man = *reinterpret_cast<const uint32_t*>(kPieceManVar);
+        const uint32_t blocks = man ? *reinterpret_cast<const uint32_t*>(man + 0x20) : 0;
+        const int count = man ? *reinterpret_cast<const int*>(man + 0x1C) : 0;
+        for (int b = 0; blocks && b < count && b < kMaxBlocks; ++b) {
+            auto* mask = reinterpret_cast<uint32_t*>(blocks + b * kMapBlockSize + off);
+            for (int k = 0; k < 4; ++k) mask[k] |= extra[b][k];
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    std::memset(extra, 0, sizeof(uint32_t) * 4 * kMaxBlocks);
+}
+
+void __cdecl apply_draw() { apply_extra(g_extra_draw, &g_any_draw, kMapBlockDraw); }
+void __cdecl apply_stream() { apply_extra(g_extra_stream, &g_any_stream, kMapBlockStream); }
+
+// In place of `call 0x4569D0` in 0xDE2C60 (the draw masks): the game's answer, the floor noted.
+__declspec(naked) void get_disp_draw() {
     __asm {
-        push ecx
-        mov ecx, dword ptr [ebx + 0x10]
-        mov g_state, ecx
-        pop ecx
         call dword ptr [g_get]
         cmp g_mode, 0
         je done
-        cmp g_mode, 2
-        je all
-        push edx
-        mov edx, dword ptr [ecx + 8]
-        or dword ptr [eax], edx
-        mov edx, dword ptr [ecx + 12]
-        or dword ptr [eax + 4], edx
-        mov edx, dword ptr [ecx + 16]
-        or dword ptr [eax + 8], edx
-        mov edx, dword ptr [ecx + 20]
-        or dword ptr [eax + 12], edx
-        pop edx
-        jmp done
-    all:
-        mov dword ptr [eax], -1
-        mov dword ptr [eax + 4], -1
-        mov dword ptr [eax + 8], -1
-        mov dword ptr [eax + 12], -1
+        pushad
+        push 0
+        push ecx
+        call note_floor
+        add esp, 8
+        popad
     done:
         ret
     }
 }
 
-__declspec(naked) void get_disp_step() {
+// In place of `call 0x4569D0` in 0xDE2AE0 (a floor's streaming groups): noted when the streaming update asked.
+__declspec(naked) void get_disp_stream() {
     __asm {
-        push ecx
-        mov ecx, dword ptr [ebx + 0x38]
-        mov g_state, ecx
-        pop ecx
         call dword ptr [g_get]
         cmp g_mode, 0
         je done
-        cmp g_mode, 2
-        je all
-        push edx
-        mov edx, dword ptr [ecx + 8]
-        or dword ptr [eax], edx
-        mov edx, dword ptr [ecx + 12]
-        or dword ptr [eax + 4], edx
-        mov edx, dword ptr [ecx + 16]
-        or dword ptr [eax + 8], edx
-        mov edx, dword ptr [ecx + 20]
-        or dword ptr [eax + 12], edx
-        pop edx
-        jmp done
-    all:
-        mov dword ptr [eax], -1
-        mov dword ptr [eax + 4], -1
-        mov dword ptr [eax + 8], -1
-        mov dword ptr [eax + 12], -1
+        cmp g_in_stream, 0
+        je done
+        pushad
+        push 1
+        push ecx
+        call note_floor
+        add esp, 8
+        popad
     done:
         ret
     }
 }
 
-__declspec(naked) void get_disp_any() {
+// In place of `call 0xDE2C60` (stdcall, one argument, eax = the floor): the game's draw masks, then ours for the
+// map pieces.
+__declspec(naked) void build_draw() {
     __asm {
-        call dword ptr [g_get]
-        cmp g_mode, 0
-        je done
-        cmp g_mode, 2
-        je all
-        push edx
-        mov edx, dword ptr [ecx + 8]
-        or dword ptr [eax], edx
-        mov edx, dword ptr [ecx + 12]
-        or dword ptr [eax + 4], edx
-        mov edx, dword ptr [ecx + 16]
-        or dword ptr [eax + 8], edx
-        mov edx, dword ptr [ecx + 20]
-        or dword ptr [eax + 12], edx
-        pop edx
-        jmp done
-    all:
-        mov dword ptr [eax], -1
-        mov dword ptr [eax + 4], -1
-        mov dword ptr [eax + 8], -1
-        mov dword ptr [eax + 12], -1
-    done:
-        ret
+        push dword ptr [esp + 4]
+        call dword ptr [g_build_draw]
+        pushad
+        call apply_draw
+        popad
+        ret 4
+    }
+}
+
+// In place of `call 0xDE2AE0` in the streaming update (stdcall, two arguments, eax = the floor).
+__declspec(naked) void stream_floor() {
+    __asm {
+        mov dword ptr [g_in_stream], 1
+        push dword ptr [esp + 8]
+        push dword ptr [esp + 8]
+        call dword ptr [g_stream_floor]
+        mov dword ptr [g_in_stream], 0
+        ret 8
+    }
+}
+
+// In place of `call 0xE9BD70` right after the streaming masks are written: ours for the map pieces, then the call.
+__declspec(naked) void stream_done() {
+    __asm {
+        pushad
+        call apply_stream
+        popad
+        jmp dword ptr [g_stream_done]
     }
 }
 
@@ -207,8 +253,16 @@ bool redirect_call(uint32_t site, uint32_t from, const void* to) {
     return write_bytes(site, code, 5);
 }
 
+// A call rel32 at `site` that calls `from`.
+bool calls(uint32_t site, uint32_t from) {
+    const auto* p = reinterpret_cast<const uint8_t*>(site);
+    int32_t rel = 0;
+    std::memcpy(&rel, p + 1, 4);
+    return p[0] == 0xE8 && site + 5 + rel == from;
+}
+
 // --- stand-ins (see the top) -----------------------------------------------------------------------------------
-constexpr uint32_t kPieceMan = 0x0137D5F4;
+constexpr uint32_t kPieceMan = kPieceManVar;
 constexpr uint32_t kWorldChrMan = 0x0137D644;  // +0x3C the player, whose +0x29C is the floor record underfoot
 constexpr size_t kTwinPieces = sizeof(drawdist_twins::kPieces) / sizeof(drawdist_twins::kPieces[0]);
 constexpr size_t kTwinPairs = sizeof(drawdist_twins::kPairs) / sizeof(drawdist_twins::kPairs[0]);
@@ -338,24 +392,11 @@ void drawdist_tick() {
 void drawdist_set_mode(int mode) {
     if (mode < 0 || mode > 2) mode = 0;
     InterlockedExchange(&g_mode, mode);
-    // At once when the draw state is known (the player's floor record: draw groups +0x10, display groups +0x20).
-    const uint32_t state = g_state;
+    // The streaming masks follow on the next frame; the draw masks when the floor is applied again (SetFloor 0xE6E580
+    // sees no floor yet on the next frame, and FieldArea's update rebuilds them).
     __try {
-        const uint32_t wcm = *reinterpret_cast<uint32_t*>(0x0137D644);
+        const uint32_t wcm = *reinterpret_cast<uint32_t*>(kWorldChrMan);
         const uint32_t chr = wcm ? *reinterpret_cast<uint32_t*>(wcm + 0x3C) : 0;
-        const uint32_t floor = chr ? *reinterpret_cast<uint32_t*>(chr + 0x29C) : 0;
-        if (state) {
-            auto* groups = reinterpret_cast<uint32_t*>(state + 0x48);
-            if (mode == 2) {
-                for (int i = 0; i < 4; ++i) groups[i] = 0xFFFFFFFFu;
-            } else if (floor) {
-                const auto* disp = reinterpret_cast<const uint32_t*>(floor + 0x20);
-                const auto* nbr = reinterpret_cast<const uint32_t*>(floor + 0x10);
-                for (int i = 0; i < 4; ++i) groups[i] = disp[i] | (mode == 1 ? nbr[i] : 0u);
-            }
-        }
-        // And the floor applied again on the next frame (SetFloor 0xE6E580 sees no floor yet), which rebuilds the
-        // per-block masks through the sites above.
         if (chr) *reinterpret_cast<uint32_t*>(chr + 0x29C) = 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -387,21 +428,32 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent) {
                  "game's", effect_percent);
     }
     InterlockedExchange(&g_mode, (mode < 0 || mode > 2) ? 0 : mode);
-    const bool load = redirect_call(kLoadSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_load));
-    bool step = redirect_call(kStepSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_step));
-    for (const uint32_t site : kBlockSites) {
-        step = redirect_call(site, kGetDisp, reinterpret_cast<const void*>(&get_disp_any)) && step;
+    // All six sites checked before any is changed: the map pieces' masks are widened at two places and noted at two.
+    bool match = calls(kDrawGetSite, kGetDisp) && calls(kStreamGetSite, kGetDisp) && calls(kBuildDrawSite, kBuildDraw) &&
+                 calls(kStreamDoneSite, kStreamDone);
+    for (const uint32_t site : kStreamFloorSites) match = match && calls(site, kStreamFloor);
+    bool on = false;
+    if (match) {
+        on = redirect_call(kDrawGetSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_draw)) &&
+             redirect_call(kStreamGetSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_stream)) &&
+             redirect_call(kBuildDrawSite, kBuildDraw, reinterpret_cast<const void*>(&build_draw));
+        for (const uint32_t site : kStreamFloorSites) {
+            on = on && redirect_call(site, kStreamFloor, reinterpret_cast<const void*>(&stream_floor));
+        }
+        on = on && redirect_call(kStreamDoneSite, kStreamDone, reinterpret_cast<const void*>(&stream_done));
     }
     g_lod_on = install_lod();
-    g_twins_on = load && step;
-    if (!load || !step) {
+    g_twins_on = on;
+    if (!on) {
+        InterlockedExchange(&g_mode, 0);
         LOG_ERROR("DrawMapPieces: the game's code at %08X/%08X does not match this build; not used",
-                  static_cast<unsigned>(kLoadSite), static_cast<unsigned>(kStepSite));
+                  static_cast<unsigned>(kBuildDrawSite), static_cast<unsigned>(kStreamDoneSite));
     } else if (mode == 1) {
         LOG_INFO("DrawMapPieces = adjacent: the map pieces seen from the player's room and from the rooms next to it "
-                 "are drawn (the game: this room's only)");
+                 "are drawn (the game: this room's only); characters, objects and the rest keep the game's rooms");
     } else if (mode == 2) {
-        LOG_INFO("DrawMapPieces = all: every map piece of the loaded maps is drawn wherever the player stands");
+        LOG_INFO("DrawMapPieces = all: every map piece of the loaded maps is drawn wherever the player stands; "
+                 "characters, objects and the rest keep the game's rooms");
     }
     if (!g_lod_on) {
         LOG_ERROR("LodDistance: the game's code at %08X does not match this build; not used",
@@ -409,5 +461,5 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent) {
     } else if (lod_percent != 100) {
         LOG_INFO("LodDistance: models switch to their lower levels of detail %d%% as far away as the game's", lod_percent);
     }
-    return load && step;
+    return on;
 }
