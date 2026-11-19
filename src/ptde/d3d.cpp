@@ -23,6 +23,7 @@
 #include "dofwatch.h"
 #include "foliage.h"
 #include "resolution.h"
+#include "shadowmap.h"
 #include "settings.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -287,6 +288,8 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             g_set_vs_const = reinterpret_cast<SetVsConstFn>(vs);
             LOG_INFO("Device SetVertexShaderConstantF hooked%s", g_probe ? " (content-cadence probe)" : "");
         }
+        // First of the scissor hooks, so it sees the rectangle the others pass on (beside DSfix 3.0 with a larger map).
+        shadowmap_hook_device(*out);
         if (aspect_is_active()) {
             aspect_hook_device(*out);
         }

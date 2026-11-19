@@ -916,11 +916,48 @@ HRESULT WINAPI hk_clear(IDirect3DDevice9* dev, DWORD n, const D3DRECT* r, DWORD 
         static_cast<unsigned long>(c), z, static_cast<unsigned long>(n));
     return o_clear(dev, n, r, flags, c, z, st);
 }
+// The device that does the work when another mod (DSfix) hands the game a device of its own: frame logs then also say
+// when its viewport or scissor rectangle at a draw is not what the game asked for (the wrapper changed it on the way).
+IDirect3DDevice9* g_real_dev = nullptr;
+D3DVIEWPORT9 g_asked_vp{};
+RECT g_asked_sc{};
+bool g_vp_told = false, g_sc_told = false;
+
+void check_real_state() {
+    if (!g_capturing || !g_real_dev) return;
+    D3DVIEWPORT9 vp{};
+    if (SUCCEEDED(g_real_dev->GetViewport(&vp)) &&
+        (vp.X != g_asked_vp.X || vp.Y != g_asked_vp.Y || vp.Width != g_asked_vp.Width ||
+         vp.Height != g_asked_vp.Height)) {
+        if (!g_vp_told) {
+            cap("  the device's viewport is %lu,%lu %lux%lu (asked %lu,%lu %lux%lu)", vp.X, vp.Y, vp.Width, vp.Height,
+                g_asked_vp.X, g_asked_vp.Y, g_asked_vp.Width, g_asked_vp.Height);
+            g_vp_told = true;
+        }
+    }
+    RECT sc{};
+    if (SUCCEEDED(g_real_dev->GetScissorRect(&sc)) &&
+        (sc.left != g_asked_sc.left || sc.top != g_asked_sc.top || sc.right != g_asked_sc.right ||
+         sc.bottom != g_asked_sc.bottom)) {
+        if (!g_sc_told) {
+            cap("  the device's scissor is %ld,%ld-%ld,%ld (asked %ld,%ld-%ld,%ld)", sc.left, sc.top, sc.right,
+                sc.bottom, g_asked_sc.left, g_asked_sc.top, g_asked_sc.right, g_asked_sc.bottom);
+            g_sc_told = true;
+        }
+    }
+}
+
 HRESULT WINAPI hk_set_viewport(IDirect3DDevice9* dev, const D3DVIEWPORT9* v) {
     if (g_capturing && v) {
         cap("SetViewport %lu,%lu %lux%lu z %g-%g", v->X, v->Y, v->Width, v->Height, v->MinZ, v->MaxZ);
     }
-    return o_set_viewport(dev, v);
+    const HRESULT hr = o_set_viewport(dev, v);
+    if (v) {
+        g_asked_vp = *v;
+        g_vp_told = false;
+    }
+    if (g_capturing && FAILED(hr)) cap("  SetViewport failed: 0x%08lX", static_cast<unsigned long>(hr));
+    return hr;
 }
 HRESULT WINAPI hk_set_rs(IDirect3DDevice9* dev, D3DRENDERSTATETYPE s, DWORD v) {
     if (g_capturing) {
@@ -951,7 +988,22 @@ HRESULT WINAPI hk_set_sampler(IDirect3DDevice9* dev, DWORD stage, D3DSAMPLERSTAT
 }
 HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
     if (g_capturing && r) cap("SetScissor %ld,%ld-%ld,%ld", r->left, r->top, r->right, r->bottom);
-    return o_set_scissor(dev, r);
+    const HRESULT hr = o_set_scissor(dev, r);
+    if (r) {
+        g_asked_sc = *r;
+        g_sc_told = false;
+        if (g_real_dev) {
+            RECT now{};
+            if (SUCCEEDED(g_real_dev->GetScissorRect(&now)) &&
+                (now.left != r->left || now.top != r->top || now.right != r->right || now.bottom != r->bottom)) {
+                if (g_capturing) {
+                    cap("  right after SetScissor the device has %ld,%ld-%ld,%ld", now.left, now.top, now.right,
+                        now.bottom);
+                }
+            }
+        }
+    }
+    return hr;
 }
 bool safe_read_any(uintptr_t a, void* outp, size_t n) {
     __try {
@@ -1005,7 +1057,9 @@ HRESULT WINAPI hk_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, UINT start, UI
 HRESULT WINAPI hk_draw_idx(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, INT base, UINT mn, UINT nv, UINT si, UINT pc) {
     cap("DrawIndexed type %d verts %u prims %u", static_cast<int>(t), nv, pc);
     ++g_gt_draws;
-    return o_draw_idx(dev, t, base, mn, nv, si, pc);
+    const HRESULT hr = o_draw_idx(dev, t, base, mn, nv, si, pc);
+    check_real_state();
+    return hr;
 }
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, UINT pc, const void* v, UINT stride) {
     ++g_gt_draws;
@@ -2651,7 +2705,19 @@ void remote_hook_device(IDirect3DDevice9* dev) {
     hook(dev, kSetPSConstF, o_set_ps_const, reinterpret_cast<void*>(&hk_set_ps_const));
     hook(dev, kSetVSConstF, o_set_vs_const, reinterpret_cast<void*>(&hk_set_vs_const));
     hook(dev, kCreateQuery, o_create_query, reinterpret_cast<void*>(&hk_create_query));
-    out("device hooked (d3dx %s)", x_save_surface ? "found" : "MISSING");
+    {
+        IDirect3DVertexBuffer9* vb = nullptr;
+        if (SUCCEEDED(dev->CreateVertexBuffer(16, D3DUSAGE_WRITEONLY, 0, D3DPOOL_SYSTEMMEM, &vb, nullptr)) && vb) {
+            IDirect3DDevice9* real = nullptr;
+            if (SUCCEEDED(vb->GetDevice(&real)) && real) {
+                if (real != dev) g_real_dev = real;  // kept for the device's life (one reference)
+                else real->Release();
+            }
+            vb->Release();
+        }
+    }
+    out("device hooked (d3dx %s)%s", x_save_surface ? "found" : "MISSING",
+        g_real_dev ? "; another device object lies under it (frame logs check its viewport and scissor)" : "");
 }
 
 void remote_pad(DWORD index, void* state, DWORD* result) {
