@@ -534,8 +534,8 @@ bool frame_install(const Settings& settings) {
         }
         // SfxWatch shares the effect registration hook; a Watch of player fields keeps the debug registers.
         if (settings.sfx_watch > 0 && settings.watch[0] == 0) sfxwatch_set_target(settings.sfx_watch);
-        if (settings.fix_sfx_spawn_rate || sfxwatch_wanted() || settings.effect_lod_distance != 100) {
-            sfx_install(settings.fix_sfx_spawn_rate, settings.effect_lod_distance);
+        if (settings.fix_sfx_spawn_rate || sfxwatch_wanted()) {
+            sfx_install(settings.fix_sfx_spawn_rate);
         }
         if (settings.fix_sfx_actions) {
             sfx_actions_install();
@@ -558,7 +558,7 @@ bool frame_install(const Settings& settings) {
             atoc_fix_depth_install(settings.antialiasing_samples);
         }
         shadowmap_set_resolution(settings.shadow_map_resolution);
-        drawdist_install(settings.draw_map_pieces, settings.lod_distance);
+        drawdist_install(settings.draw_map_pieces, settings.lod_distance, settings.effect_lod_distance);
         int rw = settings.render_width, rh = settings.render_height;
         // YieldToDSFix: DSfix's renderWidth/renderHeight decide, and with them its anti-aliasing, SSAO and depth of
         // field; ours (Supersampling, the depth of field's and effects' resolution, HighPrecisionColor) stay off.

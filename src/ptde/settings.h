@@ -122,7 +122,7 @@ struct Settings {
     int draw_map_pieces = 1;
     // The level-of-detail switch distances in percent of the game's (drawdist.h).
     int lod_distance = 100;
-    // The fires' (torches, bonfires) level-of-detail bounds in percent of the game's (sfx.h).
+    // The fires' (torches, bonfires) level-of-detail distances in percent of the game's (drawdist.h).
     int effect_lod_distance = 200;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;

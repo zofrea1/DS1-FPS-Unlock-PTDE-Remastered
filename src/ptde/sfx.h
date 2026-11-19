@@ -8,8 +8,7 @@
 // nothing else changed. This applies the same rule to every effect as the game loads it: a detour on
 // fn 0xD19CF0 (stdcall(name, data, size), which registers an effect file with the FFX library before
 // it is parsed) walks the raw file through its pointer-offset table and raises those intervals.
-// level_percent: EffectLodDistance, the fires' level-of-detail bounds in percent (sfx.cpp, scale_levels).
-bool sfx_install(bool raise = true, int level_percent = 100);
+bool sfx_install(bool raise = true);
 
 // Effect actions on the 30 FPS frame grid. When an effect node changes state the FX library runs that state's
 // actions (FXBasicActionHandler, routines by id at 0x12DDC60), and they read their parameters at the node's clock

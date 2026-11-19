@@ -28,6 +28,14 @@
 // camera) picks level 0, 1 or 2 from the row's lv01/lv12 border distances and margins (default row 0: 15/30 m in
 // Prepare to Die Edition, 25/50 m in Remastered). The distance is scaled by 100 / LodDistance on entry, so every
 // border moves out by LodDistance percent.
+//
+// EffectLodDistance. The fires' level of detail (torches, bonfires, braziers: the 181 effects built on template
+// effect 2117, and 2116 and 2118 for 70 more) moves between states by level checks: CheckLevel (data3 type 138,
+// 0xA33600) is `int(distance from the camera) < slot n`, n = 5, 6, 7, 8 (the value of the effect's parameter slot n,
+// [context+0x60][n], read through 0x97A880 kind 1), ResetLevelSingle (139) and ResetLevel (140) likewise, and the
+// nearest state alone has the embers. The distance is scaled by 100 / EffectLodDistance before it is made an
+// integer, so every boundary moves out by that percent. (Scaling n instead, in the effect files, pointed the checks
+// at slots the effects do not have: the game crashed at load with n = 16, 2026-11-18.)
 namespace {
 
 constexpr uint32_t kGetDisp = 0x004569D0;
@@ -37,6 +45,10 @@ constexpr uint32_t kStepSite = 0x00EFDEDE;  // call 0x4569D0 (a floor of another
 // the pieces' visibility takes too: a floor's own groups alone in the draw state changed nothing (2026-11-18).
 constexpr uint32_t kBlockSites[] = {0x00DE2AFA, 0x00DE2C9F};
 constexpr uint32_t kLodFn = 0x00F61CD0;
+// EffectLodDistance: the effect level checks' call to _ftol on the camera distance (CheckLevel 0xA33600,
+// ResetLevelSingle 0xA33720, ResetLevel 0xA33890, DistanceFromCamera 0xA48A00).
+constexpr uint32_t kFtol = 0x00ABF1A0;
+constexpr uint32_t kFxDistSites[] = {0x00A33700, 0x00A33820, 0x00A339C2, 0x00A48AAA};
 constexpr uint8_t kLodHead[9] = {0x51, 0xF3, 0x0F, 0x10, 0x81, 0x50, 0x02, 0x00, 0x00};  // push ecx; movss xmm0,[ecx+250h]
 
 volatile LONG g_mode = 0;  // DrawMapPieces: 0 game, 1 adjacent, 2 all
@@ -44,6 +56,8 @@ uint32_t g_get = kGetDisp;
 // 0x4569D0 leaves ecx (the floor record + 8) as it was: its draw groups (the neighbouring rooms) are at ecx + 8.
 uint32_t g_state = 0;  // the map's draw state ([ebx+0x10] at kLoadSite, [ebx+0x38] at kStepSite): +0x48 its groups
 float g_lod_inv = 1.0f;
+float g_fx_inv = 1.0f;
+uint32_t g_ftol = kFtol;
 uint32_t g_lod_back = kLodFn + 9;
 bool g_lod_on = false;
 
@@ -139,6 +153,15 @@ __declspec(naked) void get_disp_any() {
     }
 }
 
+// In place of `call _ftol` (st0 = the camera distance in metres): the distance scaled, then _ftol, which returns to
+// the level check.
+__declspec(naked) void fx_ftol() {
+    __asm {
+        fmul dword ptr [g_fx_inv]
+        jmp dword ptr [g_ftol]
+    }
+}
+
 __declspec(naked) void lod_entry() {
     __asm {
         mulss xmm1, g_lod_inv
@@ -206,14 +229,31 @@ void drawdist_set_mode(int mode) {
     }
 }
 
+void drawdist_set_effect_lod(int percent) {
+    if (percent < 25) percent = 25;
+    if (percent > 1000) percent = 1000;
+    g_fx_inv = 100.0f / static_cast<float>(percent);
+}
+
 void drawdist_set_lod(int percent) {
     if (percent < 25) percent = 25;
     if (percent > 1000) percent = 1000;
     g_lod_inv = 100.0f / static_cast<float>(percent);
 }
 
-bool drawdist_install(int mode, int lod_percent) {
+bool drawdist_install(int mode, int lod_percent, int effect_percent) {
     drawdist_set_lod(lod_percent);
+    drawdist_set_effect_lod(effect_percent);
+    bool fx = true;
+    for (const uint32_t site : kFxDistSites) {
+        fx = redirect_call(site, kFtol, reinterpret_cast<const void*>(&fx_ftol)) && fx;
+    }
+    if (!fx) {
+        LOG_ERROR("EffectLodDistance: the effect level checks do not match this build; not used");
+    } else if (effect_percent != 100) {
+        LOG_INFO("EffectLodDistance: fires (torches, bonfires) keep each level of detail %d%% as far away as the "
+                 "game's", effect_percent);
+    }
     InterlockedExchange(&g_mode, (mode < 0 || mode > 2) ? 0 : mode);
     const bool load = redirect_call(kLoadSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_load));
     bool step = redirect_call(kStepSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_step));
