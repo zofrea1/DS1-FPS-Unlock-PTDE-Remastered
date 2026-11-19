@@ -224,6 +224,12 @@ Settings settings_load(const wchar_t* dll_path) {
             std::string v = val;
             for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             s.draw_map_pieces = (v == "all") ? 2 : (v == "adjacent") ? 1 : 0;
+        } else if (key == "foliagesway") {
+            s.foliage_sway = parse_bool(val);
+        } else if (key == "foliageswaystrength") {
+            s.foliage_sway_strength = std::atoi(val.c_str());
+        } else if (key == "foliageswayspeed") {
+            s.foliage_sway_speed = std::atoi(val.c_str());
         } else if (key == "effectloddistance") {
             s.effect_lod_distance = std::atoi(val.c_str());
         } else if (key == "loddistance") {
@@ -463,6 +469,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"fixantialiasingdepth", "false"},
                 {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
                 {"drawmappieces", "game"}, {"loddistance", "100"}, {"effectloddistance", "100"},
+                {"foliagesway", "false"},
                 {"fixsun", "false"}, {"fixwater", "false"}, {"gammaramp", "auto"}, {"dxvk", "false"},
                 {"borderlessfullscreen", "false"},
                 // The screen's shape and the HUD.

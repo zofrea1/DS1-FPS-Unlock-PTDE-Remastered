@@ -124,6 +124,11 @@ struct Settings {
     int lod_distance = 100;
     // The fires' (torches, bonfires) level-of-detail distances in percent of the game's (drawdist.h).
     int effect_lod_distance = 100;
+    // Grass, flowers, bushes, ivy and leaves sway in the wind as in Remastered; strength and speed in percent of
+    // Remastered's (foliage.h).
+    bool foliage_sway = true;
+    int foliage_sway_strength = 100;
+    int foliage_sway_speed = 100;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.

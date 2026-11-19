@@ -21,6 +21,7 @@
 #include "remixdisplay.h"
 #include "dsfix.h"
 #include "dofwatch.h"
+#include "foliage.h"
 #include "resolution.h"
 #include "settings.h"
 
@@ -352,6 +353,8 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             layout_hook_device(*out, !resolution_is_active());
         }
         if (resolution_is_active() || (settings().fix_aspect_ui && aspect_is_active())) layout_patch_scissor_sites();
+        // FoliageSway: the static models' vertex shaders get their swaying copies as the game makes them.
+        foliage_hook_device(*out);
         if (settings().shadow_bias_listed) {
             static bool told = false;
             if (!told) {

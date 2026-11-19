@@ -6,6 +6,7 @@
 
 #include "frame.h"
 #include "drawdist.h"
+#include "foliage.h"
 #include "dxgipresent.h"
 #include "limiter.h"
 #include "profile.h"
@@ -2464,6 +2465,15 @@ void run(const std::string& line) {
     } else if (c == "drawmode") {
         drawdist_set_mode(static_cast<int>(num(1, 1)));
         out("drawmode %ld", num(1, 1));
+    } else if (c == "sway") {
+        foliage_set_strength(static_cast<int>(num(1, 100)));
+        out("sway %ld", num(1, 100));
+    } else if (c == "swayspeed") {
+        foliage_set_speed(static_cast<int>(num(1, 100)));
+        out("swayspeed %ld", num(1, 100));
+    } else if (c == "swaystats") {
+        foliage_log_stats();
+        out("swaystats: see the log");
     } else if (c == "fxlodpct") {
         drawdist_set_effect_lod(static_cast<int>(num(1, 100)));
         out("fxlodpct %ld", num(1, 100));

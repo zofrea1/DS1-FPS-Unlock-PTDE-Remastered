@@ -36,6 +36,7 @@ src\ptde\scanwatch.cpp
 src\ptde\shadowmap.cpp
 src\ptde\dofwatch.cpp
 src\ptde\drawdist.cpp
+src\ptde\foliage.cpp
 src\ptde\trace.cpp
 src\ptde\watch.cpp
 src\ptde\fixes.cpp

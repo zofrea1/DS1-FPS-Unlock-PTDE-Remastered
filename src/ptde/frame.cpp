@@ -24,6 +24,7 @@
 #include "atoc.h"
 #include "shadowmap.h"
 #include "drawdist.h"
+#include "foliage.h"
 #include "dsfix.h"
 #include "resolution.h"
 #include "menuscale.h"
@@ -559,6 +560,8 @@ bool frame_install(const Settings& settings) {
         }
         shadowmap_set_resolution(settings.shadow_map_resolution);
         drawdist_install(settings.draw_map_pieces, settings.lod_distance, settings.effect_lod_distance);
+        foliage_configure(settings.foliage_sway, settings.foliage_sway_strength, settings.foliage_sway_speed);
+        foliage_install();
         int rw = settings.render_width, rh = settings.render_height;
         // YieldToDSFix: DSfix's renderWidth/renderHeight decide, and with them its anti-aliasing, SSAO and depth of
         // field; ours (Supersampling, the depth of field's and effects' resolution, HighPrecisionColor) stay off.
