@@ -396,6 +396,25 @@ constexpr UINT kSmallW = 512, kSmallH = 360;  // the game's effects target and d
 volatile LONG g_fx_mode = 0;  // 0 the game's, 1 ours (8-bit), 2 ours (float, dither), 3 ours at half size (float)
 std::unordered_set<void*> g_bilateral_shaders;
 volatile bool g_bilateral_bound = false;
+
+// FRPG_Fil_DepthCopy_MSAA (ps_89c708d8): the resolved depth (s0, two reads, the nearer kept) written back into the
+// scene's depth texture (T52) through oDepth, and 1.0 into every pixel of its colour target. That colour target is a
+// render-target surface of the scene's size the game makes for this one draw (a new one each frame: no texture, so
+// nothing can sample it, and no StretchRect reads it): only there because a draw needs one. Its colour write is left
+// out (COLORWRITEENABLE 0 for the draw; RemoteControl `swapoff 0x8000` writes it): 4 bytes a pixel at the render size
+// (Firelink 4K, 2026-11-20: the pass 0.225 ms). Were such a surface ever read by a StretchRect, the log says so and
+// the colour is written from then on.
+constexpr DWORD kDepthCopyMsaa[] = {
+    0xFFFF0300, 0x05000051, 0xA00F0000, 0x3F7F0000, 0x3B7F0000, 0x377F0000, 0x3F800000, 0x0200001F, 0x80000005,
+    0x900F0000, 0x0200001F, 0x90000000, 0xA00F0800, 0x03000042, 0x800F0000, 0x90E40000, 0xA0E40800, 0x03000008,
+    0x80010000, 0x80E40000, 0xA0E40000, 0x03000042, 0x800F0001, 0x90EE0000, 0xA0E40800, 0x03000008, 0x80020000,
+    0x80E40001, 0xA0E40000, 0x0300000A, 0x900F0800, 0x80550000, 0x80000000, 0x02000001, 0x800F0800, 0xA0FF0000,
+    0x0000FFFF};
+std::unordered_set<void*> g_depth_copy_shaders;
+volatile bool g_depth_copy_bound = false;
+IDirect3DSurface9* g_dc_surf = nullptr;  // the last colour target its colour was left out of
+bool g_dc_off = false;
+bool g_dc_logged = false;
 int g_render_w = 0, g_render_h = 0;  // the scene's size
 
 // FRPG_Fil_Bilateral with an early exit where there are no effects (RemoteControl `swapoff 0x800` draws the game's).
@@ -1319,6 +1338,12 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
         }
     }
     if (SUCCEEDED(hr) && out && *out &&
+        same_instructions(code, kDepthCopyMsaa, sizeof(kDepthCopyMsaa) / sizeof(kDepthCopyMsaa[0]))) {
+        std::lock_guard<std::mutex> lock(g_lock);
+        g_depth_copy_shaders.insert(*out);
+        ps_sets_changed();
+    }
+    if (SUCCEEDED(hr) && out && *out &&
         same_instructions(code, kCameraBlurPower, sizeof(kCameraBlurPower) / sizeof(kCameraBlurPower[0]))) {
         std::lock_guard<std::mutex> lock(g_lock);
         g_cam_power_shaders.insert(*out);
@@ -1395,6 +1420,7 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
 HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     bool copy = false;
     bool bilateral = false;
+    uint32_t flags_seen = 0;
     int game = -1;
     int swap = -1;
     LONG cam = 0;
@@ -1412,6 +1438,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
             flags = g_copy_shaders.count(ps) ? 1u : 0u;
             flags |= (g_cam_power_shaders.count(ps) ? 1u : g_cam_blur_shaders.count(ps) ? 2u : 0u) << 1;
             flags |= g_bilateral_shaders.count(ps) ? 8u : 0u;
+            flags |= g_depth_copy_shaders.count(ps) ? 0x80u : 0u;
             for (int i = 0; i < kSwapCount; ++i) {
                 if (g_swap_game[i].count(ps)) {
                     flags |= static_cast<uint32_t>(i + 1) << 4;
@@ -1421,6 +1448,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
             const uint64_t n = key | (static_cast<uint64_t>(gen) << 32) | (static_cast<uint64_t>(flags) << 48);
             _mm_storel_epi64(reinterpret_cast<__m128i*>(slot), _mm_loadl_epi64(reinterpret_cast<const __m128i*>(&n)));
         }
+        flags_seen = flags;
         copy = (flags & 1u) != 0;
         cam = static_cast<LONG>((flags >> 1) & 3u);
         bilateral = (flags & 8u) != 0;
@@ -1435,6 +1463,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
     g_copy_bound = copy;
     g_cam_bound = cam;
     g_bilateral_bound = bilateral;
+    g_depth_copy_bound = ps && (flags_seen & 0x80u) != 0;
     g_game_bound = game;
     g_swap_bound = swap;
     if (swap >= 0) {
@@ -2232,6 +2261,34 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
         HRESULT hr = S_OK;
         if (lazy_copy(dev, type, count, data, stride, &hr)) return hr;
     }
+    if (g_depth_copy_bound && !g_dc_off && !(g_swap_off_mask & 0x8000)) {
+        IDirect3DSurface9* rt = g_fx.rt0;
+        IDirect3DSwapChain9* chain = nullptr;
+        IDirect3DSurface9* more = nullptr;
+        bool dummy = rt && !container_of(rt);
+        if (dummy && SUCCEEDED(rt->GetContainer(__uuidof(IDirect3DSwapChain9), reinterpret_cast<void**>(&chain))) &&
+            chain) {
+            chain->Release();
+            dummy = false;  // a back buffer is presented
+        }
+        if (dummy && SUCCEEDED(dev->GetRenderTarget(1, &more)) && more) {
+            more->Release();
+            dummy = false;
+        }
+        if (dummy) {
+            DWORD mask = 0xF;
+            dev->GetRenderState(D3DRS_COLORWRITEENABLE, &mask);
+            dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+            const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+            dev->SetRenderState(D3DRS_COLORWRITEENABLE, mask);
+            g_dc_surf = rt;
+            if (!g_dc_logged) {
+                g_dc_logged = true;
+                LOG_INFO("Resolution: the depth copy into the scene's depth leaves its throwaway colour target alone");
+            }
+            return hr;
+        }
+    }
     HRESULT alpha_hr = S_OK;
     if (g_rt0_10bit && !(g_swap_off_mask & 0x50) && alpha_draw(dev, type, count, data, stride, &alpha_hr)) {
         return alpha_hr;
@@ -2306,7 +2363,8 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
             g_fx.depth_small = low;
             g_fx.depth_small_ds = g_fx.ds;
             if (g_fx_mode == 3 && fx_ready(dev)) {
-                // The same copy into our half-size depth (our effects target as its colour target: cleared at 3).
+                // The same copy into our half-size depth (our effects target as its colour target, cleared at 3:
+                // only the depth is written, not 8 bytes of colour a pixel that the clear replaces).
                 const HRESULT hr = o_draw_up(dev, type, count, data, stride);
                 IDirect3DSurface9* rt = g_fx.rt0;
                 IDirect3DSurface9* ds = g_fx.ds;
@@ -2314,10 +2372,14 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
                 dev->GetViewport(&vp);
                 RECT scissor{};
                 dev->GetScissorRect(&scissor);
+                DWORD mask = 0xF;
+                dev->GetRenderState(D3DRS_COLORWRITEENABLE, &mask);
                 o_set_rt(dev, 0, g_fx.surf);
                 o_set_ds(dev, g_fx.hdepth_surf);
                 fx_whole_target(dev, vp);
+                if (!(g_swap_off_mask & 0x4000)) dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
                 g_fx.hdepth_filled = SUCCEEDED(o_draw_up(dev, type, count, data, stride));
+                dev->SetRenderState(D3DRS_COLORWRITEENABLE, mask);
                 o_set_rt(dev, 0, rt);
                 o_set_ds(dev, ds);
                 o_set_viewport(dev, &vp);
@@ -2783,6 +2845,11 @@ void scopy_note(IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst, 
 HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst,
                           const RECT* dr, D3DTEXTUREFILTERTYPE filter) {
     if (src && dst && src != dst) scopy_note(src, sr, dst, dr);
+    if (src && src == g_dc_surf && !g_dc_off) {
+        g_dc_off = true;
+        LOG_ERROR("Resolution: the depth copy's colour target was read by a StretchRect (one frame may be wrong there); "
+                  "its colour is written from now on");
+    }
     if (g_held.src || g_owed.src || g_stale) {
         lazy_before_read(dev, -1, container_of(src));
         lazy_before_write(dev, dst);
@@ -2977,6 +3044,7 @@ void resolution_reset() {
     g_stale_surf = nullptr;
     for (HoldScore& h : g_hold_scores) h = HoldScore{};
     g_scopy = SceneCopy{};
+    g_dc_surf = nullptr;
     g_blur_src = nullptr;
     g_blur_dst = nullptr;
     g_dof_direct = false;
