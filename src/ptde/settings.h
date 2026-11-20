@@ -120,6 +120,8 @@ struct Settings {
     int shadow_map_resolution = 4096;
     // DrawMapPieces: 0 game, 1 adjacent (the rooms next to the player's too), 2 all (drawdist.h).
     int draw_map_pieces = 0;
+    // OcclusionCulling: with DrawMapPieces adjacent/all, the pieces it adds are skipped while hidden (occl.h).
+    bool occlusion_culling = true;
     // The level-of-detail switch distances in percent of the game's (drawdist.h).
     int lod_distance = 100;
     // The fires' (torches, bonfires) level-of-detail distances in percent of the game's (drawdist.h).

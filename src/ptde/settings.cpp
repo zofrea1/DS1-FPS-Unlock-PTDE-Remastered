@@ -224,6 +224,8 @@ Settings settings_load(const wchar_t* dll_path) {
             std::string v = val;
             for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             s.draw_map_pieces = (v == "all") ? 2 : (v == "adjacent") ? 1 : 0;
+        } else if (key == "occlusionculling") {
+            s.occlusion_culling = parse_bool(val);
         } else if (key == "foliagesway") {
             s.foliage_sway = parse_bool(val);
         } else if (key == "foliageswaystrength") {
@@ -485,6 +487,8 @@ Settings settings_load(const wchar_t* dll_path) {
                 {"fixsfxspawnrate", "false"}, {"fixsfxactions", "false"}, {"fixsfxdistortion", "false"},
                 {"fixsfxsway", "false"}, {"fixsfxtrails", "false"},
                 {"fixcutscenecamera", "false"},
+                // The path tracer sees what the camera does not (reflections, light): nothing is skipped.
+                {"occlusionculling", "false"},
                 // The mouse and keyboard, and the start-up.
                 {"hidemousecursor", "false"}, {"cacheinputreads", "false"}, {"skipintro", "false"},
             };

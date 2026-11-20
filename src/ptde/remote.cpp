@@ -18,6 +18,7 @@
 #include "surfpool.h"
 #include "d3dperf.h"
 #include "phases.h"
+#include "occl.h"
 #include "inputcache.h"
 #include "resolution.h"
 #include "sfx.h"
@@ -392,6 +393,11 @@ volatile bool g_passdump_requested = false;
 std::string g_passdump_name;
 std::string g_shotfb_name;
 volatile LONG g_query_frames = 0;  // log occlusion query results for this many more frames
+// frameocc NAME: a frame log whose indexed draws each count their visible samples (an occlusion query around each; the
+// counts are read back at Present, waiting, and listed at the end of the log as "occ K samples N").
+volatile bool g_occ_requested = false;
+bool g_occ = false;
+std::vector<IDirect3DQuery9*> g_occ_q;
 std::mutex g_frame_lock;
 std::string g_frame;
 int g_frame_line = 0;
@@ -702,6 +708,25 @@ HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, H
     if (g_capturing) {
         cap("Present");
         g_capturing = false;
+        if (!g_occ_q.empty()) {
+            const ULONGLONG until = GetTickCount64() + 3000;
+            std::string list;
+            for (size_t k = 0; k < g_occ_q.size(); ++k) {
+                DWORD n = 0;
+                HRESULT r = S_FALSE;
+                while ((r = g_occ_q[k]->GetData(&n, sizeof(n), D3DGETDATA_FLUSH)) == S_FALSE && GetTickCount64() < until) {
+                }
+                char line[64];
+                std::snprintf(line, sizeof(line), "occ %u samples %ld\n", static_cast<unsigned>(k),
+                              r == S_OK ? static_cast<long>(n) : -1L);
+                list += line;
+                g_occ_q[k]->Release();
+            }
+            g_occ_q.clear();
+            std::lock_guard<std::mutex> lock(g_frame_lock);
+            g_frame += list;
+        }
+        g_occ = false;
         write_frame();
         save_backbuffer(dev, g_frame_name);
     }
@@ -744,6 +769,8 @@ HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, H
     const HRESULT hr = o_present(dev, a, b, w, r);
     if (g_frame_requested) {
         g_frame_requested = false;
+        g_occ = g_occ_requested;
+        g_occ_requested = false;
         g_capturing = true;
     }
     return hr;
@@ -1055,9 +1082,24 @@ HRESULT WINAPI hk_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, UINT start, UI
     return o_draw(dev, t, start, count);
 }
 HRESULT WINAPI hk_draw_idx(IDirect3DDevice9* dev, D3DPRIMITIVETYPE t, INT base, UINT mn, UINT nv, UINT si, UINT pc) {
-    cap("DrawIndexed type %d verts %u prims %u", static_cast<int>(t), nv, pc);
+    IDirect3DQuery9* q = nullptr;
+    if (g_capturing && g_occ && g_occ_q.size() < 20000 &&
+        (FAILED(dev->CreateQuery(D3DQUERYTYPE_OCCLUSION, &q)) || !q || FAILED(q->Issue(D3DISSUE_BEGIN)))) {
+        if (q) q->Release();
+        q = nullptr;
+    }
+    if (q) {
+        cap("DrawIndexed type %d verts %u prims %u occ %u", static_cast<int>(t), nv, pc,
+            static_cast<unsigned>(g_occ_q.size()));
+    } else {
+        cap("DrawIndexed type %d verts %u prims %u", static_cast<int>(t), nv, pc);
+    }
     ++g_gt_draws;
     const HRESULT hr = o_draw_idx(dev, t, base, mn, nv, si, pc);
+    if (q) {
+        q->Issue(D3DISSUE_END);
+        g_occ_q.push_back(q);
+    }
     check_real_state();
     return hr;
 }
@@ -2519,6 +2561,28 @@ void run(const std::string& line) {
     } else if (c == "drawmode") {
         drawdist_set_mode(static_cast<int>(num(1, 1)));
         out("drawmode %ld", num(1, 1));
+    } else if (c == "occl") {
+        // occl 0|1|2 (+4): OcclusionCulling off, the pieces DrawMapPieces adds, every map piece; +4 audit: what would
+        // be skipped is drawn with its samples counted ([occl] audit lines, "wrong" for any seen).
+        if (t.size() > 1) occl_set_mode(static_cast<int>(num(1, 1)));
+        out("occl %d", occl_mode());
+    } else if (c == "occlshow") {
+        // occlshow 1: every OcclusionCulling candidate's box drawn as lines over the picture (no test).
+        occl_set_show(static_cast<int>(num(1, 1)));
+        out("occlshow %ld", num(1, 1));
+    } else if (c == "occlvista") {
+        // occlvista 1: OcclusionCulling leaves boxes over 150 m on a side alone (as before its own drawing decided).
+        occl_set_vista_cap(static_cast<int>(num(1, 1)));
+        out("occlvista %ld", num(1, 1));
+    } else if (c == "entdump") {
+        // entdump [N]: the next frame's model draws (up to N, default 2000) in the log, with their render target.
+        occl_request_dump(t.size() > 1 ? static_cast<int>(num(1, 2000)) : 2000);  // -1: one line per pass
+        out("entdump");
+    } else if (c == "drawwiden") {
+        // drawwiden MASK: which managers adjacent/all widen (1 map pieces, 2 map effects, 4 point lights); send
+        // drawmode again afterwards so the draw masks are rebuilt.
+        drawdist_set_widen(static_cast<int>(num(1, 7)));
+        out("drawwiden %ld", num(1, 7));
     } else if (c == "sway") {
         foliage_set_strength(static_cast<int>(num(1, 100)));
         out("sway %ld", num(1, 100));
@@ -2581,6 +2645,10 @@ void run(const std::string& line) {
         g_dump_requested = true;
     } else if (c == "frame" && t.size() > 1) {
         g_frame_name = t[1];
+        g_frame_requested = true;
+    } else if (c == "frameocc" && t.size() > 1) {
+        g_frame_name = t[1];
+        g_occ_requested = true;
         g_frame_requested = true;
     } else if (c == "shotfb" && t.size() > 1) {
         g_shotfb_name = t[1];

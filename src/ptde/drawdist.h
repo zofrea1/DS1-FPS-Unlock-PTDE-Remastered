@@ -19,3 +19,6 @@ void drawdist_tick();
 void drawdist_set_mode(int mode);
 void drawdist_set_lod(int percent);
 void drawdist_set_effect_lod(int percent);  // RemoteControl `fxlodpct N`
+// RemoteControl `drawwiden MASK` (diagnostics): which managers adjacent/all widen: 1 the map pieces, 2 the map effects,
+// 4 the point lights (default 7; a manager left out keeps the game's masks from the next rebuild on).
+void drawdist_set_widen(int mask);

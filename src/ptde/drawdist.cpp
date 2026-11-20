@@ -112,6 +112,7 @@ constexpr uint32_t kFxDistSites[] = {0x00A33700, 0x00A33820, 0x00A339C2, 0x00A48
 constexpr uint8_t kLodHead[9] = {0x51, 0xF3, 0x0F, 0x10, 0x81, 0x50, 0x02, 0x00, 0x00};  // push ecx; movss xmm0,[ecx+250h]
 
 volatile LONG g_mode = 0;  // DrawMapPieces: 0 game, 1 adjacent, 2 all
+volatile LONG g_widen = 7;  // diagnostics (RemoteControl drawwiden): the widened managers, bit i = kWidened[i]
 uint32_t g_get = kGetDisp;
 uint32_t g_build_draw = kBuildDraw;
 uint32_t g_stream_floor = kStreamFloor;
@@ -225,7 +226,9 @@ void apply_extra(uint32_t (*extra)[4], bool* any, bool stream) {
         const int piece_blocks = pieces ? *reinterpret_cast<const int*>(pieces + 0x1C) : 0;
         if (count > piece_blocks) count = piece_blocks;
         if (count > kMaxBlocks) count = kMaxBlocks;
-        for (const Widened& w : kWidened) {
+        for (int wi = 0; wi < static_cast<int>(sizeof(kWidened) / sizeof(kWidened[0])); ++wi) {
+            if (!(g_widen & (1 << wi))) continue;
+            const Widened& w = kWidened[wi];
             const uint32_t off = stream ? w.stream : w.draw;
             const uint32_t man = *reinterpret_cast<const uint32_t*>(w.man_var);
             const uint32_t blocks = man ? *reinterpret_cast<const uint32_t*>(man + 0x20) : 0;
@@ -600,6 +603,8 @@ void drawdist_set_mode(int mode) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
+
+void drawdist_set_widen(int mask) { InterlockedExchange(&g_widen, mask & 7); }
 
 void drawdist_set_effect_lod(int percent) {
     if (!g_fx_on) {  // not installed: a site that could not be put back multiplies by 1

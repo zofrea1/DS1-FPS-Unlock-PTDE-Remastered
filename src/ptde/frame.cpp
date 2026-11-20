@@ -17,6 +17,7 @@
 #include "profile.h"
 #include "remote.h"
 #include "phases.h"
+#include "occl.h"
 #include "inputcache.h"
 #include "rendermath.h"
 
@@ -266,6 +267,7 @@ void frame_boundary() {
         sfx_jitter_tick();
         sfx_actions_tick();
         drawdist_tick();
+        occl_game_frame();
         footik_update(step);
         slidesteer_update(step);
         ladder_update(step);
@@ -326,6 +328,7 @@ int __fastcall hook_getcmd(void* self, void* edx) {
             d3dperf_frame();
             rendermath_render_frame();
             phases_render_frame();
+            occl_render_frame();
             gamma_frame();
         }
     } else if (cmd == 4 && g.t_cmd2 != 0) {
@@ -572,6 +575,18 @@ bool frame_install(const Settings& settings) {
             shadowmap_set_resolution(settings.shadow_map_resolution);
         }
         drawdist_install(settings.draw_map_pieces, settings.lod_distance, settings.effect_lod_distance);
+        // OcclusionCulling: only with DrawMapPieces adding pieces (or RemoteControl, which can switch both).
+        bool occl = settings.occlusion_culling && settings.draw_map_pieces != 0;
+#if FPSU_DIAGNOSTICS
+        if (settings.remote_control) occl = true;
+#endif
+        if (occl && occl_install()) {
+            occl_set_mode(settings.occlusion_culling && settings.draw_map_pieces != 0 ? 1 : 0);
+            if (settings.occlusion_culling && settings.draw_map_pieces != 0) {
+                LOG_INFO("OcclusionCulling: the map pieces DrawMapPieces adds are skipped while something in front "
+                         "hides them");
+            }
+        }
         foliage_configure(settings.foliage_sway, settings.foliage_sway_strength, settings.foliage_sway_speed);
         foliage_install();
         int rw = settings.render_width, rh = settings.render_height;

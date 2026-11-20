@@ -21,6 +21,7 @@
 #include "remixdisplay.h"
 #include "dsfix.h"
 #include "dofwatch.h"
+#include "occl.h"
 #include "foliage.h"
 #include "resolution.h"
 #include "shadowmap.h"
@@ -219,6 +220,7 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     d3dperf_reset();
     surfpool_reset();
     resolution_reset();
+    occl_reset();
     passcull_reset();
     atoc_reset();
     const HRESULT hr = g_reset(device, pp);
@@ -274,6 +276,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
                   client.right - client.left, client.bottom - client.top);
     }
     if (SUCCEEDED(hr) && out && *out) {
+        occl_capture_device(*out);  // before any hook
         const PtdeExtension* ext = ptde_extension();
         if (ext && ext->device_created) ext->device_created(*out);
     }
@@ -393,6 +396,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             }
         }
         dofwatch_hook_device(*out);
+        occl_set_device(*out);
     }
     if (SUCCEEDED(hr) && out && *out && remote_enabled()) {
         remote_hook_device(*out);
