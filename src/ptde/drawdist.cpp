@@ -24,10 +24,12 @@
 //    all: a map piece only while its groups meet it (0xE9CB80), a character is asked for (loaded and made active,
 //    [chr+0xC]+0xC = 2, 0xE3E870 at 0xDE81F0) only while its floor's groups meet it, and likewise objects and the
 //    collisions in the physics world.
-// The two options widen what the player's floor adds to its block's two masks, for the map pieces alone: the floor's
-// contribution is noted as the game reads it (0xDE2C9F, 0xDE2AFA) and ORed into the map piece manager's masks after
-// the game has written them (after 0xDE2C60 returns; before 0xE9BD70 at 0xDE8198, right after the streaming masks are
-// written). Characters, objects, collisions, effects, sounds and lights keep the game's own masks.
+// The two options widen what the player's floor adds to its block's two masks, for what is only seen: the floor's
+// contribution is noted as the game reads it (0xDE2C9F, 0xDE2AFA) and ORed into the masks of the map pieces, the map
+// effects (WorldSfxManImp [0x137D6E4]: torches' fire, mist, embers) and the map's point lights
+// (WorldMapPointLightManImp [0x137D6EC]) after the game has written them (after 0xDE2C60 returns; before 0xE9BD70 at
+// 0xDE8198, right after the streaming masks are written). Characters, objects (with their physics and events),
+// collisions and sounds keep the game's own masks.
 //  adjacent: the floor's display groups and its draw groups: the pieces seen from this room and from the rooms next to
 //            it (the ledge grass from the overlook). Rooms farther away stay culled.
 //  all:      every group: every piece of the loaded maps wherever the player stands (the view's own culling still
@@ -77,11 +79,23 @@ constexpr uint32_t kStreamFloor = 0x00DE2AE0;    // stdcall(FieldArea, masks), e
 constexpr uint32_t kStreamFloorSites[] = {0x00DE807C, 0x00DE8096};  // its calls in the streaming update 0xDE7C30
 constexpr uint32_t kStreamDone = 0x00E9BD70;     // called by 0xDE7C30 right after it wrote the streaming masks
 constexpr uint32_t kStreamDoneSite = 0x00DE8198;
-constexpr uint32_t kPieceManVar = 0x0137D5F4;    // WorldMapManImp, the map pieces' manager
-constexpr uint32_t kMapBlockSize = 0x5C;         // its +0x20: one per block (count +0x1C)
-constexpr uint32_t kMapBlockDraw = 0x0C;         // the block's draw mask (16 bytes)
-constexpr uint32_t kMapBlockStream = 0x1C;       // the block's streaming mask
+constexpr uint32_t kPieceManVar = 0x0137D5F4;    // WorldMapManImp, the map pieces' manager (+0x1C blocks' count)
+constexpr uint32_t kFieldAreaVar = 0x01378520;   // FieldArea: +8 its world info, +0x0C the blocks the masks go to
 constexpr int kMaxBlocks = 32;
+// The masks widened, per manager: its +0x20 = one entry per block (the order of the map piece manager's), each with
+// its draw mask (0xDE2C60 writes it, 0xDE2F67 / 0xDE2FC4 for the effects and lights) and its streaming mask (0xDE7C30,
+// 0xDE817B for the effects; the lights have none), 16 bytes each.
+struct Widened {
+    uint32_t man_var;
+    uint32_t size;
+    uint32_t draw;
+    uint32_t stream;  // 0: none
+};
+constexpr Widened kWidened[] = {
+    {0x0137D5F4, 0x5C, 0x0C, 0x1C},  // WorldMapManImp: map pieces
+    {0x0137D6E4, 0x3C, 0x1C, 0x0C},  // WorldSfxManImp: map effects
+    {0x0137D6EC, 0x2C, 0x0C, 0},     // WorldMapPointLightManImp: point lights
+};
 constexpr uint32_t kLodFn = 0x00F61CD0;
 // EffectLodDistance: the effect level checks' call to _ftol on the camera distance (CheckLevel 0xA33600,
 // ResetLevelSingle 0xA33720, ResetLevel 0xA33890, DistanceFromCamera 0xA48A00).
@@ -100,8 +114,8 @@ uint32_t g_ftol = kFtol;
 uint32_t g_lod_back = kLodFn + 9;
 bool g_lod_on = false;
 
-// What the floors add for the map pieces alone, per block, until it is ORed into the map piece manager's masks (the
-// game thread: FieldArea's update and the streaming update run there, one after the other).
+// What the floors add for the widened managers alone, per block, until it is ORed into their masks (the game thread:
+// FieldArea's update and the streaming update run there, one after the other).
 uint32_t g_extra_draw[kMaxBlocks][4] = {};
 uint32_t g_extra_stream[kMaxBlocks][4] = {};
 bool g_any_draw = false;
@@ -122,25 +136,36 @@ void __cdecl note_floor(uint32_t rec8, int stream) {
     }
 }
 
-// The noted groups ORed into every block's mask at `off` in the map piece manager, then forgotten.
-void apply_extra(uint32_t (*extra)[4], bool* any, uint32_t off) {
+// The noted groups ORed into the draw (or streaming) masks of the widened managers, as many blocks as the game wrote
+// (FieldArea's world info +0x0C, and no more than the map piece manager holds), then forgotten.
+void apply_extra(uint32_t (*extra)[4], bool* any, bool stream) {
     if (!*any) return;
     *any = false;
     __try {
-        const uint32_t man = *reinterpret_cast<const uint32_t*>(kPieceManVar);
-        const uint32_t blocks = man ? *reinterpret_cast<const uint32_t*>(man + 0x20) : 0;
-        const int count = man ? *reinterpret_cast<const int*>(man + 0x1C) : 0;
-        for (int b = 0; blocks && b < count && b < kMaxBlocks; ++b) {
-            auto* mask = reinterpret_cast<uint32_t*>(blocks + b * kMapBlockSize + off);
-            for (int k = 0; k < 4; ++k) mask[k] |= extra[b][k];
+        const uint32_t fa = *reinterpret_cast<const uint32_t*>(kFieldAreaVar);
+        const uint32_t info = fa ? *reinterpret_cast<const uint32_t*>(fa + 8) : 0;
+        const uint32_t pieces = *reinterpret_cast<const uint32_t*>(kPieceManVar);
+        int count = info ? *reinterpret_cast<const int*>(info + 0x0C) : 0;
+        const int piece_blocks = pieces ? *reinterpret_cast<const int*>(pieces + 0x1C) : 0;
+        if (count > piece_blocks) count = piece_blocks;
+        if (count > kMaxBlocks) count = kMaxBlocks;
+        for (const Widened& w : kWidened) {
+            const uint32_t off = stream ? w.stream : w.draw;
+            const uint32_t man = *reinterpret_cast<const uint32_t*>(w.man_var);
+            const uint32_t blocks = man ? *reinterpret_cast<const uint32_t*>(man + 0x20) : 0;
+            if (!off || !blocks) continue;
+            for (int b = 0; b < count; ++b) {
+                auto* mask = reinterpret_cast<uint32_t*>(blocks + b * w.size + off);
+                for (int k = 0; k < 4; ++k) mask[k] |= extra[b][k];
+            }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     std::memset(extra, 0, sizeof(uint32_t) * 4 * kMaxBlocks);
 }
 
-void __cdecl apply_draw() { apply_extra(g_extra_draw, &g_any_draw, kMapBlockDraw); }
-void __cdecl apply_stream() { apply_extra(g_extra_stream, &g_any_stream, kMapBlockStream); }
+void __cdecl apply_draw() { apply_extra(g_extra_draw, &g_any_draw, false); }
+void __cdecl apply_stream() { apply_extra(g_extra_stream, &g_any_stream, true); }
 
 // In place of `call 0x4569D0` in 0xDE2C60 (the draw masks): the game's answer, the floor noted.
 __declspec(naked) void get_disp_draw() {
@@ -179,7 +204,7 @@ __declspec(naked) void get_disp_stream() {
 }
 
 // In place of `call 0xDE2C60` (stdcall, one argument, eax = the floor): the game's draw masks, then ours for the
-// map pieces.
+// map pieces, effects and lights.
 __declspec(naked) void build_draw() {
     __asm {
         push dword ptr [esp + 4]
@@ -450,10 +475,11 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent) {
                   static_cast<unsigned>(kBuildDrawSite), static_cast<unsigned>(kStreamDoneSite));
     } else if (mode == 1) {
         LOG_INFO("DrawMapPieces = adjacent: the map pieces seen from the player's room and from the rooms next to it "
-                 "are drawn (the game: this room's only); characters, objects and the rest keep the game's rooms");
+                 "are drawn (the game: this room's only), with their effects and lights; characters and objects keep the "
+                 "game's rooms");
     } else if (mode == 2) {
         LOG_INFO("DrawMapPieces = all: every map piece of the loaded maps is drawn wherever the player stands; "
-                 "characters, objects and the rest keep the game's rooms");
+                 "with their effects and lights; characters and objects keep the game's rooms");
     }
     if (!g_lod_on) {
         LOG_ERROR("LodDistance: the game's code at %08X does not match this build; not used",
