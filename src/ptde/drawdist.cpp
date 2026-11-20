@@ -28,8 +28,9 @@
 // contribution is noted as the game reads it (0xDE2C9F, 0xDE2AFA) and ORed into the masks of the map pieces, the map
 // effects (WorldSfxManImp [0x137D6E4]: torches' fire, mist, embers) and the map's point lights
 // (WorldMapPointLightManImp [0x137D6EC]) after the game has written them (after 0xDE2C60 returns; before 0xE9BD70 at
-// 0xDE8198, right after the streaming masks are written). Characters, objects (with their physics and events),
-// collisions and sounds keep the game's own masks.
+// 0xDE8198, right after the streaming masks are written); the renderer's own groups (GameRend+0x48, see kLoadSite) are
+// widened the same way. Characters, objects (with their physics and events), collisions and sounds keep the game's
+// own masks: the renderer draws only what is in the scene, so they are drawn where the game has them.
 //  adjacent: the floor's display groups and its draw groups: the pieces seen from this room and from the rooms next to
 //            it (the ledge grass from the overlook). Rooms farther away stay culled.
 //  all:      every group: every piece of the loaded maps wherever the player stands (the view's own culling still
@@ -71,6 +72,12 @@
 namespace {
 
 constexpr uint32_t kGetDisp = 0x004569D0;
+// The renderer's own groups (GameRend, FieldArea+0x10: +0x48), taken from the floor when a map loads (0xDE8625, into
+// [ebx+0x10]+0x48) and when the player steps onto a floor of another block (0xEFDEDE, into [ebx+0x38]+0x48): what is in
+// the scene is drawn only where its groups meet them too (a map piece added to the scene by its block's streaming mask
+// alone was not drawn: the same draw calls, 2026-11-19).
+constexpr uint32_t kLoadSite = 0x00DE8625;
+constexpr uint32_t kStepSite = 0x00EFDEDE;
 constexpr uint32_t kDrawGetSite = 0x00DE2C9F;    // call 0x4569D0 in 0xDE2C60 (the draw masks): the floor's groups
 constexpr uint32_t kStreamGetSite = 0x00DE2AFA;  // call 0x4569D0 in 0xDE2AE0 (a floor's streaming groups)
 constexpr uint32_t kBuildDraw = 0x00DE2C60;      // stdcall(FieldArea), eax = the floor: every block's draw mask
@@ -121,6 +128,74 @@ uint32_t g_extra_stream[kMaxBlocks][4] = {};
 bool g_any_draw = false;
 bool g_any_stream = false;
 volatile LONG g_in_stream = 0;  // inside the streaming update's floor calls (0xDE2AE0 has other callers: load checks)
+// 0x4569D0 leaves ecx (the floor record + 8) as it was: its draw groups (the neighbouring rooms) are at ecx + 8.
+uint32_t g_rend = 0;  // GameRend ([ebx+0x10] at kLoadSite, [ebx+0x38] at kStepSite): +0x48 the groups it draws
+
+// The renderer's groups widened in place (eax = the answer of 0x4569D0): the floor's draw groups added (adjacent), or
+// every group (all). Only GameRend takes these two answers.
+__declspec(naked) void get_disp_load() {
+    __asm {
+        push ecx
+        mov ecx, dword ptr [ebx + 0x10]
+        mov g_rend, ecx
+        pop ecx
+        call dword ptr [g_get]
+        cmp g_mode, 0
+        je done
+        cmp g_mode, 2
+        je all
+        push edx
+        mov edx, dword ptr [ecx + 8]
+        or dword ptr [eax], edx
+        mov edx, dword ptr [ecx + 12]
+        or dword ptr [eax + 4], edx
+        mov edx, dword ptr [ecx + 16]
+        or dword ptr [eax + 8], edx
+        mov edx, dword ptr [ecx + 20]
+        or dword ptr [eax + 12], edx
+        pop edx
+        jmp done
+    all:
+        mov dword ptr [eax], -1
+        mov dword ptr [eax + 4], -1
+        mov dword ptr [eax + 8], -1
+        mov dword ptr [eax + 12], -1
+    done:
+        ret
+    }
+}
+
+__declspec(naked) void get_disp_step() {
+    __asm {
+        push ecx
+        mov ecx, dword ptr [ebx + 0x38]
+        mov g_rend, ecx
+        pop ecx
+        call dword ptr [g_get]
+        cmp g_mode, 0
+        je done
+        cmp g_mode, 2
+        je all
+        push edx
+        mov edx, dword ptr [ecx + 8]
+        or dword ptr [eax], edx
+        mov edx, dword ptr [ecx + 12]
+        or dword ptr [eax + 4], edx
+        mov edx, dword ptr [ecx + 16]
+        or dword ptr [eax + 8], edx
+        mov edx, dword ptr [ecx + 20]
+        or dword ptr [eax + 12], edx
+        pop edx
+        jmp done
+    all:
+        mov dword ptr [eax], -1
+        mov dword ptr [eax + 4], -1
+        mov dword ptr [eax + 8], -1
+        mov dword ptr [eax + 12], -1
+    done:
+        ret
+    }
+}
 
 // A floor's groups as the game reads them (rec8 = the floor's record + 8, the ecx of 0x4569D0): its block (record
 // +0x0F) gets its draw groups (record +0x10, the rooms next to it) with adjacent, or every group with all.
@@ -417,11 +492,24 @@ void drawdist_tick() {
 void drawdist_set_mode(int mode) {
     if (mode < 0 || mode > 2) mode = 0;
     InterlockedExchange(&g_mode, mode);
-    // The streaming masks follow on the next frame; the draw masks when the floor is applied again (SetFloor 0xE6E580
-    // sees no floor yet on the next frame, and FieldArea's update rebuilds them).
+    // The renderer's groups at once (the player's floor record: draw groups +0x10, display groups +0x20); the
+    // streaming masks follow on the next frame, the draw masks when the floor is applied again (SetFloor 0xE6E580 sees
+    // no floor yet on the next frame, and FieldArea's update rebuilds them).
+    const uint32_t rend = g_rend;
     __try {
         const uint32_t wcm = *reinterpret_cast<uint32_t*>(kWorldChrMan);
         const uint32_t chr = wcm ? *reinterpret_cast<uint32_t*>(wcm + 0x3C) : 0;
+        const uint32_t floor = chr ? *reinterpret_cast<uint32_t*>(chr + 0x29C) : 0;
+        if (rend) {
+            auto* groups = reinterpret_cast<uint32_t*>(rend + 0x48);
+            if (mode == 2) {
+                for (int i = 0; i < 4; ++i) groups[i] = 0xFFFFFFFFu;
+            } else if (floor) {
+                const auto* disp = reinterpret_cast<const uint32_t*>(floor + 0x20);
+                const auto* nbr = reinterpret_cast<const uint32_t*>(floor + 0x10);
+                for (int i = 0; i < 4; ++i) groups[i] = disp[i] | (mode == 1 ? nbr[i] : 0u);
+            }
+        }
         if (chr) *reinterpret_cast<uint32_t*>(chr + 0x29C) = 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -453,13 +541,16 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent) {
                  "game's", effect_percent);
     }
     InterlockedExchange(&g_mode, (mode < 0 || mode > 2) ? 0 : mode);
-    // All six sites checked before any is changed: the map pieces' masks are widened at two places and noted at two.
-    bool match = calls(kDrawGetSite, kGetDisp) && calls(kStreamGetSite, kGetDisp) && calls(kBuildDrawSite, kBuildDraw) &&
-                 calls(kStreamDoneSite, kStreamDone);
+    // All eight sites checked before any is changed: the renderer's groups are widened at two, the floors noted at two
+    // and the widened managers' masks written at two.
+    bool match = calls(kLoadSite, kGetDisp) && calls(kStepSite, kGetDisp) && calls(kDrawGetSite, kGetDisp) &&
+                 calls(kStreamGetSite, kGetDisp) && calls(kBuildDrawSite, kBuildDraw) && calls(kStreamDoneSite, kStreamDone);
     for (const uint32_t site : kStreamFloorSites) match = match && calls(site, kStreamFloor);
     bool on = false;
     if (match) {
-        on = redirect_call(kDrawGetSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_draw)) &&
+        on = redirect_call(kLoadSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_load)) &&
+             redirect_call(kStepSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_step)) &&
+             redirect_call(kDrawGetSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_draw)) &&
              redirect_call(kStreamGetSite, kGetDisp, reinterpret_cast<const void*>(&get_disp_stream)) &&
              redirect_call(kBuildDrawSite, kBuildDraw, reinterpret_cast<const void*>(&build_draw));
         for (const uint32_t site : kStreamFloorSites) {
