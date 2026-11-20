@@ -36,6 +36,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 #include <intrin.h>
 #include <emmintrin.h>
@@ -397,6 +398,91 @@ std::unordered_set<void*> g_bilateral_shaders;
 volatile bool g_bilateral_bound = false;
 int g_render_w = 0, g_render_h = 0;  // the scene's size
 
+// FRPG_Fil_Bilateral with an early exit where there are no effects (RemoteControl `swapoff 0x800` draws the game's).
+// The effects target starts each frame cleared to (0, 0, 0, 1) and the shader's result is a weighted sum of four of
+// its texels, blended ONE + SRCALPHA into the scene's colour (RGB only): where all four still hold (0, 0, 0, 1) that
+// is the scene times the weights' sum (1 within a few float steps, which rounds back to the scene's own 10-bit, 8-bit
+// or 16-bit float value). Those pixels are discarded before the five depth reads (one of them the scene's depth at
+// full size) and the blend into the scene; at 4K that is most of the screen in most views. Every other pixel runs the
+// game's own instructions, unchanged, in the else branch: the code is the game's with a test put in front of it.
+// Firelink at 4K, 2026-11-20: 0.140 ms for the game's pass.
+IDirect3DPixelShader9* g_bskip_ps = nullptr;
+IDirect3DDevice9* g_bskip_dev = nullptr;
+bool g_bskip_logged = false;
+
+// kBilateral with the test in front of its seventh instruction (the first read). Instructions are a token with the
+// count of their own tokens in bits 24-27, then those. The test (r5-r9 and c3 are free in the game's shader):
+//   mov r1.z, c2.z; add r5, r1.xzzy, v0.xyxy          the two neighbours' coordinates, as the game makes them later
+//   texld r6, r0.zwzw, s0; texld r7, r5, s0; texld r8, r5.zwzw, s0; texld r9, v0, s0   the four effects texels
+//   add rN, rN, c3 (N = 6..9; c3 = 0, 0, 0, -1); add r6, r6_abs, r7_abs; add r6, r6, r8_abs; add r6, r6, r9_abs
+//   dp4 r6.x, r6, c2.y                                 how far the four are from (0, 0, 0, 1) together
+//   if_ge -r6.x, c2.z: mov oC0, c2.z; mov r6, c2.x; texkill r6   all four (0, 0, 0, 1): discarded
+//   else: <the game's instructions> endif
+bool bilateral_skip_code(std::vector<DWORD>& out) {
+    constexpr size_t n = sizeof(kBilateral) / sizeof(kBilateral[0]);
+    static const DWORD kTest[] = {
+        0x02000001, 0x80040001, 0xA0AA0002, 0x03000002, 0x800F0005, 0x80680001, 0x90440000, 0x03000042, 0x800F0006,
+        0x80EE0000, 0xA0E40800, 0x03000042, 0x800F0007, 0x80E40005, 0xA0E40800, 0x03000042, 0x800F0008, 0x80EE0005,
+        0xA0E40800, 0x03000042, 0x800F0009, 0x90E40000, 0xA0E40800, 0x03000002, 0x800F0006, 0x80E40006, 0xA0E40003,
+        0x03000002, 0x800F0007, 0x80E40007, 0xA0E40003, 0x03000002, 0x800F0008, 0x80E40008, 0xA0E40003, 0x03000002,
+        0x800F0009, 0x80E40009, 0xA0E40003, 0x03000002, 0x800F0006, 0x8BE40006, 0x8BE40007, 0x03000002, 0x800F0006,
+        0x80E40006, 0x8BE40008, 0x03000002, 0x800F0006, 0x80E40006, 0x8BE40009, 0x03000009, 0x80010006, 0x80E40006,
+        0xA0550002, 0x02030029, 0x81000006, 0xA0AA0002, 0x02000001, 0x800F0800, 0xA0AA0002, 0x02000001, 0x800F0006,
+        0xA0000002, 0x01000041, 0x800F0006, 0x0000002A};
+    static const DWORD kDefC3[] = {0x05000051, 0xA00F0003, 0x00000000, 0x00000000, 0x00000000, 0xBF800000};
+    out.assign(kBilateral, kBilateral + 1);  // the version
+    size_t i = 1;
+    int arith = 0;  // instructions after the definitions and declarations
+    bool defs_done = false;
+    while (i < n && kBilateral[i] != 0x0000FFFF) {
+        const DWORD op = kBilateral[i] & 0xFFFF;
+        const size_t len = 1 + ((kBilateral[i] >> 24) & 0xF);
+        if (i + len > n) return false;
+        if (op != 0x51 && !defs_done) {
+            out.insert(out.end(), kDefC3, kDefC3 + 6);  // after the game's definitions
+            defs_done = true;
+        }
+        if (op != 0x51 && op != 0x1F && arith++ == 6) {
+            // The seventh instruction must be the first read (texld r2, r0.zwzw, s1).
+            if (kBilateral[i] != 0x03000042 || kBilateral[i + 2] != 0x80EE0000) return false;
+            out.insert(out.end(), kTest, kTest + sizeof(kTest) / sizeof(kTest[0]));
+        }
+        out.insert(out.end(), kBilateral + i, kBilateral + i + len);
+        i += len;
+    }
+    if (i >= n || arith <= 6) return false;
+    out.push_back(0x0000002B);  // endif
+    out.push_back(0x0000FFFF);
+    return true;
+}
+
+// The bilateral upsample's draw with the early exit, when the draw is the one it was made for: blend ONE + SRCALPHA
+// adding, no alpha written, no alpha test. Anything else draws the game's shader.
+HRESULT bilateral_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    if (!g_bskip_ps || g_bskip_dev != dev || (g_swap_off_mask & 0x800)) return o_draw_up(dev, type, count, data, stride);
+    DWORD blend = 0, src = 0, dst = 0, op = 0, mask = 0, test = 0;
+    dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+    dev->GetRenderState(D3DRS_SRCBLEND, &src);
+    dev->GetRenderState(D3DRS_DESTBLEND, &dst);
+    dev->GetRenderState(D3DRS_BLENDOP, &op);
+    dev->GetRenderState(D3DRS_COLORWRITEENABLE, &mask);
+    dev->GetRenderState(D3DRS_ALPHATESTENABLE, &test);
+    if (!blend || src != D3DBLEND_ONE || dst != D3DBLEND_SRCALPHA || op != D3DBLENDOP_ADD || (mask & 8) || test) {
+        return o_draw_up(dev, type, count, data, stride);
+    }
+    IDirect3DPixelShader9* game = nullptr;
+    dev->GetPixelShader(&game);
+    o_set_ps(dev, g_bskip_ps);
+    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    o_set_ps(dev, game);
+    if (game) game->Release();
+    if (!g_bskip_logged) {
+        g_bskip_logged = true;
+        LOG_INFO("Resolution: the effects' upsample skips the pixels without effects (first frame)");
+    }
+    return hr;
+}
+
 struct Fx {
     IDirect3DDevice9* dev = nullptr;
     IDirect3DTexture9* tex = nullptr;  // ours, the scene's size (half of it in mode 3)
@@ -424,6 +510,29 @@ struct Fx {
     bool logged_missing = false;
 };
 Fx g_fx;
+
+// The depth of field drawn straight into the scene while the camera blur is a copy (dof_direct says how): the scene's
+// copy the game makes after its effects (T50 -> T53, for next frame's water), while it still equals the scene's colour,
+// and what the camera blur read and drew into last.
+struct SceneCopy {
+    IDirect3DSurface9* scene = nullptr;  // the scene's surface (T50)
+    IDirect3DBaseTexture9* scene_tex = nullptr;
+    IDirect3DSurface9* copy = nullptr;  // its copy's surface (T53)
+    IDirect3DBaseTexture9* copy_tex = nullptr;
+    bool valid = false;  // nothing drawn into either's colour since the copy
+};
+SceneCopy g_scopy;
+IDirect3DBaseTexture9* g_blur_src = nullptr;  // the texture the camera blur last read (the depth of field's output)
+IDirect3DSurface9* g_blur_dst = nullptr;      // and the surface it drew into (the scene's)
+bool g_dof_direct = false;                    // this frame's depth of field went into the scene: no camera blur draw
+bool g_dof_direct_off = false;
+bool g_dof_direct_logged = false;
+IDirect3DBaseTexture9* g_alpha_alias = nullptr;  // read as the scene itself by alpha_of (the copy, while drawn from)
+
+// A draw, clear or StretchRect into render target 0 (the game's): the copy no longer equals the scene when either is it.
+inline void scopy_drawn() {
+    if (g_scopy.valid && g_fx.rt0 && (g_fx.rt0 == g_scopy.scene || g_fx.rt0 == g_scopy.copy)) g_scopy.valid = false;
+}
 
 using SetRTFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
 using SetDSFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DSurface9*);
@@ -847,7 +956,7 @@ HRESULT fx_composite_half(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
     dev->SetPixelShaderConstantF(12, c12, 1);
     o_set_texture(dev, 0, g_fx.tex);
     o_set_texture(dev, 1, g_fx.hdepth);
-    const HRESULT hr = o_draw_up(dev, type, count, data, stride);
+    const HRESULT hr = bilateral_draw(dev, type, count, data, stride);
     o_set_texture(dev, 0, g_fx.small_fx);
     o_set_texture(dev, 1, game_depth);
     dev->SetPixelShaderConstantF(12, saved_c12, 1);
@@ -952,6 +1061,7 @@ bool alpha_ready(IDirect3DDevice9* dev, UINT w, UINT h) {
 
 // Ours, holding this texture's alpha; nullptr when it holds none.
 IDirect3DBaseTexture9* alpha_of(IDirect3DBaseTexture9* t) {
+    if (t && t == g_alpha_alias) t = g_scopy.scene_tex;
     return t && g_alpha.written && g_alpha.tex && t == g_alpha.owner && !(g_swap_off_mask & 0x60) ? g_alpha.tex : nullptr;
 }
 
@@ -1011,8 +1121,59 @@ void alpha_stage_restore(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTextur
 
 void resolve_forget(IDirect3DSurface9* s);
 
+// A resolve held back until it is used (lazy_copy, after hk_stretch's Resolve, says how).
+struct Held {
+    IDirect3DSurface9* src = nullptr;
+    IDirect3DSurface9* dst = nullptr;
+    IDirect3DBaseTexture9* tex = nullptr;  // dst's texture
+    RECT s{}, d{};
+    bool has_s = false, has_d = false;
+    D3DTEXTUREFILTERTYPE filter = D3DTEXF_NONE;
+    UINT w = 0, h = 0;
+    D3DFORMAT format = D3DFMT_UNKNOWN;
+};
+Held g_held;                               // the resolve held back (src null: none)
+Held g_owed;                               // the resolve made into a copy's target instead (src null: none)
+IDirect3DBaseTexture9* g_stale = nullptr;  // a texture whose resolve was left out, not written since
+IDirect3DSurface9* g_stale_surf = nullptr;  // its surface
+bool g_lazy_off = false;
+bool g_lazy_logged = false;
+bool g_lazy_why_logged = false;
+// Per texture surface resolved into: how often its held-back resolve went into the copy's target (hits) and how often
+// something else needed it first (misses). A resolve whose texture is read elsewhere is made as asked once it has
+// missed three times more than it hit: held back, it would be made in the middle of the reading pass instead, which
+// splits the pass under DXVK (Demon Ruins, 2026-11-20: +0.013 ms on the render thread for the depth's resolve).
+struct HoldScore {
+    IDirect3DSurface9* dst = nullptr;
+    unsigned hits = 0, misses = 0;
+};
+HoldScore g_hold_scores[8];
+HoldScore& hold_score(IDirect3DSurface9* dst) {
+    for (HoldScore& h : g_hold_scores) {
+        if (h.dst == dst) return h;
+    }
+    HoldScore* best = &g_hold_scores[0];  // a free slot, else the one with the least use
+    for (HoldScore& h : g_hold_scores) {
+        if (!h.dst) {
+            best = &h;
+            break;
+        }
+        if (h.hits + h.misses < best->hits + best->misses) best = &h;
+    }
+    *best = HoldScore{};
+    best->dst = dst;
+    return *best;
+}
+void lazy_make(IDirect3DDevice9* dev);
+void lazy_before_write(IDirect3DDevice9* dev, IDirect3DSurface9* s);
+void lazy_before_read(IDirect3DDevice9* dev, int stage, IDirect3DBaseTexture9* tex);
+bool lazy_copy(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride, HRESULT* hr);
+inline bool lazy_watching() { return g_held.src || g_owed.src || g_stale; }
+
 HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt) {
+    if (lazy_watching()) lazy_before_write(dev, rt);
     resolve_forget(rt);  // drawn into from here
+    if (index != 0 && rt && g_scopy.valid && (rt == g_scopy.scene || rt == g_scopy.copy)) g_scopy.valid = false;
     if (index == 0 && g_scene_10bit) {
         D3DSURFACE_DESC d{};
         g_rt0_10bit = rt && SUCCEEDED(rt->GetDesc(&d)) && d.Format == D3DFMT_A2R10G10B10 &&
@@ -1033,6 +1194,7 @@ HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* 
 }
 
 HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
+    if (lazy_watching()) lazy_before_write(dev, ds);
     resolve_forget(ds);
     g_fx.ds = ds;
     if (g_water.bound && ds && ds == g_water.game_ds) return o_set_ds(dev, g_water.ds);
@@ -1045,6 +1207,7 @@ HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
 
 HRESULT WINAPI hk_clear(IDirect3DDevice9* dev, DWORD count, const D3DRECT* rects, DWORD flags, D3DCOLOR color, float z,
                         DWORD stencil) {
+    if (flags & D3DCLEAR_TARGET) scopy_drawn();
     if (refl_pass_clear(count, flags, color)) {
         refl_close(dev);  // a frame without the blurs
         IDirect3DBaseTexture9* t = container_of(g_fx.rt0);
@@ -1144,6 +1307,16 @@ HRESULT WINAPI hk_create_ps(IDirect3DDevice9* dev, const DWORD* code, IDirect3DP
         std::lock_guard<std::mutex> lock(g_lock);
         g_bilateral_shaders.insert(*out);
         ps_sets_changed();
+        if (g_bskip_dev != dev) {
+            if (g_bskip_ps) g_bskip_ps->Release();
+            g_bskip_ps = nullptr;
+            g_bskip_dev = dev;
+            std::vector<DWORD> skip;
+            if (!bilateral_skip_code(skip) || FAILED(o_create_ps(dev, skip.data(), &g_bskip_ps))) {
+                g_bskip_ps = nullptr;
+                LOG_ERROR("Resolution: the effects' upsample with its early exit could not be made; the game's is used");
+            }
+        }
     }
     if (SUCCEEDED(hr) && out && *out &&
         same_instructions(code, kCameraBlurPower, sizeof(kCameraBlurPower) / sizeof(kCameraBlurPower[0]))) {
@@ -1257,6 +1430,8 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
             swap = game;
         }
     }
+    // The held-back resolve's texture on stage 0 and another shader than the copy: it is read.
+    if (!copy && g_held.src && g_tex0 && g_tex0 == g_held.tex) lazy_make(dev);
     g_copy_bound = copy;
     g_cam_bound = cam;
     g_bilateral_bound = bilateral;
@@ -1398,6 +1573,15 @@ HRESULT swap_draw(IDirect3DDevice9* dev, int swap, D3DPRIMITIVETYPE type, UINT c
 }
 
 HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex) {
+    if (tex && (tex == g_held.tex || tex == g_owed.tex || tex == g_stale)) {
+        lazy_before_read(dev, static_cast<int>(stage), tex);
+    }
+    if (g_dof_direct && tex && tex == g_blur_src && g_cam_bound != 2 && !g_dof_direct_off) {
+        g_dof_direct_off = true;
+        LOG_ERROR("Resolution: the depth of field's output was read by another draw than the camera blur in a frame it "
+                  "went straight into the scene (that draw may show an old picture once); it goes into its own target "
+                  "from now on");
+    }
     if (stage == 0) g_tex0 = tex;
     if (stage < 16 && (g_refl.stages || (tex && tex == g_refl.game_tex))) {
         // The water's reflection read from ours while it holds this frame's.
@@ -1981,7 +2165,73 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
     return hr;
 }
 
+// The depth of field drawn straight into the scene (RemoteControl `swapoff 0x2000` draws it into its own target).
+// The game draws the depth of field's composite into a target of its own (T54, 16-bit float with HighPrecisionColor)
+// and the camera blur then draws that into the scene (T50). The camera blur is almost always off (its weights 0, even
+// running and turning at full stick at Firelink, 2026-11-20) and then drawn as a copy (kCameraBlur): a full pass at
+// the render size (0.115 ms at 4K on the RTX 3090), after the composite wrote 8 bytes a pixel. While the camera blur
+// will be that copy this frame (its depth pass is skipped by the same test), the composite goes into the scene
+// instead, reading the scene from the copy the game made of it after its effects (T50 -> T53, for the next frame's
+// water: the same colour while nothing has drawn into the scene's colour since), RGB only as the camera blur's copy
+// writes, and the camera blur's draw is left out. With HighPrecisionColor = 10bit only: the composite then reads the
+// scene's rate from our texture, not from the scene's alpha (which the copy does not hold). The one difference is a
+// rounding left out: the composite's colour goes into the 10-bit scene directly instead of through 16-bit float first.
+bool dof_direct(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride, HRESULT* hr) {
+    if (g_dof_direct_off || (g_swap_off_mask & 0x2000) || !g_scopy.valid || !g_scene_10bit) return false;
+    // The camera blur's depth pass will be skipped and the blur drawn as a copy (the test in hk_draw_up).
+    if (!g_cam_off || !g_cam_copy_ps || g_cam_copy_dev != dev || (g_swap_off_mask & 0x200)) return false;
+    // The composite reads the scene and draws into what the camera blur read into the scene last time.
+    IDirect3DSurface9* out = g_fx.rt0;
+    if (!out || g_tex0 != g_scopy.scene_tex || g_blur_dst != g_scopy.scene || container_of(out) != g_blur_src ||
+        !alpha_of(g_scopy.scene_tex)) {
+        return false;
+    }
+    D3DSURFACE_DESC od{}, sd{};
+    DWORD blend = 1;
+    if (FAILED(out->GetDesc(&od)) || FAILED(g_scopy.scene->GetDesc(&sd)) || od.Width != sd.Width ||
+        od.Height != sd.Height || FAILED(dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend)) || blend) {
+        return false;
+    }
+    D3DVIEWPORT9 vp{};
+    RECT scissor{};
+    DWORD mask = 0xF;
+    dev->GetViewport(&vp);
+    dev->GetScissorRect(&scissor);
+    dev->GetRenderState(D3DRS_COLORWRITEENABLE, &mask);
+    dev->SetRenderTarget(0, g_scopy.scene);  // through the hooks, as dofhr_draw sets its targets
+    o_set_viewport(dev, &vp);
+    o_set_scissor(dev, &scissor);
+    o_set_texture(dev, 0, g_scopy.copy_tex);
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE, mask & 7);
+    g_alpha_alias = g_scopy.copy_tex;
+    *hr = g_dofhr_pct > 0 ? dofhr_draw(dev, type, count, data, stride)
+                          : swap_draw(dev, kDofSwap, type, count, data, stride);
+    g_alpha_alias = nullptr;
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE, mask);
+    o_set_texture(dev, 0, g_scopy.scene_tex);
+    dev->SetRenderTarget(0, out);
+    o_set_viewport(dev, &vp);
+    o_set_scissor(dev, &scissor);
+    g_scopy.valid = false;  // the scene holds the depth of field now
+    g_dof_direct = SUCCEEDED(*hr);
+    if (!g_dof_direct_logged && g_dof_direct) {
+        g_dof_direct_logged = true;
+        LOG_INFO("Resolution: the depth of field is drawn straight into the scene while the camera blur is off (its "
+                 "copy left out)");
+    }
+    return true;
+}
+
 HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) {
+    if (g_scopy.valid && g_fx.rt0 && (g_fx.rt0 == g_scopy.scene || g_fx.rt0 == g_scopy.copy)) {
+        DWORD mask = 0xF;
+        dev->GetRenderState(D3DRS_COLORWRITEENABLE, &mask);
+        if (mask & 7) g_scopy.valid = false;  // an alpha-only draw leaves the colour as it is
+    }
+    if (g_held.src && g_tex0 && g_tex0 == g_held.tex) {
+        HRESULT hr = S_OK;
+        if (lazy_copy(dev, type, count, data, stride, &hr)) return hr;
+    }
     HRESULT alpha_hr = S_OK;
     if (g_rt0_10bit && !(g_swap_off_mask & 0x50) && alpha_draw(dev, type, count, data, stride, &alpha_hr)) {
         return alpha_hr;
@@ -2000,6 +2250,12 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
         // reads would weigh a depth that was not written this frame.
         const bool skipped = g_cam_skipped;
         g_cam_skipped = false;
+        g_blur_src = g_tex0;
+        g_blur_dst = g_fx.rt0;
+        if (g_dof_direct) {
+            g_dof_direct = false;
+            return S_OK;  // the scene holds the depth of field already: the copy would give the same
+        }
         if ((skipped || (g_cam_off && !(g_swap_off_mask & 0x200))) && g_cam_copy_ps && g_cam_copy_dev == dev) {
             IDirect3DPixelShader9* game = nullptr;
             dev->GetPixelShader(&game);
@@ -2029,12 +2285,18 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
         dev->SetPixelShaderConstantF(66, saved, 2);
         return hr;
     }
+    if (swap == kDofSwap) {
+        g_dof_direct = false;
+        HRESULT hr = S_OK;
+        if (dof_direct(dev, type, count, data, stride, &hr)) return hr;
+    }
     if (swap == kDofSwap && g_dofhr_pct > 0) return dofhr_draw(dev, type, count, data, stride);
     if (swap >= 0) return swap_draw(dev, swap, type, count, data, stride);
     IDirect3DBaseTexture9* tex = g_tex0;
     if (g_fx.pending && g_bilateral_bound && tex && tex == g_fx.small_fx) {
         return fx_composite(dev, type, count, data, stride);
     }
+    if (g_bilateral_bound) return bilateral_draw(dev, type, count, data, stride);  // the game's own effects target
     // 1: the scene's packed depth copied into the 512x360 colour target and depth (FRPG_Fil_DepthCopy).
     if (g_fx_mode && !g_fx.phase && tex && g_fx.ds && surface_is(g_fx.rt0, kSmallW, kSmallH, D3DFMT_A8R8G8B8) &&
         surface_is(g_fx.ds, kSmallW, kSmallH, D3DFMT_D24S8) && texture_render_size(tex)) {
@@ -2275,8 +2537,256 @@ bool resolve_same(const Resolve& r, IDirect3DSurface9* src, const RECT* sr, IDir
            (!dr || std::memcmp(&r.d, dr, sizeof(RECT)) == 0);
 }
 
+void resolve_record(IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst, const RECT* dr,
+                    D3DTEXTUREFILTERTYPE filter) {
+    Resolve& r = g_resolves[g_resolve_next];
+    g_resolve_next = (g_resolve_next + 1) % 4;
+    r.src = src;
+    r.dst = dst;
+    r.has_s = sr != nullptr;
+    r.has_d = dr != nullptr;
+    if (sr) r.s = *sr;
+    if (dr) r.d = *dr;
+    r.filter = filter;
+}
+
+// A resolve made where it is used (RemoteControl `swapoff 0x1000` makes every resolve when asked). With the game's
+// anti-aliasing the scene (R41, multisampled) is resolved into a texture of its own (T48 in Firelink's frame log,
+// 2026-11-20) that one draw reads: the game's copy shader, drawing it whole into the scene texture the effects and the
+// post-processing work on (T50), a full pass over the scene (0.07 ms at 4K on the RTX 3090). A resolve from a
+// multisampled surface into a texture of the same size and format is held back until something needs it:
+//  - the copy shader drawing that texture whole into a surface of the same size and format, nothing blended or
+//    tested: the resolve goes into that surface instead and the draw is left out (the same pixels: a resolve, then an
+//    exact copy). The texture is then owed the resolve while the multisampled surface keeps what it holds;
+//  - anything else (the texture bound for reading, either surface drawn into or used by a StretchRect, another resolve
+//    held back): the resolve is made as the game asked, first.
+// The texture still owed when the multisampled surface is about to be drawn into again keeps what it held (stale).
+// Were a stale texture ever read, the log says so and resolves are made as asked from then on.
+
+HRESULT held_make(IDirect3DDevice9* dev, const Held& h) {
+    const HRESULT hr = o_stretch(dev, h.src, h.has_s ? &h.s : nullptr, h.dst, h.has_d ? &h.d : nullptr, h.filter);
+    if (SUCCEEDED(hr)) resolve_record(h.src, h.has_s ? &h.s : nullptr, h.dst, h.has_d ? &h.d : nullptr, h.filter);
+    return hr;
+}
+
+// The held-back resolve made as the game asked (something else than the copy needs it).
+void lazy_make(IDirect3DDevice9* dev) {
+    if (!g_held.src) return;
+    const Held h = g_held;
+    g_held = Held{};
+    HoldScore& score = hold_score(h.dst);
+    if (score.misses < 1000000) ++score.misses;
+    held_make(dev, h);
+}
+
+// The texture owed its resolve gets it (the multisampled surface still holds it).
+void lazy_pay(IDirect3DDevice9* dev) {
+    if (!g_owed.src) return;
+    const Held h = g_owed;
+    g_owed = Held{};
+    held_make(dev, h);
+}
+
+void lazy_stale_read() {
+    LOG_ERROR("Resolution: a texture was read whose resolve had gone into the copy's target instead (one frame may "
+              "show an old picture there); resolves are made as asked from now on");
+    g_stale = nullptr;
+    g_stale_surf = nullptr;
+    g_lazy_off = true;
+}
+
+// A surface about to be drawn into or written by a StretchRect.
+void lazy_before_write(IDirect3DDevice9* dev, IDirect3DSurface9* s) {
+    if (!s) return;
+    if (s == g_held.src || s == g_held.dst) lazy_make(dev);
+    if (s == g_owed.dst) {
+        lazy_pay(dev);  // drawn over: what it should hold first
+    } else if (s == g_owed.src) {
+        g_stale = g_owed.tex;  // the resolve can no longer be made
+        g_stale_surf = g_owed.dst;
+        g_owed = Held{};
+    }
+    if (s == g_stale_surf) {
+        g_stale = nullptr;
+        g_stale_surf = nullptr;
+    }
+}
+
+// A texture about to be bound for reading on a stage, or read by a StretchRect (stage -1).
+void lazy_before_read(IDirect3DDevice9* dev, int stage, IDirect3DBaseTexture9* tex) {
+    if (!tex) return;
+    if (tex == g_held.tex && !(stage == 0 && g_copy_bound)) lazy_make(dev);  // the copy may be the next draw
+    if (tex == g_owed.tex) lazy_pay(dev);
+    if (tex == g_stale) lazy_stale_read();
+}
+
+// The resolve can wait: a whole multisampled surface not bound for drawing, into the whole first level of a
+// render-target texture of its size and format.
+bool lazy_can_hold(IDirect3DDevice9* dev, IDirect3DSurface9* src, const D3DSURFACE_DESC& sd, const RECT* sr,
+                   IDirect3DSurface9* dst, const RECT* dr, Held* out) {
+    if (g_lazy_off || (g_swap_off_mask & 0x1000)) return false;
+    const HoldScore& score = hold_score(dst);
+    if (score.misses > score.hits + 3) return false;
+    D3DSURFACE_DESC dd{};
+    if (FAILED(dst->GetDesc(&dd)) || dd.Width != sd.Width || dd.Height != sd.Height || dd.Format != sd.Format ||
+        dd.MultiSampleType != D3DMULTISAMPLE_NONE || !(dd.Usage & D3DUSAGE_RENDERTARGET)) {
+        return false;
+    }
+    const RECT whole{0, 0, static_cast<LONG>(sd.Width), static_cast<LONG>(sd.Height)};
+    if ((sr && std::memcmp(sr, &whole, sizeof(RECT)) != 0) || (dr && std::memcmp(dr, &whole, sizeof(RECT)) != 0)) {
+        return false;
+    }
+    IDirect3DBaseTexture9* tex = container_of(dst);
+    if (!tex) return false;
+    for (DWORD i = 0; i < 4; ++i) {
+        IDirect3DSurface9* rt = nullptr;
+        if (SUCCEEDED(dev->GetRenderTarget(i, &rt)) && rt) {
+            rt->Release();
+            if (rt == src || rt == dst) return false;
+        }
+    }
+    out->src = src;
+    out->dst = dst;
+    out->tex = tex;
+    out->has_s = sr != nullptr;
+    out->has_d = dr != nullptr;
+    if (sr) out->s = *sr;
+    if (dr) out->d = *dr;
+    out->w = sd.Width;
+    out->h = sd.Height;
+    out->format = sd.Format;
+    return true;
+}
+
+// hk_draw_up with the held-back texture on stage 0: true when the draw was the copy and the resolve went into its
+// target instead (*hr its result). Otherwise the resolve is made as asked and the draw is left to the caller.
+// Why the draw is not a copy of the whole held-back texture into a surface like it (null: it is). rt: render target 0.
+const char* lazy_not_copy(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride,
+                          IDirect3DSurface9* rt) {
+    if (!g_copy_bound) return "not the copy shader";
+    if ((type != D3DPT_TRIANGLEFAN && type != D3DPT_TRIANGLESTRIP) || count != 2 || stride < 8 || !data) {
+        return "not a quad";
+    }
+    D3DSURFACE_DESC d{};
+    if (!rt || FAILED(rt->GetDesc(&d)) || d.Width != g_held.w || d.Height != g_held.h || d.Format != g_held.format ||
+        d.MultiSampleType != D3DMULTISAMPLE_NONE || rt == g_held.src || rt == g_held.dst) {
+        return "another size or format";
+    }
+    for (DWORD i = 1; i < 4; ++i) {
+        IDirect3DSurface9* more = nullptr;
+        if (SUCCEEDED(dev->GetRenderTarget(i, &more)) && more) {
+            more->Release();
+            return "more render targets";
+        }
+    }
+    D3DVIEWPORT9 vp{};
+    if (FAILED(dev->GetViewport(&vp)) || vp.X != 0 || vp.Y != 0 || vp.Width != g_held.w || vp.Height != g_held.h) {
+        return "a smaller viewport";
+    }
+    // Nothing blended, tested or converted: every channel written as read.
+    DWORD v = 1;
+    if (FAILED(dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &v)) || v) return "blended";
+    if (FAILED(dev->GetRenderState(D3DRS_ALPHATESTENABLE, &v)) || v) return "alpha test";
+    if (FAILED(dev->GetRenderState(D3DRS_SRGBWRITEENABLE, &v)) || v) return "sRGB write";
+    if (FAILED(dev->GetSamplerState(0, D3DSAMP_SRGBTEXTURE, &v)) || v) return "sRGB read";
+    if (FAILED(dev->GetRenderState(D3DRS_COLORWRITEENABLE, &v)) || (v & 0xF) != 0xF) return "channels masked";
+    if (SUCCEEDED(dev->GetRenderState(D3DRS_SCISSORTESTENABLE, &v)) && v) {
+        RECT sc{};
+        if (FAILED(dev->GetScissorRect(&sc)) || sc.left > 0 || sc.top > 0 || sc.right < static_cast<LONG>(g_held.w) ||
+            sc.bottom < static_cast<LONG>(g_held.h)) {
+            return "a smaller scissor rectangle";
+        }
+    }
+    IDirect3DSurface9* ds = nullptr;
+    if (SUCCEEDED(dev->GetDepthStencilSurface(&ds)) && ds) {
+        ds->Release();
+        DWORD z = 1, stencil = 1;
+        if (FAILED(dev->GetRenderState(D3DRS_ZENABLE, &z)) || z ||
+            FAILED(dev->GetRenderState(D3DRS_STENCILENABLE, &stencil)) || stencil) {
+            return "depth or stencil test";
+        }
+    }
+    // The quad covers the target from corner to corner (pixel coordinates with the half-pixel offset first).
+    const auto* bytes = static_cast<const BYTE*>(data);
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (UINT k = 0; k < 4; ++k) {
+        const float* p = reinterpret_cast<const float*>(bytes + k * stride);
+        x0 = (std::min)(x0, p[0]);
+        x1 = (std::max)(x1, p[0]);
+        y0 = (std::min)(y0, p[1]);
+        y1 = (std::max)(y1, p[1]);
+    }
+    if (x0 != -0.5f || y0 != -0.5f || x1 != static_cast<float>(g_held.w) - 0.5f ||
+        y1 != static_cast<float>(g_held.h) - 0.5f) {
+        return "not the whole target";
+    }
+    return nullptr;
+}
+
+// hk_draw_up with the held-back texture on stage 0: true when the draw was the copy and the resolve went into its
+// target instead (*hr its result). Otherwise the resolve is made as asked and the draw is left to the caller.
+bool lazy_copy(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride, HRESULT* hr) {
+    IDirect3DSurface9* rt = nullptr;
+    if (FAILED(dev->GetRenderTarget(0, &rt))) rt = nullptr;
+    const char* why = lazy_not_copy(dev, type, count, data, stride, rt);
+    if (why) {
+        if (rt) rt->Release();
+        if (g_copy_bound && !g_lazy_why_logged) {
+            g_lazy_why_logged = true;
+            LOG_INFO("Resolution: a held-back resolve made as asked (the copy reading it: %s)", why);
+        }
+        lazy_make(dev);
+        return false;
+    }
+    const Held h = g_held;
+    g_held = Held{};
+    *hr = o_stretch(dev, h.src, h.has_s ? &h.s : nullptr, rt, nullptr, h.filter);
+    rt->Release();
+    if (FAILED(*hr)) {
+        held_make(dev, h);
+        return false;
+    }
+    resolve_forget(rt);
+    g_owed = h;
+    HoldScore& score = hold_score(h.dst);
+    if (score.hits < 1000000) ++score.hits;
+    if (!g_lazy_logged) {
+        g_lazy_logged = true;
+        LOG_INFO("Resolution: the anti-aliased scene is resolved straight into the texture the game copied it into "
+                 "(the copy left out)");
+    }
+    return true;
+}
+
+// A StretchRect: into the scene or its copy, the copy no longer equals it; the scene (the texture the camera blur draws
+// into, the scene's size) copied whole into a texture of its size and format is recorded (10-bit scene only).
+void scopy_note(IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst, const RECT* dr) {
+    if (g_scopy.valid && (dst == g_scopy.scene || dst == g_scopy.copy)) g_scopy.valid = false;
+    if (!g_scene_10bit || !g_blur_dst || src != g_blur_dst) return;
+    D3DSURFACE_DESC sd{}, dd{};
+    if (FAILED(src->GetDesc(&sd)) || FAILED(dst->GetDesc(&dd)) || sd.MultiSampleType != D3DMULTISAMPLE_NONE ||
+        dd.Width != sd.Width || dd.Height != sd.Height || dd.Format != sd.Format) {
+        return;
+    }
+    const RECT whole{0, 0, static_cast<LONG>(sd.Width), static_cast<LONG>(sd.Height)};
+    if ((sr && std::memcmp(sr, &whole, sizeof(RECT)) != 0) || (dr && std::memcmp(dr, &whole, sizeof(RECT)) != 0)) return;
+    IDirect3DBaseTexture9* st = container_of(src);
+    IDirect3DBaseTexture9* dt = container_of(dst);
+    if (!st || !dt) return;
+    g_scopy.scene = src;
+    g_scopy.scene_tex = st;
+    g_scopy.copy = dst;
+    g_scopy.copy_tex = dt;
+    g_scopy.valid = true;
+}
+
 HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst,
                           const RECT* dr, D3DTEXTUREFILTERTYPE filter) {
+    if (src && dst && src != dst) scopy_note(src, sr, dst, dr);
+    if (g_held.src || g_owed.src || g_stale) {
+        lazy_before_read(dev, -1, container_of(src));
+        lazy_before_write(dev, dst);
+    }
     if (src && dst && src != dst) {
         D3DSURFACE_DESC rd{};
         const bool resolve = SUCCEEDED(src->GetDesc(&rd)) && rd.MultiSampleType != D3DMULTISAMPLE_NONE;
@@ -2294,18 +2804,15 @@ HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const R
         }
         resolve_forget(dst);  // its target holds something else from here
         if (resolve) {
-            const HRESULT hr = o_stretch(dev, src, sr, dst, dr, filter);
-            if (SUCCEEDED(hr)) {
-                Resolve& r = g_resolves[g_resolve_next];
-                g_resolve_next = (g_resolve_next + 1) % 4;
-                r.src = src;
-                r.dst = dst;
-                r.has_s = sr != nullptr;
-                r.has_d = dr != nullptr;
-                if (sr) r.s = *sr;
-                if (dr) r.d = *dr;
-                r.filter = filter;
+            Held h;
+            if (lazy_can_hold(dev, src, rd, sr, dst, dr, &h)) {
+                h.filter = filter;
+                lazy_make(dev);
+                g_held = h;
+                return D3D_OK;
             }
+            const HRESULT hr = o_stretch(dev, src, sr, dst, dr, filter);
+            if (SUCCEEDED(hr)) resolve_record(src, sr, dst, dr, filter);
             return hr;
         }
     }
@@ -2348,6 +2855,31 @@ HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const R
     return o_stretch(dev, src, sr, dst, dr, filter);
 }
 
+using DrawPrimFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
+using DrawIdxFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
+using DrawIdxUPFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void*, D3DFORMAT,
+                                     const void*, UINT);
+DrawPrimFn o_draw_prim = nullptr;
+DrawIdxFn o_draw_idx = nullptr;
+DrawIdxUPFn o_draw_idx_up = nullptr;
+
+HRESULT WINAPI hk_draw_prim(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT start, UINT prims) {
+    scopy_drawn();
+    return o_draw_prim(dev, type, start, prims);
+}
+
+HRESULT WINAPI hk_draw_idx(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT min_index, UINT verts,
+                           UINT start, UINT prims) {
+    scopy_drawn();
+    return o_draw_idx(dev, type, base, min_index, verts, start, prims);
+}
+
+HRESULT WINAPI hk_draw_idx_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT min_index, UINT verts, UINT prims,
+                              const void* indices, D3DFORMAT index_format, const void* data, UINT stride) {
+    scopy_drawn();
+    return o_draw_idx_up(dev, type, min_index, verts, prims, indices, index_format, data, stride);
+}
+
 void* patch_slot(void* object, int slot, void* replacement) {
     void** vtable = *reinterpret_cast<void***>(object);
     void* original = vtable[slot];
@@ -2385,6 +2917,13 @@ void resolution_hook_device(IDirect3DDevice9* dev) {
     if (p && !o_set_texture) o_set_texture = reinterpret_cast<SetTextureFn>(p);
     p = patch_slot(dev, 83, reinterpret_cast<void*>(&hk_draw_up));
     if (p && !o_draw_up) o_draw_up = reinterpret_cast<DrawUPFn>(p);
+    // The other draws only say whether they went into the scene (dof_direct's copy of it).
+    p = patch_slot(dev, 81, reinterpret_cast<void*>(&hk_draw_prim));
+    if (p && !o_draw_prim) o_draw_prim = reinterpret_cast<DrawPrimFn>(p);
+    p = patch_slot(dev, 82, reinterpret_cast<void*>(&hk_draw_idx));
+    if (p && !o_draw_idx) o_draw_idx = reinterpret_cast<DrawIdxFn>(p);
+    p = patch_slot(dev, 84, reinterpret_cast<void*>(&hk_draw_idx_up));
+    if (p && !o_draw_idx_up) o_draw_idx_up = reinterpret_cast<DrawIdxUPFn>(p);
     p = patch_slot(dev, 75, reinterpret_cast<void*>(&hk_set_scissor));
     if (p && !o_set_scissor) o_set_scissor = reinterpret_cast<SetScissorFn>(p);
     p = patch_slot(dev, 34, reinterpret_cast<void*>(&hk_stretch));
@@ -2432,6 +2971,15 @@ void resolution_reset() {
     g_rt0_10bit = false;
     release_ptr(g_reduce.state);  // made again on the next use
     for (Resolve& r : g_resolves) r = Resolve{};
+    g_held = Held{};
+    g_owed = Held{};
+    g_stale = nullptr;
+    g_stale_surf = nullptr;
+    for (HoldScore& h : g_hold_scores) h = HoldScore{};
+    g_scopy = SceneCopy{};
+    g_blur_src = nullptr;
+    g_blur_dst = nullptr;
+    g_dof_direct = false;
     area2_release_targets();
     fx_release_target();          // the default pool goes before a Reset; made again on the next use
     dofhr_release_targets();
