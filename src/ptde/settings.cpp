@@ -225,7 +225,9 @@ Settings settings_load(const wchar_t* dll_path) {
             for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             s.draw_map_pieces = (v == "all") ? 2 : (v == "adjacent") ? 1 : 0;
         } else if (key == "occlusionculling") {
-            s.occlusion_culling = parse_bool(val);
+            std::string v = val;
+            for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            s.occlusion_culling = v == "all" ? 2 : (v == "added" || parse_bool(val)) ? 1 : 0;
         } else if (key == "foliagesway") {
             s.foliage_sway = parse_bool(val);
         } else if (key == "foliageswaystrength") {

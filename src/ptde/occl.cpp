@@ -1,5 +1,6 @@
 #include "occl.h"
 
+#include "fpsu_buildcfg.h"
 #include "log.h"
 #include "shaders/occl_box_ps.h"
 #include "shaders/occl_box_vs.h"
@@ -614,7 +615,8 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
             ++g_st_notest;
         }
     }
-    const uint32_t flags = model_flags(*reinterpret_cast<const uint32_t*>(entity + 0x40));
+    // Mode 3 (diagnostics only): every model, characters and objects too.
+    const uint32_t flags = (mode & 3) == 3 ? 3u : model_flags(*reinterpret_cast<const uint32_t*>(entity + 0x40));
     if (!(flags & 1) || ((mode & 3) == 1 && !(flags & 2))) return 0;
     const auto* bx = reinterpret_cast<const float*>(entity + 0xA0);
     const float box[6] = {bx[0], bx[1], bx[2], bx[4], bx[5], bx[6]};
@@ -762,7 +764,7 @@ bool occl_install() {
 }
 
 void occl_set_mode(int mode) {
-    if (mode < 0 || mode > 6 || (mode & 3) == 3) mode = 0;
+    if (mode < 0 || mode > 7) mode = 0;
     InterlockedExchange(&g_mode, mode);
 }
 
@@ -803,6 +805,26 @@ void occl_reset() {
 }
 
 void occl_game_frame() {
+#if FPSU_DIAGNOSTICS
+    // Ctrl+Shift+O (with the game in front): off, the pieces DrawMapPieces adds, every map piece, off...
+    if (g_installed) {
+        static bool was_down = false;
+        const bool down = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
+                          (GetAsyncKeyState('O') & 0x8000);
+        if (down && !was_down) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+            if (pid == GetCurrentProcessId()) {
+                const int next = (g_mode & 3) == 0 ? 1 : (g_mode & 3) == 1 ? 2 : 0;
+                occl_set_mode(next);
+                LOG_INFO("OcclusionCulling (Ctrl+Shift+O): %s", next == 0   ? "off"
+                                                                : next == 1 ? "the pieces DrawMapPieces adds"
+                                                                            : "every map piece");
+            }
+        }
+        was_down = down;
+    }
+#endif
     if (!g_installed || g_mode == 0) return;
     // The table of the map pieces' models every ten frames (and when the player's room changes).
     bool room_changed = false;

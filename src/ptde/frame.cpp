@@ -575,16 +575,22 @@ bool frame_install(const Settings& settings) {
             shadowmap_set_resolution(settings.shadow_map_resolution);
         }
         drawdist_install(settings.draw_map_pieces, settings.lod_distance, settings.effect_lod_distance);
-        // OcclusionCulling: only with DrawMapPieces adding pieces (or RemoteControl, which can switch both).
-        bool occl = settings.occlusion_culling && settings.draw_map_pieces != 0;
+        // OcclusionCulling: true acts on the pieces DrawMapPieces adds (nothing to do with game), all on every map
+        // piece. A diagnostics build installs it always, for Ctrl+Shift+O (off / added / all) and RemoteControl.
+        const int occl_mode = settings.occlusion_culling == 2 ? 2
+                              : settings.occlusion_culling == 1 && settings.draw_map_pieces != 0 ? 1 : 0;
+        bool occl = occl_mode != 0;
 #if FPSU_DIAGNOSTICS
-        if (settings.remote_control) occl = true;
+        occl = true;
 #endif
         if (occl && occl_install()) {
-            occl_set_mode(settings.occlusion_culling && settings.draw_map_pieces != 0 ? 1 : 0);
-            if (settings.occlusion_culling && settings.draw_map_pieces != 0) {
+            occl_set_mode(occl_mode);
+            if (occl_mode == 1) {
                 LOG_INFO("OcclusionCulling: the map pieces DrawMapPieces adds are skipped while something in front "
                          "hides them");
+            } else if (occl_mode == 2) {
+                LOG_INFO("OcclusionCulling = all: every map piece is skipped while something in front hides it (the "
+                         "game's own too)");
             }
         }
         foliage_configure(settings.foliage_sway, settings.foliage_sway_strength, settings.foliage_sway_speed);
