@@ -45,6 +45,8 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main_composite /O3 /D SIDE_ALPHA=1 /Vn kDofHrCompositeSidePs /Fh src\ptde\shaders\dof_hr_composite_side_ps.h src\ptde\shaders\dof_hr.hlsl
 if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_3_0 /E main_composite /O3 /D SIDE_ALPHA=1 /D SHARP_DISCARD=1 /Vn kDofHrCompositeSharpPs /Fh src\ptde\shaders\dof_hr_composite_sharp_ps.h src\ptde\shaders\dof_hr.hlsl
+if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kEffectsCompositePs /Fh src\ptde\shaders\effects_composite_ps.h src\ptde\shaders\effects_composite.hlsl
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T vs_3_0 /E main_vs /O3 /Vn kPresentReduceVs /Fh src\ptde\shaders\present_reduce_vs.h src\ptde\shaders\present_reduce.hlsl

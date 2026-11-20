@@ -21,6 +21,7 @@
 #include "shaders/dof_hr_blur_ps.h"
 #include "shaders/dof_hr_composite_ps.h"
 #include "shaders/dof_hr_composite_side_ps.h"
+#include "shaders/dof_hr_composite_sharp_ps.h"
 #include "shaders/dof_hr_down_ps.h"
 #include "shaders/dof_hr_down_side_ps.h"
 #include "shaders/dof_hr_vs.h"
@@ -1952,6 +1953,7 @@ struct DofHr {
     IDirect3DPixelShader9* comp = nullptr;
     IDirect3DPixelShader9* down_side = nullptr;  // down and comp with the scene's rate from ours (10bit)
     IDirect3DPixelShader9* comp_side = nullptr;
+    IDirect3DPixelShader9* comp_sharp = nullptr;  // comp_side for dof_direct: sharp pixels left as they are
     IDirect3DVertexDeclaration9* decl = nullptr;
     IDirect3DStateBlock9* state = nullptr;
     // A, level 1, level 2 at half size (full: the render size); Q, Q2, level 3 at half of that.
@@ -1979,13 +1981,13 @@ bool dofhr_ready(IDirect3DDevice9* dev, UINT scene_w, UINT scene_h) {
     if (g_dofhr.dev != dev) {
         dofhr_release_targets();
         IUnknown* objs[] = {g_dofhr.vs,   g_dofhr.down,      g_dofhr.blur,     g_dofhr.comp,
-                            g_dofhr.decl, g_dofhr.down_side, g_dofhr.comp_side};
+                            g_dofhr.decl, g_dofhr.down_side, g_dofhr.comp_side, g_dofhr.comp_sharp};
         for (IUnknown* o : objs) {
             if (o) o->Release();
         }
         g_dofhr.vs = nullptr;
         g_dofhr.down = g_dofhr.blur = g_dofhr.comp = nullptr;
-        g_dofhr.down_side = g_dofhr.comp_side = nullptr;
+        g_dofhr.down_side = g_dofhr.comp_side = g_dofhr.comp_sharp = nullptr;
         g_dofhr.decl = nullptr;
         g_dofhr.failed = false;
         g_dofhr.dev = dev;
@@ -2006,6 +2008,10 @@ bool dofhr_ready(IDirect3DDevice9* dev, UINT scene_w, UINT scene_h) {
             if (g_dofhr.down_side) g_dofhr.down_side->Release();
             if (g_dofhr.comp_side) g_dofhr.comp_side->Release();
             g_dofhr.down_side = g_dofhr.comp_side = nullptr;
+        }
+        if (g_dofhr.comp_side &&
+            FAILED(o_create_ps(dev, reinterpret_cast<const DWORD*>(kDofHrCompositeSharpPs), &g_dofhr.comp_sharp))) {
+            g_dofhr.comp_sharp = nullptr;
         }
     }
     if (g_dofhr.failed) return false;
@@ -2154,7 +2160,9 @@ HRESULT dofhr_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, con
     IDirect3DBaseTexture9* side_saved_tex = nullptr;
     DWORD side_saved[6] = {};
     if (side) alpha_stage_set(dev, 5, side, &side_saved_tex, side_saved);
-    o_set_ps(dev, side ? g_dofhr.comp_side : g_dofhr.comp);
+    // Drawn into the scene itself (dof_direct): its sharp pixels are left as they are.
+    const bool sharp = side && g_alpha_alias && g_dofhr.comp_sharp && !(g_swap_off_mask & 0x10000);
+    o_set_ps(dev, sharp ? g_dofhr.comp_sharp : side ? g_dofhr.comp_side : g_dofhr.comp);
     float sizes[8] = {static_cast<float>(g_dofhr.qw), static_cast<float>(g_dofhr.qh), 1.0f / g_dofhr.qw,
                       1.0f / g_dofhr.qh, 256.0f, 180.0f, 1.0f / 256, 1.0f / 180};
     stage_size(dev, 4, sizes + 4);

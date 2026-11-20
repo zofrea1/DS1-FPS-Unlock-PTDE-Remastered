@@ -111,8 +111,22 @@ float4 bspline(sampler2D s, float2 uv, float4 size) {
            g1.y * (g0.x * tex2Dlod(s, float4(t0.x, t1.y, 0, 0)) + g1.x * tex2Dlod(s, float4(t1.x, t1.y, 0, 0)));
 }
 
+// SHARP_DISCARD (with SIDE_ALPHA): the composite drawn into the scene itself (resolution.cpp's dof_direct), reading the
+// scene from an exact copy of it. A pixel without blur (blend = (1, 0, 0, 0)) would be written back as it is: it is
+// discarded before the scene is read, and the scene's own value stays.
 float4 main_composite(float2 uv : TEXCOORD1) : COLOR0 {
     float nearBlur = bspline(gNear, uv, gNearSize).w;
+#if defined(SIDE_ALPHA) && defined(SHARP_DISCARD)
+    float rate = tex2Dlod(gSceneAlpha, float4(uv, 0, 0)).a;
+    float4 w = saturate(max(rate, nearBlur) * gStrength.x * gWeightScale + gWeightBias);
+    float4 blend = float4(w.x, w.y - w.x, w.z - w.y, w.w - w.z);
+    [branch] if (blend.x == 1.0 && blend.y == 0.0 && blend.z == 0.0 && blend.w == 0.0) {
+        discard;
+        return 0;
+    }
+    float4 src = saturate(tex2Dlod(gScene, float4(uv, 0, 0)));
+    src.w = rate;
+#else
     float4 src = saturate(tex2Dlod(gScene, float4(uv, 0, 0)));
 #ifdef SIDE_ALPHA
     src.w = tex2Dlod(gSceneAlpha, float4(uv, 0, 0)).a;
@@ -120,6 +134,7 @@ float4 main_composite(float2 uv : TEXCOORD1) : COLOR0 {
     float blurW = max(src.w, nearBlur) * gStrength.x;
     float4 w = saturate(blurW * gWeightScale + gWeightBias);
     float4 blend = float4(w.x, w.y - w.x, w.z - w.y, w.w - w.z);
+#endif
     float4 o = src * blend.x;
     [branch] if (blend.y != 0.0 || blend.z != 0.0 || blend.w != 0.0) {
         o += tex2Dlod(gLevel1, float4(uv, 0, 0)) * blend.y;
