@@ -239,7 +239,72 @@ void apply_extra(uint32_t (*extra)[4], bool* any, bool stream) {
     std::memset(extra, 0, sizeof(uint32_t) * 4 * kMaxBlocks);
 }
 
-void __cdecl apply_draw() { apply_extra(g_extra_draw, &g_any_draw, false); }
+// The render thread's copy of a block's draw mask: 0xDE2C60 also queues each block's mask for the two render objects of
+// its world info entry ([FieldArea+8]+0x10, 0x3C each: +0x2C through 0x1000610, +0x30 through 0xFCE250; ecx = the
+// object, eax = the render command buffer [[[0x13783C0]+8]]+0x28, the 16-byte mask on the stack, the caller pops it).
+// A map piece in the scene and in GameRend's groups was still not drawn while these had the game's mask (2026-11-19).
+constexpr uint32_t kRenderMaskA = 0x01000610;
+constexpr uint32_t kRenderMaskB = 0x00FCE250;
+constexpr uint32_t kRenderCmdVar = 0x013783C0;
+
+void queue_render_mask(uint32_t fn, uint32_t obj, uint32_t buf, const uint32_t* m) {
+    const uint32_t m0 = m[0], m1 = m[1], m2 = m[2], m3 = m[3];
+    __asm {
+        push m3
+        push m2
+        push m1
+        push m0
+        mov ecx, obj
+        mov eax, buf
+        call dword ptr [fn]
+        add esp, 16
+    }
+}
+
+// Right after 0xDE2C60 (the game thread, where it queued its own): every block given extra groups gets its widened
+// mask (the map piece manager's, now ORed) queued for its render objects again.
+void requeue_render_masks(const bool* widened, int count) {
+    __try {
+        const uint32_t fa = *reinterpret_cast<const uint32_t*>(kFieldAreaVar);
+        const uint32_t info = fa ? *reinterpret_cast<const uint32_t*>(fa + 8) : 0;
+        const uint32_t entries = info ? *reinterpret_cast<const uint32_t*>(info + 0x10) : 0;
+        const uint32_t pieces = *reinterpret_cast<const uint32_t*>(kPieceManVar);
+        const uint32_t blocks = pieces ? *reinterpret_cast<const uint32_t*>(pieces + 0x20) : 0;
+        const uint32_t r = *reinterpret_cast<const uint32_t*>(kRenderCmdVar);
+        const uint32_t r8 = r ? *reinterpret_cast<const uint32_t*>(r + 8) : 0;
+        const uint32_t r0 = r8 ? *reinterpret_cast<const uint32_t*>(r8) : 0;
+        const uint32_t buf = r0 ? *reinterpret_cast<const uint32_t*>(r0 + 0x28) : 0;
+        if (!entries || !blocks || !buf) return;
+        const int piece_blocks = *reinterpret_cast<const int*>(pieces + 0x1C);
+        for (int b = 0; b < count && b < piece_blocks; ++b) {
+            if (!widened[b]) continue;
+            const auto* mask = reinterpret_cast<const uint32_t*>(blocks + b * 0x5C + 0x0C);
+            const uint32_t a = *reinterpret_cast<const uint32_t*>(entries + b * 0x3C + 0x2C);
+            const uint32_t c = *reinterpret_cast<const uint32_t*>(entries + b * 0x3C + 0x30);
+            if (a) queue_render_mask(kRenderMaskA, a, buf, mask);
+            if (c) queue_render_mask(kRenderMaskB, c, buf, mask);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void __cdecl apply_draw() {
+    if (!g_any_draw) return;
+    bool widened[kMaxBlocks] = {};
+    int count = 0;
+    __try {
+        const uint32_t fa = *reinterpret_cast<const uint32_t*>(kFieldAreaVar);
+        const uint32_t info = fa ? *reinterpret_cast<const uint32_t*>(fa + 8) : 0;
+        count = info ? *reinterpret_cast<const int*>(info + 0x0C) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    if (count > kMaxBlocks) count = kMaxBlocks;
+    for (int b = 0; b < kMaxBlocks; ++b) {
+        widened[b] = (g_extra_draw[b][0] | g_extra_draw[b][1] | g_extra_draw[b][2] | g_extra_draw[b][3]) != 0;
+    }
+    apply_extra(g_extra_draw, &g_any_draw, false);
+    requeue_render_masks(widened, count);
+}
 void __cdecl apply_stream() { apply_extra(g_extra_stream, &g_any_stream, true); }
 
 // In place of `call 0x4569D0` in 0xDE2C60 (the draw masks): the game's answer, the floor noted.
