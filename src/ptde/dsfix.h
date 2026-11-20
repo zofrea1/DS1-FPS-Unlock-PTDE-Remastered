@@ -17,6 +17,7 @@ struct DsfixInfo {
     int dof_override = 0;        // DSfix.ini "dofOverrideResolution" (0: its 512x360 targets keep their size)
     int aa_quality = 0;          // DSfix.ini "aaQuality" (0 off, DSfix's default when not listed)
     bool aa_smaa = false;        // DSfix.ini "aaType SMAA" (any other type, and DSfix's default, is FXAA)
+    bool v3 = false;             // DSfix.ini has settings only DSfix 3.0 (DDTM) has: weaponWearBars, hudScaleTopLeft...
 };
 
 DsfixInfo dsfix_probe(const wchar_t* game_dir);
@@ -30,6 +31,9 @@ bool dsfix_loaded();
 void dsfix_render_size(int* width, int* height);
 // DSfix's dofOverrideResolution from the last probe (0 when unset or DSfix is not loaded).
 int dsfix_dof_override();
+// The DSfix beside the game is DSfix 3.0: its DSfix.ini lists settings DSfix 2.x never had. Its DLL has no version
+// resource or export of its own to tell; with a 2.x DSfix.ini beside the 3.0 DLL this is false.
+bool dsfix_is_v3();
 // DSfix's SMAA runs on a scene of `width` x `height`: DSfix is loaded with aaType SMAA (aaQuality > 0), and its
 // anti-aliasing finds the scene, which it only does at its own renderWidth x renderHeight, or at 1024x720, which DSfix
 // makes at that size and registers as the scene (a 1280x720 one it makes at the present size and does not register).
@@ -37,6 +41,7 @@ int dsfix_dof_override();
 // which of the two it was: "DSfix's render size" or "1024x720, which DSfix makes its render size".
 bool dsfix_smaa_on_scene(int width, int height, const char** match = nullptr);
 // YieldToDSFix: with DSfix loaded, this mod's picture settings that DSfix has its own of step back (the resolution with
-// what rides on it, anisotropic filtering, the HUD's size). dsfix_yields() is true only with both. Set from DllMain.
+// what rides on it, anisotropic filtering, the HUD's size and place, the fullscreen refresh rate). dsfix_yields() is
+// true only with both. Set from DllMain.
 void dsfix_set_yield(bool on);
 bool dsfix_yields();

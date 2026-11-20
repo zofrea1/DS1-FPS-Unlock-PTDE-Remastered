@@ -56,6 +56,7 @@ void dsfix_render_size(int* width, int* height) {
 }
 
 int dsfix_dof_override() { return dsfix_loaded() ? g_last.dof_override : 0; }
+bool dsfix_is_v3() { return dsfix_loaded() && g_last.v3; }
 bool dsfix_smaa_on_scene(int width, int height, const char** match) {
     if (!dsfix_loaded() || g_last.aa_quality <= 0 || !g_last.aa_smaa) return false;
     // DSfix makes 1024x720 textures at its render size and registers them as the scene. A 1280x720 one it makes at the
@@ -113,6 +114,9 @@ DsfixInfo dsfix_probe_impl(const wchar_t* game_dir) {
                 info.aa_smaa = value == "SMAA";  // DSfix compares the exact text; anything else is FXAA
             } else if (key == "skipIntro") {
                 info.skip_intro = std::atoi(value.c_str()) != 0;
+            } else if (key == "weaponWearBars" || key == "hudScaleTopLeft" || key == "menuScale" || key == "gameMap" ||
+                       key == "quickSave") {
+                info.v3 = true;  // DSfix 3.0's own settings (2.4's DSfix.ini has none of them)
             }
         }
     }

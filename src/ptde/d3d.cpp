@@ -124,10 +124,25 @@ const Settings& settings() {
     return g_settings;
 }
 
+// FixAspect, unless DSfix decides the picture (YieldToDSFix): then the game keeps its 16:9 picture on any screen and
+// draws its HUD and menus where it does without this mod, which is where DSfix 3.0's HUD mod and weaponWearBars look
+// for them (FixAspectUI's 16:9 layout in the middle, or the layout stretched without it, would move them).
+bool aspect_wanted() {
+    return settings().fps_unlock && settings().fix_aspect && !dsfix_yields();
+}
+
 // Fullscreen modes the display offers at the requested size, and the one to use.
 void adjust_present_parameters(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS* pp, const char* where) {
     const Settings& cfg = settings();
     if (!pp || pp->Windowed || cfg.fullscreen_refresh < 0) {
+        return;
+    }
+    // YieldToDSFix: the rate is DSfix's (fullscreenHz, in 2.x and 3.0). This hook sits beneath DSfix's, so the rate DSfix
+    // chose would be replaced (FullscreenRefreshRate 0: the display's highest).
+    if (dsfix_yields()) {
+        LOG_INFO("%s: fullscreen %ux%u at %u Hz as DSfix passes it on (YieldToDSFix: DSfix's fullscreenHz decides, "
+                 "FullscreenRefreshRate is off)", where, pp->BackBufferWidth, pp->BackBufferHeight,
+                 pp->FullScreen_RefreshRateInHz);
         return;
     }
     const D3DFORMAT format = pp->BackBufferFormat == D3DFMT_UNKNOWN ? D3DFMT_X8R8G8B8 : pp->BackBufferFormat;
@@ -192,7 +207,7 @@ void adjust_present_parameters(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMET
 HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     IDirect3D9* d3d = nullptr;
     if (pp && SUCCEEDED(device->GetDirect3D(&d3d)) && d3d) {
-        aspect_set_enabled(settings().fps_unlock && settings().fix_aspect);
+        aspect_set_enabled(aspect_wanted());
         if (aspect_is_enabled()) {
             aspect_adjust_present(d3d, D3DADAPTER_DEFAULT, pp, "Reset");
         }
@@ -237,7 +252,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
                                   D3DPRESENT_PARAMETERS* pp, IDirect3DDevice9** out) {
     // RTX Remix's bridge sets the fullscreen display mode itself (at 60 Hz): its call takes FullscreenRefreshRate.
     if (settings().rtx_remix_applied) remix_display_install(settings().fps_unlock ? settings().fullscreen_refresh : -1);
-    aspect_set_enabled(settings().fps_unlock && settings().fix_aspect);
+    aspect_set_enabled(aspect_wanted());
     if (aspect_is_enabled()) {
         aspect_adjust_present(d3d, adapter, pp, "CreateDevice");
     }
@@ -305,8 +320,18 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         resolution_hook_device(*out);
         resolution_check_scene_format(*out, settings().antialiasing_samples);
         resolution_sun_hook_device(*out);
+        // FixWater: DSfix 2.4 as released leaves the water's ripple step at 512x360. DSfix 3.0 sets it itself, and the
+        // hook would only look at every pixel shader constant upload for nothing.
         if (settings().fix_water_with_dsfix && dsfix_dof_override() > 0 && !resolution_is_active()) {
-            resolution_water_hook_device(*out, dsfix_dof_override());
+            if (dsfix_is_v3()) {
+                static bool told = false;
+                if (!told) {
+                    told = true;
+                    LOG_INFO("FixWater: off beside DSfix 3.0, which corrects the water itself");
+                }
+            } else {
+                resolution_water_hook_device(*out, dsfix_dof_override());
+            }
         }
         atoc_fix_depth_check(*out);
         if (settings().alpha_to_coverage) {

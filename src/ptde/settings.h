@@ -133,11 +133,13 @@ struct Settings {
     bool hide_mouse_cursor = true;
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.
     bool fix_sun_with_dsfix = true;
-    // With DSfix 2.x's dofOverrideResolution and its resolution: the water surfaces no longer break into blocks.
+    // With DSfix 2.x's dofOverrideResolution and its resolution: the water surfaces no longer break into blocks (off
+    // beside DSfix 3.0, which corrects them itself).
     bool fix_water_with_dsfix = true;
     // YieldToDSFix: with DSfix loaded, DSfix's own settings decide the resolution (and what rides on it), the
-    // texture filtering, and the HUD and menus (UIScale, UIScaleWorld, UIScaleText, UIScaleMenus and
-    // FixBossBarOverlap off); ours step back (dsfix.h).
+    // texture filtering, the fullscreen refresh rate (FullscreenRefreshRate off), and the HUD and menus (UIScale,
+    // UIScaleWorld, UIScaleText, UIScaleMenus, FixBossBarOverlap, FixAspect and FixAspectUI off); ours step back
+    // (dsfix.h).
     bool yield_to_dsfix = false;
     // YieldToRtxRemix: 0 auto (when RTX Remix is installed beside the game), 1 always, 2 never. rtx_remix_applied: it
     // applies (settings.cpp sets the picture, Direct3D-level and effects-code settings it lists).

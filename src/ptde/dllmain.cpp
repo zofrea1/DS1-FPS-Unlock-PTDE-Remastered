@@ -97,8 +97,8 @@ DWORD WINAPI worker(void*) {
     }
     const DsfixInfo dsfix = dsfix_probe(game_dir);
     if (dsfix.present) {
-        LOG_INFO("DSfix detected (DSfix.ini %s). unlockFPS=%d FPSlimit=%d", dsfix.ini_found ? "found" : "not found",
-                 dsfix.unlock_fps ? 1 : 0, dsfix.fps_limit);
+        LOG_INFO("DSfix detected (DSfix.ini %s%s). unlockFPS=%d FPSlimit=%d", dsfix.ini_found ? "found" : "not found",
+                 dsfix.v3 ? ", DSfix 3.0's" : "", dsfix.unlock_fps ? 1 : 0, dsfix.fps_limit);
         if (dsfix.skip_intro && settings.skip_intro) {
             LOG_INFO("DSfix's skipIntro is on too: it only acts while the logos show, and with SkipIntro they never do");
         }
@@ -115,9 +115,10 @@ DWORD WINAPI worker(void*) {
         LOG_INFO("YieldToDSFix: DSfix decides the picture where it has settings of its own: RenderResolution, "
                  "Supersampling, DepthOfFieldStrength, DepthOfFieldResolution, EffectsResolution, WaterResolution, "
                  "HighPrecisionColor and AnisotropicFiltering are off (DSfix's renderWidth/renderHeight, "
-                 "presentWidth/presentHeight, dof settings and filteringOverride apply), and the HUD and menus are the "
-                 "game's for DSfix's HUD mod: UIScale, UIScaleWorld, UIScaleText, UIScaleMenus and FixBossBarOverlap "
-                 "are off");
+                 "presentWidth/presentHeight, dof settings and filteringOverride apply), FullscreenRefreshRate is off "
+                 "(DSfix's fullscreenHz), and the HUD and menus are the game's for DSfix's HUD mod: UIScale, "
+                 "UIScaleWorld, UIScaleText, UIScaleMenus, FixBossBarOverlap, FixAspect and FixAspectUI are off (a "
+                 "screen other than 16:9 keeps the game's 16:9 picture)");
     } else if (settings.yield_to_dsfix) {
         LOG_INFO("YieldToDSFix: DSfix is not loaded (no DINPUT8.dll with DSfix.ini beside the game); nothing to yield to");
     }
