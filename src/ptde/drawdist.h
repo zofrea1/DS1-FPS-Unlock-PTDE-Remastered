@@ -4,9 +4,9 @@
 // display groups), so grass, rocks and ruins showed only from certain places (Firelink's ledge grass from inside the
 // shrine). adjacent adds the pieces seen from the rooms next to the player's (the floor's draw groups); all draws
 // every piece of the loaded maps (costly: Demon Ruins draws Lost Izalith). Only the map pieces, their effects and
-// their lights: characters, objects, collisions and sounds keep the game's rooms (2.7.0 widened them all, which
-// loaded and woke the characters of the whole map: events that wait for one ran early, Solaire left the Undead
-// Burg). See drawdist.cpp.
+// their lights (since 2.7.1): characters, objects, collisions and sounds keep the game's rooms (up to 2.7.0 all of
+// them were widened, which loaded and woke the characters of the whole map: events that wait for one ran early,
+// Solaire left the Undead Burg). See drawdist.cpp.
 // LodDistance: the distances at which models switch to their lower levels of detail, in percent (100 = the
 // game's; Remastered raised the default row's from 15/30 m to 25/50 m, about 167).
 // EffectLodDistance: the distances at which fires (torches, bonfires) drop their embers and other detail, in percent.

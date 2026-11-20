@@ -36,10 +36,11 @@
 //  all:      every group: every piece of the loaded maps wherever the player stands (the view's own culling still
 //            applies). Measured 2026-11-18 at 4K: Demon Ruins +3.5 ms game and +4.2 ms render thread a frame (about
 //            300 -> 134 FPS: it draws Lost Izalith behind the walls, same map file), Blighttown +2.4 / +0.6 ms,
-//            Firelink +0.5 / +0.6 ms (before 2.7.1, with every other manager's masks widened as well).
-// Up to 2.7.0 the four reads themselves answered the widened groups, so every manager got them: in the whole block
-// (all) or the next rooms (adjacent) every character was asked for and active, and with it the map's events that wait
-// for one to be loaded. The Undead Burg's 11015100 places Solaire's summon sign at the Bell Gargoyles once his summon
+//            Firelink +0.5 / +0.6 ms (measured up to 2.7.0, with every other manager's masks widened as well).
+// Since 2.7.1 only those three managers and the renderer are widened. Up to 2.7.0 (the 2.6.0 and 2.7.0 releases) the
+// four reads themselves answered the widened groups, so every manager got them: in the whole block (all) or the next
+// rooms (adjacent) every character was asked for and active, and with it the map's events that wait for one to be
+// loaded. The Undead Burg's 11015100 places Solaire's summon sign at the Bell Gargoyles once his summon
 // (6540, beside their fog) is loaded and the player is human, and disables his Undead Burg self (6001): with all it ran
 // at the Undead Burg bonfire and Solaire was gone from his place past the Taurus Demon (user report 2026-11-19;
 // reproduced: flag 11015100 on and 6001 disabled within a second of being human there; not with game). An infinite
@@ -49,7 +50,7 @@
 // Prepare to Die Edition, 25/50 m in Remastered). The distance is scaled by 100 / LodDistance on entry, so every
 // border moves out by LodDistance percent.
 //
-// Stand-ins. In five maps some surfaces exist twice: a detailed piece drawn from the rooms that look at it up close
+// Stand-ins. In nine maps some surfaces exist twice: a detailed piece drawn from the rooms that look at it up close
 // and a cheaper stand-in of the same surfaces drawn from the rooms that see it from afar (Anor Londo's m2200B1 and its
 // stand-in m8010B1; m8000B1 stands in for ten of the cathedral's pieces). The game never draws both, as no room lists
 // both, but adjacent (or all) adds a neighbouring room's pieces, so the two were drawn in the same place and fought
@@ -535,6 +536,26 @@ void twins_tick_body() {
 }
 
 bool g_twins_on = false;
+bool g_fx_on = false;  // EffectLodDistance: the four level checks call fx_ftol
+
+// EffectLodDistance: all four sites checked before any is changed, and all four changed or none: if one cannot be
+// written, the ones already changed get the game's call back.
+bool install_fx() {
+    for (const uint32_t site : kFxDistSites) {
+        if (!calls(site, kFtol)) return false;
+    }
+    const size_t n = sizeof(kFxDistSites) / sizeof(kFxDistSites[0]);
+    size_t done = 0;
+    while (done < n && redirect_call(kFxDistSites[done], kFtol, reinterpret_cast<const void*>(&fx_ftol))) ++done;
+    if (done == n) return true;
+    for (size_t i = 0; i < done; ++i) {
+        if (!redirect_call(kFxDistSites[i], reinterpret_cast<uint32_t>(&fx_ftol), reinterpret_cast<const void*>(kFtol))) {
+            LOG_ERROR("EffectLodDistance: the level check at %08X could not be put back; its distance stays the game's "
+                      "(scaled by 1)", static_cast<unsigned>(kFxDistSites[i]));
+        }
+    }
+    return false;
+}
 
 bool install_lod() {
     if (std::memcmp(reinterpret_cast<const void*>(kLodFn), kLodHead, sizeof(kLodHead)) != 0) return false;
@@ -581,6 +602,10 @@ void drawdist_set_mode(int mode) {
 }
 
 void drawdist_set_effect_lod(int percent) {
+    if (!g_fx_on) {  // not installed: a site that could not be put back multiplies by 1
+        g_fx_inv = 1.0f;
+        return;
+    }
     if (percent < 25) percent = 25;
     if (percent > 1000) percent = 1000;
     g_fx_inv = 100.0f / static_cast<float>(percent);
@@ -594,12 +619,9 @@ void drawdist_set_lod(int percent) {
 
 bool drawdist_install(int mode, int lod_percent, int effect_percent) {
     drawdist_set_lod(lod_percent);
+    g_fx_on = install_fx();
     drawdist_set_effect_lod(effect_percent);
-    bool fx = true;
-    for (const uint32_t site : kFxDistSites) {
-        fx = redirect_call(site, kFtol, reinterpret_cast<const void*>(&fx_ftol)) && fx;
-    }
-    if (!fx) {
+    if (!g_fx_on) {
         LOG_ERROR("EffectLodDistance: the effect level checks do not match this build; not used");
     } else if (effect_percent != 100) {
         LOG_INFO("EffectLodDistance: fires (torches, bonfires) keep each level of detail %d%% as far away as the "
