@@ -870,7 +870,8 @@ void detail_tick_body() {
     static uint32_t* live[kDetPieces];
     static bool seen[kDetPieces], own[kDetPieces], drawn[kDetPieces], forced[kDetPieces], covering[kDetPieces];
     static uint8_t level[kDetPieces];
-    static uint8_t why[kDetPieces];  // why it is left out: 1 backdrop, 2 stand-in, 3 twin, 4 the same model twice
+    static uint8_t why[kDetPieces];  // why it is left out: 1 backdrop, 2 stand-in, 3 twin, 4 the same model twice,
+                                     // 5 surfaces too far apart for a depth bias
     for (size_t i = 0; i < kDetPieces; ++i) {
         const auto& p = D::kPieces[i];
         live[i] = live_groups(p);
@@ -938,18 +939,29 @@ void detail_tick_body() {
     // one but two tessellations of the same shape, which cut through each other where they are not in one plane
     // (user report 2026-11-21: the cliff and wall seen along the Undead Burg bridge, the game's m2000B1 and m2520B1
     // with m2380B1 of another room). One is drawn: the player's room's own, or of two others the finer.
+    // The same for two pieces that share a room but whose surfaces run apart (Pair::apart, from the gap pass: within
+    // 0.5 m of each other over much more area than they share in one plane): the depth levels below push the coarser
+    // back by about 5 cm at 50 m at most, and a coarse version up to tens of centimetres off its detailed one still
+    // showed through it, flickering as the camera moved (user report 2026-11-21 under the Undead Burg's bridge: the
+    // room's own m2410B1 with m2020B1, m2030B1 and m2012B1 of other rooms; none of it with DrawMapPieces = game). And
+    // for pairs only the gap pass found (no surface in one plane: crossing at an angle). In those two cases a piece is
+    // left out only when enough of it lies on the other (the pair's bits), so a big piece is not dropped for a small
+    // one near it; otherwise the depth levels stay. Only a piece the player's room does not draw is ever left out.
     for (size_t k = 0; k < kDetPairs; ++k) {
         const auto& pr = D::kPairs[k];
         if (pr.winner > 1 || !drawn[pr.a] || !drawn[pr.b]) continue;
         const auto& pa = D::kPieces[pr.a];
         const auto& pb = D::kPieces[pr.b];
-        if (any_of(pa.groups, pb.groups)) continue;              // they share a room: the depth levels below
+        const bool shared = any_of(pa.groups, pb.groups);
+        const bool apart = (pr.apart & 4) != 0;
+        if (shared && !apart) continue;                          // in one plane: the depth levels below
         if (covering[pr.a] || covering[pr.b]) continue;          // drawn in a stand-in's place: never left out
         const bool oa = own[pr.a] && !forced[pr.a], ob = own[pr.b] && !forced[pr.b];
         if (oa && ob) continue;                                  // the game's own picture
         const size_t h = oa ? pr.b : ob ? pr.a : (pr.winner ? pr.a : pr.b);
+        if ((shared || (pr.apart & 8)) && !(pr.apart & (h == pr.a ? 1 : 2))) continue;  // too little of it on the other
         drawn[h] = false;
-        why[h] = 3;
+        why[h] = apart && (shared || (pr.apart & 8)) ? 5 : 3;
     }
     // Write what is wanted: hidden (drawn otherwise), drawn from any room, or the piece's own groups.
     for (size_t i = 0; i < kDetPieces; ++i) {
@@ -965,7 +977,9 @@ void detail_tick_body() {
             static const char* const kWhy[] = {"", "a far backdrop, left to the rooms the game draws it from",
                                                "hidden: finer pieces of the same surfaces drawn in its place",
                                                "hidden: another room's version of surfaces drawn here (no z-fighting)",
-                                               "hidden: the same model drawn for this room"};
+                                               "hidden: the same model drawn for this room",
+                                               "hidden: another room's version crossing surfaces drawn here, too far apart "
+                                               "for a depth bias"};
             LOG_INFO("DrawMapPieces: %s (map %s), %s", p.name, p.map, kWhy[why[i]]);
         }
     }
