@@ -236,6 +236,21 @@ DWORD WINAPI watchdog(void*) {
                     std::snprintf(space, sizeof(space), ", address space %.0f MB free of %.0f MB",
                                   static_cast<double>(ms.ullAvailVirtual) / 1048576.0,
                                   static_cast<double>(ms.ullTotalVirtual) / 1048576.0);
+                    // Once: under 400 MB free with the game's 2 GB (measured 2026-11-21 on the Undead Burg's bridge
+                    // at 4K with DXVK: 1.5 GB in use alone, whatever DrawMapPieces; crashes at 346 and 254 MB free).
+                    static bool warned = false;
+                    const auto* exe = reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
+                    const auto* nt = exe ? reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                                               exe + reinterpret_cast<const IMAGE_DOS_HEADER*>(exe)->e_lfanew)
+                                         : nullptr;
+                    const bool laa = nt && (nt->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE);
+                    if (!warned && !laa && ms.ullAvailVirtual < 400ull * 1048576ull) {
+                        warned = true;
+                        LOG_INFO("Warning: address space low: %.0f MB of the game's 2 GB left. DARKSOULS.exe is not large address "
+                                 "aware; with that flag set in its header (a \"4GB patch\") the game gets 4 GB and "
+                                 "cannot run out like this. A lower RenderResolution or DXVK = false also use less.",
+                                 static_cast<double>(ms.ullAvailVirtual) / 1048576.0);
+                    }
                 }
 #endif
                 LOG_INFO("Heartbeat: %llu steps in %d s (%.1f per second), frame time %.2f ms%s%s%s",
