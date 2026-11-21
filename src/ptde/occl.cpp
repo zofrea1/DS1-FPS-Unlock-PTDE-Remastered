@@ -1,5 +1,6 @@
 #include "occl.h"
 
+#include "d3dperf.h"
 #include "drawdist.h"
 
 #include "fpsu_buildcfg.h"
@@ -650,7 +651,7 @@ void watch_entity(uint32_t entity, uint32_t cam) {
     g_watch_buf += line;
 }
 
-int __cdecl decide_inner(uint32_t entity, uint32_t ctx) {
+int __cdecl decide_inner(uint32_t entity, uint32_t ctx, uint32_t mflags) {
     const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
     if (g_watch_left > 0) watch_entity(entity, cam);
     if (g_dump_frame && cam) {
@@ -666,7 +667,7 @@ int __cdecl decide_inner(uint32_t entity, uint32_t ctx) {
         ++g_pass_draws;
     }
     if (g_inside && g_player_ok) {
-        const uint32_t f = model_flags(*reinterpret_cast<const uint32_t*>(entity + 0x40));
+        const uint32_t f = mflags;
         if ((f & 6) == 2) {
             const auto* b = reinterpret_cast<const float*>(entity + 0xA0);  // min x y z w, max x y z w
             const float px = g_player[0], py = g_player[1], pz = g_player[2];
@@ -719,7 +720,7 @@ int __cdecl decide_inner(uint32_t entity, uint32_t ctx) {
         }
     }
     // Mode 3 (diagnostics only): every model, characters and objects too.
-    const uint32_t flags = (mode & 3) == 3 ? 3u : model_flags(*reinterpret_cast<const uint32_t*>(entity + 0x40));
+    const uint32_t flags = (mode & 3) == 3 ? 3u : mflags;
     if (!(flags & 1) || ((mode & 3) == 1 && !(flags & 2))) return 0;
     const auto* bx = reinterpret_cast<const float*>(entity + 0xA0);
     const float box[6] = {bx[0], bx[1], bx[2], bx[4], bx[5], bx[6]};
@@ -765,12 +766,13 @@ int __cdecl decide_inner(uint32_t entity, uint32_t ctx) {
 // decide_inner's answer (0 draw, 1 skip, 2 draw inside the query g_wrap_q), and 2 also for a drawn piece that only
 // DrawMapPieces adds, seen by a perspective camera: wrapped, with the depth bias.
 int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
-    const int r = decide_inner(entity, ctx);
+    const uint32_t mflags = model_flags(*reinterpret_cast<const uint32_t*>(entity + 0x40));
+    const int r = decide_inner(entity, ctx, mflags);
     g_wrap_bias = false;
     if (r == 1 || !g_zbias) return r;
     const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
     if (!cam || !perspective(cam)) return r;
-    if ((model_flags(*reinterpret_cast<const uint32_t*>(entity + 0x40)) & 6) != 2) return r;
+    if ((mflags & 6) != 2) return r;
     // The camera's nearest distance to the piece's world box, and the near plane (projection +0xC8 = -near * q).
     const auto* c = reinterpret_cast<const float*>(cam);
     const auto* b = reinterpret_cast<const float*>(entity + 0xA0);  // min x y z w, max x y z w
@@ -793,8 +795,17 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
 void __cdecl wrap_begin() {
     if (g_wrap_q) g_wrap_q->Issue(D3DISSUE_BEGIN);
     if (g_wrap_bias && g_dev) {
-        g_dev->GetRenderState(D3DRS_DEPTHBIAS, &g_saved_bias);
-        g_dev->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &g_saved_slope);
+        unsigned long v = 0;
+        if (d3dperf_render_state(D3DRS_DEPTHBIAS, &v)) {
+            g_saved_bias = v;
+        } else {
+            g_dev->GetRenderState(D3DRS_DEPTHBIAS, &g_saved_bias);
+        }
+        if (d3dperf_render_state(D3DRS_SLOPESCALEDEPTHBIAS, &v)) {
+            g_saved_slope = v;
+        } else {
+            g_dev->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &g_saved_slope);
+        }
         float b = 0.0f, s = 0.0f;
         std::memcpy(&b, &g_saved_bias, 4);
         std::memcpy(&s, &g_saved_slope, 4);
@@ -810,10 +821,19 @@ void __cdecl wrap_end() {
     if (g_wrap_q) g_wrap_q->Issue(D3DISSUE_END);
     g_wrap_q = nullptr;
     if (g_wrap_bias && g_dev) {
+        unsigned long v = 0;
         DWORD now = 0;
-        g_dev->GetRenderState(D3DRS_DEPTHBIAS, &now);
+        if (d3dperf_render_state(D3DRS_DEPTHBIAS, &v)) {
+            now = v;
+        } else {
+            g_dev->GetRenderState(D3DRS_DEPTHBIAS, &now);
+        }
         if (now == g_set_bias) g_dev->SetRenderState(D3DRS_DEPTHBIAS, g_saved_bias);
-        g_dev->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &now);
+        if (d3dperf_render_state(D3DRS_SLOPESCALEDEPTHBIAS, &v)) {
+            now = v;
+        } else {
+            g_dev->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &now);
+        }
         if (now == g_set_slope) g_dev->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, g_saved_slope);
     }
     g_wrap_bias = false;
