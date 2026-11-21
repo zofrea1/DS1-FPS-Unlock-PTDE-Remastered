@@ -1,11 +1,12 @@
 #include "drawdist.h"
 
-#include "drawdist_twins.h"
+#include "drawdist_detail.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -50,18 +51,31 @@
 // Prepare to Die Edition, 25/50 m in Remastered). The distance is scaled by 100 / LodDistance on entry, so every
 // border moves out by LodDistance percent.
 //
-// Stand-ins. In nine maps some surfaces exist twice: a detailed piece drawn from the rooms that look at it up close
-// and a cheaper stand-in of the same surfaces drawn from the rooms that see it from afar (Anor Londo's m2200B1 and its
-// stand-in m8010B1; m8000B1 stands in for ten of the cathedral's pieces). The game never draws both, as no room lists
-// both, but adjacent (or all) adds a neighbouring room's pieces, so the two were drawn in the same place and fought
-// over the depth (z-fighting: the terraces flickered, Anor Londo 2026-11-19). The pairs (drawdist_twins.h, found from
-// the maps' own data: pieces with no draw group in common whose triangles share planes and overlap, at least 0.25 m^2)
-// are checked once a frame: a piece that would be drawn only because of a neighbouring room is hidden while its twin
-// is drawn by the player's own room, and of two twins both drawn only because of neighbours the one with fewer
-// vertices stays. Hidden means its draw groups cleared in the map piece manager ([0x137D5F4]: +0x1C the blocks' count,
-// +0x20 the blocks, 0x5C each, one per map in a fixed order; a block's +0x2C its pieces' count, +0x30 its pieces,
-// 0x50 each: +0x04 the id (block << 24 | index), +0x08 the draw groups the frame's culling tests), put back as soon as
-// that no longer holds. Nothing the game itself draws from the player's room is ever hidden.
+// Detail rules (since 2.7.1). Many surfaces exist twice: a detailed piece drawn from the rooms that look at it up close
+// and a cheaper stand-in of the same surfaces drawn from the rooms that see it from afar (from the Undead Burg's bridge
+// the game draws m2420B1, 23k vertices, for the 24 pieces of the lower Burg, about 430k; Anor Londo's m8010B1 for
+// m2200B1). Seen from one room the game draws one of them; adjacent and all add the other, so the two fought over the
+// depth (z-fighting: Anor Londo's terraces flickered, 2026-11-19), and up to the 2.7.1 tests the added one was hidden,
+// which kept the coarse one wherever the player's room showed it (user, 2026-11-21: "we want the high detail to win
+// almost always"). The tables (drawdist_detail.h, from the maps' own data by gen_detail.py) list every pair of pieces
+// whose surfaces overlap (same plane within 5 cm, 0.25 m^2 or more, whatever their draw groups) with the finer of the
+// two (smaller triangles where they overlap), the stand-ins (pieces that finer pieces cover: 75% of the area on their
+// surfaces, nothing over 3% farther than 1 m from them) and the coarse far backdrops (a side over 250 m, nearly all of
+// the area in triangles over 100 m^2). Once a frame, with adjacent or all:
+//  - a backdrop the game does not draw from here is not added: Darkroot's valley floor below the Undead Burg
+//    (m2372B1), drawn from the bridge's deck where the parapets hide its edges, looked like a broken dark slab from
+//    Solaire's platform next to it (user report 2026-11-21);
+//  - a stand-in that would be drawn is hidden and the finer pieces covering it are drawn in its place, from any room
+//    (their groups set to all ones), unless the game draws all of them itself (its own picture) or the player stands
+//    in one of those pieces' bounds (the occlusion code leaves a piece of another room holding the player out);
+//  - of two overlapping pieces both drawn (not both by the game itself), the coarser is drawn one depth level farther
+//    than the finer (occl.cpp's depth bias: a level is about 10 cm at the piece's nearest point; the game's own pieces
+//    start at level 0, added ones at 1), so the finer wins where they overlap and the coarser's other surfaces stay.
+// Hidden means its draw groups cleared in the map piece manager ([0x137D5F4]: +0x1C the blocks' count, +0x20 the
+// blocks, 0x5C each, one per map in a fixed order; a block's +0x2C its pieces' count, +0x30 its pieces, 0x50 each:
+// +0x04 the id (block << 24 | index), +0x08 the draw groups the frame's culling tests). Everything is put back in game
+// mode. Lower Burg from the bridge drawn in detail (with the sun's shadows and the point lights the detailed pieces
+// take and the stand-in does not): 320 -> 271 FPS at 4K looking down on it.
 //
 // EffectLodDistance. The fires' level of detail (torches, bonfires, braziers: the 181 effects built on template
 // effect 2117, and 2116 and 2118 for 70 more) moves between states by level checks: CheckLevel (data3 type 138,
@@ -646,17 +660,30 @@ void scenery_tick() {
     }
 }
 
-// --- stand-ins (see the top) -----------------------------------------------------------------------------------
+// --- detail rules (see the top) ----------------------------------------------------------------------------------
+namespace D = drawdist_detail;
 constexpr uint32_t kPieceMan = kPieceManVar;
 constexpr uint32_t kWorldChrMan = 0x0137D644;  // +0x3C the player, whose +0x29C is the floor record underfoot
-constexpr size_t kTwinPieces = sizeof(drawdist_twins::kPieces) / sizeof(drawdist_twins::kPieces[0]);
-constexpr size_t kTwinPairs = sizeof(drawdist_twins::kPairs) / sizeof(drawdist_twins::kPairs[0]);
-bool g_hidden[kTwinPieces] = {};
-volatile LONG g_hidden_count = 0;
-volatile LONG g_hides = 0;  // pieces hidden so far (for the log)
+constexpr size_t kDetPieces = sizeof(D::kPieces) / sizeof(D::kPieces[0]);
+constexpr size_t kDetPairs = sizeof(D::kPairs) / sizeof(D::kPairs[0]);
+constexpr size_t kDetStandins = sizeof(D::kStandins) / sizeof(D::kStandins[0]);
+constexpr int kRolePieces = 512;  // pieces a map may have for the roles (the largest has 195)
+constexpr uint32_t kOnes[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+constexpr uint32_t kZero[4] = {};
+
+// What we wrote into a table piece's live groups: nothing (its own), zero (hidden) or all ones (drawn in place of a
+// stand-in, from any room).
+enum : uint8_t { kAsIs = 0, kHidden = 1, kForced = 2 };
+uint8_t g_state[kDetPieces] = {};
+// For occl.cpp (DrawMapPieces' depth bias and OcclusionCulling): per block and piece index, bit 0 = drawn in place of a
+// stand-in (counts as added; the occlusion code's own test of the player inside its box is left to holds() here),
+// bits 4-7 = depth level + 1 (0 = not in the table: the generic rule).
+uint8_t g_role[kMaxBlocks][kRolePieces] = {};
+uint32_t g_role_gen = 0;
+volatile LONG g_detail_on = 1;  // RemoteControl `detailrules 0|1` (diagnostics A/B)
 
 // The live draw groups of a table piece, or null when its map is not loaded or does not match the table.
-uint32_t* live_groups(const drawdist_twins::Piece& p) {
+uint32_t* live_groups(const D::Piece& p) {
     const uint32_t man = *reinterpret_cast<const uint32_t*>(kPieceMan);
     if (!man) return nullptr;
     const uint32_t blocks = *reinterpret_cast<const uint32_t*>(man + 0x20);
@@ -693,74 +720,175 @@ bool block_masks(int block, uint32_t seen[4], uint32_t game[4]) {
     return true;
 }
 
-void show_all_twins() {
-    for (size_t i = 0; i < kTwinPieces; ++i) {
-        if (!g_hidden[i]) continue;
-        uint32_t* g = live_groups(drawdist_twins::kPieces[i]);
-        static const uint32_t zero[4] = {};
-        if (g && groups_are(g, zero)) std::memcpy(g, drawdist_twins::kPieces[i].groups, 16);
-        g_hidden[i] = false;
-    }
-    g_hidden_count = 0;
+const uint32_t* written(uint8_t state, const D::Piece& p) {
+    return state == kHidden ? kZero : state == kForced ? kOnes : p.groups;
 }
 
-void twins_tick_body() {
-    const LONG mode = g_mode;
-    if (mode == 0) {
-        if (g_hidden_count) show_all_twins();
+// Puts what we wrote back (game mode, rules off). A piece whose groups are no longer ours is left alone.
+void restore_all() {
+    for (size_t i = 0; i < kDetPieces; ++i) {
+        if (g_state[i] == kAsIs) continue;
+        const auto& p = D::kPieces[i];
+        uint32_t* g = live_groups(p);
+        if (g && groups_are(g, written(g_state[i], p))) std::memcpy(g, p.groups, 16);
+        g_state[i] = kAsIs;
+    }
+}
+
+void publish_roles(const uint8_t (&role)[kMaxBlocks][kRolePieces]) {
+    if (std::memcmp(role, g_role, sizeof(g_role)) != 0) {
+        std::memcpy(g_role, role, sizeof(g_role));
+        ++g_role_gen;
+    }
+}
+
+// The player's position (physics: chr +0x28 controller, +0x1C physics, +0x10 x y z), or false.
+bool player_at(uint32_t chr, float out[3]) {
+    const uint32_t ctrl = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x28) : 0;
+    const uint32_t phys = ctrl ? *reinterpret_cast<const uint32_t*>(ctrl + 0x1C) : 0;
+    if (!phys) return false;
+    std::memcpy(out, reinterpret_cast<const void*>(phys + 0x10), 12);
+    return true;
+}
+
+// Whether the piece's own surfaces come near the player: within its occupancy (2 m cells its triangles pass through and
+// their neighbours, so about 2 to 4 m), or within its box where it has none. A piece's box can reach far past its
+// surfaces: the lower Burg's m2140B1 holds the Undead Burg bridge's deck in its box, its nearest triangle 5 m away.
+bool holds(const D::Piece& p, const float at[3]) {
+    constexpr float m = 0.5f;
+    if (!(at[0] > p.box[0] - m && at[0] < p.box[3] + m && at[1] > p.box[1] - m && at[1] < p.box[4] + m &&
+          at[2] > p.box[2] - m && at[2] < p.box[5] + m)) {
+        return false;
+    }
+    if (p.vox < 0) return true;
+    int c[3];
+    for (int k = 0; k < 3; ++k) {
+        c[k] = static_cast<int>(std::floor((at[k] - p.vox_org[k]) / 2.0f));
+        if (c[k] < 0 || c[k] >= p.vox_dim[k]) return false;
+    }
+    const uint32_t bit = (static_cast<uint32_t>(c[2]) * p.vox_dim[1] + static_cast<uint32_t>(c[1])) * p.vox_dim[0] +
+                         static_cast<uint32_t>(c[0]);
+    return (D::kVox[p.vox + (bit >> 3)] >> (bit & 7)) & 1;
+}
+
+void detail_tick_body() {
+    static uint8_t role[kMaxBlocks][kRolePieces];
+    std::memset(role, 0, sizeof(role));
+    if (g_mode == 0 || !g_detail_on) {
+        restore_all();
+        publish_roles(role);
         return;
     }
     const uint32_t wcm = *reinterpret_cast<const uint32_t*>(kWorldChrMan);
     const uint32_t chr = wcm ? *reinterpret_cast<const uint32_t*>(wcm + 0x3C) : 0;
     const uint32_t floor = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x29C) : 0;
     if (!floor) return;  // loading or no floor yet: keep what is set
-    // Each piece by its own map's masks: drawn (the live draw mask, ours ORed in) and the game's own (as the game wrote
-    // it). The player's floor groups only number the player's map's rooms.
-    bool hide[kTwinPieces] = {};
-    for (size_t k = 0; k < kTwinPairs; ++k) {
-        const auto& pr = drawdist_twins::kPairs[k];
-        const auto& a = drawdist_twins::kPieces[pr.a];
-        const auto& b = drawdist_twins::kPieces[pr.b];
-        uint32_t a_seen[4], a_game[4], b_seen[4], b_game[4];
-        if (!block_masks(a.block, a_seen, a_game) || !block_masks(b.block, b_seen, b_game)) continue;
-        if (!any_of(a.groups, a_seen) || !any_of(b.groups, b_seen)) continue;
-        const bool a_own = any_of(a.groups, a_game), b_own = any_of(b.groups, b_game);
-        if (a_own && b_own) continue;  // the game's own picture
-        if (a_own) {
-            hide[pr.b] = true;
-        } else if (b_own) {
-            hide[pr.a] = true;
-        } else {
-            const bool keep_a = a.verts < b.verts || (a.verts == b.verts && a.index < b.index);
-            hide[keep_a ? pr.b : pr.a] = true;
-        }
-    }
-    static const uint32_t zero[4] = {};
-    LONG hidden = 0;
-    for (size_t i = 0; i < kTwinPieces; ++i) {
-        const auto& p = drawdist_twins::kPieces[i];
-        uint32_t* g = live_groups(p);
-        if (!g) {
-            g_hidden[i] = false;  // its map is gone (or not this build's): nothing of ours is left there
+    float at[3] = {};
+    const bool at_ok = player_at(chr, at);
+    // Each piece by its own map's masks: seen (the live draw mask, ours ORed in: what would be drawn) and own (the game's
+    // own mask: what the game itself draws from here). The player's floor groups only number the player's map's rooms.
+    static uint32_t* live[kDetPieces];
+    static bool seen[kDetPieces], own[kDetPieces], drawn[kDetPieces], forced[kDetPieces];
+    static uint8_t level[kDetPieces];
+    for (size_t i = 0; i < kDetPieces; ++i) {
+        const auto& p = D::kPieces[i];
+        live[i] = live_groups(p);
+        seen[i] = own[i] = drawn[i] = forced[i] = false;
+        level[i] = 0;
+        if (!live[i]) {
+            g_state[i] = kAsIs;  // its map is gone (or not this build's): nothing of ours is left there
             continue;
         }
-        if (hide[i] && !g_hidden[i] && groups_are(g, p.groups)) {
-            std::memcpy(g, zero, 16);
-            g_hidden[i] = true;
-            InterlockedIncrement(&g_hides);
-            static bool told[kTwinPieces] = {};
-            if (!told[i]) {
-                told[i] = true;
-                LOG_INFO("DrawMapPieces: %s (map %s) hidden while a twin of the same surfaces is drawn (no z-fighting)",
-                         p.name, p.map);
-            }
-        } else if (!hide[i] && g_hidden[i]) {
-            if (groups_are(g, zero)) std::memcpy(g, p.groups, 16);
-            g_hidden[i] = false;
+        if (!groups_are(live[i], written(g_state[i], p))) g_state[i] = kAsIs;  // rewritten by someone else: not ours
+        uint32_t bseen[4], bgame[4];
+        if (!block_masks(p.block, bseen, bgame)) {
+            live[i] = nullptr;
+            continue;
         }
-        hidden += g_hidden[i] ? 1 : 0;
+        seen[i] = any_of(p.groups, bseen);
+        own[i] = any_of(p.groups, bgame);
+        // A coarse far backdrop only where the game draws it.
+        drawn[i] = seen[i] && (own[i] || !(p.flags & D::kBackdrop));
     }
-    g_hidden_count = hidden;
+    // Stand-ins: hidden while the finer pieces covering them are drawn in their place (from any room). Not where the
+    // game draws all of them itself (its own picture), nor while the player stands in one of those pieces' bounds (the
+    // occlusion code leaves such a piece of another room out, as the game does). A piece drawn in place of one may be
+    // a stand-in for finer ones in turn.
+    for (int pass = 0; pass < 4; ++pass) {
+        bool changed = false;
+        for (size_t k = 0; k < kDetStandins; ++k) {
+            const auto& st = D::kStandins[k];
+            const size_t s = st.piece;
+            if (!live[s] || !drawn[s]) continue;
+            bool ok = true, all_own = own[s];
+            for (int c = 0; c < st.count && ok; ++c) {
+                const size_t w = D::kCover[st.first + c];
+                const auto& wp = D::kPieces[w];
+                ok = live[w] && (drawn[w] || own[w] || !(wp.flags & D::kBackdrop)) && !(at_ok && !own[w] && holds(wp, at));
+                all_own = all_own && own[w];
+            }
+            if (!ok || all_own) continue;
+            drawn[s] = false;
+            changed = true;
+            for (int c = 0; c < st.count; ++c) {
+                const size_t w = D::kCover[st.first + c];
+                if (!drawn[w]) drawn[w] = forced[w] = true;
+            }
+        }
+        if (!changed) break;
+    }
+    // The same model placed twice (for rooms that differ in light or fog): one copy stays, the player's room's own if
+    // it shows one, else one drawn in place of a stand-in, else the first.
+    for (size_t k = 0; k < kDetPairs; ++k) {
+        const auto& pr = D::kPairs[k];
+        if (pr.winner != 2 || !drawn[pr.a] || !drawn[pr.b]) continue;
+        if (own[pr.a] && own[pr.b] && !forced[pr.a] && !forced[pr.b]) continue;  // the game's own picture
+        const auto keep = [&](size_t i) { return (own[i] && !forced[i] ? 2 : 0) + (forced[i] ? 1 : 0); };
+        const size_t h = keep(pr.a) >= keep(pr.b) ? pr.b : pr.a;
+        drawn[h] = forced[h] = false;
+    }
+    // Write what is wanted: hidden (drawn otherwise), drawn from any room, or the piece's own groups.
+    for (size_t i = 0; i < kDetPieces; ++i) {
+        if (!live[i]) continue;
+        const auto& p = D::kPieces[i];
+        const uint8_t want = forced[i] ? kForced : (!drawn[i] && seen[i]) ? kHidden : kAsIs;
+        if (want == g_state[i]) continue;
+        std::memcpy(live[i], written(want, p), 16);
+        g_state[i] = want;
+        static bool told[kDetPieces] = {};
+        if (want == kHidden && !told[i]) {
+            told[i] = true;
+            if (p.flags & D::kBackdrop) {
+                LOG_INFO("DrawMapPieces: %s (map %s), a far backdrop, left to the rooms the game draws it from", p.name, p.map);
+            } else {
+                LOG_INFO("DrawMapPieces: %s (map %s) hidden: finer pieces of the same surfaces drawn in its place", p.name,
+                         p.map);
+            }
+        }
+    }
+    // Depth levels: where two overlapping pieces are both drawn (not both by the game itself), the coarser is drawn one
+    // level farther than the finer. Start: the game's own pieces 0, added ones 1 (the generic rule).
+    for (size_t i = 0; i < kDetPieces; ++i) level[i] = drawn[i] && (forced[i] || !own[i]) ? 1 : 0;
+    for (int pass = 0; pass < 4; ++pass) {
+        bool changed = false;
+        for (size_t k = 0; k < kDetPairs; ++k) {
+            const auto& pr = D::kPairs[k];
+            if (pr.winner > 1 || !drawn[pr.a] || !drawn[pr.b]) continue;
+            if (own[pr.a] && own[pr.b] && !forced[pr.a] && !forced[pr.b]) continue;  // the game's own picture
+            const size_t w = pr.winner ? pr.b : pr.a, l = pr.winner ? pr.a : pr.b;
+            if (level[l] <= level[w] && level[w] < 7) {
+                level[l] = static_cast<uint8_t>(level[w] + 1);
+                changed = true;
+            }
+        }
+        if (!changed) break;
+    }
+    for (size_t i = 0; i < kDetPieces; ++i) {
+        const auto& p = D::kPieces[i];
+        if (!live[i] || !drawn[i] || p.block >= kMaxBlocks || p.index >= kRolePieces) continue;
+        role[p.block][p.index] = static_cast<uint8_t>((forced[i] ? 1 : 0) | ((level[i] + 1) << 4));
+    }
+    publish_roles(role);
 }
 
 bool g_twins_on = false;
@@ -798,7 +926,7 @@ bool install_lod() {
 void drawdist_tick() {
     if (!g_twins_on) return;
     __try {
-        twins_tick_body();
+        detail_tick_body();
         scenery_tick();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -810,6 +938,12 @@ bool drawdist_game_mask(int block, uint32_t out[4]) {
     return true;
 }
 uint32_t drawdist_game_mask_gen() { return g_game_draw_gen; }
+uint8_t drawdist_piece_role(int block, int index) {
+    if (block < 0 || block >= kMaxBlocks || index < 0 || index >= kRolePieces) return 0;
+    return g_role[block][index];
+}
+uint32_t drawdist_role_gen() { return g_role_gen; }
+void drawdist_set_detail(int on) { InterlockedExchange(&g_detail_on, on ? 1 : 0); }
 bool drawdist_game_sfx_mask(int block, uint32_t out[4]) {
     if (block < 0 || block >= g_game_sfx_blocks) return false;
     std::memcpy(out, g_game_sfx[block], 16);

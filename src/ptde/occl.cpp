@@ -93,6 +93,10 @@
 // bridge (frozen frame, pixels differing from the game's own picture by more than 4 of 255): 748,000 without the bias,
 // 106,000 with it (the added piece's real extra surfaces: its outline, the window openings). The values before the
 // draw are put back after it, unless the draw itself set others.
+// Since the detail rules (drawdist.cpp, 2026-11-21) the bias comes in levels: where the tables know two overlapping
+// pieces, the coarser is drawn one level farther than the finer whoever's room shows it (under the bridge the detailed
+// m2010B1 now wins over the game's coarse m2410B1); a level multiplies both biases. Pieces the tables do not know keep
+// the rule above (added ones one level back).
 namespace {
 
 constexpr uint32_t kEntityVt = 0x01171A54;
@@ -125,6 +129,10 @@ ModelSlot g_models[2][kModelSlots];
 volatile LONG g_models_cur = -1;
 int g_game_ticks = 0;
 uint32_t g_built_gen = 0;  // drawdist_game_mask_gen() the table was built from
+uint32_t g_built_role_gen = 0;  // drawdist_role_gen() likewise
+// Model flag: drawn in place of a stand-in (DrawMapPieces' detail rules), whose test of the player inside it was made
+// against its surfaces there (drawdist.cpp's holds()), not its box.
+constexpr uint32_t kNoInside = 0x10000u;
 
 inline uint32_t hash_ptr(uint32_t p, int bits) { return ((p >> 3) * 2654435761u) >> (32 - bits); }
 
@@ -135,6 +143,7 @@ void build_models() {
     ModelSlot* t = g_models[back];
     std::memset(t, 0, sizeof(g_models[0]));
     const uint32_t gen = drawdist_game_mask_gen();
+    const uint32_t role_gen = drawdist_role_gen();
     __try {
         const uint32_t man = *reinterpret_cast<const uint32_t*>(kPieceManVar);
         const int blocks = man ? *reinterpret_cast<const int*>(man + 0x1C) : 0;
@@ -154,12 +163,16 @@ void build_models() {
                 const uint32_t fl = mm ? *reinterpret_cast<const uint32_t*>(mm + 0x14) : 0;
                 if (!fl) continue;
                 const auto* g = reinterpret_cast<const uint32_t*>(e + 0x08);
-                const bool extra = !((g[0] & own[0]) | (g[1] & own[1]) | (g[2] & own[2]) | (g[3] & own[3]));
+                // DrawMapPieces' detail rules: a piece drawn in place of a stand-in counts as added (its groups are
+                // all ones then), and the depth level + 1 they chose (bits 8-11 of the flags; 0: the generic rule).
+                const uint8_t role = drawdist_piece_role(b, i);
+                const bool extra = (role & 1) || !((g[0] & own[0]) | (g[1] & own[1]) | (g[2] & own[2]) | (g[3] & own[3]));
                 uint32_t h = hash_ptr(fl, kModelBits);
                 for (int probe = 0; probe < kModelSlots; ++probe, h = (h + 1) & (kModelSlots - 1)) {
                     if (t[h].key == 0 || t[h].key == fl) {
                         t[h].key = fl;
-                        t[h].flags |= 1u | (extra ? 2u : 4u);
+                        t[h].flags |= 1u | (extra ? 2u : 4u) | (static_cast<uint32_t>(role >> 4) << 8) |
+                                      ((role & 1) ? kNoInside : 0u);
                         break;
                     }
                 }
@@ -169,6 +182,7 @@ void build_models() {
         return;  // keep the table in use
     }
     g_built_gen = gen;
+    g_built_role_gen = role_gen;
     InterlockedExchange(&g_models_cur, back);
     build_fx_positions();
 }
@@ -362,6 +376,7 @@ float g_zbias_max = 2.0e-6f;          // the most D3DRS_DEPTHBIAS added
 constexpr float kZbiasMin = 4.0f / 16777216.0f;  // the least: 4 steps of a 24-bit depth buffer
 constexpr float kZbiasSlope = 1.0f;   // D3DRS_SLOPESCALEDEPTHBIAS added
 float g_wrap_bias_val = 0.0f;         // this draw's
+float g_wrap_slope_val = 0.0f;        // this draw's slope-scaled bias added
 bool g_wrap_bias = false;             // the next draw the stub wraps gets the bias
 DWORD g_saved_bias = 0, g_saved_slope = 0, g_set_bias = 0, g_set_slope = 0;
 
@@ -828,7 +843,7 @@ int __cdecl decide_inner(uint32_t entity, uint32_t ctx, uint32_t mflags) {
     }
     if (g_inside && g_player_ok) {
         const uint32_t f = mflags;
-        if ((f & 6) == 2) {
+        if ((f & 6) == 2 && !(f & kNoInside)) {
             const auto* b = reinterpret_cast<const float*>(entity + 0xA0);  // min x y z w, max x y z w
             const float px = g_player[0], py = g_player[1], pz = g_player[2];
             if (px > b[0] && px < b[4] && py > b[1] && py < b[5] && pz > b[2] && pz < b[6]) {
@@ -939,7 +954,10 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     if (r == 1 || !g_zbias) return r;
     const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
     if (!cam || !perspective(cam)) return r;
-    if ((mflags & 6) != 2) return r;
+    // The depth level: the detail rules' (bits 8-11, level + 1) or the generic rule's (an added piece 1, the game's 0).
+    const uint32_t lv = (mflags >> 8) & 0xF;
+    const uint32_t level = lv ? lv - 1 : ((mflags & 6) == 2 ? 1u : 0u);
+    if (level == 0) return r;
     // The camera's nearest distance to the piece's world box, and the near plane (projection +0xC8 = -near * q).
     const auto* c = reinterpret_cast<const float*>(cam);
     const auto* b = reinterpret_cast<const float*>(entity + 0xA0);  // min x y z w, max x y z w
@@ -954,7 +972,8 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     float bias = d2 > 1e-6f ? nearp * g_zbias_world / d2 : g_zbias_max;
     if (bias > g_zbias_max) bias = g_zbias_max;
     if (bias < kZbiasMin) bias = kZbiasMin;
-    g_wrap_bias_val = bias;
+    g_wrap_bias_val = bias * static_cast<float>(level);
+    g_wrap_slope_val = kZbiasSlope * static_cast<float>(level);
     g_wrap_bias = true;
     return 2;
 }
@@ -980,7 +999,7 @@ void __cdecl wrap_begin() {
         std::memcpy(&b, &g_saved_bias, 4);
         std::memcpy(&s, &g_saved_slope, 4);
         b += g_wrap_bias_val;
-        s += kZbiasSlope;
+        s += g_wrap_slope_val;
         std::memcpy(&g_set_bias, &b, 4);
         std::memcpy(&g_set_slope, &s, 4);
         g_dev->SetRenderState(D3DRS_DEPTHBIAS, g_set_bias);
@@ -1234,7 +1253,8 @@ void occl_game_frame() {
         const uint32_t wcm = *reinterpret_cast<const uint32_t*>(kWorldChrMan);
         const uint32_t chr = wcm ? *reinterpret_cast<const uint32_t*>(wcm + 0x3C) : 0;
         const uint32_t floor = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x29C) : 0;
-        room_changed = drawdist_game_mask_gen() != g_built_gen;  // the game wrote its draw masks again
+        room_changed = drawdist_game_mask_gen() != g_built_gen ||  // the game wrote its draw masks again
+                       drawdist_role_gen() != g_built_role_gen;     // or the detail rules changed
         // The player's position: its physics (+0x28 controller, +0x1C physics, +0x10 x y z).
         const uint32_t ctrl = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x28) : 0;
         const uint32_t phys = ctrl ? *reinterpret_cast<const uint32_t*>(ctrl + 0x1C) : 0;

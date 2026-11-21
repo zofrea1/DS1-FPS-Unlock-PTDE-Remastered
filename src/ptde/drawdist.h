@@ -13,9 +13,18 @@
 // game's; Remastered raised the default row's from 15/30 m to 25/50 m, about 167).
 // EffectLodDistance: the distances at which fires (torches, bonfires) drop their embers and other detail, in percent.
 bool drawdist_install(int mode, int lod_percent, int effect_percent);
-// Once a frame (game thread): with adjacent or all, a map piece that would be drawn over a twin of the same surfaces
-// (a detailed piece and its stand-in) is hidden while the twin is the player's room's own; put back otherwise.
+// Once a frame (game thread): with adjacent or all, the detail rules (drawdist.cpp's top): a stand-in hidden while
+// the finer pieces of its surfaces are drawn in its place, coarse far backdrops only where the game draws them, and the
+// depth levels that let the finer of two overlapping pieces win.
 void drawdist_tick();
+// The detail rules' answer for a map piece (its block, its index in it): 0 = not theirs (the generic rule); else bit 0
+// = drawn in place of a stand-in (counts as a piece DrawMapPieces adds), bits 4-7 = its depth level + 1 (each level
+// drawn a little farther in depth). Game thread; drawdist_role_gen() changes whenever any answer does.
+uint8_t drawdist_piece_role(int block, int index);
+uint32_t drawdist_role_gen();
+// RemoteControl `detailrules 0|1` (diagnostics A/B): the detail rules off (every piece as the masks say, the generic
+// depth bias) or on.
+void drawdist_set_detail(int on);
 // RemoteControl: `drawmode 0|1|2` for this session (takes effect within a few seconds: the floor is applied again);
 // `lodpct N`.
 void drawdist_set_mode(int mode);

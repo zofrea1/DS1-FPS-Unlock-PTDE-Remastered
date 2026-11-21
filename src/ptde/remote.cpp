@@ -2679,6 +2679,10 @@ void run(const std::string& line) {
         // scenery 0/1: the scenery characters (Firelink's crow) kept active wherever their map is loaded.
         drawdist_set_scenery(static_cast<int>(num(1, 1)));
         out("scenery %ld", num(1, 1));
+    } else if (c == "detailrules") {
+        // detailrules 0|1: DrawMapPieces' detail rules off (every piece as the masks say, the generic depth bias) or on.
+        drawdist_set_detail(static_cast<int>(num(1, 1)));
+        out("detailrules %ld", num(1, 1));
     } else if (c == "drawwiden") {
         // drawwiden MASK: which managers adjacent/all widen (1 map pieces, 2 map effects, 4 point lights); send
         // drawmode again afterwards so the draw masks are rebuilt.
