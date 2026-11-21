@@ -11,4 +11,5 @@
 // frame's duration: a per-frame weight k applied n = dt * 30 times has the weight 1 - (1 - k)^n.
 bool camera_install();
 void camera_set_enabled(bool on);
+void camera_set_hold(bool on);  // diagnostics: the follow camera left where it is (RemoteControl `camhold`)
 bool camera_enabled();

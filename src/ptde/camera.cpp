@@ -268,7 +268,10 @@ bool install_gain_sites() {
     return true;
 }
 
+volatile long g_hold = 0;  // diagnostics (RemoteControl `camhold 1`): the follow camera not updated (stays put)
+
 void __stdcall follow_stub(void* camera, float dt, void* chr, void* extra) {
+    if (g_hold) return;
     double n = static_cast<double>(dt) * 30.0;
     if (!(n > 0.02)) n = 0.02;
     if (n > 10.0) n = 10.0;
@@ -279,6 +282,8 @@ void __stdcall follow_stub(void* camera, float dt, void* chr, void* extra) {
 }
 
 }  // namespace
+
+void camera_set_hold(bool on) { g_hold = on ? 1 : 0; }
 
 bool camera_install() {
     for (uint32_t site : kCallSites) {

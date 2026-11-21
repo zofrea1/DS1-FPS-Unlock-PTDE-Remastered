@@ -28,7 +28,7 @@ bool remote_start();
 // SD card under Android): RemoteShaderDumps = false.
 void remote_set_shader_dumps(bool on);
 // RemoteDeviceHooks (default true): false leaves the Direct3D device's methods unhooked (for speed measurements).
-void remote_set_device_hooks(bool on);
+void remote_set_device_hooks(int mode);  // 0 none, 1 all, 2 Present only (screenshots: `present` in the INI)
 bool remote_enabled();
 
 // The name a created shader was saved under (vs_/ps_<hash>), "none" or "unknown".

@@ -717,12 +717,22 @@ HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, H
     return o_present(dev, a, b, w, r);
 }
 
+// The wrapped time of the frame, worked out once a frame (it ran for each foliage draw: the x87 fmod was 1.5% of the
+// render thread with DrawMapPieces all on the Undead Burg bridge, 2026-11-20); same inputs, same value.
+double g_wrap_in = -1.0, g_wrap_out = 0.0;
+float g_wrap_speed = -1.0f;
+
 void send_wind(IDirect3DDevice9* dev) {
     double t = g_frame_t;
     const float speed = g_speed;
     if (speed > 1e-6f) {
-        const double period = 4.0 * 3.14159265358979 / speed;  // every cosine back where it started
-        t = std::fmod(t, period);
+        if (t != g_wrap_in || speed != g_wrap_speed) {
+            const double period = 4.0 * 3.14159265358979 / speed;  // every cosine back where it started
+            g_wrap_in = t;
+            g_wrap_speed = speed;
+            g_wrap_out = std::fmod(t, period);
+        }
+        t = g_wrap_out;
     }
     // Remastered's W0 = (direction x, z, time, previous time: not drawn here) and W1 = (speed, strength, verticality,
     // phase scale).

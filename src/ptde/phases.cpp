@@ -211,8 +211,9 @@ void report() {
                                static_cast<double>(s.ticks) / g_tsc_per_ms / g_frames,
                                static_cast<double>(s.calls) / g_frames);
         } else {
-            n += std::snprintf(line + n, sizeof(line) - n, " %X %.3f%s", s.target,
-                               static_cast<double>(s.ticks) / g_tsc_per_ms / g_frames, s.calls > g_frames ? "+" : "");
+            n += std::snprintf(line + n, sizeof(line) - n, " %X %.3f%s(%.1f/f)", s.target,
+                               static_cast<double>(s.ticks) / g_tsc_per_ms / g_frames, s.calls > g_frames ? "+" : "",
+                               static_cast<double>(s.calls) / g_frames);
         }
         s.ticks = 0;
         s.calls = 0;

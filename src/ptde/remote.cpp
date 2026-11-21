@@ -4,6 +4,7 @@
 
 #if FPSU_DIAGNOSTICS
 
+#include "camera.h"
 #include "frame.h"
 #include "drawdist.h"
 #include "foliage.h"
@@ -480,6 +481,55 @@ void snap(IDirect3DDevice9* dev) {
     bb->Release();
 }
 
+// snapring NAME N [W]: the next N frames copied (scaled to W wide) into a ring of render targets in video memory, a
+// cheap copy per frame, so the frame rate stays what it is; saved as NAME-000.bmp.. once all are taken (the stall
+// comes after), with NAME-times.txt (ms since the first). Frame-by-frame looks at motion at high frame rates (the
+// Hellkite's landing, 2026-11-20).
+std::string g_ring_name;
+std::vector<IDirect3DSurface9*> g_ring;
+std::vector<double> g_ring_ms;
+volatile LONG g_ring_left = 0;
+UINT g_ring_width = 640;
+LONG g_ring_n = 0;
+
+void ring_tick(IDirect3DDevice9* dev) {
+    IDirect3DSurface9* bb = nullptr;
+    if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return;
+    D3DSURFACE_DESC d{};
+    bb->GetDesc(&d);
+    const UINT w = g_ring_width, h = d.Width ? d.Height * w / d.Width : 0;
+    const LONG i = g_ring_n - g_ring_left;
+    if (static_cast<LONG>(g_ring.size()) <= i) g_ring.resize(i + 1, nullptr);
+    if (!g_ring[i]) dev->CreateRenderTarget(w, h, d.Format, D3DMULTISAMPLE_NONE, 0, FALSE, &g_ring[i], nullptr);
+    if (g_ring[i]) dev->StretchRect(bb, nullptr, g_ring[i], nullptr, D3DTEXF_LINEAR);
+    LARGE_INTEGER now{}, f{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&f);
+    g_ring_ms.push_back(1000.0 * static_cast<double>(now.QuadPart) / static_cast<double>(f.QuadPart));
+    bb->Release();
+    if (InterlockedDecrement(&g_ring_left) > 0) return;
+    std::string times;
+    for (LONG k = 0; k < static_cast<LONG>(g_ring.size()); ++k) {
+        if (!g_ring[k]) continue;
+        char tag[48];
+        std::snprintf(tag, sizeof(tag), "-%03ld", static_cast<long>(k));
+        save_surface_png(dev, g_ring[k], shot_path(g_ring_name + tag, L".bmp"));
+        g_ring[k]->Release();
+        g_ring[k] = nullptr;
+        char line[48];
+        std::snprintf(line, sizeof(line), "%.3f\n",
+                      k < static_cast<LONG>(g_ring_ms.size()) ? g_ring_ms[k] - g_ring_ms[0] : 0.0);
+        times += line;
+    }
+    if (FILE* fp = _wfopen(shot_path(g_ring_name + "-times", L".txt").c_str(), L"wb")) {
+        std::fwrite(times.data(), 1, times.size(), fp);
+        std::fclose(fp);
+    }
+    g_ring.clear();
+    g_ring_ms.clear();
+    out("snapring %s: saved %ld frames", g_ring_name.c_str(), static_cast<long>(g_ring_n));
+}
+
 // One render target texture saved every so often (rtseq): its own picture, without lighting or the HUD.
 std::string g_seq_name;
 int g_seq_id = 0;
@@ -757,6 +807,7 @@ HRESULT WINAPI hk_present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, H
         ++g_seq_index;
         if (InterlockedDecrement(&g_seq_left) == 0) out("rtseq %s: done (%ld)", g_seq_name.c_str(), g_seq_index);
     }
+    if (g_ring_left > 0) ring_tick(dev);
     if (g_snap_left > 0 && GetTickCount64() >= g_snap_next) {
         g_snap_next = GetTickCount64() + g_snap_interval;
         snap(dev);
@@ -2316,6 +2367,18 @@ void run(const std::string& line) {
         g_snap_next = 0;
         g_snap_left = static_cast<LONG>(num(2, 10));
         out("snaps %s: %ld every %ld ms", t[1].c_str(), num(2, 10), num(3, 100));
+    } else if (c == "snapring" && t.size() > 1) {
+        if (g_ring_left > 0) {
+            out("snapring: %s still running", g_ring_name.c_str());
+        } else {
+            g_ring_name = t[1];
+            g_ring_width = static_cast<UINT>(num(3, 640));
+            g_ring_n = static_cast<LONG>(num(2, 120));
+            if (g_ring_n > 2000) g_ring_n = 2000;
+            g_ring_ms.clear();
+            InterlockedExchange(&g_ring_left, g_ring_n);
+            out("snapring %s: %ld frames", t[1].c_str(), static_cast<long>(g_ring_n));
+        }
     } else if (c == "rtseq" && t.size() > 2) {
         g_seq_name = t[1];
         g_seq_id = static_cast<int>(num(2, 0));
@@ -2578,6 +2641,18 @@ void run(const std::string& line) {
         // occlinside 0/1: DrawMapPieces' pieces of other rooms that hold the player left out (1) or drawn (0).
         occl_set_inside(num(1, 1) != 0);
         out("occlinside %ld", num(1, 1));
+    } else if (c == "entwatch" && t.size() > 5) {
+        // entwatch X Y Z R FRAMES: main-camera model draws whose box centre is within R of X Y Z, each frame.
+        occl_watch(static_cast<float>(std::atof(t[1].c_str())), static_cast<float>(std::atof(t[2].c_str())),
+                   static_cast<float>(std::atof(t[3].c_str())), static_cast<float>(std::atof(t[4].c_str())),
+                   static_cast<int>(num(5, 100)));
+        out("entwatch %s %s %s r %s: %ld frames", t[1].c_str(), t[2].c_str(), t[3].c_str(), t[4].c_str(), num(5, 100));
+    } else if (c == "camhold") {
+        camera_set_hold(num(1, 1) != 0);
+        out("camhold %ld", num(1, 1));
+    } else if (c == "occlfx") {
+        occl_set_fx(static_cast<int>(num(1, 0)));
+        out("occlfx %ld", num(1, 0));
     } else if (c == "zbias") {
         // zbias 0/1 [METRES MAX]: DrawMapPieces' added pieces drawn with a depth bias (1) or not (0): metres moved back
         // at the piece's nearest point, the most depth bias.
@@ -2741,8 +2816,8 @@ void remote_set_shader_dumps(bool on) { g_shader_dumps = on; }
 // RemoteDeviceHooks = false: the device's methods are left alone (no frame logs, screenshots, resource or shader
 // tracking), so speed measurements see the game's render thread without this layer. Under DXVK the hooks share the
 // method table with FilterSamplerStates' and its per-frame check would also start its cache over every frame.
-bool g_device_hooks = true;
-void remote_set_device_hooks(bool on) { g_device_hooks = on; }
+int g_device_hooks = 1;
+void remote_set_device_hooks(int mode) { g_device_hooks = mode; }
 
 bool remote_start() {
     GetModuleFileNameW(nullptr, g_dir, MAX_PATH);
@@ -2768,6 +2843,10 @@ void remote_hook_device(IDirect3DDevice9* dev) {
         x_disassemble = reinterpret_cast<DisassembleFn>(GetProcAddress(x, "D3DXDisassembleShader"));
     }
     hook(dev, kPresent, o_present, reinterpret_cast<void*>(&hk_present));
+    if (g_device_hooks == 2) {  // Present only: screenshots, nothing on the per-draw path (speed measurements)
+        out("device hooked: Present only (d3dx %s)", x_save_surface ? "found" : "MISSING");
+        return;
+    }
     hook(dev, kCreateTexture, o_create_texture, reinterpret_cast<void*>(&hk_create_texture));
     hook(dev, kCreateRenderTarget, o_create_rt, reinterpret_cast<void*>(&hk_create_rt));
     hook(dev, kCreateDepth, o_create_depth, reinterpret_cast<void*>(&hk_create_depth));

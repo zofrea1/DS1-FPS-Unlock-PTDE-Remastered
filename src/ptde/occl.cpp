@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 // OcclusionCulling: the map pieces DrawMapPieces adds are skipped while something in front hides them completely.
 //
@@ -601,8 +602,57 @@ void collect() {
     }
 }
 
+// Effect draw entities (vtable 0x11E7BC4: slot 10 = 0x558500 -> 0xBA4FD0, the FFX instance at +0x30): diagnostics
+// for now (entdump lists them with their first 0x100 bytes as floats).
+constexpr uint32_t kFxEntityVt = 0x011E7BC4;
+volatile LONG g_fx_skip = 0;  // diagnostics (RemoteControl `occlfx 9`): every effect draw left out
+int __cdecl decide_fx(uint32_t entity, uint32_t ctx, uint32_t) {
+    if (g_fx_skip == 9) return 1;
+    if (g_dump_frame) {
+        const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
+        const auto* f = reinterpret_cast<const float*>(entity);
+        const auto* u = reinterpret_cast<const uint32_t*>(entity);
+        char line[1400];
+        int n = std::snprintf(line, sizeof(line), "[entdump] fx entity %08X cam %08X fx %08X |", entity, cam, u[0x30 / 4]);
+        for (int k = 0; k < 64 && n < static_cast<int>(sizeof(line)) - 24; ++k) {
+            const uint32_t v = u[k];
+            if (v > 0x00100000u && v < 0x7FFF0000u && (v & 3) == 0) {
+                n += std::snprintf(line + n, sizeof(line) - n, " %X:p", k * 4);
+            } else {
+                n += std::snprintf(line + n, sizeof(line) - n, " %X:%.2f", k * 4, f[k]);
+            }
+        }
+        LOG_INFO("%s", line);
+    }
+    return 0;
+}
+
+// entwatch (diagnostics): every main-camera model draw whose world box centre lies within R of a point, each frame:
+// time, entity, box, written to entwatch.txt in the game folder after N frames (pose changes of an animated model
+// show in its box: the Hellkite's landing, 2026-11-21).
+volatile LONG g_watch_left = 0;
+float g_watch_pt[3] = {}, g_watch_r = 0.0f;
+std::string g_watch_buf;
+uint32_t g_watch_lastcam = 0;
+void watch_entity(uint32_t entity, uint32_t cam) {
+    if (cam != g_main_cam || !cam) return;
+    const auto* b = reinterpret_cast<const float*>(entity + 0xA0);
+    const float cx = (b[0] + b[4]) * 0.5f - g_watch_pt[0], cy = (b[1] + b[5]) * 0.5f - g_watch_pt[1],
+                cz = (b[2] + b[6]) * 0.5f - g_watch_pt[2];
+    if (cx * cx + cy * cy + cz * cz > g_watch_r * g_watch_r) return;
+    LARGE_INTEGER now{}, f{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&f);
+    char line[200];
+    std::snprintf(line, sizeof(line), "%d %.3f %08X %.4f %.4f %.4f %.4f %.4f %.4f\n", g_frame,
+                  1000.0 * static_cast<double>(now.QuadPart) / static_cast<double>(f.QuadPart), entity, b[0], b[1], b[2],
+                  b[4], b[5], b[6]);
+    g_watch_buf += line;
+}
+
 int __cdecl decide_inner(uint32_t entity, uint32_t ctx) {
     const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
+    if (g_watch_left > 0) watch_entity(entity, cam);
     if (g_dump_frame && cam) {
         if (cam != g_pass_cam) {
             if (g_pass_draws) LOG_INFO("[entdump]   %d entity draws", g_pass_draws);
@@ -774,7 +824,20 @@ void __cdecl wrap_end() {
 __declspec(naked) void draw_stub() {
     __asm {
         cmp dword ptr [ecx], 0x01171A54  // kEntityVt
+        je model
+        cmp dword ptr [ecx], 0x011E7BC4  // kFxEntityVt
         jne pass
+        push ecx
+        push dword ptr [esp + 4]
+        push dword ptr [esp + 12]
+        push ecx
+        call decide_fx
+        add esp, 12
+        pop ecx
+        test eax, eax
+        jnz other
+        jmp pass
+    model:
         push ecx
         push dword ptr [esp + 4]
         push dword ptr [esp + 12]
@@ -872,6 +935,15 @@ void occl_set_mode(int mode) {
 
 int occl_mode() { return g_mode; }
 void occl_set_inside(bool on) { InterlockedExchange(&g_inside, on ? 1 : 0); }
+void occl_set_fx(int mode) { InterlockedExchange(&g_fx_skip, mode); }
+void occl_watch(float x, float y, float z, float r, int frames) {
+    g_watch_pt[0] = x;
+    g_watch_pt[1] = y;
+    g_watch_pt[2] = z;
+    g_watch_r = r;
+    g_watch_buf.clear();
+    InterlockedExchange(&g_watch_left, frames);
+}
 void occl_set_zbias(bool on, float world, float max_bias) {
     if (world >= 0.0f) g_zbias_world = world;
     if (max_bias >= 0.0f) g_zbias_max = max_bias;
@@ -963,6 +1035,14 @@ void occl_game_frame() {
 }
 
 void occl_render_frame() {
+    if (g_watch_left > 0 && InterlockedDecrement(&g_watch_left) == 0) {
+        if (FILE* f = std::fopen("entwatch.txt", "wb")) {
+            std::fwrite(g_watch_buf.data(), 1, g_watch_buf.size(), f);
+            std::fclose(f);
+        }
+        LOG_INFO("[entwatch] written (%u bytes)", static_cast<unsigned>(g_watch_buf.size()));
+        g_watch_buf.clear();
+    }
     if (g_dump_frame) {
         if (g_pass_draws) LOG_INFO("[entdump]   %d entity draws", g_pass_draws);
         g_dump_frame = 0;

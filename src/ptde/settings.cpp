@@ -365,7 +365,7 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "remoteshaderdumps") {
             s.remote_shader_dumps = parse_bool(val);
         } else if (key == "remotedevicehooks") {
-            s.remote_device_hooks = parse_bool(val);
+            s.remote_device_hooks = val == "present" ? 2 : (parse_bool(val) ? 1 : 0);
         } else if (key == "skippresentrepeat") {
             s.skip_present_repeat = parse_bool(val);
         } else if (key == "dxvk") {
