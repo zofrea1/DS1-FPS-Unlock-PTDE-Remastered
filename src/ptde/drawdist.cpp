@@ -134,6 +134,8 @@ uint32_t g_extra_draw[kMaxBlocks][4] = {};
 // their stand-ins). Game thread.
 uint32_t g_game_draw[kMaxBlocks][4] = {};
 int g_game_draw_blocks = 0;  // blocks recorded (0: none yet)
+uint32_t g_game_sfx[kMaxBlocks][4] = {};  // the same for the map effects (WorldSfxManImp: 0x3C a block, mask +0x1C)
+int g_game_sfx_blocks = 0;
 uint32_t g_game_draw_gen = 0;
 uint32_t g_extra_stream[kMaxBlocks][4] = {};
 bool g_any_draw = false;
@@ -315,8 +317,16 @@ void note_game_draw() {
         if (!blocks) count = 0;
         for (int b = 0; b < count; ++b) std::memcpy(g_game_draw[b], reinterpret_cast<const void*>(blocks + b * 0x5C + 0x0C), 16);
         g_game_draw_blocks = count;
+        const uint32_t sfx = *reinterpret_cast<const uint32_t*>(0x0137D6E4);
+        const uint32_t sblocks = sfx ? *reinterpret_cast<const uint32_t*>(sfx + 0x20) : 0;
+        int scount = sfx ? *reinterpret_cast<const int*>(sfx + 0x1C) : 0;
+        if (scount > count) scount = count;
+        if (!sblocks) scount = 0;
+        for (int b = 0; b < scount; ++b) std::memcpy(g_game_sfx[b], reinterpret_cast<const void*>(sblocks + b * 0x3C + 0x1C), 16);
+        g_game_sfx_blocks = scount;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_game_draw_blocks = 0;
+        g_game_sfx_blocks = 0;
     }
     ++g_game_draw_gen;
 }
@@ -800,6 +810,11 @@ bool drawdist_game_mask(int block, uint32_t out[4]) {
     return true;
 }
 uint32_t drawdist_game_mask_gen() { return g_game_draw_gen; }
+bool drawdist_game_sfx_mask(int block, uint32_t out[4]) {
+    if (block < 0 || block >= g_game_sfx_blocks) return false;
+    std::memcpy(out, g_game_sfx[block], 16);
+    return true;
+}
 
 void drawdist_set_scenery(int on) {
     InterlockedExchange(&g_scenery_on, on && calls(kChrTestSite, reinterpret_cast<uint32_t>(&chr_test)) ? (on == 2 ? 2 : 1) : 0);

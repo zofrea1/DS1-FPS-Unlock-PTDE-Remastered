@@ -32,3 +32,5 @@ void drawdist_set_scenery(int on);  // 2: kept active at the game's rate (diagno
 // then). Game thread. The generation changes each time the masks are written.
 bool drawdist_game_mask(int block, uint32_t out[4]);
 uint32_t drawdist_game_mask_gen();
+// The same for the map effects' blocks (WorldSfxManImp's draw mask, +0x1C of its 0x3C-byte blocks).
+bool drawdist_game_sfx_mask(int block, uint32_t out[4]);

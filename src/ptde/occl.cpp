@@ -61,6 +61,22 @@
 // with game). Leaving such pieces out only ever brings the picture back toward the game's own: what the player's room
 // shows is never touched. A model that is also drawn by a piece of the player's room is never left out.
 //
+// The map effects DrawMapPieces adds (adjacent/all widen the map effects' groups too: torches' fire, mist, embers of
+// other rooms) are skipped the same way while hidden: on the Undead Burg bridge with all, 62 of the 79 effects drawn
+// were added ones, none of them visible from there (frozen frames with and without them identical), and they cost
+// about 0.9 ms of the render thread a frame (the effects library updates and builds an effect when it draws it). An
+// effect counts as added when its box holds the position of a map effect whose groups do not meet the game's own mask
+// of its map (WorldSfxManImp entries: 0x34 bytes, groups at +0, [+0x20]+0 the position) and no position of one that
+// does: effects of characters and the game's own map effects are never skipped (an effect can light what is around
+// it; a hidden torch of the player's room lighting a visible wall stays as it is). The evidence is its box alone,
+// grown by 1 m and half its largest side (its particles' quads), at most 10 m, and for the camera's movement as a
+// piece's: the effects library draws its particles in batches after the effect's own draw call, so a query around
+// that call counts nothing (8,700 counted, none with samples, visible effects included); hidden after two box tests in
+// a row found nothing (tested in the next frame's tests: effects are drawn after them), shown at the first that finds
+// something, drawn for real every eighth frame. An effect not drawn is not updated either, as when the game itself
+// does not draw it (out of its rooms). Checked 2026-11-21: frozen frames with and without it in 8 directions at the
+// bridge, the Demon Ruins and Blighttown no further apart than the same picture twice; bridge 180.7 -> 204.9 FPS.
+//
 // Depth bias (DrawMapPieces adjacent/all, with or without OcclusionCulling): a piece only DrawMapPieces adds is drawn a
 // little farther in depth (D3DRS_DEPTHBIAS / SLOPESCALEDEPTHBIAS for its draw, perspective cameras only: not the
 // shadow maps), so where it covers the same surfaces as a piece the game draws from this room, the game's wins instead
@@ -111,6 +127,8 @@ uint32_t g_built_gen = 0;  // drawdist_game_mask_gen() the table was built from
 
 inline uint32_t hash_ptr(uint32_t p, int bits) { return ((p >> 3) * 2654435761u) >> (32 - bits); }
 
+void build_fx_positions();
+
 void build_models() {
     const int back = g_models_cur == 0 ? 1 : 0;
     ModelSlot* t = g_models[back];
@@ -151,6 +169,68 @@ void build_models() {
     }
     g_built_gen = gen;
     InterlockedExchange(&g_models_cur, back);
+    build_fx_positions();
+}
+
+// ---- the map effects' positions (game thread builds with the model table, render thread reads) ----
+struct FxPos {
+    float p[3];
+    uint8_t added;  // groups not meeting the game's own mask of its map (DrawMapPieces' widening shows it)
+};
+constexpr int kFxPosMax = 1024;
+FxPos g_fxpos[2][kFxPosMax];
+int g_fxpos_n[2] = {};
+volatile LONG g_fxpos_cur = -1;
+
+void build_fx_positions() {
+    const int back = g_fxpos_cur == 0 ? 1 : 0;
+    int n = 0;
+    __try {
+        const uint32_t man = *reinterpret_cast<const uint32_t*>(0x0137D6E4);
+        const int blocks = man ? *reinterpret_cast<const int*>(man + 0x1C) : 0;
+        const uint32_t barr = man ? *reinterpret_cast<const uint32_t*>(man + 0x20) : 0;
+        for (int b = 0; b < blocks && b < 64 && barr; ++b) {
+            const uint32_t blk = barr + b * 0x3C;
+            const int cnt = *reinterpret_cast<const int*>(blk + 0x2C);
+            const uint32_t arr = *reinterpret_cast<const uint32_t*>(blk + 0x30);
+            if (!arr || cnt <= 0 || cnt > 4096) continue;
+            const auto* live = reinterpret_cast<const uint32_t*>(blk + 0x1C);
+            uint32_t game[4];
+            if (!drawdist_game_sfx_mask(b, game)) std::memcpy(game, live, 16);
+            for (int i = 0; i < cnt && n < kFxPosMax; ++i) {
+                const uint32_t e = arr + i * 0x34;
+                const auto* g = reinterpret_cast<const uint32_t*>(e);
+                if (!((g[0] & live[0]) | (g[1] & live[1]) | (g[2] & live[2]) | (g[3] & live[3]))) continue;
+                const uint32_t obj = *reinterpret_cast<const uint32_t*>(e + 0x20);
+                if (!obj) continue;
+                const auto* p = reinterpret_cast<const float*>(obj);
+                if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) continue;
+                if (std::fabs(p[0]) < 1.5f && std::fabs(p[1]) < 1.5f && std::fabs(p[2]) < 1.5f) continue;  // no place
+                FxPos& f = g_fxpos[back][n++];
+                std::memcpy(f.p, p, 12);
+                f.added = ((g[0] & game[0]) | (g[1] & game[1]) | (g[2] & game[2]) | (g[3] & game[3])) ? 0 : 1;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    g_fxpos_n[back] = n;
+    InterlockedExchange(&g_fxpos_cur, back);
+}
+
+// An effect's (grown) box holds an added map effect's position and none of the game's own.
+bool fx_added(const float* box) {
+    const LONG cur = g_fxpos_cur;
+    if (cur < 0) return false;
+    bool added = false;
+    const FxPos* t = g_fxpos[cur];
+    for (int i = 0, n = g_fxpos_n[cur]; i < n; ++i) {
+        const float* p = t[i].p;
+        if (p[0] < box[0] || p[0] > box[3] || p[1] < box[1] || p[1] > box[4] || p[2] < box[2] || p[2] > box[5]) continue;
+        if (!t[i].added) return false;
+        added = true;
+    }
+    return added;
 }
 
 uint32_t model_flags(uint32_t fl) {
@@ -258,6 +338,12 @@ float g_last_pos[3] = {};
 float g_cam_step = 0.0f;  // how far the camera moved since the previous frame (m)
 int g_jump_frame = -1000;
 Ent* g_hidden_cands[kMaxRecs];  // hidden pieces seen in the depth pre-pass (to box-test)
+// Effects are drawn after the frame's box tests: their candidates wait for the next frame's (two lists, by parity).
+constexpr int kFxCandMax = 1024;
+Ent* g_fx_cands[2][kFxCandMax];
+int g_fx_ncands[2] = {};
+int g_fx_list = 0;
+volatile LONG g_st_fx_skips = 0, g_st_fx_added = 0;
 Ent* g_show_ents[kMaxRecs];     // diagnostics (occlshow 1): every candidate seen in the pre-pass, boxes drawn
 int g_nshow = 0;
 volatile LONG g_show = 0;
@@ -422,6 +508,14 @@ void run_tests() {
                  static_cast<unsigned long>(saved[0]), static_cast<unsigned long>(saved[1]),
                  static_cast<unsigned long>(saved[2]));
     }
+    {
+        const int prev = g_fx_list ^ 1;
+        for (int i = 0; i < g_fx_ncands[prev] && g_nhidden < kMaxRecs; ++i) {
+            Ent* s = g_fx_cands[prev][i];
+            if (s && s->ent && !s->unreliable) g_hidden_cands[g_nhidden++] = s;
+        }
+        g_fx_ncands[prev] = 0;
+    }
     if ((!g_nhidden && !g_show) || !make_device_objects() || !g_draw_up) return;
     // The game's view-projection (relative to the camera) is in c0..c3: the fourth row is the view direction (unit
     // length, no translation). Anything else is not the state this was made for: no tests (the hidden show again).
@@ -530,7 +624,8 @@ void apply_batch(Batch& b) {
                     ++g_wrong_logged;
                     const float* x = s->box;
                     LOG_INFO("[occl] wrong: ent %08X %s samples %lu dist %.1f evidence age %d box %.1f %.1f %.1f .. "
-                             "%.1f %.1f %.1f (size %.0f x %.0f x %.0f)", s->ent, s->extra ? "extra" : "own",
+                             "%.1f %.1f %.1f (size %.0f x %.0f x %.0f)", s->ent,
+                             s->extra == 2 ? "effect" : (s->extra ? "extra" : "own"),
                              static_cast<unsigned long>(samples), b.dist[i], b.frame - s->evidence, x[0], x[1], x[2],
                              x[3], x[4], x[5], x[3] - x[0], x[4] - x[1], x[5] - x[2]);
                 }
@@ -548,6 +643,14 @@ void apply_batch(Batch& b) {
                 s->box_zero = -1000;
                 s->shown = b.frame;
             } else {
+                if (s->extra == 2) {  // an effect: its box is the evidence (see the top), two tests in a row
+                    s->zero_run = s->box_zero == b.frame - 1 ? s->zero_run + 1 : 1;
+                    if (s->zero_run >= 2 && !s->hidden) {
+                        s->hidden = 1;
+                        s->evidence = b.frame;
+                        ++g_st_hid;
+                    }
+                }
                 if (b.frame > s->box_zero) s->box_zero = b.frame;
                 if (s->hidden && b.frame > s->evidence) s->evidence = b.frame;
             }
@@ -606,9 +709,13 @@ void collect() {
 // Effect draw entities (vtable 0x11E7BC4: slot 10 = 0x558500 -> 0xBA4FD0, the FFX instance at +0x30): diagnostics
 // for now (entdump lists them with their first 0x100 bytes as floats).
 constexpr uint32_t kFxEntityVt = 0x011E7BC4;
-volatile LONG g_fx_skip = 0;  // diagnostics (RemoteControl `occlfx 9`): every effect draw left out
+volatile LONG g_fx_skip = 1;  // added map effects skipped while hidden (1); RemoteControl `occlfx 0|1`, 9: all out
+constexpr float kFxMargin = 1.0f;  // metres the effect's box grows by (its particles' size)
+int fx_decide_body(uint32_t entity, uint32_t ctx);
 int __cdecl decide_fx(uint32_t entity, uint32_t ctx, uint32_t) {
     if (g_fx_skip == 9) return 1;
+    const int r = g_fx_skip == 1 ? fx_decide_body(entity, ctx) : 0;
+    if (r) return r;
     if (g_dump_frame) {
         const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
         const auto* f = reinterpret_cast<const float*>(entity);
@@ -649,6 +756,52 @@ void watch_entity(uint32_t entity, uint32_t cam) {
                   1000.0 * static_cast<double>(now.QuadPart) / static_cast<double>(f.QuadPart), entity, b[0], b[1], b[2],
                   b[4], b[5], b[6]);
     g_watch_buf += line;
+}
+
+// An effect draw by the main camera: skipped while hidden, its own drawing counted (see the top) when added.
+int fx_decide_body(uint32_t entity, uint32_t ctx) {
+    if (g_mode == 0) return 0;
+    const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
+    if (!cam || cam != g_main_cam) return 0;
+    const auto* bb = reinterpret_cast<const float*>(entity + 0x50);  // min x y z w, max x y z w
+    // Grown for its particles' size: 1 m, and half its largest side more (smoke and mist quads are large), at most 10.
+    float side = bb[4] - bb[0];
+    if (bb[5] - bb[1] > side) side = bb[5] - bb[1];
+    if (bb[6] - bb[2] > side) side = bb[6] - bb[2];
+    float m = kFxMargin + 0.5f * side;
+    if (!(m <= 10.0f)) m = 10.0f;
+    float box[6] = {bb[0] - m, bb[1] - m, bb[2] - m, bb[4] + m, bb[5] + m, bb[6] + m};
+    for (float v : box) {
+        if (!std::isfinite(v)) return 0;
+    }
+    if (!(box[3] >= box[0] && box[4] >= box[1] && box[5] >= box[2]) || box[3] - box[0] > kMaxSide ||
+        box[4] - box[1] > kMaxSide || box[5] - box[2] > kMaxSide) {
+        return 0;
+    }
+    if (!fx_added(box)) return 0;
+    Ent* s = find_ent(entity);
+    if (!s) return 0;
+    // Its particles move its box every frame: kept current, the evidence not reset (a model's box change means another
+    // piece in that memory); a new entry starts as a model's does.
+    if (s->seen == -1000) {
+        s->unreliable = bad_box(box) ? 1 : 0;
+        s->shown = g_frame;
+    }
+    std::memcpy(s->box, box, sizeof(box));
+    s->extra = 2;
+    ++g_st_fx_added;
+    const bool probe = ((hash_ptr(entity, 16) + g_frame) % kProbeEvery) == 0;
+    const bool hide = s->hidden && !s->unreliable && s->evidence >= g_frame - kStale && g_frame != g_jump_frame &&
+                      !near_camera(box) && !probe;
+    if (s->seen != g_frame) {
+        s->seen = g_frame;
+        if (!s->unreliable && g_fx_ncands[g_fx_list] < kFxCandMax) g_fx_cands[g_fx_list][g_fx_ncands[g_fx_list]++] = s;
+    }
+    if (hide) {
+        ++g_st_fx_skips;
+        return 1;
+    }
+    return 0;
 }
 
 int __cdecl decide_inner(uint32_t entity, uint32_t ctx, uint32_t mflags) {
@@ -1055,6 +1208,8 @@ void occl_game_frame() {
 }
 
 void occl_render_frame() {
+    g_fx_list ^= 1;
+    g_fx_ncands[g_fx_list] = 0;
     if (g_watch_left > 0 && InterlockedDecrement(&g_watch_left) == 0) {
         if (FILE* f = std::fopen("entwatch.txt", "wb")) {
             std::fwrite(g_watch_buf.data(), 1, g_watch_buf.size(), f);
@@ -1110,6 +1265,12 @@ void occl_render_frame() {
             LOG_INFO("[occl] DrawMapPieces: %.1f draws a frame of other rooms' pieces holding the player left out",
                      static_cast<double>(g_st_inside) / static_cast<double>(g_st_frames));
         }
+        if (g_st_next && g_st_fx_added && g_st_frames) {
+            LOG_INFO("[occl] DrawMapPieces' map effects: %.1f added effect draws a frame, %.1f skipped while hidden",
+                     static_cast<double>(g_st_fx_added) / static_cast<double>(g_st_frames),
+                     static_cast<double>(g_st_fx_skips) / static_cast<double>(g_st_frames));
+        }
+        g_st_fx_added = g_st_fx_skips = 0;
         g_st_inside = 0;
         g_st_next = now + 5000;
         g_st_frames = g_st_pieces = g_st_skips = g_st_boxes = g_st_owndraws = g_st_hid = g_st_shown_box = 0;
