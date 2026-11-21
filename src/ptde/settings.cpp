@@ -224,6 +224,8 @@ Settings settings_load(const wchar_t* dll_path) {
             std::string v = val;
             for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             s.draw_map_pieces = (v == "all") ? 2 : (v == "adjacent") ? 1 : 0;
+        } else if (key == "drawmapobjects") {
+            s.draw_map_objects = parse_bool(val);
         } else if (key == "occlusionculling") {
             std::string v = val;
             for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));

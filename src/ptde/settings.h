@@ -120,6 +120,8 @@ struct Settings {
     int shadow_map_resolution = 4096;
     // DrawMapPieces: 0 game, 1 adjacent (the rooms next to the player's too), 2 all (drawdist.h).
     int draw_map_pieces = 0;
+    // DrawMapObjects: with DrawMapPieces adjacent/all, the added rooms' objects are loaded and drawn too (drawdist.h).
+    bool draw_map_objects = true;
     // OcclusionCulling (occl.h): 0 off, 1 (true) the pieces DrawMapPieces adjacent/all add are skipped while hidden,
     // 2 (all) every map piece, the game's own too, whatever DrawMapPieces says.
     int occlusion_culling = 1;

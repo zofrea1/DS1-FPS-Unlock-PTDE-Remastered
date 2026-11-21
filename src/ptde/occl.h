@@ -16,6 +16,7 @@ void occl_set_inside(bool on);
 // most depth bias. A negative value keeps that parameter. Needs occl_install.
 void occl_set_zbias(bool on, float world = -1.0f, float max_bias = -1.0f);
 void occl_set_fx(int mode);
+void occl_set_objshadow(int mode);  // diagnostics: added objects out of the shadow maps (1) / other cameras (2)
 // The map pieces of a mirrored pass that SkipUnusedReflection does not send are not drawn either (1, default) or are
 // (0); 100 + N: the next N draws that read the mirrored scene in the log (diagnostics).
 void occl_set_refl(int on);

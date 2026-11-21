@@ -2661,6 +2661,9 @@ void run(const std::string& line) {
     } else if (c == "occlrefl") {
         occl_set_refl(static_cast<int>(num(1, 1)));
         out("occlrefl %ld", num(1, 1));
+    } else if (c == "occlobj") {
+        occl_set_objshadow(static_cast<int>(num(1, 0)));
+        out("occlobj %ld", num(1, 0));
     } else if (c == "occlfx") {
         occl_set_fx(static_cast<int>(num(1, 0)));
         out("occlfx %ld", num(1, 0));
@@ -2684,8 +2687,8 @@ void run(const std::string& line) {
         drawdist_set_detail(static_cast<int>(num(1, 1)));
         out("detailrules %ld", num(1, 1));
     } else if (c == "drawwiden") {
-        // drawwiden MASK: which managers adjacent/all widen (1 map pieces, 2 map effects, 4 point lights); send
-        // drawmode again afterwards so the draw masks are rebuilt.
+        // drawwiden MASK: which managers adjacent/all widen (1 map pieces, 2 map effects, 4 point lights, 8 objects);
+        // send drawmode again afterwards so the draw masks are rebuilt.
         drawdist_set_widen(static_cast<int>(num(1, 7)));
         out("drawwiden %ld", num(1, 7));
     } else if (c == "sway") {

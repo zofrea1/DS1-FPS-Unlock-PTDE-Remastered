@@ -133,6 +133,10 @@ uint32_t g_built_role_gen = 0;  // drawdist_role_gen() likewise
 // Model flag: drawn in place of a stand-in (DrawMapPieces' detail rules), whose test of the player inside it was made
 // against its surfaces there (drawdist.cpp's holds()), not its box.
 constexpr uint32_t kNoInside = 0x10000u;
+// Model flag: an object's model (WorldObjManImp), not a map piece's: culled like one, but never given the depth bias
+// (an added ladder against a wall the game draws must not sink into it).
+constexpr uint32_t kObject = 0x20000u;
+constexpr uint32_t kObjManVar = 0x0137D5F8;  // WorldObjManImp: +0x1C blocks, +0x20 entries 0xEC (+0x3C n, +0x40 objects)
 
 inline uint32_t hash_ptr(uint32_t p, int bits) { return ((p >> 3) * 2654435761u) >> (32 - bits); }
 
@@ -173,6 +177,38 @@ void build_models() {
                         t[h].key = fl;
                         t[h].flags |= 1u | (extra ? 2u : 4u) | (static_cast<uint32_t>(role >> 4) << 8) |
                                       ((role & 2) ? kNoInside : 0u);
+                        break;
+                    }
+                }
+            }
+        }
+        // The objects (DrawMapPieces adjacent/all load and draw the objects of the rooms they add, see drawdist.cpp):
+        // WorldObjManImp's blocks (0xEC each, the map piece manager's order) list their ObjIns (+0x3C count, +0x40
+        // the array, 0xC0 each, in the MSB's order): +0x14 its draw groups as live, +0x90 its ObjModel, whose +0x14 is
+        // the FlverModel its draws carry (as a map piece's MapModel). Added when its groups do not meet the game's own
+        // mask of its map (the same mask the game gives every manager of a block).
+        const uint32_t oman = *reinterpret_cast<const uint32_t*>(kObjManVar);
+        const int oblocks = oman ? *reinterpret_cast<const int*>(oman + 0x1C) : 0;
+        const uint32_t oarr = oman ? *reinterpret_cast<const uint32_t*>(oman + 0x20) : 0;
+        for (int b = 0; b < oblocks && b < 64 && oarr; ++b) {
+            const uint32_t blk = oarr + b * 0xEC;
+            const int n = *reinterpret_cast<const int*>(blk + 0x3C);
+            const uint32_t arr = *reinterpret_cast<const uint32_t*>(blk + 0x40);
+            if (!arr || n <= 0 || n > 4096) continue;
+            uint32_t own[4];
+            if (!drawdist_game_mask(b, own)) std::memcpy(own, reinterpret_cast<const void*>(blk + 0x0C), 16);
+            for (int i = 0; i < n; ++i) {
+                const uint32_t o = arr + i * 0xC0;
+                const uint32_t om = *reinterpret_cast<const uint32_t*>(o + 0x90);
+                const uint32_t fl = om ? *reinterpret_cast<const uint32_t*>(om + 0x14) : 0;
+                if (!fl) continue;
+                const auto* g = reinterpret_cast<const uint32_t*>(o + 0x14);
+                const bool extra = !((g[0] & own[0]) | (g[1] & own[1]) | (g[2] & own[2]) | (g[3] & own[3]));
+                uint32_t h = hash_ptr(fl, kModelBits);
+                for (int probe = 0; probe < kModelSlots; ++probe, h = (h + 1) & (kModelSlots - 1)) {
+                    if (t[h].key == 0 || t[h].key == fl) {
+                        t[h].key = fl;
+                        t[h].flags |= 1u | (extra ? 2u : 4u) | kObject;
                         break;
                     }
                 }
@@ -231,6 +267,37 @@ void build_fx_positions() {
     }
     g_fxpos_n[back] = n;
     InterlockedExchange(&g_fxpos_cur, back);
+}
+
+// Diagnostics (`occlfx 100+N`): the effects taken for added map effects, each logged once with the map effect matched.
+volatile LONG g_fxlog_left = 0;
+uint32_t g_fxlog_ents[256] = {};
+int g_fxlog_n = 0;
+void fxlog(uint32_t entity, const float* bb, const float* box) {
+    for (int i = 0; i < g_fxlog_n; ++i) {
+        if (g_fxlog_ents[i] == entity) return;
+    }
+    if (g_fxlog_n >= 256) return;
+    g_fxlog_ents[g_fxlog_n++] = entity;
+    InterlockedDecrement(&g_fxlog_left);
+    const LONG cur = g_fxpos_cur;
+    float near_d = -1.0f, mp[3] = {};
+    if (cur >= 0) {
+        const float c[3] = {(bb[0] + bb[4]) * 0.5f, (bb[1] + bb[5]) * 0.5f, (bb[2] + bb[6]) * 0.5f};
+        for (int i = 0, n = g_fxpos_n[cur]; i < n; ++i) {
+            const float* q = g_fxpos[cur][i].p;
+            if (q[0] < box[0] || q[0] > box[3] || q[1] < box[1] || q[1] > box[4] || q[2] < box[2] || q[2] > box[5]) continue;
+            const float d = std::sqrt((q[0] - c[0]) * (q[0] - c[0]) + (q[1] - c[1]) * (q[1] - c[1]) +
+                                      (q[2] - c[2]) * (q[2] - c[2]));
+            if (near_d < 0.0f || d < near_d) {
+                near_d = d;
+                std::memcpy(mp, q, 12);
+            }
+        }
+    }
+    LOG_INFO("[occlfx] added effect %08X (fx %08X): box %.1f %.1f %.1f .. %.1f %.1f %.1f; map effect at %.1f %.1f %.1f, "
+             "%.1f m from its centre", entity, *reinterpret_cast<const uint32_t*>(entity + 0x30), bb[0], bb[1], bb[2],
+             bb[4], bb[5], bb[6], mp[0], mp[1], mp[2], near_d);
 }
 
 // An effect's (grown) box holds an added map effect's position and none of the game's own.
@@ -731,6 +798,7 @@ void collect() {
 // Effect draw entities (vtable 0x11E7BC4: slot 10 = 0x558500 -> 0xBA4FD0, the FFX instance at +0x30): diagnostics
 // for now (entdump lists them with their first 0x100 bytes as floats).
 constexpr uint32_t kFxEntityVt = 0x011E7BC4;
+volatile LONG g_objshadow = 0;  // diagnostics: RemoteControl `occlobj N`
 volatile LONG g_fx_skip = 1;  // added map effects skipped while hidden (1); RemoteControl `occlfx 0|1`, 9: all out
 constexpr float kFxMargin = 1.0f;  // metres the effect's box grows by (its particles' size)
 int fx_decide_body(uint32_t entity, uint32_t ctx);
@@ -801,6 +869,7 @@ int fx_decide_body(uint32_t entity, uint32_t ctx) {
         return 0;
     }
     if (!fx_added(box)) return 0;
+    if (g_fxlog_left > 0) fxlog(entity, bb, box);
     Ent* s = find_ent(entity);
     if (!s) return 0;
     // Its particles move its box every frame: kept current, the evidence not reset (a model's box change means another
@@ -949,6 +1018,11 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
         ++g_st_refl_unused;
         return 1;
     }
+    if (g_objshadow && (mflags & kObject) && (mflags & 6) == 2) {
+        // Diagnostics (`occlobj N`): added objects left out of the shadow maps (1) or of every other camera (2).
+        const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
+        if (cam && (g_objshadow == 2 ? cam != g_main_cam : !perspective(cam))) return 1;
+    }
     const int r = decide_inner(entity, ctx, mflags);
     g_wrap_bias = false;
     if (r == 1 || !g_zbias) return r;
@@ -956,7 +1030,7 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     if (!cam || !perspective(cam)) return r;
     // The depth level: the detail rules' (bits 8-11, level + 1) or the generic rule's (an added piece 1, the game's 0).
     const uint32_t lv = (mflags >> 8) & 0xF;
-    const uint32_t level = lv ? lv - 1 : ((mflags & 6) == 2 ? 1u : 0u);
+    const uint32_t level = lv ? lv - 1 : ((mflags & 6) == 2 && !(mflags & kObject) ? 1u : 0u);
     if (level == 0) return r;
     // The camera's nearest distance to the piece's world box, and the near plane (projection +0xC8 = -near * q).
     const auto* c = reinterpret_cast<const float*>(cam);
@@ -1145,7 +1219,15 @@ void occl_set_mode(int mode) {
 
 int occl_mode() { return g_mode; }
 void occl_set_inside(bool on) { InterlockedExchange(&g_inside, on ? 1 : 0); }
-void occl_set_fx(int mode) { InterlockedExchange(&g_fx_skip, mode); }
+void occl_set_objshadow(int mode) { InterlockedExchange(&g_objshadow, mode); }
+void occl_set_fx(int mode) {
+    if (mode >= 100) {  // RemoteControl `occlfx 100+N`: log the next N effects taken for added map effects
+        g_fxlog_n = 0;
+        InterlockedExchange(&g_fxlog_left, mode - 100);
+        return;
+    }
+    InterlockedExchange(&g_fx_skip, mode);
+}
 bool occl_query_active() { return g_wrap_active; }
 
 void occl_note_reflection_read(unsigned stages) {

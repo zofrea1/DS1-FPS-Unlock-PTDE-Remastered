@@ -30,8 +30,14 @@
 // effects (WorldSfxManImp [0x137D6E4]: torches' fire, mist, embers) and the map's point lights
 // (WorldMapPointLightManImp [0x137D6EC]) after the game has written them (after 0xDE2C60 returns; before 0xE9BD70 at
 // 0xDE8198, right after the streaming masks are written); the renderer's own groups (GameRend+0x48, see kLoadSite) are
-// widened the same way. Characters, objects (with their physics and events), collisions and sounds keep the game's
-// own masks: the renderer draws only what is in the scene, so they are drawn where the game has them.
+// widened the same way. Since 2.7.1 (DrawMapObjects) the objects too (WorldObjManImp [0x137D5F8]: ladders, doors,
+// crates, barrels, item corpses; both masks, so they are loaded as when the player stands there: checked 2026-11-21 in
+// the Undead Burg with all, every one of its 528 objects stayed where the MSB puts it, crates and barrels only move
+// once broken; with the streaming mask alone left out they were not drawn). Characters, collisions and sounds keep
+// the game's own masks: the renderer draws only what is in the scene, so they are drawn where the game has them
+// (characters cannot be drawn without being loaded, and loading them wakes them: 2026-11-21 with all from the Undead
+// Burg bridge 137 more became active within a second, one of the Bell Gargoyles left its roof and their fight began,
+// rats walked off).
 //  adjacent: the floor's display groups and its draw groups: the pieces seen from this room and from the rooms next to
 //            it (the ledge grass from the overlook). Rooms farther away stay culled.
 //  all:      every group: every piece of the loaded maps wherever the player stands (the view's own culling still
@@ -124,6 +130,7 @@ constexpr Widened kWidened[] = {
     {0x0137D5F4, 0x5C, 0x0C, 0x1C},  // WorldMapManImp: map pieces
     {0x0137D6E4, 0x3C, 0x1C, 0x0C},  // WorldSfxManImp: map effects
     {0x0137D6EC, 0x2C, 0x0C, 0},     // WorldMapPointLightManImp: point lights
+    {0x0137D5F8, 0xEC, 0x0C, 0x1C},  // WorldObjManImp: objects (ladders, doors, crates, barrels, item corpses)
 };
 constexpr uint32_t kLodFn = 0x00F61CD0;
 // EffectLodDistance: the effect level checks' call to _ftol on the camera distance (CheckLevel 0xA33600,
@@ -133,7 +140,7 @@ constexpr uint32_t kFxDistSites[] = {0x00A33700, 0x00A33820, 0x00A339C2, 0x00A48
 constexpr uint8_t kLodHead[9] = {0x51, 0xF3, 0x0F, 0x10, 0x81, 0x50, 0x02, 0x00, 0x00};  // push ecx; movss xmm0,[ecx+250h]
 
 volatile LONG g_mode = 0;  // DrawMapPieces: 0 game, 1 adjacent, 2 all
-volatile LONG g_widen = 7;  // diagnostics (RemoteControl drawwiden): the widened managers, bit i = kWidened[i]
+volatile LONG g_widen = 15;  // diagnostics (RemoteControl drawwiden): the widened managers, bit i = kWidened[i]
 uint32_t g_get = kGetDisp;
 uint32_t g_build_draw = kBuildDraw;
 uint32_t g_stream_floor = kStreamFloor;
@@ -1015,7 +1022,7 @@ void drawdist_set_mode(int mode) {
     }
 }
 
-void drawdist_set_widen(int mask) { InterlockedExchange(&g_widen, mask & 7); }
+void drawdist_set_widen(int mask) { InterlockedExchange(&g_widen, mask & 15); }
 
 void drawdist_set_effect_lod(int percent) {
     if (!g_fx_on) {  // not installed: a site that could not be put back multiplies by 1
@@ -1077,11 +1084,11 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent) {
                   static_cast<unsigned>(kBuildDrawSite), static_cast<unsigned>(kStreamDoneSite));
     } else if (mode == 1) {
         LOG_INFO("DrawMapPieces = adjacent: the map pieces seen from the player's room and from the rooms next to it "
-                 "are drawn (the game: this room's only), with their effects and lights; characters and objects keep the "
-                 "game's rooms");
+                 "are drawn (the game: this room's only), with their effects and lights (objects: DrawMapObjects); "
+                 "characters keep the game's rooms");
     } else if (mode == 2) {
         LOG_INFO("DrawMapPieces = all: every map piece of the loaded maps is drawn wherever the player stands; "
-                 "with their effects and lights; characters and objects keep the game's rooms");
+                 "with their effects and lights (objects: DrawMapObjects); characters keep the game's rooms");
     }
     if (!g_lod_on) {
         LOG_ERROR("LodDistance: the game's code at %08X does not match this build; not used",

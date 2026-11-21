@@ -575,6 +575,13 @@ bool frame_install(const Settings& settings) {
             shadowmap_set_resolution(settings.shadow_map_resolution);
         }
         drawdist_install(settings.draw_map_pieces, settings.lod_distance, settings.effect_lod_distance);
+        drawdist_set_widen(settings.draw_map_objects ? 15 : 7);
+        if (settings.draw_map_pieces != 0) {
+            LOG_INFO("DrawMapObjects = %s: %s", settings.draw_map_objects ? "true" : "false",
+                     settings.draw_map_objects ? "the objects of the rooms DrawMapPieces adds are loaded and drawn too "
+                                                 "(ladders, doors, crates, barrels, item corpses)"
+                                               : "objects keep the game's rooms");
+        }
         // OcclusionCulling: true acts on the pieces DrawMapPieces adds (nothing to do with game), all on every map
         // piece. A diagnostics build installs it always, for Ctrl+Shift+O (off / added / all) and RemoteControl.
         const int occl_mode = settings.occlusion_culling == 2 ? 2
