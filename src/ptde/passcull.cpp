@@ -166,6 +166,7 @@ bool g_prev_reads = false;    // the last frame had reads
 bool g_hidden_reads = false;  // the latest resolved frame had reads, all hidden
 int g_skip_run = 0;
 volatile LONG g_vis = 1;      // the queries on (RemoteControl `passcull 1 0 0` off)
+volatile LONG g_nomask = 0;   // development: every bound stage counts as read (before 2026-11-21)
 volatile LONG g_stat_hidden = 0;
 // development counters (RemoteControl `passcull` prints them)
 long g_c_first = 0, g_c_occl = 0, g_c_noq = 0, g_c_vis = 0, g_c_hid = 0, g_c_wait = 0, g_c_q = 0;
@@ -419,7 +420,7 @@ HRESULT WINAPI hk_clear(IDirect3DDevice9* dev, DWORD count, const D3DRECT* rects
 }
 
 HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
-    if (g_mode != 0) g_ps_mask = sampler_mask(ps);
+    if (g_mode != 0) g_ps_mask = g_nomask ? 0xFFFFu : sampler_mask(ps);
     return o_set_ps(dev, ps);
 }
 
@@ -560,6 +561,7 @@ void passcull_counters(long out[7]) {
 bool passcull_skipping() { return g_in_pass && g_skipping; }
 void passcull_debug_color(unsigned long color) { InterlockedExchange(&g_dbg_color, static_cast<LONG>(color)); }
 void passcull_set_queries(int on) { InterlockedExchange(&g_vis, on ? 1 : 0); }
+void passcull_set_nomask(int on) { InterlockedExchange(&g_nomask, on ? 1 : 0); }
 void passcull_debug_copy(unsigned long color) { InterlockedExchange(&g_dbg_copy, static_cast<LONG>(color)); }
 long passcull_take_hidden() { return InterlockedExchange(&g_stat_hidden, 0); }
 

@@ -24,6 +24,8 @@ bool passcull_skipping();
 void passcull_debug_color(unsigned long color);
 // Development: the reading draws' occlusion queries on (default) or off (any read keeps the scene drawn).
 void passcull_set_queries(int on);
+// Development: 1 = any bound stage counts as read, whatever the shader samples (the behaviour before 2026-11-21).
+void passcull_set_nomask(int on);
 // Development: the kept copy painted COLOR (0 = off): a skipped pass whose readers show is seen at once.
 void passcull_debug_copy(unsigned long color);
 // Frames since the last call whose reads were all hidden.

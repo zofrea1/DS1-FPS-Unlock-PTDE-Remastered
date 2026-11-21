@@ -2312,6 +2312,7 @@ void run(const std::string& line) {
         if (t.size() > 2) passcull_debug_color(static_cast<unsigned long>(std::strtoul(t[2].c_str(), nullptr, 16)));
         if (t.size() > 3) passcull_set_queries(static_cast<int>(num(3, 1)));
         if (t.size() > 4) passcull_debug_copy(static_cast<unsigned long>(std::strtoul(t[4].c_str(), nullptr, 16)));
+        if (t.size() > 5) passcull_set_nomask(static_cast<int>(num(5, 0)));
         long c[7] = {};
         passcull_counters(c);
         out("passcull %d (unused for %d frames; read at once: first %ld, in a query %ld, no query %ld; queried reads %ld; "
