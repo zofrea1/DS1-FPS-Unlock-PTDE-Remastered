@@ -66,11 +66,18 @@
 //    (m2372B1), drawn from the bridge's deck where the parapets hide its edges, looked like a broken dark slab from
 //    Solaire's platform next to it (user report 2026-11-21);
 //  - a stand-in that would be drawn is hidden and the finer pieces covering it are drawn in its place, from any room
-//    (their groups set to all ones), unless the game draws all of them itself (its own picture) or the player stands
-//    in one of those pieces' bounds (the occlusion code leaves a piece of another room holding the player out);
-//  - of two overlapping pieces both drawn (not both by the game itself), the coarser is drawn one depth level farther
-//    than the finer (occl.cpp's depth bias: a level is about 10 cm at the piece's nearest point; the game's own pieces
-//    start at level 0, added ones at 1), so the finer wins where they overlap and the coarser's other surfaces stay.
+//    (their groups set to all ones), unless the game draws all of them itself (its own picture) or the player is
+//    within one of those pieces' surfaces (their 2 m occupancy grids; the occlusion code leaves a piece of another
+//    room holding the player out);
+//  - of two other overlapping pieces with no draw group in common (versions of the same surfaces for different
+//    rooms, usually two tessellations of one shape rather than a coarse and a detailed copy: drawn together they cut
+//    through each other where they are not in one plane, as the cliff and wall seen along the Undead Burg bridge did,
+//    user report 2026-11-21), one is drawn: the player's room's own, or of two others the finer;
+//  - of the same model placed twice (rooms that differ in light or fog), the player's room's copy;
+//  - of two overlapping pieces still both drawn (not both by the game itself), the coarser is drawn one depth level
+//    farther than the finer (occl.cpp's depth bias: a level is about 10 cm at the piece's nearest point; the game's
+//    own pieces start at level 0, added ones at 1), so the finer wins where they overlap and the coarser's other
+//    surfaces stay.
 // Hidden means its draw groups cleared in the map piece manager ([0x137D5F4]: +0x1C the blocks' count, +0x20 the
 // blocks, 0x5C each, one per map in a fixed order; a block's +0x2C its pieces' count, +0x30 its pieces, 0x50 each:
 // +0x04 the id (block << 24 | index), +0x08 the draw groups the frame's culling tests). Everything is put back in game
@@ -785,16 +792,18 @@ void detail_tick_body() {
     if (!floor) return;  // loading or no floor yet: keep what is set
     float at[3] = {};
     const bool at_ok = player_at(chr, at);
-    // Each piece by its own map's masks: seen (the live draw mask, ours ORed in: what would be drawn) and own (the game's
-    // own mask: what the game itself draws from here). The player's floor groups only number the player's map's rooms.
+    // Each piece by its own map's masks: seen (the live draw mask, ours ORed in: what would be drawn) and own (the
+    // game's own mask: what the game itself draws from here). The player's floor groups only number the player's map's
+    // rooms.
     static uint32_t* live[kDetPieces];
-    static bool seen[kDetPieces], own[kDetPieces], drawn[kDetPieces], forced[kDetPieces];
+    static bool seen[kDetPieces], own[kDetPieces], drawn[kDetPieces], forced[kDetPieces], covering[kDetPieces];
     static uint8_t level[kDetPieces];
+    static uint8_t why[kDetPieces];  // why it is left out: 1 backdrop, 2 stand-in, 3 twin, 4 the same model twice
     for (size_t i = 0; i < kDetPieces; ++i) {
         const auto& p = D::kPieces[i];
         live[i] = live_groups(p);
-        seen[i] = own[i] = drawn[i] = forced[i] = false;
-        level[i] = 0;
+        seen[i] = own[i] = drawn[i] = forced[i] = covering[i] = false;
+        level[i] = why[i] = 0;
         if (!live[i]) {
             g_state[i] = kAsIs;  // its map is gone (or not this build's): nothing of ours is left there
             continue;
@@ -809,6 +818,7 @@ void detail_tick_body() {
         own[i] = any_of(p.groups, bgame);
         // A coarse far backdrop only where the game draws it.
         drawn[i] = seen[i] && (own[i] || !(p.flags & D::kBackdrop));
+        if (seen[i] && !drawn[i]) why[i] = 1;
     }
     // Stand-ins: hidden while the finer pieces covering them are drawn in their place (from any room). Not where the
     // game draws all of them itself (its own picture), nor while the player stands in one of those pieces' bounds (the
@@ -824,14 +834,17 @@ void detail_tick_body() {
             for (int c = 0; c < st.count && ok; ++c) {
                 const size_t w = D::kCover[st.first + c];
                 const auto& wp = D::kPieces[w];
-                ok = live[w] && (drawn[w] || own[w] || !(wp.flags & D::kBackdrop)) && !(at_ok && !own[w] && holds(wp, at));
+                ok = live[w] && (drawn[w] || own[w] || !(wp.flags & D::kBackdrop)) &&
+                     !(at_ok && !own[w] && holds(wp, at));
                 all_own = all_own && own[w];
             }
             if (!ok || all_own) continue;
             drawn[s] = false;
+            why[s] = 2;
             changed = true;
             for (int c = 0; c < st.count; ++c) {
                 const size_t w = D::kCover[st.first + c];
+                covering[w] = true;
                 if (!drawn[w]) drawn[w] = forced[w] = true;
             }
         }
@@ -846,6 +859,25 @@ void detail_tick_body() {
         const auto keep = [&](size_t i) { return (own[i] && !forced[i] ? 2 : 0) + (forced[i] ? 1 : 0); };
         const size_t h = keep(pr.a) >= keep(pr.b) ? pr.b : pr.a;
         drawn[h] = forced[h] = false;
+        why[h] = 4;
+    }
+    // Twins: two overlapping pieces with no draw group in common, versions of the same surfaces for different rooms
+    // (the game never draws both). Unless a stand-in's whole replacement, they are not a coarse copy and a detailed
+    // one but two tessellations of the same shape, which cut through each other where they are not in one plane
+    // (user report 2026-11-21: the cliff and wall seen along the Undead Burg bridge, the game's m2000B1 and m2520B1
+    // with m2380B1 of another room). One is drawn: the player's room's own, or of two others the finer.
+    for (size_t k = 0; k < kDetPairs; ++k) {
+        const auto& pr = D::kPairs[k];
+        if (pr.winner > 1 || !drawn[pr.a] || !drawn[pr.b]) continue;
+        const auto& pa = D::kPieces[pr.a];
+        const auto& pb = D::kPieces[pr.b];
+        if (any_of(pa.groups, pb.groups)) continue;              // they share a room: the depth levels below
+        if (covering[pr.a] || covering[pr.b]) continue;          // drawn in a stand-in's place: never left out
+        const bool oa = own[pr.a] && !forced[pr.a], ob = own[pr.b] && !forced[pr.b];
+        if (oa && ob) continue;                                  // the game's own picture
+        const size_t h = oa ? pr.b : ob ? pr.a : (pr.winner ? pr.a : pr.b);
+        drawn[h] = false;
+        why[h] = 3;
     }
     // Write what is wanted: hidden (drawn otherwise), drawn from any room, or the piece's own groups.
     for (size_t i = 0; i < kDetPieces; ++i) {
@@ -855,15 +887,14 @@ void detail_tick_body() {
         if (want == g_state[i]) continue;
         std::memcpy(live[i], written(want, p), 16);
         g_state[i] = want;
-        static bool told[kDetPieces] = {};
-        if (want == kHidden && !told[i]) {
-            told[i] = true;
-            if (p.flags & D::kBackdrop) {
-                LOG_INFO("DrawMapPieces: %s (map %s), a far backdrop, left to the rooms the game draws it from", p.name, p.map);
-            } else {
-                LOG_INFO("DrawMapPieces: %s (map %s) hidden: finer pieces of the same surfaces drawn in its place", p.name,
-                         p.map);
-            }
+        static uint8_t told[kDetPieces] = {};  // the reasons logged (bits)
+        if (want == kHidden && why[i] && !(told[i] & (1u << why[i]))) {
+            told[i] = static_cast<uint8_t>(told[i] | (1u << why[i]));
+            static const char* const kWhy[] = {"", "a far backdrop, left to the rooms the game draws it from",
+                                               "hidden: finer pieces of the same surfaces drawn in its place",
+                                               "hidden: another room's version of surfaces drawn here (no z-fighting)",
+                                               "hidden: the same model drawn for this room"};
+            LOG_INFO("DrawMapPieces: %s (map %s), %s", p.name, p.map, kWhy[why[i]]);
         }
     }
     // Depth levels: where two overlapping pieces are both drawn (not both by the game itself), the coarser is drawn one
