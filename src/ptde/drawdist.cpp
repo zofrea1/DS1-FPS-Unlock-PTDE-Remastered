@@ -440,7 +440,12 @@ bool calls(uint32_t site, uint32_t from) {
 // user report 2026-11-20). The characters below also pass that test wherever their map is loaded (with all, or with
 // adjacent too where their entry says so), so they are seen from as far as the widened groups reach (the crow from the
 // aqueduct to the Undead Burg). Only characters checked to be scenery: no event of theirs depends on where the player
-// is, and being active early starts nothing.
+// is, and being active early starts nothing. While one is active it is also updated every frame: WorldChrMan's pass
+// (0xE3F7D7..0xE3F8D7) gives a character the player's room does not display the rate -2 (updated now and then: its
+// animation moved in steps from afar) and an inactive one -1 (none), unless chr+0x1FD bit 0 fixes the rate (chr+0xF4)
+// as it stands, as the event command "Set Network Update Rate: Always" does for the Hellkite; that bit with rate 0 is
+// set while the character is active ([chr+0xC]+8 = 2) and taken off again when it is not (or DrawMapPieces is game),
+// so the game's -1 applies to it inactive as before.
 // (Making every character active was what woke whole maps up to 2.7.0: see the top.)
 struct Scenery {
     int entity;
@@ -456,6 +461,7 @@ constexpr int kSceneryCount = static_cast<int>(sizeof(kScenery) / sizeof(kScener
 constexpr uint32_t kChrTestSite = 0x00E3EA13;  // call 0x42DAA0 in 0xE3E870's loop (esi = the character)
 constexpr uint32_t kMaskAny = 0x0042DAA0;
 uint32_t g_scenery_chr[kSceneryCount] = {};  // their characters this frame (game thread; 0 when not loaded)
+uint32_t g_scenery_fixed[kSceneryCount] = {};  // the character whose rate we fixed (its bit 0 was clear before)
 volatile LONG g_scenery_on = 0;              // all, and the test site redirected
 volatile LONG g_scenery_told = 0;
 
@@ -508,9 +514,29 @@ __declspec(naked) void chr_test() {
     }
 }
 
+// Each frame (game thread): their characters, and the rate of those kept active (the bit taken off again when the
+// option or the mode is switched off).
 void scenery_tick() {
-    if (!g_scenery_on || g_mode == 0) return;
-    for (int k = 0; k < kSceneryCount; ++k) g_scenery_chr[k] = chr_by_entity(kScenery[k].entity);
+    const LONG mode = g_mode;
+    for (int k = 0; k < kSceneryCount; ++k) {
+        const bool wanted = g_scenery_on && mode >= kScenery[k].from_mode;
+        const uint32_t chr = wanted || g_scenery_fixed[k] ? chr_by_entity(kScenery[k].entity) : 0;
+        if (g_scenery_fixed[k] && g_scenery_fixed[k] != chr) g_scenery_fixed[k] = 0;  // gone (its map unloaded)
+        g_scenery_chr[k] = wanted ? chr : 0;
+        const uint32_t state = chr ? *reinterpret_cast<const uint32_t*>(chr + 0xC) : 0;
+        const bool active = state && *reinterpret_cast<const int32_t*>(state + 8) == 2;
+        auto* flags = chr ? reinterpret_cast<uint8_t*>(chr + 0x1FD) : nullptr;
+        if (chr && active && wanted) {
+            if (!g_scenery_fixed[k] && !(*flags & 1)) g_scenery_fixed[k] = chr;  // the bit is ours to take off
+            if (g_scenery_fixed[k] == chr) {
+                *flags = static_cast<uint8_t>(*flags | 1);
+                *reinterpret_cast<int32_t*>(chr + 0xF4) = 0;
+            }
+        } else if (chr && g_scenery_fixed[k] == chr) {
+            *flags = static_cast<uint8_t>(*flags & ~1);  // the game's rate again (-1 while inactive)
+            g_scenery_fixed[k] = 0;
+        }
+    }
 }
 
 // --- stand-ins (see the top) -----------------------------------------------------------------------------------
