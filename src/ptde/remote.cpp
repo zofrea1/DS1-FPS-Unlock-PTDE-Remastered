@@ -2660,6 +2660,11 @@ void run(const std::string& line) {
     } else if (c == "capture") {
         profile_request_capture();
         out("capture requested (the [prof] lines go to the main log in about 12 s)");
+    } else if (c == "dofrepair") {
+        // dofrepair N: the next N direct depth of field composites are put right at once (dof_repair), as in a frame
+        // that reads its targets before the camera blur; the picture should stay the same.
+        resolution_force_dof_repair(static_cast<int>(num(1, 1)));
+        out("dofrepair %ld", num(1, 1));
     } else if (c == "swapoff") {
         resolution_set_swap_off_mask(static_cast<int>(num(1, 0)));
         out("swapoff 0x%lX", num(1, 0));

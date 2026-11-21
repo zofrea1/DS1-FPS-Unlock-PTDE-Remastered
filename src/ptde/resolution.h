@@ -27,6 +27,7 @@ void resolution_reset();
 void resolution_set_present_reduce(bool on);
 // Diagnostics: switch single replacements off (bit i = kSwaps[i], bit 7 = the area-average copies).
 void resolution_set_swap_off_mask(int mask);
+void resolution_force_dof_repair(int frames);  // RemoteControl `dofrepair N` (diagnostics)
 
 // The depth of field's smooth composite on or off (RemoteControl `dof`, for comparing with the game's own).
 void resolution_set_smooth_dof(bool on);

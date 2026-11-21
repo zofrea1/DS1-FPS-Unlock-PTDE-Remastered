@@ -550,6 +550,7 @@ bool g_dof_copy_kept = false;                 // and the copy it read the scene 
 bool g_dof_direct_off = false;
 bool g_dof_direct_logged = false;
 LONG g_dof_repairs = 0;
+volatile LONG g_dof_force_repair = 0;  // RemoteControl `dofrepair N`: the next N direct composites put right at once
 IDirect3DBaseTexture9* g_alpha_alias = nullptr;  // read as the scene itself by alpha_of (the copy, while drawn from)
 void dof_repair(IDirect3DDevice9* dev);
 
@@ -2263,6 +2264,10 @@ bool dof_direct(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const 
     g_scopy.valid = false;  // the scene holds the depth of field now
     g_dof_direct = SUCCEEDED(*hr);
     g_dof_copy_kept = g_dof_direct;
+    if (g_dof_direct && g_dof_force_repair > 0) {
+        InterlockedDecrement(&g_dof_force_repair);
+        dof_repair(dev);  // a test: the camera blur then draws its copy from the depth of field's own target
+    }
     if (!g_dof_direct_logged && g_dof_direct) {
         g_dof_direct_logged = true;
         LOG_INFO("Resolution: the depth of field is drawn straight into the scene while the camera blur is off (its "
@@ -3080,6 +3085,7 @@ void resolution_set_effects(int mode) {
 }
 
 void resolution_set_swap_off_mask(int mask) { g_swap_off_mask = mask; }
+void resolution_force_dof_repair(int frames) { InterlockedExchange(&g_dof_force_repair, frames); }
 
 void resolution_set_present_reduce(bool on) {
     g_reduce_enabled = on;
