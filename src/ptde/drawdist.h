@@ -24,4 +24,4 @@ void drawdist_set_effect_lod(int percent);  // RemoteControl `fxlodpct N`
 void drawdist_set_widen(int mask);
 // A few scenery characters (Firelink's crow, with adjacent and all) are kept active wherever their map is loaded, so
 // they are seen from farther (drawdist.cpp's kScenery). RemoteControl `scenery 0|1`.
-void drawdist_set_scenery(bool on);
+void drawdist_set_scenery(int on);  // 2: kept active at the game's rate (diagnostics)

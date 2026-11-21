@@ -449,90 +449,148 @@ bool calls(uint32_t site, uint32_t from) {
 // (Making every character active was what woke whole maps up to 2.7.0: see the top.)
 struct Scenery {
     int entity;
-    int from_mode;  // the lowest DrawMapPieces mode it applies with: 1 adjacent, 2 all
+    int from_mode;     // the lowest DrawMapPieces mode it applies with: 1 adjacent, 2 all
+    int hostile[2];    // event flags that make it hostile (0: none): then the game's rooms again, so an angered
+                       // character does not follow the player out of them
     const char* what;
 };
+// Firelink Shrine (m10_02), checked 2026-11-20 against every map's events (and the template events they are passed
+// to) and their talk scripts: no event waits for one of them to be loaded (no 4[07] backread condition, the
+// Solaire kind), the events that move, anger, kill or remove them go by event flags, the player's map, damage and
+// HP; every flag their talk scripts set follows a spoken line, a menu choice or the player within 5 m. The
+// Asylum's arrival event (11020001) keeps them all unloaded until the crow has landed (backread removed, chr+0x14,
+// which the test above keeps). One step depends on the Fire Keeper being active: 11020110 sends her talk script
+// 1701 once flag 11020609 is set and waits for its answer (flag 11020101): it may now come while the player is still
+// on the aqueduct, with the same result. Left out: the Undead Merchant's Firelink copy (6240, c2510 on the aqueduct),
+// whose template event (11020504) gives AI commands, short warps and a home area. Hostile flags from their
+// hostility events (11020510 and 11020501-11020503). Each with adjacent too (the user's choice, 2026-11-20).
 constexpr Scenery kScenery[] = {
     // c3510 on the ruins north of the bonfire. Its one event (11025050) makes it immortal and, once its HP is below
     // 30%, plays its fly-away animation (7000) and turns its AI off.
-    {1020100, 1, "Firelink Shrine's crow"},  // with adjacent too (the user's choice, 2026-11-20)
+    {1020100, 1, {0, 0}, "Firelink Shrine's crow"},
+    {6270, 1, {1461, 0}, "the Crestfallen Warrior"},
+    {6060, 1, {0, 0}, "the Fire Keeper"},  // in her cell: immortal, never hostile
+    {6031, 1, {1096, 0}, "Big Hat Logan (Firelink)"},
+    {6041, 1, {1114, 0}, "Griggs of Vinheim (Firelink)"},
+    {6070, 1, {1176, 0}, "Rhea of Thorolund (Firelink)"},
+    {6080, 1, {1197, 1195}, "Petrus of Thorolund"},
+    {6090, 1, {1213, 0}, "Vince of Thorolund"},
+    {6100, 1, {1223, 0}, "Nico of Thorolund"},
+    {6131, 1, {1253, 0}, "Laurentius (Firelink)"},
+    {6181, 1, {1314, 0}, "Ingward (Firelink)"},
+    {6261, 1, {1434, 0}, "Domhnall of Zena (Firelink)"},
+    {6287, 1, {1512, 0}, "Siegmeyer of Catarina (Firelink)"},
+    {6292, 1, {1547, 0}, "Sieglinde of Catarina (Firelink)"},
+    {6301, 1, {1574, 0}, "Knight Lautrec (Firelink)"},
+    {6322, 1, {1627, 0}, "Trusty Patches (Firelink)"},
+    {6330, 1, {0, 0}, "Kingseeker Frampt"},  // leaves when attacked (11020425), never fights
 };
 constexpr int kSceneryCount = static_cast<int>(sizeof(kScenery) / sizeof(kScenery[0]));
 constexpr uint32_t kChrTestSite = 0x00E3EA13;  // call 0x42DAA0 in 0xE3E870's loop (esi = the character)
 constexpr uint32_t kMaskAny = 0x0042DAA0;
-uint32_t g_scenery_chr[kSceneryCount] = {};  // their characters this frame (game thread; 0 when not loaded)
+// Their characters as WorldChrMan's loop last passed them (game thread): it visits every character of the loaded maps
+// each frame, so the entity id at chr+0x208 names them there without the event system's lookup (17 of those a frame
+// cost the game thread about 0.28 ms). A character not passed for two frames is gone (its map unloaded): its pointer is
+// not used again.
+constexpr uint32_t kChrEntity = 0x208;
+uint32_t g_scenery_chr[kSceneryCount] = {};    // the character last passed
+uint32_t g_scenery_seen[kSceneryCount] = {};   // the frame it was (g_scenery_frame)
+uint8_t g_scenery_want[kSceneryCount] = {};    // kept active this frame (mode, option, not hostile)
 uint32_t g_scenery_fixed[kSceneryCount] = {};  // the character whose rate we fixed (its bit 0 was clear before)
-volatile LONG g_scenery_on = 0;              // all, and the test site redirected
+uint32_t g_scenery_frame = 1;
+volatile LONG g_scenery_on = 0;  // the test site redirected and not switched off (RemoteControl `scenery 0`); 2:
+                                 // kept active at the game's rate (RemoteControl `scenery 2`, diagnostics)
 volatile LONG g_scenery_told = 0;
 
-// The character with an MSB entity id (the event system's lookup: eax = the id, returns eax), or 0.
-uint32_t chr_by_entity(int entity) {
-    uint32_t r = 0;
+// An event flag (EventFlagMan [0x137D7D4], 0xD38C40: eax = the manager, cl = 0, push id, returns al), or false.
+bool flag_on(int id) {
+    const uint32_t efm = *reinterpret_cast<const uint32_t*>(0x0137D7D4);
+    if (!efm) return false;
+    uint8_t on = 0;
     __try {
         __asm {
-            mov eax, entity
-            mov edx, 0x00D6C360
+            push id
+            xor ecx, ecx
+            mov eax, efm
+            mov edx, 0x00D38C40
             call edx
-            mov r, eax
+            mov on, al
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        r = 0;
+        on = 0;
     }
-    return r;
+    return on != 0;
 }
 
-int __cdecl scenery_wanted(uint32_t chr) {
-    const LONG mode = g_mode;
-    if (!g_scenery_on || mode == 0 || !chr) return 0;
+// For every character the loop tests (cdecl, from chr_test): the game's answer `ok`, or yes for one of ours kept
+// active; ours are noted for scenery_tick.
+int __cdecl scenery_check(uint32_t chr, int ok) {
+    if (!g_scenery_on || !chr) return ok;
+    const int id = *reinterpret_cast<const int*>(chr + kChrEntity);
+    if (id != 1020100 && (id < 6000 || id > 6999)) return ok;  // every entity in the table
     for (int k = 0; k < kSceneryCount; ++k) {
-        if (chr == g_scenery_chr[k] && mode >= kScenery[k].from_mode) {
-            if (!(g_scenery_told & (1 << k))) {
-                InterlockedOr(&g_scenery_told, 1 << k);
-                LOG_INFO("DrawMapPieces: %s kept active outside its rooms (seen from farther, at the game's lower update "
-                         "rate there)", kScenery[k].what);
-            }
-            return 1;
+        if (id != kScenery[k].entity) continue;
+        g_scenery_chr[k] = chr;
+        g_scenery_seen[k] = g_scenery_frame;
+        // Only one that is shown (chr+0x1FD bit 7, readable while it is inactive too: clear for the characters an
+        // event keeps disabled, such as those who have not come to the shrine yet).
+        if (ok || !g_scenery_want[k] || !(*reinterpret_cast<const uint8_t*>(chr + 0x1FD) & 0x80)) return ok;
+        if (!(g_scenery_told & (1 << k))) {
+            InterlockedOr(&g_scenery_told, 1 << k);
+            LOG_INFO("DrawMapPieces: %s kept active outside its rooms (seen from farther, updated every frame)",
+                     kScenery[k].what);
         }
+        return 1;
     }
-    return 0;
+    return ok;
 }
 
-// In place of the call to 0x42DAA0 at kChrTestSite: the game's answer, or yes for a scenery character with all.
+// In place of the call to 0x42DAA0 at kChrTestSite: the game's answer, then scenery_check's.
 __declspec(naked) void chr_test() {
     __asm {
         mov edx, 0x0042DAA0
         call edx
-        test al, al
-        jnz done
         push ecx
+        movzx eax, al
+        push eax
         push esi
-        call scenery_wanted
-        add esp, 4
+        call scenery_check
+        add esp, 8
         pop ecx
-    done:
         ret
     }
 }
 
-// Each frame (game thread): their characters, and the rate of those kept active (the bit taken off again when the
-// option or the mode is switched off).
+// Each frame (game thread, before WorldChrMan's pass): which are kept active, and the update rate of those that are.
 void scenery_tick() {
     const LONG mode = g_mode;
+    const uint32_t frame = ++g_scenery_frame;
+    const bool flags_now = (frame % 10) == 0;  // the hostile flags every tenth frame
     for (int k = 0; k < kSceneryCount; ++k) {
-        const bool wanted = g_scenery_on && mode >= kScenery[k].from_mode;
-        const uint32_t chr = wanted || g_scenery_fixed[k] ? chr_by_entity(kScenery[k].entity) : 0;
+        const Scenery& sc = kScenery[k];
+        const bool on = g_scenery_on && mode >= sc.from_mode;
+        if (!on) {
+            g_scenery_want[k] = 0;
+        } else if (flags_now || !g_scenery_want[k]) {
+            const bool hostile = (sc.hostile[0] && flag_on(sc.hostile[0])) || (sc.hostile[1] && flag_on(sc.hostile[1]));
+            g_scenery_want[k] = hostile ? 0 : 1;
+        }
+        const uint32_t chr = frame - g_scenery_seen[k] <= 2 ? g_scenery_chr[k] : 0;
         if (g_scenery_fixed[k] && g_scenery_fixed[k] != chr) g_scenery_fixed[k] = 0;  // gone (its map unloaded)
-        g_scenery_chr[k] = wanted ? chr : 0;
-        const uint32_t state = chr ? *reinterpret_cast<const uint32_t*>(chr + 0xC) : 0;
+        if (!chr) continue;
+        const uint32_t state = *reinterpret_cast<const uint32_t*>(chr + 0xC);
         const bool active = state && *reinterpret_cast<const int32_t*>(state + 8) == 2;
-        auto* flags = chr ? reinterpret_cast<uint8_t*>(chr + 0x1FD) : nullptr;
-        if (chr && active && wanted) {
+        auto* flags = reinterpret_cast<uint8_t*>(chr + 0x1FD);
+        // Shown (chr+0x1FD bit 7: set for the characters an event has not disabled; at a new game's Firelink the crow,
+        // the Crestfallen Warrior, the Fire Keeper and Petrus, the others clear until they arrive): updated every
+        // frame. One not there yet stays active at the game's rate.
+        if (active && g_scenery_want[k] && (*flags & 0x80) && g_scenery_on == 1) {
             if (!g_scenery_fixed[k] && !(*flags & 1)) g_scenery_fixed[k] = chr;  // the bit is ours to take off
             if (g_scenery_fixed[k] == chr) {
                 *flags = static_cast<uint8_t>(*flags | 1);
                 *reinterpret_cast<int32_t*>(chr + 0xF4) = 0;
             }
-        } else if (chr && g_scenery_fixed[k] == chr) {
+        } else if (g_scenery_fixed[k] == chr) {
             *flags = static_cast<uint8_t>(*flags & ~1);  // the game's rate again (-1 while inactive)
             g_scenery_fixed[k] = 0;
         }
@@ -688,8 +746,8 @@ void drawdist_tick() {
     }
 }
 
-void drawdist_set_scenery(bool on) {
-    InterlockedExchange(&g_scenery_on, on && calls(kChrTestSite, reinterpret_cast<uint32_t>(&chr_test)) ? 1 : 0);
+void drawdist_set_scenery(int on) {
+    InterlockedExchange(&g_scenery_on, on && calls(kChrTestSite, reinterpret_cast<uint32_t>(&chr_test)) ? (on == 2 ? 2 : 1) : 0);
 }
 
 void drawdist_set_mode(int mode) {
