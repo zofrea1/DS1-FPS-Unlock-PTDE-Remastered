@@ -430,6 +430,86 @@ bool calls(uint32_t site, uint32_t from) {
     return p[0] == 0xE8 && site + 5 + rel == from;
 }
 
+// --- scenery characters -------------------------------------------------------------------------------------------
+// Characters keep the game's rooms: each frame 0xE3E870 (WorldChrMan, from 0xDE81F0) walks every character of the
+// loaded maps and tests its groups (0x456B50) against its block's streaming mask with 0x42DAA0 at 0xE3EA13 (eax = the
+// AND of the two, al = any bit set); a character that passes is made active ([chr+0xC]+0xC = 2) unless an event has
+// turned it off (chr+0x14), one that does not is made inactive (0) and is neither updated nor drawn. A loaded,
+// active character the player's room does not display is drawn wherever adjacent or all widen the renderer's groups,
+// at the lower update rate the game keeps for characters it believes unseen (Firelink's crow from below its ruins,
+// user report 2026-11-20). With all, the characters below also pass that test wherever their map is loaded, so they
+// are seen from as far as the widened groups reach (the crow from the aqueduct to the Undead Burg). Only characters
+// checked to be scenery: no event of theirs depends on where the player is, and being active early starts nothing.
+// (Making every character active was what woke whole maps up to 2.7.0: see the top.)
+struct Scenery {
+    int entity;
+    const char* what;
+};
+constexpr Scenery kScenery[] = {
+    // c3510 on the ruins north of the bonfire. Its one event (11025050) makes it immortal and, once its HP is below
+    // 30%, plays its fly-away animation (7000) and turns its AI off.
+    {1020100, "Firelink Shrine's crow"},
+};
+constexpr int kSceneryCount = static_cast<int>(sizeof(kScenery) / sizeof(kScenery[0]));
+constexpr uint32_t kChrTestSite = 0x00E3EA13;  // call 0x42DAA0 in 0xE3E870's loop (esi = the character)
+constexpr uint32_t kMaskAny = 0x0042DAA0;
+uint32_t g_scenery_chr[kSceneryCount] = {};  // their characters this frame (game thread; 0 when not loaded)
+volatile LONG g_scenery_on = 0;              // all, and the test site redirected
+volatile LONG g_scenery_told = 0;
+
+// The character with an MSB entity id (the event system's lookup: eax = the id, returns eax), or 0.
+uint32_t chr_by_entity(int entity) {
+    uint32_t r = 0;
+    __try {
+        __asm {
+            mov eax, entity
+            mov edx, 0x00D6C360
+            call edx
+            mov r, eax
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        r = 0;
+    }
+    return r;
+}
+
+int __cdecl scenery_wanted(uint32_t chr) {
+    if (!g_scenery_on || g_mode != 2 || !chr) return 0;
+    for (int k = 0; k < kSceneryCount; ++k) {
+        if (chr == g_scenery_chr[k]) {
+            if (!(g_scenery_told & (1 << k))) {
+                InterlockedOr(&g_scenery_told, 1 << k);
+                LOG_INFO("DrawMapPieces = all: %s kept active outside its rooms (seen from farther, at the game's lower "
+                         "update rate there)", kScenery[k].what);
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// In place of the call to 0x42DAA0 at kChrTestSite: the game's answer, or yes for a scenery character with all.
+__declspec(naked) void chr_test() {
+    __asm {
+        mov edx, 0x0042DAA0
+        call edx
+        test al, al
+        jnz done
+        push ecx
+        push esi
+        call scenery_wanted
+        add esp, 4
+        pop ecx
+    done:
+        ret
+    }
+}
+
+void scenery_tick() {
+    if (!g_scenery_on || g_mode != 2) return;
+    for (int k = 0; k < kSceneryCount; ++k) g_scenery_chr[k] = chr_by_entity(kScenery[k].entity);
+}
+
 // --- stand-ins (see the top) -----------------------------------------------------------------------------------
 constexpr uint32_t kPieceMan = kPieceManVar;
 constexpr uint32_t kWorldChrMan = 0x0137D644;  // +0x3C the player, whose +0x29C is the floor record underfoot
@@ -574,8 +654,13 @@ void drawdist_tick() {
     if (!g_twins_on) return;
     __try {
         twins_tick_body();
+        scenery_tick();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+void drawdist_set_scenery(bool on) {
+    InterlockedExchange(&g_scenery_on, on && calls(kChrTestSite, reinterpret_cast<uint32_t>(&chr_test)) ? 1 : 0);
 }
 
 void drawdist_set_mode(int mode) {
@@ -652,6 +737,14 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent) {
     }
     g_lod_on = install_lod();
     g_twins_on = on;
+    // Scenery characters (see above): the test site redirected whatever the mode (RemoteControl can switch to all).
+    if (on && calls(kChrTestSite, kMaskAny) &&
+        redirect_call(kChrTestSite, kMaskAny, reinterpret_cast<const void*>(&chr_test))) {
+        InterlockedExchange(&g_scenery_on, 1);
+    } else if (on) {
+        LOG_ERROR("DrawMapPieces: the character test at %08X does not match this build; scenery characters keep the "
+                  "game's rooms", static_cast<unsigned>(kChrTestSite));
+    }
     if (!on) {
         InterlockedExchange(&g_mode, 0);
         LOG_ERROR("DrawMapPieces: the game's code at %08X/%08X does not match this build; not used",

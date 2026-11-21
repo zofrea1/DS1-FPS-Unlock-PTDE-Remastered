@@ -2582,6 +2582,10 @@ void run(const std::string& line) {
         // entdump [N]: the next frame's model draws (up to N, default 2000) in the log, with their render target.
         occl_request_dump(t.size() > 1 ? static_cast<int>(num(1, 2000)) : 2000);  // -1: one line per pass
         out("entdump");
+    } else if (c == "scenery") {
+        // scenery 0/1: with all, the scenery characters (Firelink's crow) kept active wherever their map is loaded.
+        drawdist_set_scenery(num(1, 1) != 0);
+        out("scenery %ld", num(1, 1));
     } else if (c == "drawwiden") {
         // drawwiden MASK: which managers adjacent/all widen (1 map pieces, 2 map effects, 4 point lights); send
         // drawmode again afterwards so the draw masks are rebuilt.
