@@ -92,8 +92,16 @@ void laa_ensure(bool enabled) {
     ms.dwLength = sizeof(ms);
     const double total_mb = GlobalMemoryStatusEx(&ms) ? static_cast<double>(ms.ullTotalVirtual) / 1048576.0 : 0.0;
     if (total_mb > 3072.0) {
-        LOG_INFO("LargeAddressAware: the game has %.0f MB of address space (DARKSOULS.exe is large address aware)",
-                 total_mb);
+        // The flag of the exe this process was started from (its header in memory), or the system's own 4 GB (Proton
+        // sets WINE_LARGE_ADDRESS_AWARE: the Steam Deck had 4096 MB with the exe unflagged, 2026-11-21).
+        const auto* base = reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
+        const auto* nt = base ? reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                                    base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew)
+                              : nullptr;
+        const bool flag = nt && (nt->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE);
+        LOG_INFO("LargeAddressAware: the game has %.0f MB of address space (%s)", total_mb,
+                 flag ? "DARKSOULS.exe is large address aware"
+                      : "given by the system, as Proton does; DARKSOULS.exe is left as it is");
         return;
     }
     if (!enabled) {
