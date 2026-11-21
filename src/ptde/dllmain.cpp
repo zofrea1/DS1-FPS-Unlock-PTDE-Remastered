@@ -15,6 +15,7 @@
 #include "frame.h"
 #include "gauge.h"
 #include "intro.h"
+#include "laa.h"
 #include "framekick.h"
 #include "focus.h"
 #include "drivetype.h"
@@ -85,6 +86,7 @@ DWORD WINAPI worker(void*) {
     // A mod built into this DLL (see extension.h) and the start-up logos do not depend on the FPS unlock.
     if (ext && ext->start) ext->start(g_self);
     intro_install(settings.skip_intro);
+    laa_ensure(settings.large_address_aware);
     framekick_install(settings.fix_framerate_kick);
     drivetype_install(settings.cache_drive_type, settings.profile);
     inputcache_configure(settings.cache_input_reads);

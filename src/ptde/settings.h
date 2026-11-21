@@ -261,6 +261,9 @@ struct Settings {
     // Skip the autosave notice and the Bandai Namco, FromSoftware and Havok logos at start-up (see intro.h).
     // Independent of FPSUnlock.
     bool skip_intro = true;
+    // Set the large address aware flag on DARKSOULS.exe so the game gets 4 GB of address space from its next start
+    // (laa.h). Independent of FPSUnlock.
+    bool large_address_aware = true;
     // The game's own frame rate check ends online play after 30 seconds that averaged 15 FPS or less, which one
     // long pause is enough for (see framekick.h). true leaves the check out. Independent of FPSUnlock.
     bool fix_framerate_kick = true;
