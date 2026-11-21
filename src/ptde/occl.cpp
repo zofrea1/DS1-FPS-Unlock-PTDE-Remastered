@@ -172,7 +172,7 @@ void build_models() {
                     if (t[h].key == 0 || t[h].key == fl) {
                         t[h].key = fl;
                         t[h].flags |= 1u | (extra ? 2u : 4u) | (static_cast<uint32_t>(role >> 4) << 8) |
-                                      ((role & 1) ? kNoInside : 0u);
+                                      ((role & 2) ? kNoInside : 0u);
                         break;
                     }
                 }

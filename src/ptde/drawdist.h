@@ -18,7 +18,8 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent);
 // depth levels that let the finer of two overlapping pieces win.
 void drawdist_tick();
 // The detail rules' answer for a map piece (its block, its index in it): 0 = not theirs (the generic rule); else bit 0
-// = drawn in place of a stand-in (counts as a piece DrawMapPieces adds), bits 4-7 = its depth level + 1 (each level
+// = drawn from any room in place of a stand-in (counts as a piece DrawMapPieces adds), bit 1 = drawn in a stand-in's
+// place at all (the player was checked against its surfaces, not its box), bits 4-7 = its depth level + 1 (each level
 // drawn a little farther in depth). Game thread; drawdist_role_gen() changes whenever any answer does.
 uint8_t drawdist_piece_role(int block, int index);
 uint32_t drawdist_role_gen();

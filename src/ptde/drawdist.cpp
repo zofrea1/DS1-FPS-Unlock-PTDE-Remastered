@@ -682,9 +682,12 @@ constexpr uint32_t kZero[4] = {};
 // stand-in, from any room).
 enum : uint8_t { kAsIs = 0, kHidden = 1, kForced = 2 };
 uint8_t g_state[kDetPieces] = {};
-// For occl.cpp (DrawMapPieces' depth bias and OcclusionCulling): per block and piece index, bit 0 = drawn in place of a
-// stand-in (counts as added; the occlusion code's own test of the player inside its box is left to holds() here),
-// bits 4-7 = depth level + 1 (0 = not in the table: the generic rule).
+// For occl.cpp (DrawMapPieces' depth bias and OcclusionCulling): per block and piece index, bit 0 = drawn from any room
+// in a stand-in's place (counts as added), bit 1 = drawn in a stand-in's place at all (forced or by the rooms' masks:
+// the occlusion code's own test of the player inside its box is left to holds() here; its box can hold the player
+// with its surfaces metres away, and leaving it out opened a hole where the stand-in was, user report 2026-11-21:
+// m2140B1 under the start of the Undead Burg bridge), bits 4-7 = depth level + 1 (0 = not in the table: the generic
+// rule).
 uint8_t g_role[kMaxBlocks][kRolePieces] = {};
 uint32_t g_role_gen = 0;
 volatile LONG g_detail_on = 1;  // RemoteControl `detailrules 0|1` (diagnostics A/B)
@@ -917,7 +920,8 @@ void detail_tick_body() {
     for (size_t i = 0; i < kDetPieces; ++i) {
         const auto& p = D::kPieces[i];
         if (!live[i] || !drawn[i] || p.block >= kMaxBlocks || p.index >= kRolePieces) continue;
-        role[p.block][p.index] = static_cast<uint8_t>((forced[i] ? 1 : 0) | ((level[i] + 1) << 4));
+        role[p.block][p.index] =
+            static_cast<uint8_t>((forced[i] ? 1 : 0) | (covering[i] ? 2 : 0) | ((level[i] + 1) << 4));
     }
     publish_roles(role);
 }
