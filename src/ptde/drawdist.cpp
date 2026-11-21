@@ -437,18 +437,20 @@ bool calls(uint32_t site, uint32_t from) {
 // turned it off (chr+0x14), one that does not is made inactive (0) and is neither updated nor drawn. A loaded,
 // active character the player's room does not display is drawn wherever adjacent or all widen the renderer's groups,
 // at the lower update rate the game keeps for characters it believes unseen (Firelink's crow from below its ruins,
-// user report 2026-11-20). With all, the characters below also pass that test wherever their map is loaded, so they
-// are seen from as far as the widened groups reach (the crow from the aqueduct to the Undead Burg). Only characters
-// checked to be scenery: no event of theirs depends on where the player is, and being active early starts nothing.
+// user report 2026-11-20). The characters below also pass that test wherever their map is loaded (with all, or with
+// adjacent too where their entry says so), so they are seen from as far as the widened groups reach (the crow from the
+// aqueduct to the Undead Burg). Only characters checked to be scenery: no event of theirs depends on where the player
+// is, and being active early starts nothing.
 // (Making every character active was what woke whole maps up to 2.7.0: see the top.)
 struct Scenery {
     int entity;
+    int from_mode;  // the lowest DrawMapPieces mode it applies with: 1 adjacent, 2 all
     const char* what;
 };
 constexpr Scenery kScenery[] = {
     // c3510 on the ruins north of the bonfire. Its one event (11025050) makes it immortal and, once its HP is below
     // 30%, plays its fly-away animation (7000) and turns its AI off.
-    {1020100, "Firelink Shrine's crow"},
+    {1020100, 1, "Firelink Shrine's crow"},  // with adjacent too (the user's choice, 2026-11-20)
 };
 constexpr int kSceneryCount = static_cast<int>(sizeof(kScenery) / sizeof(kScenery[0]));
 constexpr uint32_t kChrTestSite = 0x00E3EA13;  // call 0x42DAA0 in 0xE3E870's loop (esi = the character)
@@ -474,13 +476,14 @@ uint32_t chr_by_entity(int entity) {
 }
 
 int __cdecl scenery_wanted(uint32_t chr) {
-    if (!g_scenery_on || g_mode != 2 || !chr) return 0;
+    const LONG mode = g_mode;
+    if (!g_scenery_on || mode == 0 || !chr) return 0;
     for (int k = 0; k < kSceneryCount; ++k) {
-        if (chr == g_scenery_chr[k]) {
+        if (chr == g_scenery_chr[k] && mode >= kScenery[k].from_mode) {
             if (!(g_scenery_told & (1 << k))) {
                 InterlockedOr(&g_scenery_told, 1 << k);
-                LOG_INFO("DrawMapPieces = all: %s kept active outside its rooms (seen from farther, at the game's lower "
-                         "update rate there)", kScenery[k].what);
+                LOG_INFO("DrawMapPieces: %s kept active outside its rooms (seen from farther, at the game's lower update "
+                         "rate there)", kScenery[k].what);
             }
             return 1;
         }
@@ -506,7 +509,7 @@ __declspec(naked) void chr_test() {
 }
 
 void scenery_tick() {
-    if (!g_scenery_on || g_mode != 2) return;
+    if (!g_scenery_on || g_mode == 0) return;
     for (int k = 0; k < kSceneryCount; ++k) g_scenery_chr[k] = chr_by_entity(kScenery[k].entity);
 }
 

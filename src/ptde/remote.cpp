@@ -2583,7 +2583,7 @@ void run(const std::string& line) {
         occl_request_dump(t.size() > 1 ? static_cast<int>(num(1, 2000)) : 2000);  // -1: one line per pass
         out("entdump");
     } else if (c == "scenery") {
-        // scenery 0/1: with all, the scenery characters (Firelink's crow) kept active wherever their map is loaded.
+        // scenery 0/1: the scenery characters (Firelink's crow) kept active wherever their map is loaded.
         drawdist_set_scenery(num(1, 1) != 0);
         out("scenery %ld", num(1, 1));
     } else if (c == "drawwiden") {
