@@ -1065,9 +1065,10 @@ void report() {
 #endif
     long skipped = 0, drawn = 0, stale = 0;
     passcull_take_stats(&skipped, &drawn, &stale);
+    const long hidden = passcull_take_hidden();
     if (!quiet && (skipped || stale)) {
         LOG_INFO("SkipUnusedReflection: the mirrored scene skipped %ld times, drawn %ld times; %ld draws read the "
-                 "kept copy", skipped, drawn, stale);
+                 "kept copy; %ld frames read it from hidden draws only", skipped, drawn, stale, hidden);
     }
 }
 

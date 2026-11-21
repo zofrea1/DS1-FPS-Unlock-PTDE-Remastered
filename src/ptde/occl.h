@@ -16,6 +16,13 @@ void occl_set_inside(bool on);
 // most depth bias. A negative value keeps that parameter. Needs occl_install.
 void occl_set_zbias(bool on, float world = -1.0f, float max_bias = -1.0f);
 void occl_set_fx(int mode);
+// The map pieces of a mirrored pass that SkipUnusedReflection does not send are not drawn either (1, default) or are
+// (0); 100 + N: the next N draws that read the mirrored scene in the log (diagnostics).
+void occl_set_refl(int on);
+// Diagnostics: the first draw of a frame that has the mirrored scene's texture bound (passcull.cpp).
+void occl_note_reflection_read(unsigned stages);
+// Render thread: one of OcclusionCulling's occlusion queries is counting a draw now (another may not begin).
+bool occl_query_active();  // experiment: DrawMapPieces' added pieces left out of the water's reflection
 void occl_watch(float x, float y, float z, float r, int frames);  // diagnostics: entwatch  // effect draws: 0 normal, 9 all left out (diagnostics)
 void occl_set_vista_cap(int on);  // diagnostics: boxes over 150 m on a side left alone
 void occl_set_show(int on);   // diagnostics

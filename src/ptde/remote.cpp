@@ -2309,7 +2309,14 @@ void run(const std::string& line) {
     } else if (c == "passcull") {
         // passcull [0|1|2]: the water's mirror scene drawn always, skipped while unused, or always skipped.
         if (t.size() > 1) passcull_set_mode(static_cast<int>(num(1, 1)));
-        out("passcull %d (unused for %d frames)", passcull_mode(), passcull_unused_frames());
+        if (t.size() > 2) passcull_debug_color(static_cast<unsigned long>(std::strtoul(t[2].c_str(), nullptr, 16)));
+        if (t.size() > 3) passcull_set_queries(static_cast<int>(num(3, 1)));
+        if (t.size() > 4) passcull_debug_copy(static_cast<unsigned long>(std::strtoul(t[4].c_str(), nullptr, 16)));
+        long c[7] = {};
+        passcull_counters(c);
+        out("passcull %d (unused for %d frames; read at once: first %ld, in a query %ld, no query %ld; queried reads %ld; "
+            "frames visible %ld hidden %ld late %ld)", passcull_mode(), passcull_unused_frames(), c[0], c[1], c[2], c[3],
+            c[4], c[5], c[6]);
     } else if (c == "dxgipace") {
         // dxgipace [0|1|2] [HZ]: presenting through DXGI with the GPU flipping each frame when done (0), timed to the
         // game's steps by our presenting thread (1), or that thread flipping each frame as soon as it is ready (2);
@@ -2650,6 +2657,9 @@ void run(const std::string& line) {
     } else if (c == "camhold") {
         camera_set_hold(num(1, 1) != 0);
         out("camhold %ld", num(1, 1));
+    } else if (c == "occlrefl") {
+        occl_set_refl(static_cast<int>(num(1, 1)));
+        out("occlrefl %ld", num(1, 1));
     } else if (c == "occlfx") {
         occl_set_fx(static_cast<int>(num(1, 0)));
         out("occlfx %ld", num(1, 0));

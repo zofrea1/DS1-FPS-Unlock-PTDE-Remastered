@@ -2,6 +2,7 @@
 
 #include "d3dperf.h"
 #include "drawdist.h"
+#include "passcull.h"
 
 #include "fpsu_buildcfg.h"
 #include "log.h"
@@ -261,7 +262,8 @@ struct Ent {
     uint32_t acc;
     uint8_t hidden;
     uint8_t extra;   // diagnostics: not the player's room's
-    uint8_t pad[2];
+    uint8_t boxonly; // its box tests alone hide it (no query around its own drawing): effects, mirror readers
+    uint8_t pad;
 };
 constexpr int kEntBits = 13;
 constexpr int kEntSlots = 1 << kEntBits;
@@ -344,6 +346,11 @@ Ent* g_fx_cands[2][kFxCandMax];
 int g_fx_ncands[2] = {};
 int g_fx_list = 0;
 volatile LONG g_st_fx_skips = 0, g_st_fx_added = 0;
+volatile LONG g_refl_unused = 1, g_st_refl_unused = 0;
+unsigned long g_st_readers = 0;
+bool g_wrap_active = false;  // one of ours is counting (render thread)
+uint32_t g_cur_ent = 0, g_cur_ctx = 0, g_cur_flags = 0;
+volatile LONG g_readlog = 0;
 Ent* g_show_ents[kMaxRecs];     // diagnostics (occlshow 1): every candidate seen in the pre-pass, boxes drawn
 int g_nshow = 0;
 volatile LONG g_show = 0;
@@ -643,7 +650,7 @@ void apply_batch(Batch& b) {
                 s->box_zero = -1000;
                 s->shown = b.frame;
             } else {
-                if (s->extra == 2) {  // an effect: its box is the evidence (see the top), two tests in a row
+                if (s->extra == 2 || s->boxonly) {  // its box is the evidence (effects: see the top), two in a row
                     s->zero_run = s->box_zero == b.frame - 1 ? s->zero_run + 1 : 1;
                     if (s->zero_run >= 2 && !s->hidden) {
                         s->hidden = 1;
@@ -897,7 +904,7 @@ int __cdecl decide_inner(uint32_t entity, uint32_t ctx, uint32_t mflags) {
         s->seen = g_frame;
         ++g_st_pieces;
         if (g_show && !g_tested && g_nshow < kMaxRecs) g_show_ents[g_nshow++] = s;
-        if ((s->hidden || s->zero_run >= 1) && !s->unreliable && !g_tested && g_nhidden < kMaxRecs) {
+        if ((s->hidden || s->zero_run >= 1 || s->boxonly) && !s->unreliable && !g_tested && g_nhidden < kMaxRecs) {
             g_hidden_cands[g_nhidden++] = s;
         }
         if (s->hidden && probe) ++g_st_probes;
@@ -908,7 +915,7 @@ int __cdecl decide_inner(uint32_t entity, uint32_t ctx, uint32_t mflags) {
         g_wrap_q = new_record(kAuditDraw, s, distance_to(box));  // audit: drawn after all, counting its samples
         return g_wrap_q ? 2 : 1;
     }
-    if (in_color && g_frame != g_jump_frame) {
+    if (in_color && g_frame != g_jump_frame && !s->boxonly) {
         g_wrap_q = new_record(kOwnDraw, s, 0.0f);
         ++g_st_owndraws;
         if (g_wrap_q) return 2;
@@ -920,6 +927,13 @@ int __cdecl decide_inner(uint32_t entity, uint32_t ctx, uint32_t mflags) {
 // DrawMapPieces adds, seen by a perspective camera: wrapped, with the depth bias.
 int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     const uint32_t mflags = model_flags(*reinterpret_cast<const uint32_t*>(entity + 0x40));
+    g_cur_ent = entity;
+    g_cur_ctx = ctx;
+    g_cur_flags = mflags;
+    if ((mflags & 1) && g_refl_unused && passcull_skipping()) {
+        ++g_st_refl_unused;
+        return 1;
+    }
     const int r = decide_inner(entity, ctx, mflags);
     g_wrap_bias = false;
     if (r == 1 || !g_zbias) return r;
@@ -946,7 +960,10 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
 }
 
 void __cdecl wrap_begin() {
-    if (g_wrap_q) g_wrap_q->Issue(D3DISSUE_BEGIN);
+    if (g_wrap_q) {
+        g_wrap_q->Issue(D3DISSUE_BEGIN);
+        g_wrap_active = true;
+    }
     if (g_wrap_bias && g_dev) {
         unsigned long v = 0;
         if (d3dperf_render_state(D3DRS_DEPTHBIAS, &v)) {
@@ -973,6 +990,7 @@ void __cdecl wrap_begin() {
 void __cdecl wrap_end() {
     if (g_wrap_q) g_wrap_q->Issue(D3DISSUE_END);
     g_wrap_q = nullptr;
+    g_wrap_active = false;
     if (g_wrap_bias && g_dev) {
         unsigned long v = 0;
         DWORD now = 0;
@@ -1109,6 +1127,37 @@ void occl_set_mode(int mode) {
 int occl_mode() { return g_mode; }
 void occl_set_inside(bool on) { InterlockedExchange(&g_inside, on ? 1 : 0); }
 void occl_set_fx(int mode) { InterlockedExchange(&g_fx_skip, mode); }
+bool occl_query_active() { return g_wrap_active; }
+
+void occl_note_reflection_read(unsigned stages) {
+    if ((stages & 0x100u) && g_cur_ent && g_wrap_active) {
+        // Inside our query around a piece's drawing: from now on its box alone hides it, and the mirror's code counts
+        // its reading draws with queries of its own (they do not nest).
+        Ent* s = find_ent(g_cur_ent);
+        if (s && !s->boxonly) {
+            s->boxonly = 1;
+            s->zero_run = 0;
+            ++g_st_readers;
+        }
+    }
+    if (g_readlog <= 0) return;
+    --g_readlog;
+    const uint32_t e = g_cur_ent;
+    const auto* b = e ? reinterpret_cast<const float*>(e + 0xA0) : nullptr;
+    const uint32_t cam = g_cur_ctx ? *reinterpret_cast<const uint32_t*>(g_cur_ctx + 0x100) : 0;
+    LOG_INFO("[occl] mirror read: stages %X, last entity %08X (vt %08X, model %08X, flags %u) cam %08X main %d area %u box "
+             "%.1f %.1f %.1f .. %.1f %.1f %.1f", stages, e, e ? *reinterpret_cast<const uint32_t*>(e) : 0,
+             e ? *reinterpret_cast<const uint32_t*>(e + 0x40) : 0, g_cur_flags, cam, cam == g_main_cam, g_rt0_area,
+             b ? b[0] : 0, b ? b[1] : 0, b ? b[2] : 0, b ? b[4] : 0, b ? b[5] : 0, b ? b[6] : 0);
+}
+
+void occl_set_refl(int on) {
+    if (on >= 100) {
+        InterlockedExchange(&g_readlog, on - 100);
+    } else {
+        InterlockedExchange(&g_refl_unused, on ? 1 : 0);
+    }
+}
 void occl_watch(float x, float y, float z, float r, int frames) {
     g_watch_pt[0] = x;
     g_watch_pt[1] = y;
@@ -1178,7 +1227,7 @@ void occl_game_frame() {
         was_down = down;
     }
 #endif
-    if (!g_installed || (g_mode == 0 && !g_inside && !g_zbias)) return;
+    if (!g_installed || (g_mode == 0 && !g_inside && !g_zbias && !(g_refl_unused && passcull_mode() == 1))) return;
     // The table of the map pieces' models every ten frames (and when the player's room changes).
     bool room_changed = false;
     __try {
@@ -1270,6 +1319,11 @@ void occl_render_frame() {
                      static_cast<double>(g_st_fx_added) / static_cast<double>(g_st_frames),
                      static_cast<double>(g_st_fx_skips) / static_cast<double>(g_st_frames));
         }
+        if (g_st_next && g_st_refl_unused && g_st_frames) {
+            LOG_INFO("[occl] unused reflection: %.1f map piece draws a frame not made",
+                     static_cast<double>(g_st_refl_unused) / static_cast<double>(g_st_frames));
+        }
+        g_st_refl_unused = 0;
         g_st_fx_added = g_st_fx_skips = 0;
         g_st_inside = 0;
         g_st_next = now + 5000;

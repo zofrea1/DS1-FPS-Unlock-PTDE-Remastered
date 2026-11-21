@@ -579,8 +579,9 @@ bool frame_install(const Settings& settings) {
         // piece. A diagnostics build installs it always, for Ctrl+Shift+O (off / added / all) and RemoteControl.
         const int occl_mode = settings.occlusion_culling == 2 ? 2
                               : settings.occlusion_culling == 1 && settings.draw_map_pieces != 0 ? 1 : 0;
-        // DrawMapPieces adjacent/all also need it for the pieces of other rooms that reach into the player's (occl.cpp).
-        bool occl = occl_mode != 0 || settings.draw_map_pieces != 0;
+        // DrawMapPieces adjacent/all also need it for the pieces of other rooms that reach into the player's (occl.cpp),
+        // and SkipUnusedReflection to leave the map pieces out of a mirrored pass it does not send (their work too).
+        bool occl = occl_mode != 0 || settings.draw_map_pieces != 0 || settings.skip_unused_reflection;
 #if FPSU_DIAGNOSTICS
         occl = true;
 #endif
