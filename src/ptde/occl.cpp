@@ -136,6 +136,8 @@ constexpr uint32_t kNoInside = 0x10000u;
 // Model flag: an object's model (WorldObjManImp), not a map piece's: culled like one, but never given the depth bias
 // (an added ladder against a wall the game draws must not sink into it).
 constexpr uint32_t kObject = 0x20000u;
+// While the table is built only: an added piece of this model without kNoInside (one that still needs the inside rule).
+constexpr uint32_t kNeedsInside = 0x40000u;
 constexpr uint32_t kObjManVar = 0x0137D5F8;  // WorldObjManImp: +0x1C blocks, +0x20 entries 0xEC (+0x3C n, +0x40 objects)
 
 inline uint32_t hash_ptr(uint32_t p, int bits) { return ((p >> 3) * 2654435761u) >> (32 - bits); }
@@ -170,13 +172,22 @@ void build_models() {
                 // DrawMapPieces' detail rules: a piece drawn in place of a stand-in counts as added (its groups are
                 // all ones then), and the depth level + 1 they chose (bits 8-11 of the flags; 0: the generic rule).
                 const uint8_t role = drawdist_piece_role(b, i);
+                // A piece with no groups is never drawn (one the detail rules hide: a stand-in, the other copy of a
+                // model placed twice): it says nothing about the model's draws (Grok 1aa07756: the hidden copy of a
+                // same-model pair marked the kept one, the game's own, as added).
+                if (!(role & 1) && !(g[0] | g[1] | g[2] | g[3])) continue;
                 const bool extra = (role & 1) || !((g[0] & own[0]) | (g[1] & own[1]) | (g[2] & own[2]) | (g[3] & own[3]));
+                // The model's flags hold every drawn piece of it (several pieces can share a model): its depth level +
+                // 1 is the lowest any of them needs (the generic rule's: an added piece 1, the game's own 0; ORing the
+                // codes made level 0 and 1 read as 2), and kNoInside only while no added piece of it needs the rule.
+                const uint32_t code = (role >> 4) ? static_cast<uint32_t>(role >> 4) : (extra ? 2u : 1u);
                 uint32_t h = hash_ptr(fl, kModelBits);
                 for (int probe = 0; probe < kModelSlots; ++probe, h = (h + 1) & (kModelSlots - 1)) {
                     if (t[h].key == 0 || t[h].key == fl) {
                         t[h].key = fl;
-                        t[h].flags |= 1u | (extra ? 2u : 4u) | (static_cast<uint32_t>(role >> 4) << 8) |
-                                      ((role & 2) ? kNoInside : 0u);
+                        const uint32_t old = (t[h].flags >> 8) & 0xF;
+                        t[h].flags |= 1u | (extra ? 2u : 4u) | ((role & 2) ? kNoInside : (extra ? kNeedsInside : 0u));
+                        if (old == 0 || code < old) t[h].flags = (t[h].flags & ~0xF00u) | (code << 8);
                         break;
                     }
                 }
@@ -208,7 +219,8 @@ void build_models() {
                 for (int probe = 0; probe < kModelSlots; ++probe, h = (h + 1) & (kModelSlots - 1)) {
                     if (t[h].key == 0 || t[h].key == fl) {
                         t[h].key = fl;
-                        t[h].flags |= 1u | (extra ? 2u : 4u) | kObject;
+                        // Objects keep level 0 (never pushed back): code 1.
+                        t[h].flags = (t[h].flags & ~0xF00u) | 1u | (extra ? 2u : 4u) | kObject | (1u << 8);
                         break;
                     }
                 }
@@ -216,6 +228,9 @@ void build_models() {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;  // keep the table in use
+    }
+    for (int k = 0; k < kModelSlots; ++k) {
+        if (t[k].flags & kNeedsInside) t[k].flags &= ~(kNoInside | kNeedsInside);
     }
     g_built_gen = gen;
     g_built_role_gen = role_gen;
@@ -965,7 +980,9 @@ int __cdecl decide_inner(uint32_t entity, uint32_t ctx, uint32_t mflags) {
     }
     // Mode 3 (diagnostics only): every model, characters and objects too.
     const uint32_t flags = (mode & 3) == 3 ? 3u : mflags;
-    if (!(flags & 1) || ((mode & 3) == 1 && !(flags & 2))) return 0;
+    // OcclusionCulling = true: only a model whose every drawn piece is an added one (a model the player's room also
+    // draws, a crate or a ladder in both, is never skipped: the game's own draws stay; Grok 1aa07756).
+    if (!(flags & 1) || ((mode & 3) == 1 && (flags & 6) != 2)) return 0;
     const auto* bx = reinterpret_cast<const float*>(entity + 0xA0);
     const float box[6] = {bx[0], bx[1], bx[2], bx[4], bx[5], bx[6]};
     if (g_vista_cap && (box[3] - box[0] > kMaxSide || box[4] - box[1] > kMaxSide || box[5] - box[2] > kMaxSide)) return 0;
@@ -1028,7 +1045,8 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     if (r == 1 || !g_zbias) return r;
     const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
     if (!cam || !perspective(cam)) return r;
-    // The depth level: the detail rules' (bits 8-11, level + 1) or the generic rule's (an added piece 1, the game's 0).
+    // The depth level: bits 8-11, level + 1 (the lowest of the model's drawn pieces: the detail rules' or the generic
+    // rule's, an added piece 1, the game's 0); 0 only in a table from before (the generic rule then).
     const uint32_t lv = (mflags >> 8) & 0xF;
     const uint32_t level = lv ? lv - 1 : ((mflags & 6) == 2 && !(mflags & kObject) ? 1u : 0u);
     if (level == 0) return r;

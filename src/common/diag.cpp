@@ -226,10 +226,22 @@ DWORD WINAPI watchdog(void*) {
                 if (g_extra) {
                     g_extra(extra, sizeof(extra));
                 }
-                LOG_INFO("Heartbeat: %llu steps in %d s (%.1f per second), frame time %.2f ms%s%s",
+                // The 32-bit game's address space (2026-11-21: a host crashed in the graphics driver at 1702 MB of
+                // its 2 GB in use; DARKSOULS.exe is not large address aware): what is left, for the next crash report.
+                char space[96] = {};
+#if !defined(_WIN64)
+                MEMORYSTATUSEX ms{};
+                ms.dwLength = sizeof(ms);
+                if (GlobalMemoryStatusEx(&ms)) {
+                    std::snprintf(space, sizeof(space), ", address space %.0f MB free of %.0f MB",
+                                  static_cast<double>(ms.ullAvailVirtual) / 1048576.0,
+                                  static_cast<double>(ms.ullTotalVirtual) / 1048576.0);
+                }
+#endif
+                LOG_INFO("Heartbeat: %llu steps in %d s (%.1f per second), frame time %.2f ms%s%s%s",
                          static_cast<unsigned long long>(steps), since_heartbeat,
                          static_cast<double>(steps) / since_heartbeat, g_frame_ms ? g_frame_ms() : 0.0f,
-                         extra[0] ? ", " : "", extra);
+                         extra[0] ? ", " : "", extra, space);
             }
             heartbeat_base = now;
             since_heartbeat = 0;
