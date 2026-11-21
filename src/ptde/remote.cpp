@@ -2574,6 +2574,10 @@ void run(const std::string& line) {
         // occlvista 1: OcclusionCulling leaves boxes over 150 m on a side alone (as before its own drawing decided).
         occl_set_vista_cap(static_cast<int>(num(1, 1)));
         out("occlvista %ld", num(1, 1));
+    } else if (c == "occlinside") {
+        // occlinside 0/1: DrawMapPieces' pieces of other rooms that hold the player left out (1) or drawn (0).
+        occl_set_inside(num(1, 1) != 0);
+        out("occlinside %ld", num(1, 1));
     } else if (c == "entdump") {
         // entdump [N]: the next frame's model draws (up to N, default 2000) in the log, with their render target.
         occl_request_dump(t.size() > 1 ? static_cast<int>(num(1, 2000)) : 2000);  // -1: one line per pass

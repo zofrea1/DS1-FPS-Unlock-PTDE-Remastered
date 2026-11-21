@@ -543,15 +543,25 @@ struct SceneCopy {
 };
 SceneCopy g_scopy;
 IDirect3DBaseTexture9* g_blur_src = nullptr;  // the texture the camera blur last read (the depth of field's output)
+IDirect3DSurface9* g_blur_src_surf = nullptr;  // its surface
 IDirect3DSurface9* g_blur_dst = nullptr;      // and the surface it drew into (the scene's)
 bool g_dof_direct = false;                    // this frame's depth of field went into the scene: no camera blur draw
+bool g_dof_copy_kept = false;                 // and the copy it read the scene from is unchanged since (dof_repair)
 bool g_dof_direct_off = false;
 bool g_dof_direct_logged = false;
+LONG g_dof_repairs = 0;
 IDirect3DBaseTexture9* g_alpha_alias = nullptr;  // read as the scene itself by alpha_of (the copy, while drawn from)
+void dof_repair(IDirect3DDevice9* dev);
 
 // A draw, clear or StretchRect into render target 0 (the game's): the copy no longer equals the scene when either is it.
-inline void scopy_drawn() {
+// After a direct depth of field, a draw into the scene or the depth of field's output by anything but the camera blur
+// first gets the targets as the game would have them (dof_repair).
+inline void scopy_drawn(IDirect3DDevice9* dev) {
     if (g_scopy.valid && g_fx.rt0 && (g_fx.rt0 == g_scopy.scene || g_fx.rt0 == g_scopy.copy)) g_scopy.valid = false;
+    if (g_dof_direct && g_cam_bound == 0 && g_fx.rt0 &&
+        (g_fx.rt0 == g_scopy.scene || g_fx.rt0 == g_blur_src_surf || g_fx.rt0 == g_scopy.copy)) {
+        dof_repair(dev);
+    }
 }
 
 using SetRTFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
@@ -1194,6 +1204,7 @@ HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* 
     if (lazy_watching()) lazy_before_write(dev, rt);
     resolve_forget(rt);  // drawn into from here
     if (index != 0 && rt && g_scopy.valid && (rt == g_scopy.scene || rt == g_scopy.copy)) g_scopy.valid = false;
+    if (g_dof_direct && rt && rt == g_scopy.copy) dof_repair(dev);  // drawn into: as the game has it first
     if (index == 0 && g_scene_10bit) {
         D3DSURFACE_DESC d{};
         g_rt0_10bit = rt && SUCCEEDED(rt->GetDesc(&d)) && d.Format == D3DFMT_A2R10G10B10 &&
@@ -1227,7 +1238,7 @@ HRESULT WINAPI hk_set_ds(IDirect3DDevice9* dev, IDirect3DSurface9* ds) {
 
 HRESULT WINAPI hk_clear(IDirect3DDevice9* dev, DWORD count, const D3DRECT* rects, DWORD flags, D3DCOLOR color, float z,
                         DWORD stencil) {
-    if (flags & D3DCLEAR_TARGET) scopy_drawn();
+    if (flags & D3DCLEAR_TARGET) scopy_drawn(dev);
     if (refl_pass_clear(count, flags, color)) {
         refl_close(dev);  // a frame without the blurs
         IDirect3DBaseTexture9* t = container_of(g_fx.rt0);
@@ -1606,11 +1617,11 @@ HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseT
     if (tex && (tex == g_held.tex || tex == g_owed.tex || tex == g_stale)) {
         lazy_before_read(dev, static_cast<int>(stage), tex);
     }
-    if (g_dof_direct && tex && tex == g_blur_src && g_cam_bound != 2 && !g_dof_direct_off) {
-        g_dof_direct_off = true;
-        LOG_ERROR("Resolution: the depth of field's output was read by another draw than the camera blur in a frame it "
-                  "went straight into the scene (that draw may show an old picture once); it goes into its own target "
-                  "from now on");
+    // After a direct depth of field, the scene, its copy or the depth of field's output read by anything but the camera
+    // blur: the targets as the game would have them first.
+    if (g_dof_direct && tex && g_cam_bound != 2 &&
+        (tex == g_blur_src || tex == g_scopy.scene_tex || tex == g_scopy.copy_tex)) {
+        dof_repair(dev);
     }
     if (stage == 0) g_tex0 = tex;
     if (stage < 16 && (g_refl.stages || (tex && tex == g_refl.game_tex))) {
@@ -2219,7 +2230,7 @@ bool dof_direct(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const 
     if (!g_cam_off || !g_cam_copy_ps || g_cam_copy_dev != dev || (g_swap_off_mask & 0x200)) return false;
     // The composite reads the scene and draws into what the camera blur read into the scene last time.
     IDirect3DSurface9* out = g_fx.rt0;
-    if (!out || g_tex0 != g_scopy.scene_tex || g_blur_dst != g_scopy.scene || container_of(out) != g_blur_src ||
+    if (!out || out != g_blur_src_surf || g_tex0 != g_scopy.scene_tex || g_blur_dst != g_scopy.scene ||
         !alpha_of(g_scopy.scene_tex)) {
         return false;
     }
@@ -2251,6 +2262,7 @@ bool dof_direct(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const 
     o_set_scissor(dev, &scissor);
     g_scopy.valid = false;  // the scene holds the depth of field now
     g_dof_direct = SUCCEEDED(*hr);
+    g_dof_copy_kept = g_dof_direct;
     if (!g_dof_direct_logged && g_dof_direct) {
         g_dof_direct_logged = true;
         LOG_INFO("Resolution: the depth of field is drawn straight into the scene while the camera blur is off (its "
@@ -2264,6 +2276,10 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
         DWORD mask = 0xF;
         dev->GetRenderState(D3DRS_COLORWRITEENABLE, &mask);
         if (mask & 7) g_scopy.valid = false;  // an alpha-only draw leaves the colour as it is
+    }
+    if (g_dof_direct && g_cam_bound == 0 && g_fx.rt0 &&
+        (g_fx.rt0 == g_scopy.scene || g_fx.rt0 == g_blur_src_surf || g_fx.rt0 == g_scopy.copy)) {
+        dof_repair(dev);  // a draw into them by anything but the camera blur: as the game has them first
     }
     if (g_held.src && g_tex0 && g_tex0 == g_held.tex) {
         HRESULT hr = S_OK;
@@ -2315,7 +2331,16 @@ HRESULT WINAPI hk_draw_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT cou
         // reads would weigh a depth that was not written this frame.
         const bool skipped = g_cam_skipped;
         g_cam_skipped = false;
-        g_blur_src = g_tex0;
+        if (g_blur_src != g_tex0) {
+            g_blur_src = g_tex0;
+            g_blur_src_surf = nullptr;
+            IDirect3DSurface9* surf = nullptr;
+            if (g_tex0 && g_tex0->GetType() == D3DRTYPE_TEXTURE &&
+                SUCCEEDED(static_cast<IDirect3DTexture9*>(g_tex0)->GetSurfaceLevel(0, &surf)) && surf) {
+                surf->Release();  // identity only: the game holds it
+                g_blur_src_surf = surf;
+            }
+        }
         g_blur_dst = g_fx.rt0;
         if (g_dof_direct) {
             g_dof_direct = false;
@@ -2830,7 +2855,12 @@ bool lazy_copy(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT count, const v
 
 // A StretchRect: into the scene or its copy, the copy no longer equals it; the scene (the texture the camera blur draws
 // into, the scene's size) copied whole into a texture of its size and format is recorded (10-bit scene only).
-void scopy_note(IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst, const RECT* dr) {
+void scopy_note(IDirect3DDevice9* dev, IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst,
+                const RECT* dr) {
+    if (g_dof_direct && (src == g_scopy.scene || src == g_blur_src_surf || src == g_scopy.copy || dst == g_scopy.scene ||
+                         dst == g_blur_src_surf || dst == g_scopy.copy)) {
+        dof_repair(dev);  // as the game has them first
+    }
     if (g_scopy.valid && (dst == g_scopy.scene || dst == g_scopy.copy)) g_scopy.valid = false;
     if (!g_scene_10bit || !g_blur_dst || src != g_blur_dst) return;
     D3DSURFACE_DESC sd{}, dd{};
@@ -2850,9 +2880,35 @@ void scopy_note(IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst, 
     g_scopy.valid = true;
 }
 
+// A frame whose depth of field went straight into the scene, where something other than the camera blur then reads
+// or draws into the scene, its copy or the depth of field's output (the game skipped the camera blur that frame, or
+// does something else between them; seen once, 2.7 s after a load, 2026-11-20): the targets are made what the game
+// would have, first: the depth of field's result (now in the scene) into its own target, and the scene as it was
+// before it back from the copy it was read from (when that copy is unchanged). The camera blur, if it still comes,
+// then draws as the game's. More than 100 repairs in a session: the depth of field goes into its own target from then.
+void dof_repair(IDirect3DDevice9* dev) {
+    g_dof_direct = false;
+    if (!g_blur_src_surf || !g_scopy.scene) return;
+    const bool kept = g_dof_copy_kept && g_scopy.copy;
+    g_dof_copy_kept = false;
+    o_stretch(dev, g_scopy.scene, nullptr, g_blur_src_surf, nullptr, D3DTEXF_POINT);
+    if (kept) o_stretch(dev, g_scopy.copy, nullptr, g_scopy.scene, nullptr, D3DTEXF_POINT);
+    resolve_forget(g_scopy.scene);
+    resolve_forget(g_blur_src_surf);
+    const LONG n = ++g_dof_repairs;
+    if (n == 1 || n == 100) {
+        LOG_INFO("Resolution: a frame read the depth of field's targets after it went straight into the scene: both "
+                 "made as the game has them (%ld so far%s)", n, kept ? "" : "; the scene's copy had changed");
+    }
+    if (n >= 100 && !g_dof_direct_off) {
+        g_dof_direct_off = true;
+        LOG_INFO("Resolution: the depth of field goes into its own target from now on (it needed putting right too often)");
+    }
+}
+
 HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const RECT* sr, IDirect3DSurface9* dst,
                           const RECT* dr, D3DTEXTUREFILTERTYPE filter) {
-    if (src && dst && src != dst) scopy_note(src, sr, dst, dr);
+    if (src && dst && src != dst) scopy_note(dev, src, sr, dst, dr);
     if (src && src == g_dc_surf && !g_dc_off) {
         g_dc_off = true;
         LOG_ERROR("Resolution: the depth copy's colour target was read by a StretchRect (one frame may be wrong there); "
@@ -2939,19 +2995,19 @@ DrawIdxFn o_draw_idx = nullptr;
 DrawIdxUPFn o_draw_idx_up = nullptr;
 
 HRESULT WINAPI hk_draw_prim(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT start, UINT prims) {
-    scopy_drawn();
+    scopy_drawn(dev);
     return o_draw_prim(dev, type, start, prims);
 }
 
 HRESULT WINAPI hk_draw_idx(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT min_index, UINT verts,
                            UINT start, UINT prims) {
-    scopy_drawn();
+    scopy_drawn(dev);
     return o_draw_idx(dev, type, base, min_index, verts, start, prims);
 }
 
 HRESULT WINAPI hk_draw_idx_up(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT min_index, UINT verts, UINT prims,
                               const void* indices, D3DFORMAT index_format, const void* data, UINT stride) {
-    scopy_drawn();
+    scopy_drawn(dev);
     return o_draw_idx_up(dev, type, min_index, verts, prims, indices, index_format, data, stride);
 }
 
@@ -3054,8 +3110,10 @@ void resolution_reset() {
     g_scopy = SceneCopy{};
     g_dc_surf = nullptr;
     g_blur_src = nullptr;
+    g_blur_src_surf = nullptr;
     g_blur_dst = nullptr;
     g_dof_direct = false;
+    g_dof_copy_kept = false;
     area2_release_targets();
     fx_release_target();          // the default pool goes before a Reset; made again on the next use
     dofhr_release_targets();

@@ -48,6 +48,14 @@
 // Checked with RemoteControl `occl 5` (audit: what would be skipped is drawn and its samples counted) while walking,
 // strafing and turning, 2026-11-20: ~1.9 million skipped draws in Blighttown, Demon Ruins, Quelaag's Domain and
 // Firelink had 33,000 visible samples in all (DXVK at 4K with 4x anti-aliasing: under 10,000 pixels, single frames).
+//
+// Pieces from inside (DrawMapPieces adjacent/all, with or without OcclusionCulling): a piece the player's room does
+// not show, whose world box holds the player, is not drawn by any camera. Such a piece is part of another room that
+// reaches into this one: at the bottom of Havel's tower in the Undead Burg, Darkroot Basin's ground (m12_00 m1790B0,
+// 57,000 vertices, its box -15..137 x -96..27 x -196..-28) passes through the tower at waist height, and the game
+// draws it only from Darkroot's side (user report with screenshots, 2026-11-20; reproduced: drawn with adjacent, not
+// with game). Leaving such pieces out only ever brings the picture back toward the game's own: what the player's room
+// shows is never touched. A model that is also drawn by a piece of the player's room is never left out.
 namespace {
 
 constexpr uint32_t kEntityVt = 0x01171A54;
@@ -62,11 +70,17 @@ constexpr Site kSites[] = {{0x00FFD466, 0x57}, {0x00FFD496, 0x57}, {0x00FCB9FC, 
 
 volatile LONG g_mode = 0;  // 0 off, 1 the pieces DrawMapPieces adds, 2 every map piece; +4 audit (diagnostics)
 bool g_installed = false;
+volatile LONG g_inside = 0;  // DrawMapPieces' pieces holding the player are left out (see the top)
+// The player's position (game thread, each frame), read by the render thread: x, y + 1 m (the body, not the feet), z.
+volatile float g_player[3] = {};
+volatile LONG g_player_ok = 0;
+volatile LONG g_st_inside = 0;  // draws left out so (the per-frame line)
+volatile LONG g_st_inside_logged = 0;
 
 // ---- the map pieces' models (game thread builds, render thread reads) ----
 struct ModelSlot {
     uint32_t key;    // the FlverModel
-    uint32_t flags;  // 1 a map piece, 2 not shown by the player's own room
+    uint32_t flags;  // 1 a map piece, 2 a piece of it not shown by the player's own room, 4 one shown by it
 };
 constexpr int kModelBits = 14;
 constexpr int kModelSlots = 1 << kModelBits;
@@ -110,7 +124,7 @@ void build_models() {
                 for (int probe = 0; probe < kModelSlots; ++probe, h = (h + 1) & (kModelSlots - 1)) {
                     if (t[h].key == 0 || t[h].key == fl) {
                         t[h].key = fl;
-                        t[h].flags |= 1u | (extra ? 2u : 0u);
+                        t[h].flags |= 1u | (extra ? 2u : 4u);
                         break;
                     }
                 }
@@ -579,6 +593,23 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
         }
         ++g_pass_draws;
     }
+    if (g_inside && g_player_ok) {
+        const uint32_t f = model_flags(*reinterpret_cast<const uint32_t*>(entity + 0x40));
+        if ((f & 6) == 2) {
+            const auto* b = reinterpret_cast<const float*>(entity + 0xA0);  // min x y z w, max x y z w
+            const float px = g_player[0], py = g_player[1], pz = g_player[2];
+            if (px > b[0] && px < b[4] && py > b[1] && py < b[5] && pz > b[2] && pz < b[6]) {
+                if (!g_st_inside_logged) {
+                    g_st_inside_logged = 1;
+                    LOG_INFO("DrawMapPieces: a piece of another room that holds the player (box %.0f %.0f %.0f .. %.0f %.0f "
+                             "%.0f) is left out, as the game does from this room (first time)", b[0], b[1], b[2], b[4],
+                             b[5], b[6]);
+                }
+                ++g_st_inside;
+                return 1;
+            }
+        }
+    }
     const LONG mode = g_mode;
     if (mode == 0) return 0;
     if (cam != g_main_cam) {
@@ -769,6 +800,7 @@ void occl_set_mode(int mode) {
 }
 
 int occl_mode() { return g_mode; }
+void occl_set_inside(bool on) { InterlockedExchange(&g_inside, on ? 1 : 0); }
 void occl_set_vista_cap(int on) { InterlockedExchange(&g_vista_cap, on); }
 void occl_set_show(int on) { InterlockedExchange(&g_show, on); }
 
@@ -825,7 +857,7 @@ void occl_game_frame() {
         was_down = down;
     }
 #endif
-    if (!g_installed || g_mode == 0) return;
+    if (!g_installed || (g_mode == 0 && !g_inside)) return;
     // The table of the map pieces' models every ten frames (and when the player's room changes).
     bool room_changed = false;
     __try {
@@ -833,7 +865,20 @@ void occl_game_frame() {
         const uint32_t chr = wcm ? *reinterpret_cast<const uint32_t*>(wcm + 0x3C) : 0;
         const uint32_t floor = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x29C) : 0;
         if (floor) room_changed = std::memcmp(reinterpret_cast<const void*>(floor + 0x20), g_own_built, 16) != 0;
+        // The player's position: its physics (+0x28 controller, +0x1C physics, +0x10 x y z).
+        const uint32_t ctrl = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x28) : 0;
+        const uint32_t phys = ctrl ? *reinterpret_cast<const uint32_t*>(ctrl + 0x1C) : 0;
+        if (phys && floor) {
+            const auto* p = reinterpret_cast<const float*>(phys + 0x10);
+            g_player[0] = p[0];
+            g_player[1] = p[1] + 1.0f;
+            g_player[2] = p[2];
+            g_player_ok = 1;
+        } else {
+            g_player_ok = 0;  // loading, or no player: nothing left out
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_player_ok = 0;
     }
     if (room_changed || ++g_game_ticks >= 10) {
         g_game_ticks = 0;
@@ -885,6 +930,11 @@ void occl_render_frame() {
                          g_st_wrong ? static_cast<double>(g_st_wrong_near) : 0.0);
             }
         }
+        if (g_st_next && g_st_inside && g_st_frames) {
+            LOG_INFO("[occl] DrawMapPieces: %.1f draws a frame of other rooms' pieces holding the player left out",
+                     static_cast<double>(g_st_inside) / static_cast<double>(g_st_frames));
+        }
+        g_st_inside = 0;
         g_st_next = now + 5000;
         g_st_frames = g_st_pieces = g_st_skips = g_st_boxes = g_st_owndraws = g_st_hid = g_st_shown_box = 0;
         g_st_shown_probe = g_st_probes = g_st_notest = g_st_audited = g_st_wrong = g_st_wrong_samples = 0;

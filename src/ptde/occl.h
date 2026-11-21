@@ -8,6 +8,9 @@ bool occl_install();
 // 0 off, 1 the pieces DrawMapPieces adds (not shown from the player's own room), 2 every map piece.
 void occl_set_mode(int mode);
 int occl_mode();
+// DrawMapPieces adjacent/all: a piece the player's room does not show is not drawn while its world box holds the
+// player (another room's piece reaching into this one). Needs occl_install.
+void occl_set_inside(bool on);
 void occl_set_vista_cap(int on);  // diagnostics: boxes over 150 m on a side left alone
 void occl_set_show(int on);   // diagnostics
 // Right after the device is made, before any hook: the device's own DrawPrimitiveUP (the test boxes go straight to it).
