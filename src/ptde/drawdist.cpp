@@ -489,8 +489,9 @@ constexpr int kSceneryCount = static_cast<int>(sizeof(kScenery) / sizeof(kScener
 constexpr uint32_t kChrTestSite = 0x00E3EA13;  // call 0x42DAA0 in 0xE3E870's loop (esi = the character)
 constexpr uint32_t kMaskAny = 0x0042DAA0;
 // Their characters as WorldChrMan's loop last passed them (game thread): it visits every character of the loaded maps
-// each frame, so the entity id at chr+0x208 names them there without the event system's lookup (17 of those a frame
-// cost the game thread about 0.28 ms). A character not passed for two frames is gone (its map unloaded): its pointer is
+// each frame, so the entity id at chr+0x208 names them there without the event system's lookup (simpler; measured, the
+// lookups themselves cost little: the game thread's +0.23..0.28 ms with them kept is their every-frame updates, see
+// scenery_tick). A character not passed for two frames is gone (its map unloaded): its pointer is
 // not used again.
 constexpr uint32_t kChrEntity = 0x208;
 uint32_t g_scenery_chr[kSceneryCount] = {};    // the character last passed
