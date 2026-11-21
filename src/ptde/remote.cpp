@@ -2578,6 +2578,13 @@ void run(const std::string& line) {
         // occlinside 0/1: DrawMapPieces' pieces of other rooms that hold the player left out (1) or drawn (0).
         occl_set_inside(num(1, 1) != 0);
         out("occlinside %ld", num(1, 1));
+    } else if (c == "zbias") {
+        // zbias 0/1 [METRES MAX]: DrawMapPieces' added pieces drawn with a depth bias (1) or not (0): metres moved back
+        // at the piece's nearest point, the most depth bias.
+        const float k = t.size() > 2 ? static_cast<float>(std::atof(t[2].c_str())) : -1.0f,
+                    s = t.size() > 3 ? static_cast<float>(std::atof(t[3].c_str())) : -1.0f;
+        occl_set_zbias(num(1, 1) != 0, k, s);
+        out("zbias %ld %g %g", num(1, 1), k, s);
     } else if (c == "entdump") {
         // entdump [N]: the next frame's model draws (up to N, default 2000) in the log, with their render target.
         occl_request_dump(t.size() > 1 ? static_cast<int>(num(1, 2000)) : 2000);  // -1: one line per pass

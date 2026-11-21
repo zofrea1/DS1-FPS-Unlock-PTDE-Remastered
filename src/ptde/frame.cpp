@@ -587,6 +587,7 @@ bool frame_install(const Settings& settings) {
         if (occl && occl_install()) {
             occl_set_mode(occl_mode);
             occl_set_inside(settings.draw_map_pieces != 0);
+            occl_set_zbias(settings.draw_map_pieces != 0);
             if (occl_mode == 1) {
                 LOG_INFO("OcclusionCulling: the map pieces DrawMapPieces adds are skipped while something in front "
                          "hides them");

@@ -58,6 +58,22 @@
 // draws it only from Darkroot's side (user report with screenshots, 2026-11-20; reproduced: drawn with adjacent, not
 // with game). Leaving such pieces out only ever brings the picture back toward the game's own: what the player's room
 // shows is never touched. A model that is also drawn by a piece of the player's room is never left out.
+//
+// Depth bias (DrawMapPieces adjacent/all, with or without OcclusionCulling): a piece only DrawMapPieces adds is drawn a
+// little farther in depth (D3DRS_DEPTHBIAS / SLOPESCALEDEPTHBIAS for its draw, perspective cameras only: not the
+// shadow maps), so where it covers the same surfaces as a piece the game draws from this room, the game's wins instead
+// of the two fighting over the depth. Under the Undead Burg's bridge (user report with screenshot, 2026-11-20) the game
+// draws its coarse bridge m2410B1 and all added the detailed m2010B1: 721 m^2 of their faces lie in the same planes
+// (and more within centimetres), and they flickered from below. They share a draw group, so the stand-in table (which
+// pairs pieces with none in common) did not pair them; the bias covers every such overlap without hiding the added
+// piece's other surfaces. The two are not exactly coplanar: the detailed one weaves a few centimetres in and out of the
+// coarse one, so the bias is sized per draw to move the piece about 10 cm back at its nearest point (depth bias =
+// near * 0.1 / distance^2, the near plane 5 cm), at least 4 steps of a 24-bit depth buffer and at most 2e-6: a bias in
+// depth moves a surface by an amount that grows with the square of its distance, so one value for all (2e-6, which
+// cleared the bridge at 30-60 m) moved Lost Izalith's backdrop seen from the Demon Ruins by metres. Measured at the
+// bridge (frozen frame, pixels differing from the game's own picture by more than 4 of 255): 748,000 without the bias,
+// 106,000 with it (the added piece's real extra surfaces: its outline, the window openings). The values before the
+// draw are put back after it, unless the draw itself set others.
 namespace {
 
 constexpr uint32_t kEntityVt = 0x01171A54;
@@ -245,6 +261,14 @@ int g_nshow = 0;
 volatile LONG g_show = 0;
 int g_nhidden = 0;
 IDirect3DQuery9* g_wrap_q = nullptr;  // the query the stub wraps the next draw in
+volatile LONG g_zbias = 0;            // the depth bias for the pieces only DrawMapPieces adds (see the top)
+float g_zbias_world = 0.1f;           // metres the piece moves back at its nearest point (RemoteControl `zbias 1 M MAX`)
+float g_zbias_max = 2.0e-6f;          // the most D3DRS_DEPTHBIAS added
+constexpr float kZbiasMin = 4.0f / 16777216.0f;  // the least: 4 steps of a 24-bit depth buffer
+constexpr float kZbiasSlope = 1.0f;   // D3DRS_SLOPESCALEDEPTHBIAS added
+float g_wrap_bias_val = 0.0f;         // this draw's
+bool g_wrap_bias = false;             // the next draw the stub wraps gets the bias
+DWORD g_saved_bias = 0, g_saved_slope = 0, g_set_bias = 0, g_set_slope = 0;
 
 // Statistics for the log (every 5 s).
 unsigned long g_st_frames = 0, g_st_pieces = 0, g_st_skips = 0, g_st_boxes = 0, g_st_owndraws = 0;
@@ -577,7 +601,7 @@ void collect() {
     }
 }
 
-int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
+int __cdecl decide_inner(uint32_t entity, uint32_t ctx) {
     const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
     if (g_dump_frame && cam) {
         if (cam != g_pass_cam) {
@@ -688,12 +712,61 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     return 0;
 }
 
+// decide_inner's answer (0 draw, 1 skip, 2 draw inside the query g_wrap_q), and 2 also for a drawn piece that only
+// DrawMapPieces adds, seen by a perspective camera: wrapped, with the depth bias.
+int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
+    const int r = decide_inner(entity, ctx);
+    g_wrap_bias = false;
+    if (r == 1 || !g_zbias) return r;
+    const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
+    if (!cam || !perspective(cam)) return r;
+    if ((model_flags(*reinterpret_cast<const uint32_t*>(entity + 0x40)) & 6) != 2) return r;
+    // The camera's nearest distance to the piece's world box, and the near plane (projection +0xC8 = -near * q).
+    const auto* c = reinterpret_cast<const float*>(cam);
+    const auto* b = reinterpret_cast<const float*>(entity + 0xA0);  // min x y z w, max x y z w
+    float d2 = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        const float p = c[0x40 / 4 + k];
+        const float e = p < b[k] ? b[k] - p : (p > b[4 + k] ? p - b[4 + k] : 0.0f);
+        d2 += e * e;
+    }
+    const float q = c[0xB8 / 4];
+    const float nearp = q > 0.0f ? -c[0xC8 / 4] / q : 0.05f;
+    float bias = d2 > 1e-6f ? nearp * g_zbias_world / d2 : g_zbias_max;
+    if (bias > g_zbias_max) bias = g_zbias_max;
+    if (bias < kZbiasMin) bias = kZbiasMin;
+    g_wrap_bias_val = bias;
+    g_wrap_bias = true;
+    return 2;
+}
+
 void __cdecl wrap_begin() {
     if (g_wrap_q) g_wrap_q->Issue(D3DISSUE_BEGIN);
+    if (g_wrap_bias && g_dev) {
+        g_dev->GetRenderState(D3DRS_DEPTHBIAS, &g_saved_bias);
+        g_dev->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &g_saved_slope);
+        float b = 0.0f, s = 0.0f;
+        std::memcpy(&b, &g_saved_bias, 4);
+        std::memcpy(&s, &g_saved_slope, 4);
+        b += g_wrap_bias_val;
+        s += kZbiasSlope;
+        std::memcpy(&g_set_bias, &b, 4);
+        std::memcpy(&g_set_slope, &s, 4);
+        g_dev->SetRenderState(D3DRS_DEPTHBIAS, g_set_bias);
+        g_dev->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, g_set_slope);
+    }
 }
 void __cdecl wrap_end() {
     if (g_wrap_q) g_wrap_q->Issue(D3DISSUE_END);
     g_wrap_q = nullptr;
+    if (g_wrap_bias && g_dev) {
+        DWORD now = 0;
+        g_dev->GetRenderState(D3DRS_DEPTHBIAS, &now);
+        if (now == g_set_bias) g_dev->SetRenderState(D3DRS_DEPTHBIAS, g_saved_bias);
+        g_dev->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &now);
+        if (now == g_set_slope) g_dev->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, g_saved_slope);
+    }
+    g_wrap_bias = false;
 }
 
 // ecx = the object, [esp] = return (site + 7), [esp+4] = context, [esp+8] = arg.
@@ -799,6 +872,11 @@ void occl_set_mode(int mode) {
 
 int occl_mode() { return g_mode; }
 void occl_set_inside(bool on) { InterlockedExchange(&g_inside, on ? 1 : 0); }
+void occl_set_zbias(bool on, float world, float max_bias) {
+    if (world >= 0.0f) g_zbias_world = world;
+    if (max_bias >= 0.0f) g_zbias_max = max_bias;
+    InterlockedExchange(&g_zbias, on ? 1 : 0);
+}
 void occl_set_vista_cap(int on) { InterlockedExchange(&g_vista_cap, on); }
 void occl_set_show(int on) { InterlockedExchange(&g_show, on); }
 
@@ -855,7 +933,7 @@ void occl_game_frame() {
         was_down = down;
     }
 #endif
-    if (!g_installed || (g_mode == 0 && !g_inside)) return;
+    if (!g_installed || (g_mode == 0 && !g_inside && !g_zbias)) return;
     // The table of the map pieces' models every ten frames (and when the player's room changes).
     bool room_changed = false;
     __try {

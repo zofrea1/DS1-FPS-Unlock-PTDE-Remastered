@@ -11,6 +11,10 @@ int occl_mode();
 // DrawMapPieces adjacent/all: a piece the player's room does not show is not drawn while its world box holds the
 // player (another room's piece reaching into this one). Needs occl_install.
 void occl_set_inside(bool on);
+// DrawMapPieces adjacent/all: the pieces only it adds drawn with a small depth bias, so the game's own pieces win where
+// both cover the same surfaces (no z-fighting): world = metres moved back at the piece's nearest point, max_bias = the
+// most depth bias. A negative value keeps that parameter. Needs occl_install.
+void occl_set_zbias(bool on, float world = -1.0f, float max_bias = -1.0f);
 void occl_set_vista_cap(int on);  // diagnostics: boxes over 150 m on a side left alone
 void occl_set_show(int on);   // diagnostics
 // Right after the device is made, before any hook: the device's own DrawPrimitiveUP (the test boxes go straight to it).
