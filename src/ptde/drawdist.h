@@ -2,9 +2,10 @@
 
 #include <cstdint>
 
-// DrawMapPieces (0 game, 1 adjacent, 2 all): the game draws the map pieces the floor underfoot lists (its room's
-// display groups), so grass, rocks and ruins showed only from certain places (Firelink's ledge grass from inside the
-// shrine). adjacent adds the pieces seen from the rooms next to the player's (the floor's draw groups); all draws
+// DrawMapPieces (0 game, 1 adjacent, 2 all, 3 adjacent+): the game draws the map pieces the floor underfoot lists (its
+// room's display groups), so grass, rocks and ruins showed only from certain places (Firelink's ledge grass from
+// inside the shrine). adjacent adds the pieces seen from the rooms next to the player's (the floor's draw groups);
+// adjacent+ those of the rooms up to three steps away (the neighbours' neighbours and theirs); all draws
 // every piece of the loaded maps (costly: Demon Ruins draws Lost Izalith). The map pieces, their effects, their
 // lights and (DrawMapObjects) their objects (since 2.7.1): characters, collisions and sounds keep the game's rooms (up
 // to 2.7.0 all of them were widened, which loaded and woke the characters of the whole map: events that wait for one
@@ -26,7 +27,7 @@ uint32_t drawdist_role_gen();
 // RemoteControl `detailrules 0|1` (diagnostics A/B): the detail rules off (every piece as the masks say, the generic
 // depth bias) or on.
 void drawdist_set_detail(int on);
-// RemoteControl: `drawmode 0|1|2` for this session (takes effect within a few seconds: the floor is applied again);
+// RemoteControl: `drawmode 0|1|2|3` for this session (takes effect within a few seconds: the floor is applied again);
 // `lodpct N`.
 void drawdist_set_mode(int mode);
 void drawdist_set_lod(int percent);

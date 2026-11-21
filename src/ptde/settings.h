@@ -118,7 +118,8 @@ struct Settings {
     bool fix_boss_bar_overlap = true;
     // The shadow map's side: 2048 (the game's), 4096 or 8192 (shadowmap.h).
     int shadow_map_resolution = 4096;
-    // DrawMapPieces: 0 game, 1 adjacent (the rooms next to the player's too), 2 all (drawdist.h).
+    // DrawMapPieces: 0 game, 1 adjacent (the rooms next to the player's too), 2 all, 3 adjacent+ (the rooms up to three
+    // steps away) (drawdist.h).
     int draw_map_pieces = 0;
     // DrawMapObjects: with DrawMapPieces adjacent/all, the added rooms' objects are loaded and drawn too (drawdist.h).
     bool draw_map_objects = true;

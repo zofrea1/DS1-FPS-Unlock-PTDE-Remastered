@@ -254,9 +254,10 @@ constexpr float kBossGap = 6.0f;
 struct FrameState {
     uintptr_t seen[32] = {};
     int n = 0;
-    bool world = false;                                  // the HUD 'F20' was drawn (in the world, not the title)
+    bool world = false, world_prev = false;              // the HUD 'F20' was drawn (in the world, not the title)
     bool back = false;                                   // the back plate 'R11' was drawn: the menus' layers follow
     bool menu = false, menu_prev = false;                // a menu is up (this frame, the last one)
+    bool box = false, box_prev = false;                  // one of the game's boxes is up ('R03-..', OK / CANCEL)
     int view = 0, view_prev = 0;                         // which kind of menu (View; this frame, the last one)
     float menu_s = 1.0f;                                 // its scale
     float boss_top = kNoBoss, boss_top_prev = kNoBoss;   // the top of the highest boss bar shown
@@ -279,6 +280,7 @@ const Rule kStartRule = {"", kMenu, 1177.0f, 52.0f};
 const Rule kTalkRule = {"", kMenu, 67.0f, 64.0f};
 const Rule kMessageRule = {"", kMenu, 640.0f, 720.0f};
 const Rule kSubtitleRule = {"", kMenuText, 640.0f, 720.0f};
+const Rule kPlateRule = {"", kHud, 640.0f, 720.0f, false, kLiftPrompt};  // 'R03-2x': where the prompts go, as they do
 const Rule* view_rule(int v) {
     return v == kViewStart ? &kStartRule : v == kViewTalk ? &kTalkRule : v == kViewMessage ? &kMessageRule : &kMenuRule;
 }
@@ -291,10 +293,13 @@ void top_level_drawn(uintptr_t dlg) {
             LOG_INFO("menuprobe frame: %08X again (seen %d of %d)", static_cast<unsigned>(dlg), i, f.n);
         }
         f.n = 0;
+        f.world_prev = f.world;
         f.world = false;
         f.back = false;
         f.menu_prev = f.menu;
         f.menu = false;
+        f.box_prev = f.box;
+        f.box = false;
         f.view_prev = f.view;
         f.view = kViewNone;
         f.menu_s = menu_pct() / 100.0f;
@@ -305,8 +310,9 @@ void top_level_drawn(uintptr_t dlg) {
         f.prompt_prev = f.prompt;
         f.prompt = false;
         g_mouse_s = f.menu_prev ? f.menu_s : 1.0f;
-        g_mouse_ax = view_rule(f.view_prev)->ax;
-        g_mouse_ay = view_rule(f.view_prev)->ay;
+        // A box takes the mouse (its buttons) wherever the menu under it is anchored.
+        g_mouse_ax = f.box_prev ? kMenuRule.ax : view_rule(f.view_prev)->ax;
+        g_mouse_ay = f.box_prev ? kMenuRule.ay : view_rule(f.view_prev)->ay;
         break;
     }
     if (f.n < 32) f.seen[f.n++] = dlg;
@@ -459,6 +465,32 @@ void* __fastcall hk_dialog_draw(void* dlg, void*, void* dc) {
             if (g_probe_dialogs.load(std::memory_order_relaxed) > 0) {
                 LOG_INFO("menuprobe top '%ls' menu %d (last frame %d) -> %s", name.c_str(), fs.menu ? 1 : 0,
                          fs.menu_prev ? 1 : 0, rule ? "menu scale" : "-");
+            }
+        }
+    }
+    // The game's general dialogs (2026-11-21, user report with screenshots: both stayed at the game's size). Their owner
+    // 'R03' (FrpgMenuDlgGeneralOwner, shown all the time, drawn first in the frame before the HUD) holds the boxes
+    // 'R03-00' .. 'R03-12' ("Are you sure you want to quit the game?" with OK and CANCEL is 'R03-02', 341,244 -
+    // 941,477) and the plates 'R03-20' .. 'R03-22' ("Used Dungeon Cell Key": one or two lines where the prompts go,
+    // 331,563 - 952,638 or 663). In the world (the last frame's HUD; not at the title) a box is a menu about the middle
+    // (UIScaleMenus; the button guide and the mouse go with it), a plate goes as a prompt does (UIScale toward the
+    // bottom edge, moved up with the prompts above a boss's bar).
+    if (!rule && th.depth == 2 && fs.world_prev && info_of(base).name == "FrpgMenuDlgGeneral") {
+        const std::wstring name = dialog_name(base);
+        if (name.size() >= 6 && name.compare(0, 4, L"R03-") == 0) {
+            if (name[4] == L'2') {
+                rule = &kPlateRule;
+            } else {
+                rule = &kMenuRule;
+                uint32_t vis = 0;
+                read32(base + 0x98, &vis);
+                if (vis & 0xFF) {
+                    fs.menu = true;
+                    fs.box = true;
+                }
+            }
+            if (g_probe_dialogs.load(std::memory_order_relaxed) > 0) {
+                LOG_INFO("menuprobe general '%ls' -> %s", name.c_str(), rule == &kPlateRule ? "as a prompt" : "menu scale");
             }
         }
     }

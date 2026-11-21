@@ -139,7 +139,92 @@ constexpr uint32_t kFtol = 0x00ABF1A0;
 constexpr uint32_t kFxDistSites[] = {0x00A33700, 0x00A33820, 0x00A339C2, 0x00A48AAA};
 constexpr uint8_t kLodHead[9] = {0x51, 0xF3, 0x0F, 0x10, 0x81, 0x50, 0x02, 0x00, 0x00};  // push ecx; movss xmm0,[ecx+250h]
 
-volatile LONG g_mode = 0;  // DrawMapPieces: 0 game, 1 adjacent, 2 all
+volatile LONG g_mode = 0;  // DrawMapPieces: 0 game, 1 adjacent, 2 all, 3 adjacent+
+
+// adjacent+ (2026-11-21, user: "something in-between adjacent and all ... include those crates ... rule out the really
+// far stuff"): the rooms up to kHops steps away, each step a room's draw groups (its neighbours). A room is a collision
+// of the floor's block: WorldHitManImp [0x137D6B8] +0x24 the blocks, 0x68 each (the map piece manager's order): +0x3C
+// the count, +0x40 the HitIns, 0x84 each, in place: +0x10 its draw groups (the rooms next to it), +0x20 its display
+// groups (its own), +0xF its block. From the Undead Burg bridge's deck (room 113): adjacent 10 rooms, two steps 22,
+// three 33 of the map's 128; of the objects there, adjacent adds 59, three steps 82 + 41 more, all 289 more; three
+// steps bring most of the street below the bridge's start (17 of its 24 objects; the rest only with all).
+constexpr uint32_t kHitManVar = 0x0137D6B8;
+constexpr int kHops = 3;
+struct HopCache {
+    uint32_t rec8;
+    uint32_t hits;  // the block's collision array it was made from (a reloaded map makes another)
+    uint32_t groups[4];
+};
+HopCache g_hops[8] = {};
+int g_hop_next = 0;
+
+bool meets(const uint32_t* a, const uint32_t* b) {
+    return (a[0] & b[0]) | (a[1] & b[1]) | (a[2] & b[2]) | (a[3] & b[3]);
+}
+
+// The rooms within kHops steps of the floor (rec8 = its HitIns + 8), its own included; false when its block's
+// collisions cannot be read (then the floor's draw groups alone: adjacent).
+bool hop_groups(uint32_t rec8, uint32_t out[4]) {
+    const uint32_t hit = rec8 - 8;
+    const int block = *reinterpret_cast<const int8_t*>(hit + 0xF);
+    const uint32_t man = *reinterpret_cast<const uint32_t*>(kHitManVar);
+    const uint32_t arr = man ? *reinterpret_cast<const uint32_t*>(man + 0x24) : 0;
+    if (!arr || block < 0 || block >= kMaxBlocks) return false;
+    const uint32_t blk = arr + block * 0x68;
+    const int n = *reinterpret_cast<const int*>(blk + 0x3C);
+    const uint32_t hits = *reinterpret_cast<const uint32_t*>(blk + 0x40);
+    if (!hits || n <= 0 || n > 4096 || hit < hits || hit >= hits + n * 0x84) return false;
+    for (const HopCache& c : g_hops) {
+        if (c.rec8 == rec8 && c.hits == hits) {
+            std::memcpy(out, c.groups, 16);
+            return true;
+        }
+    }
+    uint32_t set[4];
+    for (int k = 0; k < 4; ++k) {
+        set[k] = reinterpret_cast<const uint32_t*>(hit + 0x20)[k] | reinterpret_cast<const uint32_t*>(hit + 0x10)[k];
+    }
+    for (int step = 1; step < kHops; ++step) {
+        uint32_t next[4] = {set[0], set[1], set[2], set[3]};
+        for (int i = 0; i < n; ++i) {
+            const uint32_t h = hits + i * 0x84;
+            if (!meets(reinterpret_cast<const uint32_t*>(h + 0x20), set)) continue;
+            const auto* nb = reinterpret_cast<const uint32_t*>(h + 0x10);
+            for (int k = 0; k < 4; ++k) next[k] |= nb[k];
+        }
+        std::memcpy(set, next, 16);
+    }
+    HopCache& c = g_hops[g_hop_next];
+    g_hop_next = (g_hop_next + 1) % 8;
+    c.rec8 = rec8;
+    c.hits = hits;
+    std::memcpy(c.groups, set, 16);
+    std::memcpy(out, set, 16);
+    return true;
+}
+
+// What the mode adds for a floor (rec8 = its HitIns + 8): its draw groups (adjacent), the rooms within kHops steps
+// (adjacent+) or every group (all).
+void widen_groups(uint32_t rec8, uint32_t out[4]) {
+    const LONG mode = g_mode;
+    if (mode == 2) {
+        for (int k = 0; k < 4; ++k) out[k] = 0xFFFFFFFFu;
+        return;
+    }
+    if (mode == 3 && hop_groups(rec8, out)) return;
+    std::memcpy(out, reinterpret_cast<const void*>(rec8 + 8), 16);
+}
+
+// The renderer's groups widened in place (the stubs below: ecx = the floor's record + 8, eax = 0x4569D0's answer).
+void __cdecl widen_into(uint32_t rec8, uint32_t* out) {
+    __try {
+        uint32_t w[4];
+        widen_groups(rec8, w);
+        for (int k = 0; k < 4; ++k) out[k] |= w[k];
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 volatile LONG g_widen = 15;  // diagnostics (RemoteControl drawwiden): the widened managers, bit i = kWidened[i]
 uint32_t g_get = kGetDisp;
 uint32_t g_build_draw = kBuildDraw;
@@ -172,8 +257,8 @@ volatile LONG g_in_stream = 0;  // inside the streaming update's floor calls (0x
 // 0x4569D0 leaves ecx (the floor record + 8) as it was: its draw groups (the neighbouring rooms) are at ecx + 8.
 uint32_t g_rend = 0;  // GameRend ([ebx+0x10] at kLoadSite, [ebx+0x38] at kStepSite): +0x48 the groups it draws
 
-// The renderer's groups widened in place (eax = the answer of 0x4569D0): the floor's draw groups added (adjacent), or
-// every group (all). Only GameRend takes these two answers.
+// The renderer's groups widened in place (eax = the answer of 0x4569D0): the floor's draw groups added (adjacent), the
+// rooms within kHops steps (adjacent+), or every group (all). Only GameRend takes these two answers.
 __declspec(naked) void get_disp_load() {
     __asm {
         push ecx
@@ -183,24 +268,12 @@ __declspec(naked) void get_disp_load() {
         call dword ptr [g_get]
         cmp g_mode, 0
         je done
-        cmp g_mode, 2
-        je all
-        push edx
-        mov edx, dword ptr [ecx + 8]
-        or dword ptr [eax], edx
-        mov edx, dword ptr [ecx + 12]
-        or dword ptr [eax + 4], edx
-        mov edx, dword ptr [ecx + 16]
-        or dword ptr [eax + 8], edx
-        mov edx, dword ptr [ecx + 20]
-        or dword ptr [eax + 12], edx
-        pop edx
-        jmp done
-    all:
-        mov dword ptr [eax], -1
-        mov dword ptr [eax + 4], -1
-        mov dword ptr [eax + 8], -1
-        mov dword ptr [eax + 12], -1
+        pushad
+        push eax
+        push ecx
+        call widen_into
+        add esp, 8
+        popad
     done:
         ret
     }
@@ -215,24 +288,12 @@ __declspec(naked) void get_disp_step() {
         call dword ptr [g_get]
         cmp g_mode, 0
         je done
-        cmp g_mode, 2
-        je all
-        push edx
-        mov edx, dword ptr [ecx + 8]
-        or dword ptr [eax], edx
-        mov edx, dword ptr [ecx + 12]
-        or dword ptr [eax + 4], edx
-        mov edx, dword ptr [ecx + 16]
-        or dword ptr [eax + 8], edx
-        mov edx, dword ptr [ecx + 20]
-        or dword ptr [eax + 12], edx
-        pop edx
-        jmp done
-    all:
-        mov dword ptr [eax], -1
-        mov dword ptr [eax + 4], -1
-        mov dword ptr [eax + 8], -1
-        mov dword ptr [eax + 12], -1
+        pushad
+        push eax
+        push ecx
+        call widen_into
+        add esp, 8
+        popad
     done:
         ret
     }
@@ -245,8 +306,9 @@ void __cdecl note_floor(uint32_t rec8, int stream) {
         const int block = *reinterpret_cast<const int8_t*>(rec8 + 7);
         if (block < 0 || block >= kMaxBlocks) return;
         uint32_t* e = stream ? g_extra_stream[block] : g_extra_draw[block];
-        const auto* nbr = reinterpret_cast<const uint32_t*>(rec8 + 8);
-        for (int k = 0; k < 4; ++k) e[k] |= g_mode == 2 ? 0xFFFFFFFFu : nbr[k];
+        uint32_t w[4];
+        widen_groups(rec8, w);
+        for (int k = 0; k < 4; ++k) e[k] |= w[k];
         (stream ? g_any_stream : g_any_draw) = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -997,7 +1059,7 @@ void drawdist_set_scenery(int on) {
 }
 
 void drawdist_set_mode(int mode) {
-    if (mode < 0 || mode > 2) mode = 0;
+    if (mode < 0 || mode > 3) mode = 0;
     InterlockedExchange(&g_mode, mode);
     // The renderer's groups at once (the player's floor record: draw groups +0x10, display groups +0x20); the
     // streaming masks follow on the next frame, the draw masks when the floor is applied again (SetFloor 0xE6E580 sees
@@ -1013,8 +1075,9 @@ void drawdist_set_mode(int mode) {
                 for (int i = 0; i < 4; ++i) groups[i] = 0xFFFFFFFFu;
             } else if (floor) {
                 const auto* disp = reinterpret_cast<const uint32_t*>(floor + 0x20);
-                const auto* nbr = reinterpret_cast<const uint32_t*>(floor + 0x10);
-                for (int i = 0; i < 4; ++i) groups[i] = disp[i] | (mode == 1 ? nbr[i] : 0u);
+                uint32_t w[4] = {};
+                if (mode != 0) widen_groups(floor + 8, w);
+                for (int i = 0; i < 4; ++i) groups[i] = disp[i] | w[i];
             }
         }
         if (chr) *reinterpret_cast<uint32_t*>(chr + 0x29C) = 0;
@@ -1050,7 +1113,7 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent) {
         LOG_INFO("EffectLodDistance: fires (torches, bonfires) keep each level of detail %d%% as far away as the "
                  "game's", effect_percent);
     }
-    InterlockedExchange(&g_mode, (mode < 0 || mode > 2) ? 0 : mode);
+    InterlockedExchange(&g_mode, (mode < 0 || mode > 3) ? 0 : mode);
     // All eight sites checked before any is changed: the renderer's groups are widened at two, the floors noted at two
     // and the widened managers' masks written at two.
     bool match = calls(kLoadSite, kGetDisp) && calls(kStepSite, kGetDisp) && calls(kDrawGetSite, kGetDisp) &&
@@ -1089,6 +1152,10 @@ bool drawdist_install(int mode, int lod_percent, int effect_percent) {
     } else if (mode == 2) {
         LOG_INFO("DrawMapPieces = all: every map piece of the loaded maps is drawn wherever the player stands; "
                  "with their effects and lights (objects: DrawMapObjects); characters keep the game's rooms");
+    } else if (mode == 3) {
+        LOG_INFO("DrawMapPieces = adjacent+: the map pieces seen from the player's room and from the rooms up to %d steps "
+                 "away are drawn, with their effects and lights (objects: DrawMapObjects); characters keep the game's "
+                 "rooms", kHops);
     }
     if (!g_lod_on) {
         LOG_ERROR("LodDistance: the game's code at %08X does not match this build; not used",
