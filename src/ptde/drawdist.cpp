@@ -126,6 +126,15 @@ bool g_lod_on = false;
 // What the floors add for the widened managers alone, per block, until it is ORed into their masks (the game thread:
 // FieldArea's update and the streaming update run there, one after the other).
 uint32_t g_extra_draw[kMaxBlocks][4] = {};
+// Each block's draw mask as the game wrote it (0xDE2C60, before ours is ORed in): what the game itself draws of each
+// loaded map from where the player is (the player's map from the floor's groups, the others from the map's
+// connections). The floor's groups say nothing about another map's pieces (each map numbers its groups itself): judged
+// by them, a neighbouring map's pieces the game draws counted as another room's (user report 2026-11-20: at the
+// aqueduct's end the Undead Burg was missing, pieces of it left out as "holding the player", detailed ones hidden for
+// their stand-ins). Game thread.
+uint32_t g_game_draw[kMaxBlocks][4] = {};
+int g_game_draw_blocks = 0;  // blocks recorded (0: none yet)
+uint32_t g_game_draw_gen = 0;
 uint32_t g_extra_stream[kMaxBlocks][4] = {};
 bool g_any_draw = false;
 bool g_any_stream = false;
@@ -292,7 +301,28 @@ void requeue_render_masks(const bool* widened, int count) {
     }
 }
 
+// The map piece manager's draw masks as the game has just written them (before apply_extra).
+void note_game_draw() {
+    __try {
+        const uint32_t fa = *reinterpret_cast<const uint32_t*>(kFieldAreaVar);
+        const uint32_t info = fa ? *reinterpret_cast<const uint32_t*>(fa + 8) : 0;
+        const uint32_t pieces = *reinterpret_cast<const uint32_t*>(kPieceManVar);
+        const uint32_t blocks = pieces ? *reinterpret_cast<const uint32_t*>(pieces + 0x20) : 0;
+        int count = info ? *reinterpret_cast<const int*>(info + 0x0C) : 0;
+        const int piece_blocks = pieces ? *reinterpret_cast<const int*>(pieces + 0x1C) : 0;
+        if (count > piece_blocks) count = piece_blocks;
+        if (count > kMaxBlocks) count = kMaxBlocks;
+        if (!blocks) count = 0;
+        for (int b = 0; b < count; ++b) std::memcpy(g_game_draw[b], reinterpret_cast<const void*>(blocks + b * 0x5C + 0x0C), 16);
+        g_game_draw_blocks = count;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_game_draw_blocks = 0;
+    }
+    ++g_game_draw_gen;
+}
+
 void __cdecl apply_draw() {
+    note_game_draw();
     if (!g_any_draw) return;
     bool widened[kMaxBlocks] = {};
     int count = 0;
@@ -640,6 +670,19 @@ bool any_of(const uint32_t* g, const uint32_t* mask) {
     return (g[0] & mask[0]) | (g[1] & mask[1]) | (g[2] & mask[2]) | (g[3] & mask[3]);
 }
 
+// A block's live draw mask (what is drawn of it, ours ORed in) and the game's own (as 0xDE2C60 wrote it; the live one
+// before any was noted), or false when the block is not loaded.
+bool block_masks(int block, uint32_t seen[4], uint32_t game[4]) {
+    const uint32_t man = *reinterpret_cast<const uint32_t*>(kPieceMan);
+    if (!man || block < 0) return false;
+    const uint32_t blocks = *reinterpret_cast<const uint32_t*>(man + 0x20);
+    const int count = *reinterpret_cast<const int*>(man + 0x1C);
+    if (!blocks || block >= count) return false;
+    std::memcpy(seen, reinterpret_cast<const void*>(blocks + block * 0x5C + 0x0C), 16);
+    std::memcpy(game, block < g_game_draw_blocks ? g_game_draw[block] : seen, 16);
+    return true;
+}
+
 void show_all_twins() {
     for (size_t i = 0; i < kTwinPieces; ++i) {
         if (!g_hidden[i]) continue;
@@ -661,21 +704,17 @@ void twins_tick_body() {
     const uint32_t chr = wcm ? *reinterpret_cast<const uint32_t*>(wcm + 0x3C) : 0;
     const uint32_t floor = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x29C) : 0;
     if (!floor) return;  // loading or no floor yet: keep what is set
-    uint32_t own[4], seen[4];
-    std::memcpy(own, reinterpret_cast<const void*>(floor + 0x20), 16);
-    if (mode == 2) {
-        for (int k = 0; k < 4; ++k) seen[k] = 0xFFFFFFFFu;
-    } else {
-        const auto* nbr = reinterpret_cast<const uint32_t*>(floor + 0x10);
-        for (int k = 0; k < 4; ++k) seen[k] = own[k] | nbr[k];
-    }
+    // Each piece by its own map's masks: drawn (the live draw mask, ours ORed in) and the game's own (as the game wrote
+    // it). The player's floor groups only number the player's map's rooms.
     bool hide[kTwinPieces] = {};
     for (size_t k = 0; k < kTwinPairs; ++k) {
         const auto& pr = drawdist_twins::kPairs[k];
         const auto& a = drawdist_twins::kPieces[pr.a];
         const auto& b = drawdist_twins::kPieces[pr.b];
-        if (!any_of(a.groups, seen) || !any_of(b.groups, seen)) continue;
-        const bool a_own = any_of(a.groups, own), b_own = any_of(b.groups, own);
+        uint32_t a_seen[4], a_game[4], b_seen[4], b_game[4];
+        if (!block_masks(a.block, a_seen, a_game) || !block_masks(b.block, b_seen, b_game)) continue;
+        if (!any_of(a.groups, a_seen) || !any_of(b.groups, b_seen)) continue;
+        const bool a_own = any_of(a.groups, a_game), b_own = any_of(b.groups, b_game);
         if (a_own && b_own) continue;  // the game's own picture
         if (a_own) {
             hide[pr.b] = true;
@@ -754,6 +793,13 @@ void drawdist_tick() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
+
+bool drawdist_game_mask(int block, uint32_t out[4]) {
+    if (block < 0 || block >= g_game_draw_blocks) return false;
+    std::memcpy(out, g_game_draw[block], 16);
+    return true;
+}
+uint32_t drawdist_game_mask_gen() { return g_game_draw_gen; }
 
 void drawdist_set_scenery(int on) {
     InterlockedExchange(&g_scenery_on, on && calls(kChrTestSite, reinterpret_cast<uint32_t>(&chr_test)) ? (on == 2 ? 2 : 1) : 0);

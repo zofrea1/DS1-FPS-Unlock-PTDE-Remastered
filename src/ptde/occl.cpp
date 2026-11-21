@@ -1,5 +1,7 @@
 #include "occl.h"
 
+#include "drawdist.h"
+
 #include "fpsu_buildcfg.h"
 #include "log.h"
 #include "shaders/occl_box_ps.h"
@@ -87,7 +89,7 @@ constexpr int kModelSlots = 1 << kModelBits;
 ModelSlot g_models[2][kModelSlots];
 volatile LONG g_models_cur = -1;
 int g_game_ticks = 0;
-uint32_t g_own_built[4] = {};
+uint32_t g_built_gen = 0;  // drawdist_game_mask_gen() the table was built from
 
 inline uint32_t hash_ptr(uint32_t p, int bits) { return ((p >> 3) * 2654435761u) >> (32 - bits); }
 
@@ -95,16 +97,8 @@ void build_models() {
     const int back = g_models_cur == 0 ? 1 : 0;
     ModelSlot* t = g_models[back];
     std::memset(t, 0, sizeof(g_models[0]));
-    uint32_t own[4] = {};
+    const uint32_t gen = drawdist_game_mask_gen();
     __try {
-        const uint32_t wcm = *reinterpret_cast<const uint32_t*>(kWorldChrMan);
-        const uint32_t chr = wcm ? *reinterpret_cast<const uint32_t*>(wcm + 0x3C) : 0;
-        const uint32_t floor = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x29C) : 0;
-        if (floor) {
-            std::memcpy(own, reinterpret_cast<const void*>(floor + 0x20), 16);
-        } else {
-            std::memcpy(own, g_own_built, 16);  // loading, or the floor is being applied again: keep the last
-        }
         const uint32_t man = *reinterpret_cast<const uint32_t*>(kPieceManVar);
         const int blocks = man ? *reinterpret_cast<const int*>(man + 0x1C) : 0;
         const uint32_t barr = man ? *reinterpret_cast<const uint32_t*>(man + 0x20) : 0;
@@ -113,6 +107,10 @@ void build_models() {
             const int n = *reinterpret_cast<const int*>(blk + 0x2C);
             const uint32_t arr = *reinterpret_cast<const uint32_t*>(blk + 0x30);
             if (!arr || n <= 0 || n > 8192) continue;
+            // Shown by the player's room: by the game's own draw mask of this piece's map (each map numbers its
+            // groups itself; the floor's groups only fit the player's map). The live mask when none was noted.
+            uint32_t own[4];
+            if (!drawdist_game_mask(b, own)) std::memcpy(own, reinterpret_cast<const void*>(blk + 0x0C), 16);
             for (int i = 0; i < n; ++i) {
                 const uint32_t e = arr + i * 0x50;
                 const uint32_t mm = *reinterpret_cast<const uint32_t*>(e + 0x34);
@@ -133,7 +131,7 @@ void build_models() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;  // keep the table in use
     }
-    std::memcpy(g_own_built, own, 16);
+    g_built_gen = gen;
     InterlockedExchange(&g_models_cur, back);
 }
 
@@ -864,7 +862,7 @@ void occl_game_frame() {
         const uint32_t wcm = *reinterpret_cast<const uint32_t*>(kWorldChrMan);
         const uint32_t chr = wcm ? *reinterpret_cast<const uint32_t*>(wcm + 0x3C) : 0;
         const uint32_t floor = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x29C) : 0;
-        if (floor) room_changed = std::memcmp(reinterpret_cast<const void*>(floor + 0x20), g_own_built, 16) != 0;
+        room_changed = drawdist_game_mask_gen() != g_built_gen;  // the game wrote its draw masks again
         // The player's position: its physics (+0x28 controller, +0x1C physics, +0x10 x y z).
         const uint32_t ctrl = chr ? *reinterpret_cast<const uint32_t*>(chr + 0x28) : 0;
         const uint32_t phys = ctrl ? *reinterpret_cast<const uint32_t*>(ctrl + 0x1C) : 0;

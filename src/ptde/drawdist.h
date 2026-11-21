@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 // DrawMapPieces (0 game, 1 adjacent, 2 all): the game draws the map pieces the floor underfoot lists (its room's
 // display groups), so grass, rocks and ruins showed only from certain places (Firelink's ledge grass from inside the
 // shrine). adjacent adds the pieces seen from the rooms next to the player's (the floor's draw groups); all draws
@@ -25,3 +27,8 @@ void drawdist_set_widen(int mask);
 // A few scenery characters (Firelink's crow, with adjacent and all) are kept active wherever their map is loaded, so
 // they are seen from farther (drawdist.cpp's kScenery). RemoteControl `scenery 0|1`.
 void drawdist_set_scenery(int on);  // 2: kept active at the game's rate (diagnostics)
+// The game's own draw mask of a map block (what it draws of that map from where the player is, as 0xDE2C60 wrote it
+// before DrawMapPieces widened it): false when not known (not loaded, or not noted yet: the live mask is the game's
+// then). Game thread. The generation changes each time the masks are written.
+bool drawdist_game_mask(int block, uint32_t out[4]);
+uint32_t drawdist_game_mask_gen();
