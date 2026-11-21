@@ -2950,7 +2950,7 @@ std::string remote_shader_name(void*) { return "none"; }
 void remote_game_frame() {}
 bool remote_start() { return false; }
 void remote_set_shader_dumps(bool) {}
-void remote_set_device_hooks(bool) {}
+void remote_set_device_hooks(int) {}
 bool remote_enabled() { return false; }
 void remote_hook_device(IDirect3DDevice9*) {}
 void remote_pad(DWORD, void*, DWORD*) {}
