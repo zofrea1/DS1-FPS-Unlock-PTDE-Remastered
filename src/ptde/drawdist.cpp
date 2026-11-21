@@ -523,6 +523,17 @@ bool flag_on(int id) {
     return on != 0;
 }
 
+// Enabled: the event system's enable state. [chr+0xC]+0x14 bit 0 is set while an event keeps the character disabled
+// (0xE69A40, called by the event command at 0xD6DEA0 with the entity and the state, sets it with the controller's
+// +0xC4 bit 6; the game's own backread check 0xD6DE60 counts a disabled one as not loaded): at Firelink, those who have
+// not come to the shrine yet. Kept while the character is inactive (chr+0x1FD bit 7 is not: the game sets that one
+// when an enabled character first becomes active, so it was clear for everyone on a save loaded away from the
+// shrine; user report 2026-11-20, "Corndog" loaded on the aqueduct).
+bool chr_enabled(uint32_t chr) {
+    const uint32_t state = *reinterpret_cast<const uint32_t*>(chr + 0xC);
+    return state && !(*reinterpret_cast<const uint8_t*>(state + 0x14) & 1);
+}
+
 // For every character the loop tests (cdecl, from chr_test): the game's answer `ok`, or yes for one of ours kept
 // active; ours are noted for scenery_tick.
 int __cdecl scenery_check(uint32_t chr, int ok) {
@@ -533,9 +544,8 @@ int __cdecl scenery_check(uint32_t chr, int ok) {
         if (id != kScenery[k].entity) continue;
         g_scenery_chr[k] = chr;
         g_scenery_seen[k] = g_scenery_frame;
-        // Only one that is shown (chr+0x1FD bit 7, readable while it is inactive too: clear for the characters an
-        // event keeps disabled, such as those who have not come to the shrine yet).
-        if (ok || !g_scenery_want[k] || !(*reinterpret_cast<const uint8_t*>(chr + 0x1FD) & 0x80)) return ok;
+        // Only one an event has not disabled (keeping the others active cost the render thread about 17%).
+        if (ok || !g_scenery_want[k] || !chr_enabled(chr)) return ok;
         if (!(g_scenery_told & (1 << k))) {
             InterlockedOr(&g_scenery_told, 1 << k);
             LOG_INFO("DrawMapPieces: %s kept active outside its rooms (seen from farther, updated every frame)",
@@ -582,10 +592,8 @@ void scenery_tick() {
         const uint32_t state = *reinterpret_cast<const uint32_t*>(chr + 0xC);
         const bool active = state && *reinterpret_cast<const int32_t*>(state + 8) == 2;
         auto* flags = reinterpret_cast<uint8_t*>(chr + 0x1FD);
-        // Shown (chr+0x1FD bit 7: set for the characters an event has not disabled; at a new game's Firelink the crow,
-        // the Crestfallen Warrior, the Fire Keeper and Petrus, the others clear until they arrive): updated every
-        // frame. One not there yet stays active at the game's rate.
-        if (active && g_scenery_want[k] && (*flags & 0x80) && g_scenery_on == 1) {
+        // Enabled ones kept active are updated every frame (a disabled one the game made active itself keeps its rate).
+        if (active && g_scenery_want[k] && chr_enabled(chr) && g_scenery_on == 1) {
             if (!g_scenery_fixed[k] && !(*flags & 1)) g_scenery_fixed[k] = chr;  // the bit is ours to take off
             if (g_scenery_fixed[k] == chr) {
                 *flags = static_cast<uint8_t>(*flags | 1);
