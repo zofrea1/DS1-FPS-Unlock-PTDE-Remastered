@@ -15,6 +15,7 @@ src\ptde\window.cpp
 src\ptde\cursor.cpp
 src\ptde\present.cpp
 src\ptde\d3d.cpp
+src\ptde\vkprobe.cpp
 src\ptde\d3dperf.cpp
 src\ptde\ffx.cpp
 src\ptde\rendermath.cpp

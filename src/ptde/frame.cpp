@@ -657,8 +657,10 @@ bool frame_install(const Settings& settings) {
             // 10-bit back buffer in exclusive fullscreen alone), not beside DSfix (it wraps the device and keeps its
             // own picture), and by default only where Windows composes the display above 8 bits (HDR or Auto Color
             // Management: the desktop in 16-bit float), so the steps finer than 8 bits reach the screen.
+            // Under Proton the game's Direct3D 9 is Proton's DXVK; whether its swap chain can be 10-bit is asked of
+            // the window's Vulkan surface when the device is made (vkprobe.h).
             if (settings.high_precision_color && !dsfix_loaded() && settings.high_precision_output &&
-                d3d_dxvk_expected()) {
+                (d3d_dxvk_expected() || d3d_under_proton())) {
                 char text[256] = {};
                 primary_display_hdr(text, sizeof(text));
                 float white = 1.0f;

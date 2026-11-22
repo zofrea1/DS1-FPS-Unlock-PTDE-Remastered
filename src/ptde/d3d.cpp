@@ -25,6 +25,7 @@
 #include "occl.h"
 #include "foliage.h"
 #include "resolution.h"
+#include "vkprobe.h"
 #include "shadowmap.h"
 #include "settings.h"
 
@@ -212,10 +213,14 @@ void adjust_present_parameters(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMET
 // HighPrecisionOutput: the back buffer A2R10G10B10 while the frame buffer is 10-bit and the device is DXVK's (the game
 // asks for X8R8G8B8), else the game's own format (an 8-bit one if the game's descriptor gave it the frame's 10-bit
 // format). Returns the format the game asked for.
+// Under Proton: the game window's Vulkan surface offers a 10-bit format in the SDR colour space (vkprobe.h), so
+// Proton's DXVK presents the 10-bit back buffer as it is (gamescope with HDR on, the Steam Deck OLED); -1 not probed.
+int g_proton_10bit = -1;
+
 D3DFORMAT fit_back_buffer_format(D3DPRESENT_PARAMETERS* pp, const char* where) {
     if (!pp) return D3DFMT_UNKNOWN;
     const D3DFORMAT asked = pp->BackBufferFormat;
-    const bool ten = resolution_output_10bit() && g_dxvk_active;
+    const bool ten = resolution_output_10bit() && (g_dxvk_active || g_proton_10bit == 1);
     if (ten) {
         pp->BackBufferFormat = D3DFMT_A2R10G10B10;
     } else if (asked == D3DFMT_A2R10G10B10) {
@@ -227,7 +232,7 @@ D3DFORMAT fit_back_buffer_format(D3DPRESENT_PARAMETERS* pp, const char* where) {
         LOG_INFO("HighPrecisionOutput: %s with a %s back buffer (the game asked for format %d)", where,
                  pp->BackBufferFormat == D3DFMT_A2R10G10B10 ? "10-bit" : "8-bit", static_cast<int>(asked));
     }
-    if (resolution_output_10bit() && !g_dxvk_active) resolution_output_8bit_back();
+    if (resolution_output_10bit() && !ten) resolution_output_8bit_back();
     return asked;
 }
 
@@ -293,6 +298,14 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
     }
     if (settings().fps_unlock) adjust_present_parameters(d3d, adapter, pp, "CreateDevice");
     depthrev_adjust_present(pp, settings().reversed_depth);
+    if (resolution_output_10bit() && !g_dxvk_active && g_proton_10bit < 0 && d3d_under_proton()) {
+        char text[512];
+        const HWND w = pp && pp->hDeviceWindow ? pp->hDeviceWindow : window;
+        g_proton_10bit = vkprobe_10bit_surface(w, text, sizeof(text)) == 1 ? 1 : 0;
+        LOG_INFO("HighPrecisionOutput: under Proton the game window's Vulkan surface offers %s: %s", text,
+                 g_proton_10bit ? "a 10-bit format, so Proton's DXVK presents 10 bits a channel"
+                                : "no 10-bit format in the SDR colour space, so the picture stays 8-bit (dithered)");
+    }
     const D3DFORMAT asked = fit_back_buffer_format(pp, "CreateDevice");
     HRESULT hr = g_create_device(d3d, adapter, type, window, flags, pp, out);
     if (FAILED(hr) && pp && pp->BackBufferFormat == D3DFMT_A2R10G10B10) {
@@ -541,6 +554,9 @@ void** find_create_slot() {
 }  // namespace
 
 bool d3d_dxvk_expected() { return dxvk_expected(); }
+bool d3d_under_proton() {
+    return settings().fps_unlock && GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
+}
 
 void d3d_install_early(HMODULE self) {
     g_self = self;

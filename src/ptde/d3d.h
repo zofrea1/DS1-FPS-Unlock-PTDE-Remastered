@@ -20,6 +20,8 @@ void d3d_install_early(HMODULE self);
 // Whether the game's Direct3D 9 will be DXVK's (DXVK = true, not under Proton / Wine, dxvk_d3d9.dll beside this DLL),
 // before Direct3DCreate9 is called; dxvk_route's later checks (another Direct3D 9 replacement) can still say no.
 bool d3d_dxvk_expected();
+// Proton / Wine: the game's Direct3D 9 is the prefix's own (Proton's DXVK), whatever DXVK says.
+bool d3d_under_proton();
 
 // Content-cadence probe: a hash of every vertex shader constant upload since the previous call
 // (matrices, skinning palettes). The present hooks compare consecutive frames to see how often
