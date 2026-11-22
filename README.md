@@ -2,7 +2,7 @@
 
 High-FPS unlock with gameplay physics fixes for **Dark Souls: Remastered** and **Dark Souls: Prepare to Die Edition**. Movement, physics, camera, animation and menus stay correct at any frame rate, not just faster. Both games run in real time at 120, 240 or whatever your PC holds, and keep real-time speed when the frame rate dips.
 
-The mods are proxy DLLs. The game's files on disk are never modified, and each mod has an INI with a switch for every fix so you can compare against the retail behaviour.
+The mods are proxy DLLs. The game's data files are never modified; the one change on disk is PTDE's 4 GB flag in DARKSOULS.exe (`LargeAddressAware`, the original kept as `DARKSOULS.exe.before-laa`). Each mod has an INI with a switch for every fix so you can compare against the retail behaviour.
 
 Looking for co-op in Prepare to Die Edition? [Prepare to Co-op Edition](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE) plays the whole game with up to seven friends and includes this mod.
 

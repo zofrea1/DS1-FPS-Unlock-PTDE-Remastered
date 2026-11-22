@@ -1,6 +1,6 @@
 #pragma once
 
-// LargeAddressAware (default true, 2.7.1). DARKSOULS.exe (the Steam build, no DRM wrapper) is not large address aware:
+// LargeAddressAware (default true, 2.8.0). DARKSOULS.exe (the Steam build, no DRM wrapper) is not large address aware:
 // the game has 2 GB of address space, and at 4K with DXVK about 1.5 GB of it is in use on the Undead Burg's bridge
 // alone. With more players in a co-op session (up to 8), the Undead Burg's enemies near a teammate and other heavy
 // settings it ran out: a host crashed in NVIDIA's Vulkan driver at 1702 MB in use (2026-11-21), another at 1660 MB

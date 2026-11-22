@@ -244,7 +244,10 @@ DWORD WINAPI watchdog(void*) {
                                                exe + reinterpret_cast<const IMAGE_DOS_HEADER*>(exe)->e_lfanew)
                                          : nullptr;
                     const bool laa = nt && (nt->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE);
-                    if (!warned && !laa && ms.ullAvailVirtual < 400ull * 1048576ull) {
+                    // Only with the 2 GB: Proton gives the process 4 GB with the exe in memory unflagged (the Steam
+                    // Deck: 4096 MB, laa.cpp), and the 4 GB patch would change nothing there (Grok review 2026-11-22).
+                    const bool two_gb = ms.ullTotalVirtual <= 3072ull * 1048576ull;
+                    if (!warned && !laa && two_gb && ms.ullAvailVirtual < 400ull * 1048576ull) {
                         warned = true;
                         LOG_INFO("Warning: address space low: %.0f MB of the game's 2 GB left. DARKSOULS.exe is not large address "
                                  "aware; with that flag set in its header (a \"4GB patch\") the game gets 4 GB and "
