@@ -30,6 +30,11 @@ void remote_set_shader_dumps(bool on);
 // RemoteDeviceHooks (default true): false leaves the Direct3D device's methods unhooked (for speed measurements).
 void remote_set_device_hooks(int mode);  // 0 none, 1 all, 2 Present only (screenshots: `present` in the INI)
 bool remote_enabled();
+// Commands of a module built together with this one (Prepare to Co-op's diagnostics): a line this file does not know
+// goes to `fn`, which writes its answer to `reply` (at most `size` bytes) and returns true when it knew the command.
+// Called on the remote control's poll thread (set flags there; act on the game thread).
+using RemoteExtension = bool (*)(const char* line, char* reply, size_t size);
+void remote_set_extension(RemoteExtension fn);
 
 // The name a created shader was saved under (vs_/ps_<hash>), "none" or "unknown".
 #include <string>

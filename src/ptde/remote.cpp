@@ -129,6 +129,8 @@ wchar_t g_dir[MAX_PATH];
 ULONGLONG g_t0 = 0;
 std::mutex g_out_lock;
 
+RemoteExtension g_extension = nullptr;  // remote_set_extension
+
 void out(const char* fmt, ...) {
     char line[1024];
     va_list ap;
@@ -2823,7 +2825,13 @@ void run(const std::string& line) {
         g_query_frames = static_cast<LONG>(num(1, 10));
         out("queries: logging occlusion results for %ld frames", num(1, 10));
     } else {
-        out("unknown command: %s", line.c_str());
+        char reply[512] = {};
+        const RemoteExtension ext = g_extension;
+        if (ext && ext(line.c_str(), reply, sizeof(reply))) {
+            out("%s", reply);
+        } else {
+            out("unknown command: %s", line.c_str());
+        }
     }
 }
 
@@ -2878,6 +2886,7 @@ bool remote_start() {
 }
 
 bool remote_enabled() { return g_on; }
+void remote_set_extension(RemoteExtension fn) { g_extension = fn; }
 
 void remote_hook_device(IDirect3DDevice9* dev) {
     if (!g_on || !dev || !g_device_hooks) return;
@@ -2981,6 +2990,7 @@ void remote_game_frame() {
 
 #else  // FPSU_DIAGNOSTICS
 std::string remote_shader_name(void*) { return "none"; }
+void remote_set_extension(RemoteExtension) {}
 
 void remote_game_frame() {}
 bool remote_start() { return false; }
