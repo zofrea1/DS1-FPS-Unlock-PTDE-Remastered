@@ -7,12 +7,12 @@
 // ptde_fps_unlock_version(), because Prepare to Co-op's tools\make_ini.ps1 reads it from there; a static_assert there
 // keeps the two equal.
 #define FPSU_VERSION_MAJOR 2
-#define FPSU_VERSION_MINOR 8
+#define FPSU_VERSION_MINOR 9
 #define FPSU_VERSION_PATCH 0
-#define FPSU_VERSION_STR "2.8.0"
+#define FPSU_VERSION_STR "2.9.0"
 
 // Remastered: 2.6.0 changed only Prepare to Die Edition (Remastered stayed 2.5.0); 2.7.0 gave both games the same
-// number; 2.7.1 again changes only Prepare to Die Edition (DrawMapPieces no longer wakes the characters).
+// number; 2.8.0 and 2.9.0 again change only Prepare to Die Edition (Remastered stays 2.7.0).
 #define FPSU_DSR_VERSION_MAJOR 2
 #define FPSU_DSR_VERSION_MINOR 7
 #define FPSU_DSR_VERSION_PATCH 0
