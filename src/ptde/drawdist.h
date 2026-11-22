@@ -26,6 +26,7 @@ uint8_t drawdist_piece_role(int block, int index);
 uint32_t drawdist_role_gen();
 // RemoteControl `detailrules 0|1` (diagnostics A/B): the detail rules off (every piece as the masks say, the generic
 // depth bias) or on.
+void drawdist_floorlog(int seconds);  // diagnostics: the player's floor changes in the log for N s
 void drawdist_set_detail(int on);
 // RemoteControl: `drawmode 0|1|2|3` for this session (takes effect within a few seconds: the floor is applied again);
 // `lodpct N`.

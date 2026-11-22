@@ -2679,6 +2679,14 @@ void run(const std::string& line) {
                     s = t.size() > 3 ? static_cast<float>(std::atof(t[3].c_str())) : -1.0f;
         occl_set_zbias(num(1, 1) != 0, k, s);
         out("zbias %ld %g %g", num(1, 1), k, s);
+    } else if (c == "floorlog") {
+        // floorlog N: the player's floor changes (and its own groups) in the log for N s.
+        drawdist_floorlog(static_cast<int>(num(1, 10)));
+        out("floorlog %ld", num(1, 10));
+    } else if (c == "shadowcull") {
+        // shadowcull 0|1|2: shadow casters whose shadow cannot reach the view left out of the shadow maps (2: counted).
+        occl_set_shadowcull(static_cast<int>(num(1, 1)));
+        out("shadowcull %ld", num(1, 1));
     } else if (c == "zvp") {
         // zvp C: the depth levels through the viewport's depth range, C of the distance per level (0: DEPTHBIAS).
         if (t.size() > 1) {

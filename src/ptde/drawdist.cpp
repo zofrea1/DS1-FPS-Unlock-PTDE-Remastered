@@ -851,6 +851,8 @@ bool holds(const D::Piece& p, const float at[3]) {
 }
 
 bool g_detail_redo = true;  // the next tick works the rules out whatever its inputs (see the signature below)
+volatile LONG g_floorlog = 0;  // diagnostics (RemoteControl `floorlog N`): the player's floor changes logged for N s
+ULONGLONG g_floorlog_until = 0;
 
 void detail_tick_body() {
     static uint8_t role[kMaxBlocks][kRolePieces];
@@ -867,6 +869,28 @@ void detail_tick_body() {
     if (!floor) return;  // loading or no floor yet: keep what is set
     float at[3] = {};
     const bool at_ok = player_at(chr, at);
+    {
+        static uint32_t last_floor = 0;
+        static unsigned changes = 0;
+        if (g_floorlog) {
+            const ULONGLONG now = GetTickCount64();
+            if (!g_floorlog_until) g_floorlog_until = now + static_cast<ULONGLONG>(g_floorlog) * 1000;
+            if (floor != last_floor) {
+                ++changes;
+                const uint32_t own0 = *reinterpret_cast<const uint32_t*>(floor + 0x20);
+                const uint32_t own1 = *reinterpret_cast<const uint32_t*>(floor + 0x24);
+                LOG_INFO("[floorlog] floor %08X (block %d) own groups %08X %08X.. at %.2f %.2f %.2f", floor,
+                         static_cast<int>(*reinterpret_cast<const int8_t*>(floor + 0xF)), own0, own1, at[0], at[1], at[2]);
+            }
+            if (now >= g_floorlog_until) {
+                LOG_INFO("[floorlog] %u floor changes", changes);
+                changes = 0;
+                g_floorlog_until = 0;
+                InterlockedExchange(&g_floorlog, 0);
+            }
+        }
+        last_floor = floor;
+    }
     // Nothing to do while nothing the rules read has changed (2026-11-21 night: every frame on the render thread, 0.5%
     // of it at the Undead Burg bridge, the tables then doubled): the mode, the player's floor and 0.5 m cell (holds():
     // occupancy cells are 2 m on one grid, the boxes' margins anywhere), and every loaded block's piece array and
@@ -1103,6 +1127,7 @@ uint8_t drawdist_piece_role(int block, int index) {
     return g_role[block][index];
 }
 uint32_t drawdist_role_gen() { return g_role_gen; }
+void drawdist_floorlog(int seconds) { InterlockedExchange(&g_floorlog, seconds); }
 void drawdist_set_detail(int on) {
     InterlockedExchange(&g_detail_on, on);
     g_detail_redo = true;

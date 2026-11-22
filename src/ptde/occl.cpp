@@ -1045,6 +1045,56 @@ int __cdecl decide_inner(uint32_t entity, uint32_t ctx, uint32_t mflags) {
     return 0;
 }
 
+// Shadow casters that cannot shade anything in view (2026-11-22): the shadow maps' cameras draw whatever lies in their
+// slices, also what lies beside or behind the main camera where its shadow, which falls along the light's direction,
+// can never reach what the main camera sees. A model's box is left out of a shadow map's draws when, for one plane of
+// the main camera's frustum (its sides and near plane), the whole box lies outside it and the light's direction does
+// not point inward through it: then every point the box shades (the box moved along the light) stays outside that
+// plane. What the main camera shows is the same; only the water's small mirrored view (256x180, its own camera) could
+// have shown such a shadow. The main camera of the last frame (the same object every frame), its world rows at +0x10
+// (right, up, forward, position) and projection at +0x90; a shadow map's camera's forward row is the light's direction.
+volatile LONG g_shadowcull = 0;  // 0 off (the default: no gain measured), 1 on, 2 counted only (RemoteControl `shadowcull`)
+unsigned long g_st_sh_draws = 0, g_st_sh_cull = 0;
+
+bool shadow_cannot_reach(uint32_t cam, uint32_t entity) {
+    const uint32_t mc = g_main_cam;
+    if (!mc || cam == mc) return false;
+    const auto* m = reinterpret_cast<const float*>(mc);
+    const float* R = m + 4;
+    const float* U = m + 8;
+    const float* F = m + 12;
+    const float* P = m + 16;
+    const float px = m[0x90 / 4], py = m[0xA4 / 4];
+    if (!(px > 0.05f && px < 100.0f && py > 0.05f && py < 100.0f)) return false;
+    // The frustum's sides widened (tangents x 1.15 + 0.05: about 8 degrees more each way at the game's 43 degree field
+    // of view), so a turn between the shadow maps and the picture never meets a caster left out.
+    const float tx = 1.15f / px + 0.05f, ty = 1.15f / py + 0.05f;
+    const float* L = reinterpret_cast<const float*>(cam) + 12;  // the shadow camera's forward row
+    const float l2 = L[0] * L[0] + L[1] * L[1] + L[2] * L[2];
+    if (!(l2 > 0.9f && l2 < 1.1f)) return false;
+    const auto* b = reinterpret_cast<const float*>(entity + 0xA0);  // min x y z w, max x y z w
+    float c[3], e[3];
+    for (int k = 0; k < 3; ++k) {
+        if (!(b[k] <= b[4 + k]) || !(b[4 + k] - b[k] < 20000.0f)) return false;  // NaN, inverted or unbounded
+        c[k] = (b[k] + b[4 + k]) * 0.5f - P[k];
+        e[k] = (b[4 + k] - b[k]) * 0.5f;
+    }
+    const float sides[4][2] = {{1.0f, tx}, {-1.0f, tx}, {1.0f, ty}, {-1.0f, ty}};
+    for (int i = 0; i < 5; ++i) {
+        float n[3];
+        for (int k = 0; k < 3; ++k) {
+            n[k] = i == 4 ? F[k] : (i < 2 ? R[k] : U[k]) * sides[i][0] + F[k] * sides[i][1];
+        }
+        const float nl = n[0] * L[0] + n[1] * L[1] + n[2] * L[2];
+        if (nl > 0.0f) continue;  // the light carries the shadow inward through this plane
+        const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        const float far_in = n[0] * c[0] + n[1] * c[1] + n[2] * c[2] + std::fabs(n[0]) * e[0] + std::fabs(n[1]) * e[1] +
+                             std::fabs(n[2]) * e[2];
+        if (far_in < -0.5f * len) return true;  // the whole box at least half a metre outside
+    }
+    return false;
+}
+
 // decide_inner's answer (0 draw, 1 skip, 2 draw inside the query g_wrap_q), and 2 also for a drawn piece that only
 // DrawMapPieces adds, seen by a perspective camera: wrapped, with the depth bias.
 int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
@@ -1055,6 +1105,16 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     if ((mflags & 1) && g_refl_unused && passcull_skipping()) {
         ++g_st_refl_unused;
         return 1;
+    }
+    if (g_shadowcull) {
+        const uint32_t sc = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
+        if (sc && !perspective(sc) && g_main_cam && sc != g_main_cam) {
+            ++g_st_sh_draws;
+            if (shadow_cannot_reach(sc, entity)) {
+                ++g_st_sh_cull;
+                if (g_shadowcull == 1) return 1;
+            }
+        }
     }
     if (g_objshadow && (mflags & kObject) && (mflags & 6) == 2) {
         // Diagnostics (`occlobj N`): added objects left out of the shadow maps (1) or of every other camera (2).
@@ -1349,6 +1409,7 @@ void occl_set_zbias(bool on, float world, float max_bias) {
     if (max_bias >= 0.0f) g_zbias_max = max_bias;
     InterlockedExchange(&g_zbias, on ? 1 : 0);
 }
+void occl_set_shadowcull(int mode) { InterlockedExchange(&g_shadowcull, mode); }
 void occl_set_zvp(float c, float step) {
     if (c >= 0.0f) g_zvp = c;
     if (step >= 0.0f) g_zvp_step = step;
@@ -1512,6 +1573,13 @@ void occl_render_frame() {
             LOG_INFO("[occl] unused reflection: %.1f map piece draws a frame not made",
                      static_cast<double>(g_st_refl_unused) / static_cast<double>(g_st_frames));
         }
+        if (g_st_next && g_st_sh_draws && g_st_frames) {
+            LOG_INFO("[occl] shadow maps: %.1f of %.1f model draws a frame %s (their shadow cannot reach the view)",
+                     static_cast<double>(g_st_sh_cull) / static_cast<double>(g_st_frames),
+                     static_cast<double>(g_st_sh_draws) / static_cast<double>(g_st_frames),
+                     g_shadowcull == 1 ? "left out" : "could be left out");
+        }
+        g_st_sh_draws = g_st_sh_cull = 0;
         g_st_refl_unused = 0;
         g_st_fx_added = g_st_fx_skips = 0;
         g_st_inside = 0;

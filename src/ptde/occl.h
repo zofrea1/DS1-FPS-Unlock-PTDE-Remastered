@@ -18,6 +18,7 @@ void occl_set_zbias(bool on, float world = -1.0f, float max_bias = -1.0f);
 void occl_set_zprobe(int seed, float eps, int which);
 // The depth levels' share of the distance per level through the viewport's depth range (0: the DEPTHBIAS way).
 void occl_set_zvp(float c, float step = -1.0f);
+void occl_set_shadowcull(int mode);  // 0 off, 1 on, 2 counted only
 float occl_zvp();
 void occl_set_fx(int mode);
 void occl_set_objshadow(int mode);  // diagnostics: added objects out of the shadow maps (1) / other cameras (2)
