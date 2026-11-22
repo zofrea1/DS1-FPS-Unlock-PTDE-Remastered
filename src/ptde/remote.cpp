@@ -2655,6 +2655,11 @@ void run(const std::string& line) {
                    static_cast<float>(std::atof(t[3].c_str())), static_cast<float>(std::atof(t[4].c_str())),
                    static_cast<int>(num(5, 100)));
         out("entwatch %s %s %s r %s: %ld frames", t[1].c_str(), t[2].c_str(), t[3].c_str(), t[4].c_str(), num(5, 100));
+    } else if (c == "camspin") {
+        camera_set_spin(t.size() > 1 ? static_cast<float>(std::atof(t[1].c_str())) : 0.0f);
+        out("camspin %s", t.size() > 1 ? t[1].c_str() : "0");
+    } else if (c == "camptr") {
+        out("camptr %08X", static_cast<unsigned>(camera_follow_ptr()));
     } else if (c == "camhold") {
         camera_set_hold(num(1, 1) != 0);
         out("camhold %ld", num(1, 1));
@@ -2674,6 +2679,16 @@ void run(const std::string& line) {
                     s = t.size() > 3 ? static_cast<float>(std::atof(t[3].c_str())) : -1.0f;
         occl_set_zbias(num(1, 1) != 0, k, s);
         out("zbias %ld %g %g", num(1, 1), k, s);
+    } else if (c == "zvp") {
+        // zvp C: the depth levels through the viewport's depth range, C of the distance per level (0: DEPTHBIAS).
+        if (t.size() > 1) occl_set_zvp(static_cast<float>(std::atof(t[1].c_str())));
+        out("zvp %g", occl_zvp());
+    } else if (c == "zprobe") {
+        // zprobe SEED [EPS [WHICH]]: map pieces (WHICH 2: and objects) drawn +-EPS deeper by a hash of their model and
+        // SEED (negative: the halves swapped), to find surfaces close enough in depth to fight; zprobe 0 = off.
+        const float e = t.size() > 2 ? static_cast<float>(std::atof(t[2].c_str())) : -1.0f;
+        occl_set_zprobe(static_cast<int>(num(1, 0)), e, t.size() > 3 ? static_cast<int>(num(3, 1)) : 0);
+        out("zprobe %ld %g", num(1, 0), e);
     } else if (c == "entdump") {
         // entdump [N]: the next frame's model draws (up to N, default 2000) in the log, with their render target.
         occl_request_dump(t.size() > 1 ? static_cast<int>(num(1, 2000)) : 2000);  // -1: one line per pass

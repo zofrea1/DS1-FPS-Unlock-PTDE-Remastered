@@ -952,7 +952,10 @@ void detail_tick_body() {
         if (pr.winner > 1 || !drawn[pr.a] || !drawn[pr.b]) continue;
         const auto& pa = D::kPieces[pr.a];
         const auto& pb = D::kPieces[pr.b];
-        const bool shared = any_of(pa.groups, pb.groups);
+        // Two maps' pieces (a map's coarse copy of its neighbour's structures) never share a room: each map numbers its
+        // groups itself. Their pairs always carry bits 4 and 8 (gen_detail.py), so the depth levels order them unless
+        // enough of one lies on the other to leave it out.
+        const bool shared = pa.block == pb.block && any_of(pa.groups, pb.groups);
         const bool apart = (pr.apart & 4) != 0;
         if (shared && !apart) continue;                          // in one plane: the depth levels below
         if (covering[pr.a] || covering[pr.b]) continue;          // drawn in a stand-in's place: never left out

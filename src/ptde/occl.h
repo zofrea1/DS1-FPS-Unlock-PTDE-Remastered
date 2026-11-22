@@ -15,6 +15,10 @@ void occl_set_inside(bool on);
 // both cover the same surfaces (no z-fighting): world = metres moved back at the piece's nearest point, max_bias = the
 // most depth bias. A negative value keeps that parameter. Needs occl_install.
 void occl_set_zbias(bool on, float world = -1.0f, float max_bias = -1.0f);
+void occl_set_zprobe(int seed, float eps, int which);
+// The depth levels' share of the distance per level through the viewport's depth range (0: the DEPTHBIAS way).
+void occl_set_zvp(float c);
+float occl_zvp();
 void occl_set_fx(int mode);
 void occl_set_objshadow(int mode);  // diagnostics: added objects out of the shadow maps (1) / other cameras (2)
 // The map pieces of a mirrored pass that SkipUnusedReflection does not send are not drawn either (1, default) or are

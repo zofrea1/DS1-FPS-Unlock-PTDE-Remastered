@@ -460,6 +460,21 @@ constexpr float kZbiasSlope = 1.0f;   // D3DRS_SLOPESCALEDEPTHBIAS added
 float g_wrap_bias_val = 0.0f;         // this draw's
 float g_wrap_slope_val = 0.0f;        // this draw's slope-scaled bias added
 bool g_wrap_bias = false;             // the next draw the stub wraps gets the bias
+// The depth range way (2026-11-21 night): a level moves the draw's depth range to start at level * g_zvp (the
+// viewport's MinZ) instead of the DEPTHBIAS above: depth = z + g_zvp * level * (1 - z), about g_zvp * level * the
+// distance in metres farther at every pixel (1 - z is near / distance for a 3000 m far plane), so the same share of
+// the distance near and far: 3 cm at 10 m, 30 cm at 100 m with 0.003. 0: the DEPTHBIAS way (RemoteControl `zvp`).
+float g_zvp = 0.003f;
+float g_wrap_vp_minz = 0.0f;          // this draw's (0: none)
+bool g_vp_set = false;
+D3DVIEWPORT9 g_saved_vp{}, g_set_vp{};
+// Diagnostics (`zprobe SEED [EPS [WHICH]]`): every map piece's draws (WHICH 2: objects' too) seen by a perspective camera
+// get +EPS or -EPS of depth bias on top of their own, by a hash of their model and SEED (a negative SEED swaps the two
+// halves). Frozen frames with a few seeds differ exactly where two surfaces lie within about EPS in depth: where they
+// would fight. 0: off.
+volatile LONG g_zprobe = 0;
+float g_zprobe_eps = 1.2e-7f;
+volatile LONG g_zprobe_which = 1;
 DWORD g_saved_bias = 0, g_saved_slope = 0, g_set_bias = 0, g_set_slope = 0;
 
 // Statistics for the log (every 5 s).
@@ -1042,14 +1057,33 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     }
     const int r = decide_inner(entity, ctx, mflags);
     g_wrap_bias = false;
-    if (r == 1 || !g_zbias) return r;
+    g_wrap_vp_minz = 0.0f;
+    const LONG zprobe = g_zprobe;
+    if (r == 1 || (!g_zbias && !zprobe)) return r;
     const uint32_t cam = *reinterpret_cast<const uint32_t*>(ctx + 0x100);
     if (!cam || !perspective(cam)) return r;
+    float probe_bias = 0.0f;
+    if (zprobe && (mflags & 1) && (!(mflags & kObject) || g_zprobe_which >= 2)) {
+        const uint32_t key = *reinterpret_cast<const uint32_t*>(entity + 0x40);
+        const uint32_t seed = static_cast<uint32_t>(zprobe < 0 ? -zprobe : zprobe);
+        uint32_t hh = (key >> 4) ^ (seed * 0x9E3779B9u);
+        hh ^= hh >> 15;
+        hh *= 2654435761u;
+        hh ^= hh >> 13;
+        const bool back = ((hh >> 31) != 0) != (zprobe < 0);
+        probe_bias = back ? g_zprobe_eps : -g_zprobe_eps;
+    }
     // The depth level: bits 8-11, level + 1 (the lowest of the model's drawn pieces: the detail rules' or the generic
     // rule's, an added piece 1, the game's 0); 0 only in a table from before (the generic rule then).
     const uint32_t lv = (mflags >> 8) & 0xF;
-    const uint32_t level = lv ? lv - 1 : ((mflags & 6) == 2 && !(mflags & kObject) ? 1u : 0u);
-    if (level == 0) return r;
+    const uint32_t level = !g_zbias ? 0u : lv ? lv - 1 : ((mflags & 6) == 2 && !(mflags & kObject) ? 1u : 0u);
+    if (level == 0 && probe_bias == 0.0f) return r;
+    if (level == 0) {
+        g_wrap_bias_val = probe_bias;
+        g_wrap_slope_val = 0.0f;
+        g_wrap_bias = true;
+        return 2;
+    }
     // The camera's nearest distance to the piece's world box, and the near plane (projection +0xC8 = -near * q).
     const auto* c = reinterpret_cast<const float*>(cam);
     const auto* b = reinterpret_cast<const float*>(entity + 0xA0);  // min x y z w, max x y z w
@@ -1064,8 +1098,15 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     float bias = d2 > 1e-6f ? nearp * g_zbias_world / d2 : g_zbias_max;
     if (bias > g_zbias_max) bias = g_zbias_max;
     if (bias < kZbiasMin) bias = kZbiasMin;
-    g_wrap_bias_val = bias * static_cast<float>(level);
+    g_wrap_bias_val = bias * static_cast<float>(level) + probe_bias;
     g_wrap_slope_val = kZbiasSlope * static_cast<float>(level);
+    const float zvp = g_zvp;
+    if (zvp > 0.0f) {
+        float m = zvp * static_cast<float>(level);
+        if (m > 0.25f) m = 0.25f;
+        g_wrap_vp_minz = m;
+        g_wrap_bias_val = kZbiasMin * static_cast<float>(level) + probe_bias;
+    }
     g_wrap_bias = true;
     return 2;
 }
@@ -1096,6 +1137,11 @@ void __cdecl wrap_begin() {
         std::memcpy(&g_set_slope, &s, 4);
         g_dev->SetRenderState(D3DRS_DEPTHBIAS, g_set_bias);
         g_dev->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, g_set_slope);
+        if (g_wrap_vp_minz > 0.0f && SUCCEEDED(g_dev->GetViewport(&g_saved_vp))) {
+            g_set_vp = g_saved_vp;
+            g_set_vp.MinZ = g_saved_vp.MinZ + (g_saved_vp.MaxZ - g_saved_vp.MinZ) * g_wrap_vp_minz;
+            g_vp_set = SUCCEEDED(g_dev->SetViewport(&g_set_vp));
+        }
     }
 }
 void __cdecl wrap_end() {
@@ -1117,6 +1163,13 @@ void __cdecl wrap_end() {
             g_dev->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &now);
         }
         if (now == g_set_slope) g_dev->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, g_saved_slope);
+        if (g_vp_set) {
+            D3DVIEWPORT9 vp{};
+            if (SUCCEEDED(g_dev->GetViewport(&vp)) && std::memcmp(&vp, &g_set_vp, sizeof(vp)) == 0) {
+                g_dev->SetViewport(&g_saved_vp);
+            }
+            g_vp_set = false;
+        }
     }
     g_wrap_bias = false;
 }
@@ -1289,6 +1342,15 @@ void occl_set_zbias(bool on, float world, float max_bias) {
     if (world >= 0.0f) g_zbias_world = world;
     if (max_bias >= 0.0f) g_zbias_max = max_bias;
     InterlockedExchange(&g_zbias, on ? 1 : 0);
+}
+void occl_set_zvp(float c) {
+    if (c >= 0.0f) g_zvp = c;
+}
+float occl_zvp() { return g_zvp; }
+void occl_set_zprobe(int seed, float eps, int which) {
+    if (eps > 0.0f) g_zprobe_eps = eps;
+    if (which > 0) InterlockedExchange(&g_zprobe_which, which);
+    InterlockedExchange(&g_zprobe, seed);
 }
 void occl_set_vista_cap(int on) { InterlockedExchange(&g_vista_cap, on); }
 void occl_set_show(int on) { InterlockedExchange(&g_show, on); }
