@@ -45,6 +45,8 @@ enum DxvkFse {
 // dxgi_present (INI DxvkPresentThroughDxgi): DXVK's frames go out through DXGI (dxgipresent.h); exclusive_fullscreen
 // is then not used (no Vulkan swap chain to make exclusive).
 bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen, bool dxgi_present);
+// An option for DXVK_CONFIG (before dxvk_route loads DXVK).
+void dxvk_add_option(const char* key, const char* value);
 
 // DXVK's 32-bit d3d9.dll, renamed, in the folder of this DLL.
 inline constexpr wchar_t kDxvkFileName[] = L"dxvk_d3d9.dll";

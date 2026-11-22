@@ -15,5 +15,5 @@ bool camera_install();
 void camera_set_enabled(bool on);
 void camera_set_hold(bool on);  // diagnostics: the follow camera left where it is (RemoteControl `camhold`)
 uint32_t camera_follow_ptr();
-void camera_set_spin(float deg_per_frame);  // diagnostics: the held camera turned about the vertical each frame   // diagnostics: the follow camera object last updated
+void camera_set_spin(float deg_per_frame, float dx = 0.0f, float dy = 0.0f, float dz = 0.0f);  // diagnostics: the held camera turned about the vertical each frame   // diagnostics: the follow camera object last updated
 bool camera_enabled();

@@ -264,6 +264,8 @@ struct Settings {
     // Set the large address aware flag on DARKSOULS.exe so the game gets 4 GB of address space from its next start
     // (laa.h). Independent of FPSUnlock.
     bool large_address_aware = true;
+    // Experimental (depthrev.h): depth reversed in 32-bit float buffers. Off by default.
+    bool reversed_depth = false;
     // The game's own frame rate check ends online play after 30 seconds that averaged 15 FPS or less, which one
     // long pause is enough for (see framekick.h). true leaves the check out. Independent of FPSUnlock.
     bool fix_framerate_kick = true;

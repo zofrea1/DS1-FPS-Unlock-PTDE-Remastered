@@ -2656,7 +2656,8 @@ void run(const std::string& line) {
                    static_cast<int>(num(5, 100)));
         out("entwatch %s %s %s r %s: %ld frames", t[1].c_str(), t[2].c_str(), t[3].c_str(), t[4].c_str(), num(5, 100));
     } else if (c == "camspin") {
-        camera_set_spin(t.size() > 1 ? static_cast<float>(std::atof(t[1].c_str())) : 0.0f);
+        const auto f = [&](size_t k) { return t.size() > k ? static_cast<float>(std::atof(t[k].c_str())) : 0.0f; };
+        camera_set_spin(f(1), f(2), f(3), f(4));
         out("camspin %s", t.size() > 1 ? t[1].c_str() : "0");
     } else if (c == "camptr") {
         out("camptr %08X", static_cast<unsigned>(camera_follow_ptr()));

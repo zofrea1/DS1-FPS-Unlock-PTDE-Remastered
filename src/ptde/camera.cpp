@@ -272,7 +272,8 @@ volatile long g_hold = 0;  // diagnostics (RemoteControl `camhold 1`): the follo
 
 volatile uint32_t g_follow_cam = 0;  // diagnostics: the follow camera last updated (RemoteControl `camptr`)
 
-volatile float g_spin = 0.0f;  // diagnostics (RemoteControl `camspin DEG`): the held camera turned DEG a frame
+volatile float g_spin = 0.0f;  // diagnostics (RemoteControl `camspin DEG [DX DY DZ]`): the held camera turned DEG a frame
+volatile float g_slide[3] = {};  // and moved this much a frame
 
 void spin_held(void* camera) {
     const float a = g_spin * 0.017453292f;
@@ -290,6 +291,10 @@ void __stdcall follow_stub(void* camera, float dt, void* chr, void* extra) {
     g_follow_cam = reinterpret_cast<uint32_t>(camera);
     if (g_hold) {
         if (g_spin != 0.0f) spin_held(camera);
+        if (g_slide[0] != 0.0f || g_slide[1] != 0.0f || g_slide[2] != 0.0f) {
+            auto* pos = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(camera) + 0x40);
+            for (int k = 0; k < 3; ++k) pos[k] += g_slide[k];
+        }
         return;
     }
     double n = static_cast<double>(dt) * 30.0;
@@ -305,7 +310,12 @@ void __stdcall follow_stub(void* camera, float dt, void* chr, void* extra) {
 
 void camera_set_hold(bool on) { g_hold = on ? 1 : 0; }
 uint32_t camera_follow_ptr() { return g_follow_cam; }
-void camera_set_spin(float deg_per_frame) { g_spin = deg_per_frame; }
+void camera_set_spin(float deg_per_frame, float dx, float dy, float dz) {
+    g_spin = deg_per_frame;
+    g_slide[0] = dx;
+    g_slide[1] = dy;
+    g_slide[2] = dz;
+}
 
 bool camera_install() {
     for (uint32_t site : kCallSites) {

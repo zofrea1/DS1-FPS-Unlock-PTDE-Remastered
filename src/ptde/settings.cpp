@@ -430,6 +430,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.skip_intro = parse_bool(val);
         } else if (key == "largeaddressaware") {
             s.large_address_aware = parse_bool(val);
+        } else if (key == "reverseddepth") {
+            s.reversed_depth = parse_bool(val);
         } else if (key == "fixframeratekick") {
             s.fix_framerate_kick = parse_bool(val);
         } else if (key == "survey") {

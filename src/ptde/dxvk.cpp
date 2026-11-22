@@ -262,6 +262,8 @@ void add_dxvk_option(const char* key, const char* value) {
 
 }  // namespace
 
+void dxvk_add_option(const char* key, const char* value) { add_dxvk_option(key, value); }
+
 bool dxvk_route(const wchar_t* dxvk_path, int exclusive_fullscreen, bool dxgi_present) {
     char dxvk_name[MAX_PATH];
     narrow(dxvk_path, dxvk_name);

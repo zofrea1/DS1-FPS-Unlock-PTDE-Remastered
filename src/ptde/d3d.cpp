@@ -1,3 +1,4 @@
+#include "depthrev.h"
 #include "d3d.h"
 
 #include "aspect.h"
@@ -217,6 +218,7 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
         }
         d3d->Release();
     }
+    depthrev_adjust_present(pp, settings().reversed_depth);
     d3dperf_reset();
     surfpool_reset();
     resolution_reset();
@@ -259,6 +261,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
         aspect_adjust_present(d3d, adapter, pp, "CreateDevice");
     }
     if (settings().fps_unlock) adjust_present_parameters(d3d, adapter, pp, "CreateDevice");
+    depthrev_adjust_present(pp, settings().reversed_depth);
     const HRESULT hr = g_create_device(d3d, adapter, type, window, flags, pp, out);
     LOG_INFO("CreateDevice: adapter %u, type %d, behavior flags 0x%08lX%s%s%s%s%s%s, hr 0x%08lX", adapter,
              static_cast<int>(type), flags, (flags & D3DCREATE_HARDWARE_VERTEXPROCESSING) ? " hardware-vp" : "",
@@ -276,6 +279,7 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
                   client.right - client.left, client.bottom - client.top);
     }
     if (SUCCEEDED(hr) && out && *out) {
+        depthrev_hook_device(*out, settings().reversed_depth && g_dxvk_active);  // beneath every other hook (ReversedDepth, experimental)
         occl_capture_device(*out);  // before any hook
         const PtdeExtension* ext = ptde_extension();
         if (ext && ext->device_created) ext->device_created(*out);
@@ -428,6 +432,9 @@ void route_to_dxvk() {
     _snwprintf_s(path, _TRUNCATE, L"%s%s", dir, kDxvkFileName);
     dxgipresent_set_pacing(settings().dxvk_paced_present ? 1 : 0, limiter_requested_fps);
     dxgipresent_set_hdr_chain(settings().dxvk_hdr_swap_chain);
+    // ReversedDepth: DXVK keeps the game's 24-bit depth buffers in 32-bit float ones (as it always does on GPUs
+    // without 24-bit depth, AMD's among them), with stencil and multisampling as before.
+    if (settings().reversed_depth) dxvk_add_option("d3d9.useD32forD24", "True");  // only read when DXVK loads
     g_dxvk_active = dxvk_route(path, settings().dxvk_exclusive_fullscreen, settings().dxvk_dxgi_present);
 }
 
