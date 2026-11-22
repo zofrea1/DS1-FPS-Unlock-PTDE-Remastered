@@ -743,6 +743,9 @@ constexpr uint32_t kWorldChrMan = 0x0137D644;  // +0x3C the player, whose +0x29C
 constexpr size_t kDetPieces = sizeof(D::kPieces) / sizeof(D::kPieces[0]);
 constexpr size_t kDetPairs = sizeof(D::kPairs) / sizeof(D::kPairs[0]);
 constexpr size_t kDetStandins = sizeof(D::kStandins) / sizeof(D::kStandins[0]);
+constexpr size_t kDetObjTwins = sizeof(D::kObjTwins) / sizeof(D::kObjTwins[0]);
+constexpr uint32_t kObjMan = 0x0137D5F8;  // WorldObjManImp: +0x1C blocks, +0x20 entries 0xEC (+0x0C draw mask, +0x3C n,
+                                          // +0x40 ObjIns 0xC0 each in the MSB's order: +0x14 groups, +0x6C/7C/8C x y z)
 constexpr int kRolePieces = 512;  // pieces a map may have for the roles (the largest has 195)
 constexpr uint32_t kOnes[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
 constexpr uint32_t kZero[4] = {};
@@ -814,11 +817,41 @@ void restore_all() {
     }
 }
 
-void publish_roles(const uint8_t (&role)[kMaxBlocks][kRolePieces]) {
+// kObjTwins left out (1): an object of another room lying on a map piece drawn here (see the rules below). For occl.cpp
+// (drawdist_object_hidden), which leaves the object's draws out; changes count in g_role_gen like the roles.
+uint8_t g_objhide[kDetObjTwins] = {};
+bool g_objhide_any = false;
+
+void publish_roles(const uint8_t (&role)[kMaxBlocks][kRolePieces], const uint8_t (&objhide)[kDetObjTwins]) {
+    bool changed = false;
     if (std::memcmp(role, g_role, sizeof(g_role)) != 0) {
         std::memcpy(g_role, role, sizeof(g_role));
-        ++g_role_gen;
+        changed = true;
     }
+    if (std::memcmp(objhide, g_objhide, sizeof(g_objhide)) != 0) {
+        std::memcpy(g_objhide, objhide, sizeof(g_objhide));
+        g_objhide_any = false;
+        for (const uint8_t h : g_objhide) g_objhide_any = g_objhide_any || h != 0;
+        changed = true;
+    }
+    if (changed) ++g_role_gen;
+}
+
+// The live object of a kObjTwins entry (its ObjIns), or 0 when its map is not loaded or does not match the table.
+uint32_t live_object(const D::ObjTwin& o) {
+    const uint32_t man = *reinterpret_cast<const uint32_t*>(kObjMan);
+    if (!man) return 0;
+    const int count = *reinterpret_cast<const int*>(man + 0x1C);
+    const uint32_t blocks = *reinterpret_cast<const uint32_t*>(man + 0x20);
+    if (!blocks || o.block >= count) return 0;
+    const uint32_t blk = blocks + o.block * 0xEC;
+    const int n = *reinterpret_cast<const int*>(blk + 0x3C);
+    const uint32_t arr = *reinterpret_cast<const uint32_t*>(blk + 0x40);
+    if (!arr || n != o.map_objects || o.order >= n) return 0;
+    const uint32_t obj = arr + o.order * 0xC0;
+    const auto* f = reinterpret_cast<const float*>(obj);
+    const float dx = f[0x6C / 4] - o.pos[0], dy = f[0x7C / 4] - o.pos[1], dz = f[0x8C / 4] - o.pos[2];
+    return dx * dx + dy * dy + dz * dz < 0.25f ? obj : 0;
 }
 
 // The player's position (physics: chr +0x28 controller, +0x1C physics, +0x10 x y z), or false.
@@ -856,10 +889,12 @@ ULONGLONG g_floorlog_until = 0;
 
 void detail_tick_body() {
     static uint8_t role[kMaxBlocks][kRolePieces];
+    static uint8_t objhide[kDetObjTwins];
     if (g_mode == 0 || !g_detail_on) {
         std::memset(role, 0, sizeof(role));
+        std::memset(objhide, 0, sizeof(objhide));
         restore_all();
-        publish_roles(role);
+        publish_roles(role, objhide);
         g_detail_redo = true;
         return;
     }
@@ -1028,6 +1063,36 @@ void detail_tick_body() {
         drawn[h] = false;
         why[h] = apart && (shared || (pr.apart & 8)) ? 5 : 3;
     }
+    // Objects (DrawMapObjects): an object lying on a map piece it shares no room with (kObjTwins) is another room's
+    // version of that structure, a centimetre or two off the piece's, and the two fight over the depth wherever both
+    // are drawn (user report 2026-11-22 from the Undead Burg watchtower: the spire towers below, o1290, a room's object
+    // brought in on m2380B1, the far version the watchtower's room draws; no flicker with DrawMapPieces = game). As for
+    // the pieces, the player's room's own stays: an object it does not draw is left out while the piece is drawn
+    // (occl.cpp skips its draws), and a piece it does not draw while the object is.
+    std::memset(objhide, 0, sizeof(objhide));
+    for (size_t k = 0; k < kDetObjTwins; ++k) {
+        const auto& ot = D::kObjTwins[k];
+        const size_t pi = ot.piece;
+        if (pi >= kDetPieces || !live[pi] || !drawn[pi]) continue;
+        const uint32_t obj = live_object(ot);
+        if (!obj) continue;
+        const uint32_t man = *reinterpret_cast<const uint32_t*>(kObjMan);
+        const uint32_t oblk = *reinterpret_cast<const uint32_t*>(man + 0x20) + ot.block * 0xEC;
+        uint32_t bseen[4], bgame[4];
+        if (!block_masks(ot.block, bseen, bgame)) continue;
+        const auto* g = reinterpret_cast<const uint32_t*>(obj + 0x14);
+        if (!any_of(g, reinterpret_cast<const uint32_t*>(oblk + 0x0C))) continue;  // the object is not drawn
+        if (any_of(g, D::kPieces[pi].groups)) continue;  // one room shows both: made together, the game's picture
+        const bool oown = any_of(g, bgame), pown = own[pi] && !forced[pi];
+        if (oown && pown) continue;  // the game's own picture
+        if (oown) {
+            if (covering[pi]) continue;  // drawn in a stand-in's place: never left out
+            drawn[pi] = false;
+            why[pi] = 6;
+        } else {
+            objhide[k] = 1;
+        }
+    }
     // Write what is wanted: hidden (drawn otherwise), drawn from any room, or the piece's own groups.
     for (size_t i = 0; i < kDetPieces; ++i) {
         if (!live[i]) continue;
@@ -1044,7 +1109,8 @@ void detail_tick_body() {
                                                "hidden: another room's version of surfaces drawn here (no z-fighting)",
                                                "hidden: the same model drawn for this room",
                                                "hidden: another room's version crossing surfaces drawn here, too far apart "
-                                               "for a depth bias"};
+                                               "for a depth bias",
+                                               "hidden: an object drawn here is this room's version of its surfaces"};
             LOG_INFO("DrawMapPieces: %s (map %s), %s", p.name, p.map, kWhy[why[i]]);
         }
     }
@@ -1072,7 +1138,18 @@ void detail_tick_body() {
         role[p.block][p.index] =
             static_cast<uint8_t>((forced[i] ? 1 : 0) | (covering[i] ? 2 : 0) | ((level[i] + 1) << 4));
     }
-    publish_roles(role);
+    {
+        static uint8_t told[kDetObjTwins] = {};  // logged once each
+        for (size_t k = 0; k < kDetObjTwins; ++k) {
+            if (!objhide[k] || told[k]) continue;
+            told[k] = 1;
+            const auto& ot = D::kObjTwins[k];
+            LOG_INFO("DrawMapObjects: object #%u of map %s (at %.1f %.1f %.1f) left out: another room's version of %s, "
+                     "drawn here", static_cast<unsigned>(ot.order), D::kPieces[ot.piece].map, ot.pos[0], ot.pos[1],
+                     ot.pos[2], D::kPieces[ot.piece].name);
+        }
+    }
+    publish_roles(role, objhide);
 }
 
 bool g_twins_on = false;
@@ -1127,6 +1204,13 @@ uint8_t drawdist_piece_role(int block, int index) {
     return g_role[block][index];
 }
 uint32_t drawdist_role_gen() { return g_role_gen; }
+bool drawdist_object_hidden(int block, int index) {
+    if (!g_objhide_any) return false;
+    for (size_t k = 0; k < kDetObjTwins; ++k) {
+        if (g_objhide[k] && D::kObjTwins[k].block == block && D::kObjTwins[k].order == index) return true;
+    }
+    return false;
+}
 void drawdist_floorlog(int seconds) { InterlockedExchange(&g_floorlog, seconds); }
 void drawdist_set_detail(int on) {
     InterlockedExchange(&g_detail_on, on);

@@ -11,6 +11,9 @@
 //    their place.
 //  kBackdrop: coarse far pieces (side over 250 m, 90% of the area in triangles over 100 m^2): never brought in
 //    from another room.
+//  kObjTwins: map objects whose surfaces lie on a map piece's (30% of the object within 6 cm, 1 m^2 or more) with
+//    no draw group in common: another room's version of the structure. Of the two, the one the player's room
+//    draws stays.
 #include <cstdint>
 
 namespace drawdist_detail {
@@ -37,6 +40,14 @@ struct Pair {
     uint8_t winner;  // 0: a is finer, 1: b, 2: the same model twice (the room's own copy wins)
     uint8_t apart;   // 4: the surfaces run apart (no depth bias settles them; never both drawn); then 1: a may
                      // be hidden for b (enough of it lies on b), 2: b for a; 8: found by gaps.py only
+};
+
+struct ObjTwin {
+    uint16_t piece;        // kPieces
+    uint8_t block;         // the object manager's block of its map (the map piece manager's order)
+    uint16_t map_objects;  // that map's object count (the table is used only where it matches)
+    uint16_t order;        // the object's place among them (the MSB's order of its objects)
+    float pos[3];          // its position (checked against the live object's)
 };
 
 struct Standin {
@@ -4309,6 +4320,13 @@ constexpr uint16_t kCover[] = {
     119, 110, 91, 97, 117, 125, 134, 109, 85, 115, 155, 98, 87, 94, 107, 102,
     116, 145, 123, 129, 128, 156, 90, 81, 96, 118, 103, 165, 132, 241, 226, 230,
     234, 232, 349, 351, 366, 364, 355, 372, 356, 332, 608,
+};
+
+constexpr ObjTwin kObjTwins[] = {
+    {82, 1, 528, 58, {-38.57f, -19.81f, -67.30f}},  // o1129 on m2420B1 (m10_01), 45% of it, 1.6 m^2
+    {75, 1, 528, 465, {22.51f, 9.40f, -25.38f}},  // o1290 on m2380B1 (m10_01), 40% of it, 211.0 m^2
+    {82, 1, 528, 493, {-33.97f, -34.81f, -56.79f}},  // o1317_0000 on m2420B1 (m10_01), 88% of it, 4.2 m^2
+    {82, 1, 528, 496, {-58.57f, -43.23f, -35.54f}},  // o1317_0003 on m2420B1 (m10_01), 87% of it, 4.2 m^2
 };
 
 constexpr uint8_t kVox[] = {

@@ -24,6 +24,10 @@ void drawdist_tick();
 // drawn a little farther in depth). Game thread; drawdist_role_gen() changes whenever any answer does.
 uint8_t drawdist_piece_role(int block, int index);
 uint32_t drawdist_role_gen();
+// DrawMapObjects: whether the detail rules leave this object (its block, its index among the block's objects) out: one
+// of another room lying on a map piece drawn here, that room's version of the piece's surfaces (drawdist.cpp's
+// kObjTwins). Game thread; drawdist_role_gen() changes with the answers.
+bool drawdist_object_hidden(int block, int index);
 // RemoteControl `detailrules 0|1` (diagnostics A/B): the detail rules off (every piece as the masks say, the generic
 // depth bias) or on.
 void drawdist_floorlog(int seconds);  // diagnostics: the player's floor changes in the log for N s

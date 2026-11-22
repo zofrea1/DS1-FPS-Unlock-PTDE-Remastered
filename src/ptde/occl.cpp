@@ -145,6 +145,11 @@ constexpr uint32_t kNoInside = 0x10000u;
 constexpr uint32_t kObject = 0x20000u;
 // While the table is built only: an added piece of this model without kNoInside (one that still needs the inside rule).
 constexpr uint32_t kNeedsInside = 0x40000u;
+// Model flags of objects: an added object of this model that the detail rules leave out (another room's version of a
+// map piece drawn here, drawdist_object_hidden), and one they keep. Its draws are skipped only while every added
+// object of the model is left out and the player's room draws none of it.
+constexpr uint32_t kObjTwin = 0x80000u;
+constexpr uint32_t kObjKeep = 0x100000u;
 constexpr uint32_t kObjManVar = 0x0137D5F8;  // WorldObjManImp: +0x1C blocks, +0x20 entries 0xEC (+0x3C n, +0x40 objects)
 
 inline uint32_t hash_ptr(uint32_t p, int bits) { return ((p >> 3) * 2654435761u) >> (32 - bits); }
@@ -222,12 +227,13 @@ void build_models() {
                 if (!fl) continue;
                 const auto* g = reinterpret_cast<const uint32_t*>(o + 0x14);
                 const bool extra = !((g[0] & own[0]) | (g[1] & own[1]) | (g[2] & own[2]) | (g[3] & own[3]));
+                const uint32_t twin = !extra ? 0u : drawdist_object_hidden(b, i) ? kObjTwin : kObjKeep;
                 uint32_t h = hash_ptr(fl, kModelBits);
                 for (int probe = 0; probe < kModelSlots; ++probe, h = (h + 1) & (kModelSlots - 1)) {
                     if (t[h].key == 0 || t[h].key == fl) {
                         t[h].key = fl;
                         // Objects keep level 0 (never pushed back): code 1.
-                        t[h].flags = (t[h].flags & ~0xF00u) | 1u | (extra ? 2u : 4u) | kObject | (1u << 8);
+                        t[h].flags = (t[h].flags & ~0xF00u) | 1u | (extra ? 2u : 4u) | kObject | twin | (1u << 8);
                         break;
                     }
                 }
@@ -450,6 +456,7 @@ int g_fx_ncands[2] = {};
 int g_fx_list = 0;
 volatile LONG g_st_fx_skips = 0, g_st_fx_added = 0;
 volatile LONG g_refl_unused = 1, g_st_refl_unused = 0;
+LONG g_st_objtwin = 0;  // added objects' draws left out by the detail rules (another room's version of a piece)
 unsigned long g_st_readers = 0;
 bool g_wrap_active = false;  // one of ours is counting (render thread)
 uint32_t g_cur_ent = 0, g_cur_ctx = 0, g_cur_flags = 0;
@@ -1102,6 +1109,12 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     g_cur_ent = entity;
     g_cur_ctx = ctx;
     g_cur_flags = mflags;
+    // An added object the detail rules leave out (another room's version of a map piece drawn here): not drawn by any
+    // camera, as with DrawMapPieces = game.
+    if ((mflags & (kObject | kObjTwin | kObjKeep | 6)) == (kObject | kObjTwin | 2)) {
+        ++g_st_objtwin;
+        return 1;
+    }
     if ((mflags & 1) && g_refl_unused && passcull_skipping()) {
         ++g_st_refl_unused;
         return 1;
@@ -1573,6 +1586,10 @@ void occl_render_frame() {
             LOG_INFO("[occl] unused reflection: %.1f map piece draws a frame not made",
                      static_cast<double>(g_st_refl_unused) / static_cast<double>(g_st_frames));
         }
+        if (g_st_next && g_st_objtwin && g_st_frames) {
+            LOG_INFO("[occl] DrawMapObjects: %.1f draws a frame of other rooms' objects lying on pieces drawn here left out",
+                     static_cast<double>(g_st_objtwin) / static_cast<double>(g_st_frames));
+        }
         if (g_st_next && g_st_sh_draws && g_st_frames) {
             LOG_INFO("[occl] shadow maps: %.1f of %.1f model draws a frame %s (their shadow cannot reach the view)",
                      static_cast<double>(g_st_sh_cull) / static_cast<double>(g_st_frames),
@@ -1581,6 +1598,7 @@ void occl_render_frame() {
         }
         g_st_sh_draws = g_st_sh_cull = 0;
         g_st_refl_unused = 0;
+        g_st_objtwin = 0;
         g_st_fx_added = g_st_fx_skips = 0;
         g_st_inside = 0;
         g_st_next = now + 5000;
