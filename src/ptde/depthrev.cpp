@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <cstring>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "log.h"
@@ -345,7 +344,11 @@ struct PsInfo {
     std::unordered_map<uint32_t, IDirect3DPixelShader9*> variants;
 };
 std::unordered_map<IDirect3DPixelShader9*, PsInfo> g_ps;
-std::unordered_set<IDirect3DBaseTexture9*> g_depth_textures;
+// The depth textures made (a few: the shadow map's, the scene's copies, the low-resolution effects'), read without a
+// lock on every SetTexture: a pointer found here is checked for a depth format before it counts.
+constexpr int kMaxDepthTextures = 64;
+IDirect3DBaseTexture9* volatile g_depth_textures[kMaxDepthTextures] = {};
+volatile LONG g_depth_texture_n = 0;
 IDirect3DPixelShader9* g_cur_ps = nullptr;
 uint32_t g_depth_bound = 0;  // stages with a depth texture bound
 D3DMATRIX g_proj{};          // the projection last set (the game's)
@@ -375,9 +378,12 @@ HRESULT WINAPI hk_create_texture(IDirect3DDevice9* dev, UINT w, UINT h, UINT lev
     if (depth) ++g_formats;
     const HRESULT hr = o_create_texture(dev, w, h, levels, usage, fmt, pool, out, shared);
     if (depth && SUCCEEDED(hr) && out && *out) {
-        AcquireSRWLockExclusive(&g_lock);
-        g_depth_textures.insert(*out);
-        ReleaseSRWLockExclusive(&g_lock);
+        const LONG k = InterlockedIncrement(&g_depth_texture_n) - 1;
+        if (k < kMaxDepthTextures) {
+            g_depth_textures[k] = *out;
+        } else {
+            g_depth_textures[k % kMaxDepthTextures] = *out;  // many made over time: the oldest slots reused
+        }
     }
     return hr;
 }
@@ -453,9 +459,9 @@ HRESULT WINAPI hk_set_texture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseT
     if (stage < 16) {
         bool depth = false;
         if (tex) {
-            AcquireSRWLockShared(&g_lock);
-            depth = g_depth_textures.count(tex) != 0;
-            ReleaseSRWLockShared(&g_lock);
+            LONG n = g_depth_texture_n;
+            if (n > kMaxDepthTextures) n = kMaxDepthTextures;
+            for (LONG k = 0; k < n && !depth; ++k) depth = g_depth_textures[k] == tex;
             if (depth && tex->GetType() == D3DRTYPE_TEXTURE) {
                 D3DSURFACE_DESC d{};
                 depth = SUCCEEDED(static_cast<IDirect3DTexture9*>(tex)->GetLevelDesc(0, &d)) && is_depth_format(d.Format);
