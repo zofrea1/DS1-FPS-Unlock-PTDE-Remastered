@@ -12,6 +12,7 @@
 #include "limiter.h"
 #include "log.h"
 #include "present.h"
+#include "d3d.h"
 #include "d3dperf.h"
 #include "gamma.h"
 #include "profile.h"
@@ -651,6 +652,23 @@ bool frame_install(const Settings& settings) {
                          dsfix_match);
             } else if (settings.high_precision_color && dsfix_loaded()) {
                 LOG_INFO("HighPrecisionColor: on beside DSfix (its SMAA does not run on this mod's scene)");
+            }
+            // HighPrecisionOutput: 10 bits a channel to the screen. Through DXVK only (the system Direct3D 9 takes a
+            // 10-bit back buffer in exclusive fullscreen alone), not beside DSfix (it wraps the device and keeps its
+            // own picture), and by default only where Windows composes the display above 8 bits (HDR or Auto Color
+            // Management: the desktop in 16-bit float), so the steps finer than 8 bits reach the screen.
+            if (settings.high_precision_color && !dsfix_loaded() && settings.high_precision_output &&
+                d3d_dxvk_expected()) {
+                char text[256] = {};
+                primary_display_hdr(text, sizeof(text));
+                float white = 1.0f;
+                const int mode = display_hdr_white(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &white);
+                const bool want = settings.high_precision_output == 1 || mode == 1 || mode == 2;
+                resolution_set_high_precision_output(want);
+                LOG_INFO("HighPrecisionOutput = %s: %s (%s)", settings.high_precision_output == 1 ? "true" : "auto",
+                         want ? "10 bits a channel to the screen"
+                              : "8 bits a channel, dithered (Windows composes the display in 8 bits)",
+                         text);
             }
             if (resolution_install(rw, rh, settings.render_scale_post) && dsfix_loaded()) {
                 resolution_bypass_dsfix(!settings.render_scale_post);

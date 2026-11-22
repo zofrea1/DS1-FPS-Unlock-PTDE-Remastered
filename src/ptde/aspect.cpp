@@ -572,7 +572,10 @@ void aspect_adjust_present(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS*
     if (display.w < 640 || display.h < 480) {
         return;
     }
-    const D3DFORMAT format = pp->BackBufferFormat == D3DFMT_UNKNOWN ? D3DFMT_X8R8G8B8 : pp->BackBufferFormat;
+    // A 10-bit back buffer (HighPrecisionOutput) is shown in the same display modes as an 8-bit one.
+    const D3DFORMAT format = pp->BackBufferFormat == D3DFMT_UNKNOWN || pp->BackBufferFormat == D3DFMT_A2R10G10B10
+                                 ? D3DFMT_X8R8G8B8
+                                 : pp->BackBufferFormat;
     const UINT listed = taller_same_width(d3d, adapter, display.w, display.h, format);
     bool deck_guess = false;
     if (listed > display.h) {

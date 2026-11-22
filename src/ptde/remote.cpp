@@ -446,6 +446,11 @@ void save_backbuffer(IDirect3DDevice9* dev, const std::string& name) {
         return;
     }
     save_surface_png(dev, bb, shot_path(name, L".bmp"));
+    // A back buffer above 8 bits (HighPrecisionOutput) also as DDS, all its bits.
+    D3DSURFACE_DESC d{};
+    if (SUCCEEDED(bb->GetDesc(&d)) && d.Format != D3DFMT_A8R8G8B8 && d.Format != D3DFMT_X8R8G8B8) {
+        save_surface_png(dev, bb, shot_path(name, L".dds"));
+    }
     bb->Release();
     out("shot %s: saved", name.c_str());
 }

@@ -56,6 +56,13 @@ IDirect3DSurface9* resolution_reflection_source(IDirect3DSurface9* game_surface)
 // smoke and glows): mode 2 10-bit (the depth of field's rate kept apart), 1 16-bit float, 0 the game's 8 bits. Before
 // resolution_install; not with RenderScalePost or DSfix.
 void resolution_set_high_precision_color(int mode);
+// HighPrecisionOutput: with the 10-bit or float scene, the game's frame buffer (the final composite and HUD target)
+// made A2R10G10B10 and the picture handed to the screen at 10 bits a channel; the composite's dither then a 10-bit
+// step. Before resolution_install. resolution_output_10bit: in use (the device should get a 10-bit back buffer);
+// resolution_output_8bit_back: the back buffer stayed 8-bit after all (the dither goes back to an 8-bit step).
+void resolution_set_high_precision_output(bool want);
+bool resolution_output_10bit();
+void resolution_output_8bit_back();
 // RemoteControl `neardump` (diagnostics): the depth of field's near blur mask after its next draw, into a file.
 void resolution_near_dump();
 void resolution_near_force(bool on);

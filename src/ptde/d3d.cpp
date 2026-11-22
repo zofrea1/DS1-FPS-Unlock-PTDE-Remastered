@@ -147,7 +147,10 @@ void adjust_present_parameters(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMET
                  pp->FullScreen_RefreshRateInHz);
         return;
     }
-    const D3DFORMAT format = pp->BackBufferFormat == D3DFMT_UNKNOWN ? D3DFMT_X8R8G8B8 : pp->BackBufferFormat;
+    // A 10-bit back buffer (HighPrecisionOutput) is shown in the same display modes as an 8-bit one.
+    const D3DFORMAT format = pp->BackBufferFormat == D3DFMT_UNKNOWN || pp->BackBufferFormat == D3DFMT_A2R10G10B10
+                                 ? D3DFMT_X8R8G8B8
+                                 : pp->BackBufferFormat;
     const UINT count = d3d->GetAdapterModeCount(adapter, format);
     UINT rates[64] = {};
     int rate_count = 0;
@@ -206,6 +209,28 @@ void adjust_present_parameters(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMET
     pp->FullScreen_RefreshRateInHz = chosen;
 }
 
+// HighPrecisionOutput: the back buffer A2R10G10B10 while the frame buffer is 10-bit and the device is DXVK's (the game
+// asks for X8R8G8B8), else the game's own format (an 8-bit one if the game's descriptor gave it the frame's 10-bit
+// format). Returns the format the game asked for.
+D3DFORMAT fit_back_buffer_format(D3DPRESENT_PARAMETERS* pp, const char* where) {
+    if (!pp) return D3DFMT_UNKNOWN;
+    const D3DFORMAT asked = pp->BackBufferFormat;
+    const bool ten = resolution_output_10bit() && g_dxvk_active;
+    if (ten) {
+        pp->BackBufferFormat = D3DFMT_A2R10G10B10;
+    } else if (asked == D3DFMT_A2R10G10B10) {
+        pp->BackBufferFormat = D3DFMT_X8R8G8B8;
+    }
+    static int logged = 0;
+    if (logged < 4 && (resolution_output_10bit() || asked != pp->BackBufferFormat)) {
+        ++logged;
+        LOG_INFO("HighPrecisionOutput: %s with a %s back buffer (the game asked for format %d)", where,
+                 pp->BackBufferFormat == D3DFMT_A2R10G10B10 ? "10-bit" : "8-bit", static_cast<int>(asked));
+    }
+    if (resolution_output_10bit() && !g_dxvk_active) resolution_output_8bit_back();
+    return asked;
+}
+
 HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     IDirect3D9* d3d = nullptr;
     if (pp && SUCCEEDED(device->GetDirect3D(&d3d)) && d3d) {
@@ -219,13 +244,19 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
         d3d->Release();
     }
     depthrev_adjust_present(pp, settings().reversed_depth);
+    const D3DFORMAT asked = fit_back_buffer_format(pp, "Reset");
     d3dperf_reset();
     surfpool_reset();
     resolution_reset();
     occl_reset();
     passcull_reset();
     atoc_reset();
-    const HRESULT hr = g_reset(device, pp);
+    HRESULT hr = g_reset(device, pp);
+    if (FAILED(hr) && pp && pp->BackBufferFormat == D3DFMT_A2R10G10B10) {
+        pp->BackBufferFormat = asked == D3DFMT_A2R10G10B10 || asked == D3DFMT_UNKNOWN ? D3DFMT_X8R8G8B8 : asked;
+        resolution_output_8bit_back();
+        hr = g_reset(device, pp);
+    }
     if (SUCCEEDED(hr) && aspect_is_active()) {
         aspect_hook_device(device);
     }
@@ -262,7 +293,13 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
     }
     if (settings().fps_unlock) adjust_present_parameters(d3d, adapter, pp, "CreateDevice");
     depthrev_adjust_present(pp, settings().reversed_depth);
-    const HRESULT hr = g_create_device(d3d, adapter, type, window, flags, pp, out);
+    const D3DFORMAT asked = fit_back_buffer_format(pp, "CreateDevice");
+    HRESULT hr = g_create_device(d3d, adapter, type, window, flags, pp, out);
+    if (FAILED(hr) && pp && pp->BackBufferFormat == D3DFMT_A2R10G10B10) {
+        pp->BackBufferFormat = asked == D3DFMT_A2R10G10B10 || asked == D3DFMT_UNKNOWN ? D3DFMT_X8R8G8B8 : asked;
+        resolution_output_8bit_back();
+        hr = g_create_device(d3d, adapter, type, window, flags, pp, out);
+    }
     LOG_INFO("CreateDevice: adapter %u, type %d, behavior flags 0x%08lX%s%s%s%s%s%s, hr 0x%08lX", adapter,
              static_cast<int>(type), flags, (flags & D3DCREATE_HARDWARE_VERTEXPROCESSING) ? " hardware-vp" : "",
              (flags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) ? " SOFTWARE-vp" : "",
@@ -412,6 +449,22 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
     return hr;
 }
 
+bool dxvk_expected() {
+    if (!settings().fps_unlock || !settings().dxvk) return false;
+    if (GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")) return false;
+    wchar_t dir[MAX_PATH];
+    GetModuleFileNameW(g_self, dir, MAX_PATH);
+    wchar_t* slash = wcsrchr(dir, L'\\');
+    if (slash) {
+        slash[1] = 0;
+    } else {
+        dir[0] = 0;
+    }
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s%s", dir, kDxvkFileName);
+    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
 // DXVK goes in before the game's first call reaches the system Direct3DCreate9, so whatever
 // wraps that function (DSfix) wraps DXVK.
 void route_to_dxvk() {
@@ -486,6 +539,8 @@ void** find_create_slot() {
 }
 
 }  // namespace
+
+bool d3d_dxvk_expected() { return dxvk_expected(); }
 
 void d3d_install_early(HMODULE self) {
     g_self = self;

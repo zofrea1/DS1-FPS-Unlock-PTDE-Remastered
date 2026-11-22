@@ -617,6 +617,7 @@ DXGI_FORMAT dxgi_format(VkFormat f) {
     switch (f) {
     case VK_FORMAT_B8G8R8A8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM;
     case VK_FORMAT_R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return DXGI_FORMAT_R10G10B10A2_UNORM;  // HighPrecisionOutput
     default: return DXGI_FORMAT_UNKNOWN;
     }
 }
@@ -1115,9 +1116,12 @@ VKAPI_ATTR VkResult VKAPI_CALL our_surface_caps2(VkPhysicalDevice pd, const VkPh
     return vi.GetPhysicalDeviceSurfaceCapabilities2KHR(pd, &copy, c);
 }
 
+// DXVK takes the first of these that fits the game's back buffer: an 8-bit one for X8R8G8B8, the 10-bit one for
+// A2R10G10B10 (HighPrecisionOutput; DXGI's R10G10B10A2, red in the low bits as in Vulkan's A2B10G10R10).
 const VkSurfaceFormatKHR kFormats[] = {
     {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
     {VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+    {VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
 };
 const VkPresentModeKHR kModes[] = {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR,
                                    VK_PRESENT_MODE_FIFO_KHR};
@@ -1354,7 +1358,8 @@ bool fit_window(Swap* s, HWND hwnd) {
         w->format = fmt;
         w->flags = flags;
         d->windows.push_back(w);
-        LOG_INFO("DXGI present: DXGI flip-model swap chain %ux%u on the game window", desc.Width, desc.Height);
+        LOG_INFO("DXGI present: DXGI flip-model swap chain %ux%u on the game window (%s)", desc.Width, desc.Height,
+                 fmt == DXGI_FORMAT_R10G10B10A2_UNORM ? "10 bits a channel" : "8 bits a channel");
     } else if (w->width != s->extent.width || w->height != s->extent.height || w->format != fmt) {
         d->ctx->ClearState();
         d->ctx->Flush();

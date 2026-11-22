@@ -330,7 +330,13 @@ constexpr int kHdrSwap = 1;                   // the final composite (kHdrColAdj
 bool g_float_scene = false;                   // HighPrecisionColor: the scene's colour targets are above 8 bits
 bool g_scene_10bit = false;                   // HighPrecisionColor = 10bit: they are 10-bit (their alpha 2 bits)
 const float kDither[4] = {1.0f / 255.0f, 0, 0, 0};
+const float kDither10[4] = {1.0f / 1023.0f, 0, 0, 0};  // HighPrecisionOutput: the screen's step is a 10-bit one
 const float kNoDither[4] = {0, 0, 0, 0};
+// HighPrecisionOutput (resolution_set_high_precision_output): the frame buffer is A2R10G10B10 and the device was asked
+// for a 10-bit back buffer; g_out_back8: the back buffer stayed 8-bit after all.
+bool g_out10 = false;
+bool g_out_back8 = false;
+const float* dither_step() { return g_out10 && !g_out_back8 ? kDither10 : kDither; }
 volatile bool g_present_swap_enabled = true;  // RemoteControl `reduce 0/1`
 volatile LONG g_swap_off_mask = 0;            // RemoteControl `swapoff MASK` (diagnostics): bit i = swap i, bit 7 = copies,
                                               // bit 6 = the 10-bit scene's alpha kept in the scene (none of ours),
@@ -1483,7 +1489,7 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
         // The original sizes; the draw sets them again from the textures it binds.
         dev->SetPixelShaderConstantF(200, kSwaps[swap].sizes, 2);
         if (swap == kDofSwap) dev->SetPixelShaderConstantF(202, g_dof_strength, 1);
-        if (swap == kHdrSwap) dev->SetPixelShaderConstantF(203, g_float_scene ? kDither : kNoDither, 1);
+        if (swap == kHdrSwap) dev->SetPixelShaderConstantF(203, g_float_scene ? dither_step() : kNoDither, 1);
         return o_set_ps(dev, g_swap_ours[swap]);
     }
     return o_set_ps(dev, ps);
@@ -3374,6 +3380,45 @@ void resolution_check_scene_format(IDirect3DDevice9* dev, int samples) {
 
 void resolution_set_high_precision_color(int mode) { g_want_float_scene = mode; }
 
+// HighPrecisionOutput. The game's frame buffer, the target of the final composite (FRPG_Fil_HDR_ColAdj, ours with
+// RenderResolution) and of the HUD, menus and subtitles drawn over it, is made in CoreGraphics' init (0xF90C30) from a
+// descriptor whose format index comes from `mov ecx, 6` (A8R8G8B8 in the game's format table) at 0xF90D0C; ecx goes
+// into the descriptor twice (+0x8C beside the frame's 1280x720, and +0xD4). The composite dithered the 10-bit scene
+// into that 8-bit target (an ordered 4x4 dither of half an 8-bit step), and the 8-bit steps it leaves showed as a fine
+// grid of lighter dots in dark places, more so on a display composed in HDR (user 2026-11-22: "little white dots",
+// the Undead Asylum's opening; a pixel one step above its neighbours, every second pixel, where the dither's
+// threshold falls). Index 8 makes it A2R10G10B10, the same 32 bits a pixel.
+constexpr uint32_t kFrameFormatSite = 0x00F90D0C;  // B9 06 00 00 00: mov ecx, 6
+static bool g_want_out10 = false;
+
+void resolution_set_high_precision_output(bool want) { g_want_out10 = want; }
+bool resolution_output_10bit() { return g_out10; }
+void resolution_output_8bit_back() {
+    if (!g_out10 || g_out_back8) return;
+    g_out_back8 = true;
+    LOG_ERROR("HighPrecisionOutput: the screen could not get a 10-bit back buffer; the picture is dithered into 8 bits "
+              "as before (the frame buffer stays 10-bit)");
+}
+
+static bool patch_frame_format() {
+    auto* p = reinterpret_cast<uint8_t*>(kFrameFormatSite);
+    uint32_t imm = 0;
+    std::memcpy(&imm, p + 1, 4);
+    if (p[0] != 0xB9 || imm != kFormatA8R8G8B8) {
+        LOG_ERROR("HighPrecisionOutput: the frame buffer's format at %08X is %02X %u, not B9 %u in this build. Not "
+                  "changing it.", kFrameFormatSite, p[0], imm, kFormatA8R8G8B8);
+        return false;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(p + 1, 4, PAGE_EXECUTE_READWRITE, &old)) return false;
+    const uint32_t v = kFormatA2R10G10B10;
+    std::memcpy(p + 1, &v, 4);
+    DWORD ignored = 0;
+    VirtualProtect(p + 1, 4, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), p, 5);
+    return true;
+}
+
 bool resolution_install(int width, int height, bool scale_post) {
     g_scale_post = scale_post;
     if (width < 64 || height < 64 || width > 8192 || height > 8192) return false;
@@ -3411,6 +3456,11 @@ bool resolution_install(int width, int height, bool scale_post) {
         LOG_INFO("HighPrecisionColor: the scene's colour targets are %s (were 8-bit); the final picture is "
                  "dithered into the screen's 8 bits, so fog, smoke, glows and dark gradients fade without bands",
                  g_want_float_scene == 2 ? "10-bit" : "16-bit float");
+        if (g_want_out10 && patch_frame_format()) {
+            g_out10 = true;
+            LOG_INFO("HighPrecisionOutput: the frame buffer is 10-bit and the screen gets 10 bits a channel; the "
+                     "final picture's dither is a 10-bit step, too fine to see");
+        }
     }
     g_active = true;
     if (scale_post) {

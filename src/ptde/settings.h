@@ -91,6 +91,11 @@ struct Settings {
     // HighPrecisionColor: the scene's colour targets at more than 8 bits, dithered into the 8-bit picture
     // (resolution.h), with RenderResolution. 0 off (8-bit), 1 16-bit float (float), 2 10-bit (true, the default).
     int high_precision_color = 2;
+    // HighPrecisionOutput: with HighPrecisionColor, the finished picture handed to the screen at 10 bits a channel
+    // (the game's frame buffer and the back buffer A2R10G10B10) instead of dithered into 8 (resolution.h).
+    // 0 false, 1 true (with DXVK), 2 auto (the default: with DXVK, when Windows composes the game's display above 8
+    // bits, in HDR or Auto Color Management).
+    int high_precision_output = 2;
     int ui_scale_world = 100;      // UIScaleWorld: marks over things in the world (layout.h)
     bool even_frame_steps = true;  // EvenFrameSteps: the cap's schedule as the frames' clock (frame.cpp)
     // With the game's own anti-aliasing (multisampling) on: alpha-tested surfaces write coverage (atoc.h).

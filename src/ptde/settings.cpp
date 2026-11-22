@@ -302,6 +302,9 @@ Settings settings_load(const wchar_t* dll_path) {
             const std::string v = lower(trim(val));
             // true (10-bit) or float (16-bit float); "10bit" names the first.
             s.high_precision_color = v == "float" ? 1 : (parse_bool(val) || v == "10bit" || v == "10-bit" || v == "10") ? 2 : 0;
+        } else if (key == "highprecisionoutput") {
+            const std::string v = lower(trim(val));
+            s.high_precision_output = v == "auto" ? 2 : parse_bool(val) ? 1 : 0;
         } else if (key == "antialiasingsamples") {
             s.antialiasing_samples = std::atoi(val.c_str());
         } else if (key == "alphatocoverage") {
@@ -480,7 +483,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 // The picture: the game's own render path.
                 {"renderresolution", "off"}, {"supersampling", "1"}, {"depthoffieldstrength", "100"},
                 {"depthoffieldresolution", "game"}, {"effectsresolution", "game"}, {"waterresolution", "game"},
-                {"highprecisioncolor", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
+                {"highprecisioncolor", "false"}, {"highprecisionoutput", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
                 {"fixantialiasingdepth", "false"},
                 {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
                 {"drawmappieces", "game"}, {"loddistance", "100"}, {"effectloddistance", "100"},
