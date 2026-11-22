@@ -97,6 +97,13 @@
 // pieces, the coarser is drawn one level farther than the finer whoever's room shows it (under the bridge the detailed
 // m2010B1 now wins over the game's coarse m2410B1); a level multiplies both biases. Pieces the tables do not know keep
 // the rule above (added ones one level back).
+// Tried 2026-11-21 (night), kept for diagnostics only (RemoteControl `zvp C [STEP]`, off by default): a level moving
+// the draw's depth range (the viewport's MinZ = C + STEP * (level - 1), DEPTHBIAS 4 steps of a 24-bit buffer a
+// level): depth = z + MinZ * (1 - z), about MinZ of the distance at every pixel, the same for every piece of a level
+// wherever its box is. Against the DEPTHBIAS way (frozen frames at 14 Undead Burg spots): no fewer fighting pixels,
+// and at 0.1% to 0.3% of the distance a doorway's recess in a detailed wall 120 m away was covered by the coarse wall
+// drawn with it, which the DEPTHBIAS way (growing with the square of the distance, about 1 m there) pushes far enough
+// back. The DEPTHBIAS way stays.
 namespace {
 
 constexpr uint32_t kEntityVt = 0x01171A54;
@@ -460,11 +467,10 @@ constexpr float kZbiasSlope = 1.0f;   // D3DRS_SLOPESCALEDEPTHBIAS added
 float g_wrap_bias_val = 0.0f;         // this draw's
 float g_wrap_slope_val = 0.0f;        // this draw's slope-scaled bias added
 bool g_wrap_bias = false;             // the next draw the stub wraps gets the bias
-// The depth range way (2026-11-21 night): a level moves the draw's depth range to start at level * g_zvp (the
-// viewport's MinZ) instead of the DEPTHBIAS above: depth = z + g_zvp * level * (1 - z), about g_zvp * level * the
-// distance in metres farther at every pixel (1 - z is near / distance for a 3000 m far plane), so the same share of
-// the distance near and far: 3 cm at 10 m, 30 cm at 100 m with 0.003. 0: the DEPTHBIAS way (RemoteControl `zvp`).
-float g_zvp = 0.003f;
+// Diagnostics (RemoteControl `zvp C [STEP]`, see the top; 0 = off, the default): a level's depth range starts at
+// C + STEP * (level - 1) of it (the viewport's MinZ), about that share of the distance farther at every pixel.
+float g_zvp = 0.0f;
+float g_zvp_step = 0.0f;
 float g_wrap_vp_minz = 0.0f;          // this draw's (0: none)
 bool g_vp_set = false;
 D3DVIEWPORT9 g_saved_vp{}, g_set_vp{};
@@ -1102,7 +1108,7 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     g_wrap_slope_val = kZbiasSlope * static_cast<float>(level);
     const float zvp = g_zvp;
     if (zvp > 0.0f) {
-        float m = zvp * static_cast<float>(level);
+        float m = zvp + g_zvp_step * static_cast<float>(level - 1);
         if (m > 0.25f) m = 0.25f;
         g_wrap_vp_minz = m;
         g_wrap_bias_val = kZbiasMin * static_cast<float>(level) + probe_bias;
@@ -1343,8 +1349,9 @@ void occl_set_zbias(bool on, float world, float max_bias) {
     if (max_bias >= 0.0f) g_zbias_max = max_bias;
     InterlockedExchange(&g_zbias, on ? 1 : 0);
 }
-void occl_set_zvp(float c) {
+void occl_set_zvp(float c, float step) {
     if (c >= 0.0f) g_zvp = c;
+    if (step >= 0.0f) g_zvp_step = step;
 }
 float occl_zvp() { return g_zvp; }
 void occl_set_zprobe(int seed, float eps, int which) {

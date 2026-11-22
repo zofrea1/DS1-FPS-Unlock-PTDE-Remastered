@@ -759,7 +759,7 @@ uint8_t g_state[kDetPieces] = {};
 // rule).
 uint8_t g_role[kMaxBlocks][kRolePieces] = {};
 uint32_t g_role_gen = 0;
-volatile LONG g_detail_on = 1;  // RemoteControl `detailrules 0|1` (diagnostics A/B)
+volatile LONG g_detail_on = 1;  // RemoteControl `detailrules 0|1|2` (diagnostics A/B; 2: pairs of two maps left out)
 
 // The live draw groups of a table piece, or null when its map is not loaded or does not match the table.
 uint32_t* live_groups(const D::Piece& p) {
@@ -850,12 +850,15 @@ bool holds(const D::Piece& p, const float at[3]) {
     return (D::kVox[p.vox + (bit >> 3)] >> (bit & 7)) & 1;
 }
 
+bool g_detail_redo = true;  // the next tick works the rules out whatever its inputs (see the signature below)
+
 void detail_tick_body() {
     static uint8_t role[kMaxBlocks][kRolePieces];
-    std::memset(role, 0, sizeof(role));
     if (g_mode == 0 || !g_detail_on) {
+        std::memset(role, 0, sizeof(role));
         restore_all();
         publish_roles(role);
+        g_detail_redo = true;
         return;
     }
     const uint32_t wcm = *reinterpret_cast<const uint32_t*>(kWorldChrMan);
@@ -864,6 +867,40 @@ void detail_tick_body() {
     if (!floor) return;  // loading or no floor yet: keep what is set
     float at[3] = {};
     const bool at_ok = player_at(chr, at);
+    // Nothing to do while nothing the rules read has changed (2026-11-21 night: every frame on the render thread, 0.5%
+    // of it at the Undead Burg bridge, the tables then doubled): the mode, the player's floor and 0.5 m cell (holds():
+    // occupancy cells are 2 m on one grid, the boxes' margins anywhere), and every loaded block's piece array and
+    // masks (the live one with ours ORed in, the game's as noted). Made again every 30th frame regardless.
+    {
+        uint32_t h = 2166136261u;
+        const auto mix = [&h](uint32_t v) { h = (h ^ v) * 16777619u; };
+        mix(static_cast<uint32_t>(g_mode));
+        mix(floor);
+        if (at_ok) {
+            for (int k = 0; k < 3; ++k) mix(static_cast<uint32_t>(static_cast<int>(std::floor(at[k] * 2.0f))));
+        }
+        const uint32_t man = *reinterpret_cast<const uint32_t*>(kPieceMan);
+        const uint32_t blocks = man ? *reinterpret_cast<const uint32_t*>(man + 0x20) : 0;
+        const int count = man ? *reinterpret_cast<const int*>(man + 0x1C) : 0;
+        mix(blocks);
+        mix(static_cast<uint32_t>(count));
+        for (int b = 0; blocks && b < count && b < kMaxBlocks; ++b) {
+            const uint32_t blk = blocks + b * 0x5C;
+            mix(*reinterpret_cast<const uint32_t*>(blk + 0x30));
+            mix(*reinterpret_cast<const uint32_t*>(blk + 0x2C));
+            for (int k = 0; k < 4; ++k) mix(reinterpret_cast<const uint32_t*>(blk + 0x0C)[k]);
+            if (b < g_game_draw_blocks) {
+                for (int k = 0; k < 4; ++k) mix(g_game_draw[b][k]);
+            }
+        }
+        static uint32_t last = 0;
+        static int frames = 0;
+        if (h == last && !g_detail_redo && ++frames < 30) return;
+        last = h;
+        frames = 0;
+        g_detail_redo = false;
+    }
+    std::memset(role, 0, sizeof(role));
     // Each piece by its own map's masks: seen (the live draw mask, ours ORed in: what would be drawn) and own (the
     // game's own mask: what the game itself draws from here). The player's floor groups only number the player's map's
     // rooms.
@@ -952,6 +989,7 @@ void detail_tick_body() {
         if (pr.winner > 1 || !drawn[pr.a] || !drawn[pr.b]) continue;
         const auto& pa = D::kPieces[pr.a];
         const auto& pb = D::kPieces[pr.b];
+        if (g_detail_on == 2 && pa.block != pb.block) continue;
         // Two maps' pieces (a map's coarse copy of its neighbour's structures) never share a room: each map numbers its
         // groups itself. Their pairs always carry bits 4 and 8 (gen_detail.py), so the depth levels order them unless
         // enough of one lies on the other to leave it out.
@@ -994,6 +1032,7 @@ void detail_tick_body() {
         for (size_t k = 0; k < kDetPairs; ++k) {
             const auto& pr = D::kPairs[k];
             if (pr.winner > 1 || !drawn[pr.a] || !drawn[pr.b]) continue;
+            if (g_detail_on == 2 && D::kPieces[pr.a].block != D::kPieces[pr.b].block) continue;
             if (own[pr.a] && own[pr.b] && !forced[pr.a] && !forced[pr.b]) continue;  // the game's own picture
             const size_t w = pr.winner ? pr.b : pr.a, l = pr.winner ? pr.a : pr.b;
             if (level[l] <= level[w] && level[w] < 7) {
@@ -1064,7 +1103,10 @@ uint8_t drawdist_piece_role(int block, int index) {
     return g_role[block][index];
 }
 uint32_t drawdist_role_gen() { return g_role_gen; }
-void drawdist_set_detail(int on) { InterlockedExchange(&g_detail_on, on ? 1 : 0); }
+void drawdist_set_detail(int on) {
+    InterlockedExchange(&g_detail_on, on);
+    g_detail_redo = true;
+}
 bool drawdist_game_sfx_mask(int block, uint32_t out[4]) {
     if (block < 0 || block >= g_game_sfx_blocks) return false;
     std::memcpy(out, g_game_sfx[block], 16);

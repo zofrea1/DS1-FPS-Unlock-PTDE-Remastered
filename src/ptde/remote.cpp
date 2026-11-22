@@ -2681,7 +2681,10 @@ void run(const std::string& line) {
         out("zbias %ld %g %g", num(1, 1), k, s);
     } else if (c == "zvp") {
         // zvp C: the depth levels through the viewport's depth range, C of the distance per level (0: DEPTHBIAS).
-        if (t.size() > 1) occl_set_zvp(static_cast<float>(std::atof(t[1].c_str())));
+        if (t.size() > 1) {
+            occl_set_zvp(static_cast<float>(std::atof(t[1].c_str())),
+                         t.size() > 2 ? static_cast<float>(std::atof(t[2].c_str())) : -1.0f);
+        }
         out("zvp %g", occl_zvp());
     } else if (c == "zprobe") {
         // zprobe SEED [EPS [WHICH]]: map pieces (WHICH 2: and objects) drawn +-EPS deeper by a hash of their model and
