@@ -1066,9 +1066,9 @@ void detail_tick_body() {
     // Objects (DrawMapObjects): an object lying on a map piece it shares no room with (kObjTwins) is another room's
     // version of that structure, a centimetre or two off the piece's, and the two fight over the depth wherever both
     // are drawn (user report 2026-11-22 from the Undead Burg watchtower: the spire towers below, o1290, a room's object
-    // brought in on m2380B1, the far version the watchtower's room draws; no flicker with DrawMapPieces = game). As for
-    // the pieces, the player's room's own stays: an object it does not draw is left out while the piece is drawn
-    // (occl.cpp skips its draws), and a piece it does not draw while the object is.
+    // brought in on m2380B1, the far version the watchtower's room draws; no flicker with DrawMapPieces = game). An
+    // object the player's room does not draw is left out while the piece is drawn (occl.cpp skips its draws). The table
+    // also holds pieces of other maps (their coarse copies of this one), which never share a room with it.
     std::memset(objhide, 0, sizeof(objhide));
     for (size_t k = 0; k < kDetObjTwins; ++k) {
         const auto& ot = D::kObjTwins[k];
@@ -1082,16 +1082,12 @@ void detail_tick_body() {
         if (!block_masks(ot.block, bseen, bgame)) continue;
         const auto* g = reinterpret_cast<const uint32_t*>(obj + 0x14);
         if (!any_of(g, reinterpret_cast<const uint32_t*>(oblk + 0x0C))) continue;  // the object is not drawn
-        if (any_of(g, D::kPieces[pi].groups)) continue;  // one room shows both: made together, the game's picture
-        const bool oown = any_of(g, bgame), pown = own[pi] && !forced[pi];
-        if (oown && pown) continue;  // the game's own picture
-        if (oown) {
-            if (covering[pi]) continue;  // drawn in a stand-in's place: never left out
-            drawn[pi] = false;
-            why[pi] = 6;
-        } else {
-            objhide[k] = 1;
-        }
+        // One room shows both: made together, the game's picture (only within one map: each numbers its groups itself).
+        if (ot.block == D::kPieces[pi].block && any_of(g, D::kPieces[pi].groups)) continue;
+        // The room's own object on an added piece: the piece is drawn a depth level back (an added piece's), and a big
+        // piece is never left out for a small object lying on it.
+        if (any_of(g, bgame)) continue;
+        objhide[k] = 1;
     }
     // Write what is wanted: hidden (drawn otherwise), drawn from any room, or the piece's own groups.
     for (size_t i = 0; i < kDetPieces; ++i) {
@@ -1109,8 +1105,7 @@ void detail_tick_body() {
                                                "hidden: another room's version of surfaces drawn here (no z-fighting)",
                                                "hidden: the same model drawn for this room",
                                                "hidden: another room's version crossing surfaces drawn here, too far apart "
-                                               "for a depth bias",
-                                               "hidden: an object drawn here is this room's version of its surfaces"};
+                                               "for a depth bias"};
             LOG_INFO("DrawMapPieces: %s (map %s), %s", p.name, p.map, kWhy[why[i]]);
         }
     }

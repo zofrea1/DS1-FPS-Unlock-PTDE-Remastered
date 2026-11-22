@@ -145,11 +145,18 @@ constexpr uint32_t kNoInside = 0x10000u;
 constexpr uint32_t kObject = 0x20000u;
 // While the table is built only: an added piece of this model without kNoInside (one that still needs the inside rule).
 constexpr uint32_t kNeedsInside = 0x40000u;
-// Model flags of objects: an added object of this model that the detail rules leave out (another room's version of a
-// map piece drawn here, drawdist_object_hidden), and one they keep. Its draws are skipped only while every added
-// object of the model is left out and the player's room draws none of it.
+// Model flag of objects: an added object of this model that the detail rules leave out (another room's version of a
+// map piece or object drawn here, drawdist_object_hidden). Its draws are told from the model's other objects by their
+// world box holding that object's position (g_hidden_objs).
 constexpr uint32_t kObjTwin = 0x80000u;
-constexpr uint32_t kObjKeep = 0x100000u;
+// The objects left out so (positions, with the model table: double-buffered the same way).
+constexpr int kMaxHiddenObjs = 32;
+struct HiddenObjs {
+    int n;
+    uint32_t model[kMaxHiddenObjs];
+    float pos[kMaxHiddenObjs][3];
+};
+HiddenObjs g_hidden_objs[2] = {};
 constexpr uint32_t kObjManVar = 0x0137D5F8;  // WorldObjManImp: +0x1C blocks, +0x20 entries 0xEC (+0x3C n, +0x40 objects)
 
 inline uint32_t hash_ptr(uint32_t p, int bits) { return ((p >> 3) * 2654435761u) >> (32 - bits); }
@@ -160,6 +167,8 @@ void build_models() {
     const int back = g_models_cur == 0 ? 1 : 0;
     ModelSlot* t = g_models[back];
     std::memset(t, 0, sizeof(g_models[0]));
+    HiddenObjs& hid = g_hidden_objs[back];
+    hid.n = 0;
     const uint32_t gen = drawdist_game_mask_gen();
     const uint32_t role_gen = drawdist_role_gen();
     __try {
@@ -227,7 +236,16 @@ void build_models() {
                 if (!fl) continue;
                 const auto* g = reinterpret_cast<const uint32_t*>(o + 0x14);
                 const bool extra = !((g[0] & own[0]) | (g[1] & own[1]) | (g[2] & own[2]) | (g[3] & own[3]));
-                const uint32_t twin = !extra ? 0u : drawdist_object_hidden(b, i) ? kObjTwin : kObjKeep;
+                uint32_t twin = 0;
+                if (extra && drawdist_object_hidden(b, i) && hid.n < kMaxHiddenObjs) {
+                    const auto* f = reinterpret_cast<const float*>(o);
+                    hid.model[hid.n] = fl;
+                    hid.pos[hid.n][0] = f[0x6C / 4];
+                    hid.pos[hid.n][1] = f[0x7C / 4];
+                    hid.pos[hid.n][2] = f[0x8C / 4];
+                    ++hid.n;
+                    twin = kObjTwin;
+                }
                 uint32_t h = hash_ptr(fl, kModelBits);
                 for (int probe = 0; probe < kModelSlots; ++probe, h = (h + 1) & (kModelSlots - 1)) {
                     if (t[h].key == 0 || t[h].key == fl) {
@@ -341,6 +359,25 @@ bool fx_added(const float* box) {
         added = true;
     }
     return added;
+}
+
+// Whether this draw is of an object the detail rules leave out: its model's, its world box holding the object's position
+// (within half a metre).
+bool hidden_object(uint32_t entity) {
+    const LONG cur = g_models_cur;
+    if (cur < 0) return false;
+    const HiddenObjs& hid = g_hidden_objs[cur];
+    const uint32_t fl = *reinterpret_cast<const uint32_t*>(entity + 0x40);
+    const auto* b = reinterpret_cast<const float*>(entity + 0xA0);  // min x y z w, max x y z w
+    for (int k = 0; k < hid.n; ++k) {
+        if (hid.model[k] != fl) continue;
+        const float* p = hid.pos[k];
+        if (p[0] > b[0] - 0.5f && p[0] < b[4] + 0.5f && p[1] > b[1] - 0.5f && p[1] < b[5] + 0.5f && p[2] > b[2] - 0.5f &&
+            p[2] < b[6] + 0.5f) {
+            return true;
+        }
+    }
+    return false;
 }
 
 uint32_t model_flags(uint32_t fl) {
@@ -1109,9 +1146,9 @@ int __cdecl decide(uint32_t entity, uint32_t ctx, uint32_t) {
     g_cur_ent = entity;
     g_cur_ctx = ctx;
     g_cur_flags = mflags;
-    // An added object the detail rules leave out (another room's version of a map piece drawn here): not drawn by any
-    // camera, as with DrawMapPieces = game.
-    if ((mflags & (kObject | kObjTwin | kObjKeep | 6)) == (kObject | kObjTwin | 2)) {
+    // An added object the detail rules leave out (another room's version of a map piece or object drawn here): not drawn
+    // by any camera, as with DrawMapPieces = game.
+    if ((mflags & (kObject | kObjTwin)) == (kObject | kObjTwin) && hidden_object(entity)) {
         ++g_st_objtwin;
         return 1;
     }
