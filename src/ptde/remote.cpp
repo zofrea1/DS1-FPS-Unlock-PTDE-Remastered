@@ -2740,6 +2740,10 @@ void run(const std::string& line) {
     } else if (c == "lodpct") {
         drawdist_set_lod(static_cast<int>(num(1, 100)));
         out("lodpct %ld", num(1, 100));
+    } else if (c == "dither") {
+        // dither 0/1/2: the 2.9.0 ordered dither, the noise fixed, the noise new every frame (the default).
+        resolution_set_dither_mode(static_cast<int>(num(1, 2)));
+        out("dither %ld", num(1, 2));
     } else if (c == "atoc") {
         // atoc 0/1/2: AlphaToCoverage off, plain coverage, sharpened coverage (the default) for this session.
         atoc_set_mode(static_cast<int>(num(1, 2)));

@@ -337,6 +337,9 @@ const float kNoDither[4] = {0, 0, 0, 0};
 bool g_out10 = false;
 bool g_out_back8 = false;
 const float* dither_step() { return g_out10 && !g_out_back8 ? kDither10 : kDither; }
+// The composite's dither (hdr_coladj.hlsl): 2 a new noise pattern every frame, per channel (the default), 1 the same
+// noise every frame, 0 the 2.9.0 ordered dither (RemoteControl `dither N`, for comparisons).
+volatile LONG g_dither_mode = 2;
 volatile bool g_present_swap_enabled = true;  // RemoteControl `reduce 0/1`
 volatile LONG g_swap_off_mask = 0;            // RemoteControl `swapoff MASK` (diagnostics): bit i = swap i, bit 7 = copies,
                                               // bit 6 = the 10-bit scene's alpha kept in the scene (none of ours),
@@ -1489,7 +1492,17 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
         // The original sizes; the draw sets them again from the textures it binds.
         dev->SetPixelShaderConstantF(200, kSwaps[swap].sizes, 2);
         if (swap == kDofSwap) dev->SetPixelShaderConstantF(202, g_dof_strength, 1);
-        if (swap == kHdrSwap) dev->SetPixelShaderConstantF(203, g_float_scene ? dither_step() : kNoDither, 1);
+        if (swap == kHdrSwap) {
+            float d[4] = {0, 0, 0, 0};
+            if (g_float_scene) {
+                static uint32_t frame = 0;  // the composite runs once a frame
+                d[0] = dither_step()[0];
+                d[1] = static_cast<float>(frame++ & 63);
+                d[2] = g_dither_mode == 2 ? 1.0f : 0.0f;
+                d[3] = g_dither_mode == 0 ? 1.0f : 0.0f;
+            }
+            dev->SetPixelShaderConstantF(203, d, 1);
+        }
         return o_set_ps(dev, g_swap_ours[swap]);
     }
     return o_set_ps(dev, ps);
@@ -3392,6 +3405,7 @@ constexpr uint32_t kFrameFormatSite = 0x00F90D0C;  // B9 06 00 00 00: mov ecx, 6
 static bool g_want_out10 = false;
 
 void resolution_set_high_precision_output(bool want) { g_want_out10 = want; }
+void resolution_set_dither_mode(int mode) { InterlockedExchange(&g_dither_mode, mode < 0 ? 0 : mode > 2 ? 2 : mode); }
 bool resolution_output_10bit() { return g_out10; }
 void resolution_output_8bit_back() {
     if (!g_out10 || g_out_back8) return;

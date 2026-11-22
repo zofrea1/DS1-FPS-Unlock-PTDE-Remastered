@@ -7,8 +7,14 @@
 // bilinear reads), as the depth of field's blur is (dof_composite.hlsl). At the original 1280x720 they were stretched
 // 10x and 5x, and again to the screen.
 //
-// With HighPrecisionColor (the scene in 16-bit float) the result gets a fine ordered dither (c203.x), so the smooth
-// float gradients do not band in the 8-bit frame.
+// With HighPrecisionColor (the scene above 8 bits) the result gets a dither of less than half a step (c203.x), so the
+// smooth gradients do not band in the 8-bit frame. Up to 2.9.0 it was a 4x4 ordered (Bayer) dither, the same for red,
+// green and blue and fixed to the screen: where a dark value fell between two steps every second pixel sat one step
+// above its neighbours, a lighter, whitish dot in a 2-pixel grid (4.4% of the dark pixels in the Undead Asylum's
+// opening at 4K), and the grid crawled as the camera moved (user 2026-11-22). Now each channel takes its own
+// interleaved gradient noise (Jimenez 2014), moved on every frame (c203.y, the frame's number from the DLL, when c203.z
+// is 1): no grid, the channels step at different pixels, and over a few frames each pixel averages to its true shade.
+// c203.w 1 brings back the ordered dither (RemoteControl `dither 0`, for comparisons).
 //
 // Built with fxc (tools/build_shaders.bat) into hdr_coladj_ps.h; the DLL carries the compiled bytecode.
 
@@ -28,7 +34,12 @@ float4 gC68 : register(c68);       // the game's DL_FREG_068: x the film grain's
 float4 gC71 : register(c71);       // the game's DL_FREG_071: y the bloom rate's top
 float4 gBloomSize : register(c200);  // s1: width, height, 1 / width, 1 / height (set by the DLL)
 float4 gShaftSize : register(c201);  // s3: the same
-float4 gDither : register(c203);     // x: the dither's size (1/255 with HighPrecisionColor's 10-bit or float scene, else 0)
+// x: the dither's size (a screen step with HighPrecisionColor, else 0); y: the frame's number (0-63); z: 1 a new
+// pattern every frame; w: 1 the 2.9.0 ordered dither.
+float4 gDither : register(c203);
+
+// Interleaved gradient noise of a pixel, 0 to 1.
+float ign(float2 p) { return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715)))); }
 
 // The 4x4 ordered (Bayer) dither index of a pixel, 0 to 15.
 float bayer4(float2 p) {
@@ -69,9 +80,16 @@ float4 main(float4 uv : TEXCOORD1, float2 pos : VPOS) : COLOR0 {
     float4 b = 1.0 - 2.0 * (1.0 - noise) * (1.0 - graded);
     float4 overlay = (0.5 - noise >= 0.0) ? b : a;
     float4 result = gC68.x * (overlay - graded) + graded;
-    // HighPrecisionColor: the float scene's smooth gradients reach the 8-bit frame through an ordered dither of less
-    // than half a step instead of rounding into bands (the scene times c56.z and the colour matrix widen every step of
-    // an 8-bit scene, the reason fog and dark skies band).
-    result.rgb += ((bayer4(floor(pos)) + 0.5) / 16.0 - 0.5) * gDither.x;
+    // HighPrecisionColor: the scene's smooth gradients reach the frame through a dither of less than half a step
+    // instead of rounding into bands (the scene times c56.z and the colour matrix widen every step of an 8-bit scene,
+    // the reason fog and dark skies band).
+    float3 n;
+    if (gDither.w > 0.5) {
+        n = (bayer4(floor(pos)) + 0.5) / 16.0;
+    } else {
+        float2 q = floor(pos) + gDither.y * gDither.z * 5.588238;
+        n = float3(ign(q), ign(q + float2(29.0, 61.0)), ign(q + float2(83.0, 17.0)));
+    }
+    result.rgb += (n - 0.5) * gDither.x;
     return result;
 }

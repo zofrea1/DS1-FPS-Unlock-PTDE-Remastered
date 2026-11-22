@@ -63,6 +63,9 @@ void resolution_set_high_precision_color(int mode);
 void resolution_set_high_precision_output(bool want);
 bool resolution_output_10bit();
 void resolution_output_8bit_back();
+// RemoteControl `dither N` (diagnostics): the composite's dither, 2 per channel and new every frame (the default), 1 the
+// same noise every frame, 0 the 2.9.0 ordered dither.
+void resolution_set_dither_mode(int mode);
 // RemoteControl `neardump` (diagnostics): the depth of field's near blur mask after its next draw, into a file.
 void resolution_near_dump();
 void resolution_near_force(bool on);
