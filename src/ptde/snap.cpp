@@ -39,6 +39,9 @@ Episode g_episodes[16];
 volatile long g_capped = 0;
 volatile long g_enabled = 1;
 volatile long g_wall_rise = 0;  // frames whose rise up a wall was put back (see snap_factor)
+// The last wall rises put back (RemoteControl `wallrise`): which body, where, the snap and lift, the frame time.
+SnapWallRise g_wall_events[64];
+volatile long g_wall_seen_off = 0;  // the same frames while switched off (logged only)
 
 // Ground snap reach. Each frame the body is lifted by the step height [body+0xD4] (0.3), moved,
 // then pulled down onto ground within reach of the lifted position; the probe length comes
@@ -90,6 +93,16 @@ GroundState* ground_slot(const void* body, ULONGLONG now) {
     return nullptr;
 }
 
+// A redone 1/30 s window (FixStepUp, stepup.cpp): the body's last frames are moved again as one 30 FPS frame from
+// where the window started. The snap of that move is recorded as one frame of the window's length and the frames it
+// replaces stop counting, so the reach is the retail one for it and for the frames after it.
+struct Redo {
+    const void* body = nullptr;
+    float dt = 0.0f;
+    unsigned replaced = 0;
+};
+Redo g_redo;
+
 // `snap` is the vertical offset applied to the moved proxy, `lift` how far the proxy was raised before the
 // move (0 when the lift was skipped).
 void ground_reach_step(const void* body, float dt, float snap, float lift) {
@@ -97,6 +110,14 @@ void ground_reach_step(const void* body, float dt, float snap, float lift) {
     GroundState* state = ground_slot(body, now);
     if (!state) return;
     const float pull = -snap - lift;  // how far below the moved (unlifted) position the snap puts the body
+    if (g_redo.body == body) {
+        for (unsigned i = 0; i < g_redo.replaced && i < kDropFrames; ++i) {
+            const unsigned at = (state->head - 1 - i) % kDropFrames;
+            state->drop[at] = 0.0f;
+            state->drop_dt[at] = 0.0f;
+        }
+        dt = g_redo.dt;
+    }
     state->last_ms = now;
     state->drop[state->head % kDropFrames] = pull > 0.0f ? pull : 0.0f;
     state->drop_dt[state->head % kDropFrames] = dt;
@@ -220,12 +241,32 @@ float __cdecl snap_factor(const void* body, float proxy_y, float start_y) {
         // down). At 30 FPS and below the game's own behaviour stays.
         const float dt = static_cast<float>(fixes_last_dt());
         if (lifted && lift > 0.0f && snap > 0.0005f && dt > 0.0f && dt * 30.0f < 0.999f) {
+            const long n = InterlockedIncrement(&g_wall_rise);
+            SnapWallRise& e = g_wall_events[static_cast<unsigned long>(n + g_wall_seen_off - 1) & 63];
+            e.body = body;
+            std::memcpy(e.pos, static_cast<const uint8_t*>(body) + 0x10, sizeof(e.pos));
+            e.snap = snap;  // the game's snap, before it is put back
+            e.lift = lift;
+            e.dt = dt;
+            e.ms = GetTickCount64();
             snap = -lift;
-            InterlockedIncrement(&g_wall_rise);
         }
         ground_reach_step(body, dt, snap, lift);
     } else {
         ground_reach_restore(body);
+        // Switched off (comparisons): still log the frames the rule would have put back (`wallrise`), not counted.
+        const float lift = lifted && lifted_y > start_y ? lifted_y - start_y : 0.0f;
+        const float dt = static_cast<float>(fixes_last_dt());
+        if (lifted && lift > 0.0f && snap > 0.0005f && dt > 0.0f && dt * 30.0f < 0.999f) {
+            const long n = InterlockedIncrement(&g_wall_seen_off);
+            SnapWallRise& e = g_wall_events[static_cast<unsigned long>(g_wall_rise + n - 1) & 63];
+            e.body = body;
+            std::memcpy(e.pos, static_cast<const uint8_t*>(body) + 0x10, sizeof(e.pos));
+            e.snap = snap;
+            e.lift = lift;
+            e.dt = -dt;  // negative: logged with the fix off
+            e.ms = GetTickCount64();
+        }
     }
     Debug* d = debug_slot(body);
     d->body = body;
@@ -338,6 +379,34 @@ bool snap_install() {
 }
 
 long snap_wall_rise_count() { return g_wall_rise; }
+
+unsigned snap_wall_rise_events(SnapWallRise* out, unsigned max) {
+    const long n = g_wall_rise + g_wall_seen_off;
+    unsigned k = 0;
+    for (long i = n - 1; i >= 0 && i >= n - 64 && k < max; --i) out[k++] = g_wall_events[static_cast<unsigned long>(i) & 63];
+    return k;
+}
+
+void snap_redo_begin(const void* body, float window_dt, unsigned replaced) {
+    g_redo.body = body;
+    g_redo.dt = window_dt;
+    g_redo.replaced = replaced;
+    // A 30 FPS frame always has the full reach (no earlier frame falls inside its 1/30 s).
+    if (!g_enabled) return;
+    const size_t start = ((reinterpret_cast<uintptr_t>(body) >> 4) * 2654435761u) & (kGroundSlots - 1);
+    for (size_t n = 0; n < 32; ++n) {
+        GroundState& s = g_ground[(start + n) & (kGroundSlots - 1)];
+        if (s.body != body) continue;
+        auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(static_cast<const uint8_t*>(body)) + kReachOffset);
+        if (s.written >= 0.0f && *reach == s.written && s.base > 0.0f && s.base <= 4.0f) {
+            *reach = s.base;
+            s.written = s.base;
+        }
+        return;
+    }
+}
+
+void snap_redo_end() { g_redo = Redo(); }
 
 long snap_capped_count() {
     return g_capped;

@@ -2633,11 +2633,27 @@ void run(const std::string& line) {
         g_pad_lt = static_cast<BYTE>(num(3, 0));
         g_pad_rt = static_cast<BYTE>(num(4, 0));
         out("pad 0x%04X for %ld ms", g_pad_buttons, num(2, 150));
+    } else if (c == "stepdown") {
+        // stepdown 0|1: FixStepDown (the snap reach and the wall rise) off / on.
+        if (t.size() > 1) snap_set_enabled(num(1, 1) != 0);
+        out("stepdown %s; wall rise cut in %ld frames", snap_enabled() ? "on" : "off", snap_wall_rise_count());
+    } else if (c == "wallrise") {
+        // wallrise [N]: the last N (default 12) wall rises put back, newest first.
+        SnapWallRise ev[64];
+        const unsigned n = snap_wall_rise_events(ev, static_cast<unsigned>(num(1, 12)));
+        const ULONGLONG now = GetTickCount64();
+        out("wallrise: %ld in all, last %u:", snap_wall_rise_count(), n);
+        for (unsigned i = 0; i < n; ++i) {
+            out("  %.1f s ago body %08X at %.2f %.2f %.2f snap %+.3f lift %.3f dt %.4f", (now - ev[i].ms) / 1000.0,
+                static_cast<unsigned>(reinterpret_cast<uintptr_t>(ev[i].body)), ev[i].pos[0], ev[i].pos[1], ev[i].pos[2],
+                ev[i].snap, ev[i].lift, ev[i].dt);
+        }
     } else if (c == "stepup") {
-        // stepup 0|1: FixStepUp off / on (comparisons); stepup alone reports.
-        if (t.size() > 1) stepup_set_enabled(num(1, 1) != 0);
-        out("stepup %s, %ld frames boosted, last boost %.3f; wall rise cut in %ld frames", stepup_enabled() ? "on" : "off",
-            stepup_boosted_frames(), stepup_last_boost(), snap_wall_rise_count());
+        // stepup 0|1|2: FixStepUp off / boost / window (comparisons); stepup alone reports.
+        if (t.size() > 1) stepup_set_mode(static_cast<int>(num(1, 2)));
+        out("stepup mode %d, %ld frames boosted (last %.3f), %ld windows redone, %ld blocked entries; wall rise cut in "
+            "%ld frames", stepup_mode(), stepup_boosted_frames(), stepup_last_boost(), stepup_redone_windows(),
+            stepup_blocked_entries(), snap_wall_rise_count());
     } else if (c == "walkto" && t.size() > 3) {
         std::lock_guard<std::mutex> lock(g_pad_lock);
         g_walk_target[0] = static_cast<float>(std::atof(t[1].c_str()));
