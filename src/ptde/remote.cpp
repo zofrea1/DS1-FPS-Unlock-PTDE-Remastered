@@ -658,10 +658,12 @@ std::vector<IDirect3DQuery9*> g_gt_pool;
 // (0: until `ab off`); the first second of each window is left out (shaders made, the picture settled). The GPU's time
 // of every frame is recorded as gputime does (frames tagged with their window), and the log gets each window's GPU
 // time per frame, frame rate and the player's position, then each side's averages and the passes that differ (every
-// 10 rounds when ROUNDS is 0). Only windows the player spent in the world without moving (under 0.25 m) count, so a
-// test on the Steam Deck (RemoteControlStartup) needs nothing but standing still where the view should be measured.
+// 10 rounds when ROUNDS is 0). Only windows the player spent in the world without moving (under 0.25 m) and without
+// touching the controls (a turned camera changes the view too) count, so a test on the Steam Deck
+// (RemoteControlStartup) needs nothing but putting the Deck down where the view should be measured.
 // Render thread, except the request (poll thread, under g_ab_lock).
 bool player_position(float* xyz);
+volatile LONG g_input_tick = 0;  // GetTickCount() when a controller last read anything but rest (remote_pad)
 struct AbSide {
     double gpu_ms = 0;
     long gpu_frames = 0;
@@ -685,6 +687,7 @@ struct Ab {
     ULONGLONG start = 0, settle = 0;
     long presents = 0;
     bool player = false;     // the player was there at every frame of the window so far
+    bool touched = false;    // the controls were used in the window
     float at[3] = {};        // where the window started
     float moved = 0;         // the farthest from there so far (m)
     std::vector<AbWin> win;  // by window
@@ -760,12 +763,17 @@ void ab_end_window(ULONGLONG now) {
     AbWin& x = g_ab.win[w];
     const double secs = now > g_ab.settle ? static_cast<double>(now - g_ab.settle) / 1000.0 : 0.0;
     x.fps = secs > 0.1 ? static_cast<double>(g_ab.presents) / secs : 0.0;
-    x.still = g_ab.player && g_ab.moved < 0.25f;
+    const LONG input = g_input_tick;
+    g_ab.touched = g_ab.touched || (input != 0 && static_cast<LONG>(input - static_cast<LONG>(g_ab.start)) >= 0);
+    x.still = g_ab.player && g_ab.moved < 0.25f && !g_ab.touched;
     x.ended = true;
     LOG_INFO("ab window %d %s \"%s\": GPU %.3f ms a frame (%ld frames), %.1f FPS%s at %.1f %.1f %.1f", w, k ? "B" : "A",
              g_ab.cmd[k].c_str(), x.frames ? x.ms / x.frames : 0.0, x.frames, x.fps,
-             !g_ab.player ? " (not in the world, not counted)" : x.still ? "" : " (moved, not counted)", g_ab.at[0],
-             g_ab.at[1], g_ab.at[2]);
+             !g_ab.player       ? " (not in the world, not counted)"
+             : g_ab.moved >= 0.25f ? " (moved, not counted)"
+             : g_ab.touched        ? " (controls used, not counted)"
+                                   : "",
+             g_ab.at[0], g_ab.at[1], g_ab.at[2]);
     ab_fold(w - 1);  // its last frames are read back by now
 }
 
@@ -810,6 +818,7 @@ void ab_present() {
         g_ab.settle = now + static_cast<ULONGLONG>(settle);
         g_ab.presents = 0;
         g_ab.player = here;
+        g_ab.touched = false;  // GetTickCount() is GetTickCount64()'s low half: input - (LONG)start compares them
         g_ab.moved = 0;
         if (here) std::memcpy(g_ab.at, p, sizeof(p));
         if (g_ab.win.size() <= static_cast<size_t>(g_ab.window)) g_ab.win.resize(g_ab.window + 1);
@@ -3203,6 +3212,15 @@ void remote_hook_device(IDirect3DDevice9* dev) {
 }
 
 void remote_pad(DWORD index, void* state, DWORD* result) {
+    if (g_on && state && result && *result == 0) {
+        // `ab`: any button, trigger or stick off its dead zone (XInput's) marks the window as touched.
+        const auto* r = static_cast<const XState*>(state);
+        const auto off = [](int v, int dead) { return v > dead || v < -dead; };
+        if (r->buttons || r->lt > 30 || r->rt > 30 || off(r->lx, 7849) || off(r->ly, 7849) || off(r->rx, 8689) ||
+            off(r->ry, 8689)) {
+            InterlockedExchange(&g_input_tick, static_cast<LONG>(GetTickCount()));
+        }
+    }
     if (!g_on || index != 0 || !state || !result) return;
     std::lock_guard<std::mutex> lock(g_pad_lock);
     const ULONGLONG now = GetTickCount64();
