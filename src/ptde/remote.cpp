@@ -2740,6 +2740,9 @@ void run(const std::string& line) {
     } else if (c == "lodpct") {
         drawdist_set_lod(static_cast<int>(num(1, 100)));
         out("lodpct %ld", num(1, 100));
+    } else if (c == "aadepth") {
+        atoc_set_depth_diag(static_cast<int>(num(1, 0)));
+        out("aadepth %ld", num(1, 0));
     } else if (c == "dither") {
         // dither 0/1/2: the 2.9.0 ordered dither, the noise fixed, the noise new every frame (the default).
         resolution_set_dither_mode(static_cast<int>(num(1, 2)));

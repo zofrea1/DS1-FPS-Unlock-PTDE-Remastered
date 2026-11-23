@@ -9,6 +9,8 @@ struct IDirect3DDevice9;
 void atoc_hook_device(IDirect3DDevice9* dev);
 // RemoteControl `atoc 0/1/2`: off, plain coverage, sharpened coverage (the default).
 void atoc_set_mode(int mode);
+// RemoteControl `aadepth N` (diagnostics): FixAntialiasingDepth's pieces left out for comparisons (atoc.cpp).
+void atoc_set_depth_diag(int bits);
 // AntialiasingSamples: the samples of the game's anti-aliasing (2 = the game's, 4 or 8). Before the game makes its
 // render targets. False when the game's table does not match this build.
 bool atoc_set_msaa_samples(int samples);

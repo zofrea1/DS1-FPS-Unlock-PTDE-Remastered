@@ -66,6 +66,9 @@ bool g_logged_on = false;
 // are given converted copies; render target 0 is one of them.
 bool g_depth_float = false;
 bool g_depth_target = false;
+// RemoteControl `aadepth N` (diagnostics): bit 1 leaves the depth pre-pass's shaders the game's, bit 2 leaves the depth
+// copy the game's (comparisons only: either alone gives a wrong depth).
+volatile LONG g_depth_diag = 0;
 constexpr UINT kDepthConst = 211;  // the conversion's constants (a def in the converted copy)
 constexpr UINT kEncodeConst = 212, kDecodeConst = 213;  // the depth copy's re-encoding (defs in its copy)
 IDirect3DPixelShader9* g_copy_swap = nullptr;  // the bound shader's re-encoding copy, when it is the depth copy
@@ -431,13 +434,13 @@ DWORD render_state(IDirect3DDevice9* dev, D3DRENDERSTATETYPE state) {
 
 // Before a draw: coverage on or off, and the sharpened shader in place (true: the game's goes back after the draw).
 bool before_draw(IDirect3DDevice9* dev) {
-    if (g_copy_swap && o_set_ps) {
+    if (g_copy_swap && o_set_ps && !(g_depth_diag & 2)) {
         o_set_ps(dev, g_copy_swap);
         return true;
     }
     const LONG mode = g_mode;
     bool want = false;
-    const bool depth = g_depth_float && g_depth_target;
+    const bool depth = g_depth_float && g_depth_target && !(g_depth_diag & 1);
     if (g_method == Method::None) {
         if (!depth || !g_game_ps || !o_set_ps) return false;
         IDirect3DPixelShader9* conv = variant_of(dev, g_game_ps, 1);
@@ -667,6 +670,7 @@ void atoc_hook_device(IDirect3DDevice9* dev) {
 }
 
 void atoc_set_mode(int mode) { g_mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode); }
+void atoc_set_depth_diag(int bits) { InterlockedExchange(&g_depth_diag, bits); }
 
 bool atoc_set_msaa_samples(int samples) {
     if (samples != 2 && samples != 4 && samples != 8) return false;
