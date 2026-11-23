@@ -103,6 +103,7 @@ struct Settings {
     // With it on: the depth the effects and the depth of field read stays exact through the multisampling (one
     // float a sample), so it stays right at the edges of grass (atoc.h).
     bool fix_antialiasing_depth = true;
+    bool fix_antialiasing_depth_16 = false;  // FixAntialiasingDepth = 16bit (tests): the 16-bit variant even where float works
     // The samples of the game's own anti-aliasing when it is on: 2 (the game's), 4 or 8 (atoc.h).
     int antialiasing_samples = 2;
     bool render_scale_post = false;  // experiment: scale the post-processing targets too

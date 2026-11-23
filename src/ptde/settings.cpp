@@ -311,7 +311,8 @@ Settings settings_load(const wchar_t* dll_path) {
             // force (a 2.3.0 test value for the Steam Deck) counts as true.
             s.alpha_to_coverage = parse_bool(val) || lower(trim(val)) == "force";
         } else if (key == "fixantialiasingdepth") {
-            s.fix_antialiasing_depth = parse_bool(val);
+            s.fix_antialiasing_depth_16 = lower(trim(val)) == "16bit";
+            s.fix_antialiasing_depth = s.fix_antialiasing_depth_16 || parse_bool(val);
         } else if (key == "fixstaminatick") {
             s.fix_stamina_tick = parse_bool(val);
         } else if (key == "fixslidecontact") {

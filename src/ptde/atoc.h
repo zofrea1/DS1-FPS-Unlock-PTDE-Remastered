@@ -19,7 +19,7 @@ bool atoc_set_msaa_samples(int samples);
 // float target; see atoc.cpp), so the resolve's average is the right depth at the edges of grass and leaves. Install
 // before the game makes its render targets (samples: AntialiasingSamples); check once the device exists (picks the
 // format, hooks the draws, or puts the game's format back).
-bool atoc_fix_depth_install(int samples);
+bool atoc_fix_depth_install(int samples, bool force16 = false);
 void atoc_fix_depth_check(IDirect3DDevice9* dev);
 // Before a device Reset: our float copy of a depth resolved into an 8-bit texture goes (made again when needed).
 void atoc_reset();

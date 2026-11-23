@@ -725,6 +725,7 @@ constexpr DepthFormatSite kDepthFormats[] = {
     {0x0100AAFF, 4, "the depth texture it is resolved into"},
 };
 bool g_depth_fix = false;
+bool g_depth_force16 = false;  // FixAntialiasingDepth = 16bit (tests)
 int g_depth_samples = 2;
 
 bool write_format_index(const DepthFormatSite& f, uint32_t index) {
@@ -743,7 +744,8 @@ void write_depth_format(uint32_t index) {
 }
 }  // namespace
 
-bool atoc_fix_depth_install(int samples) {
+bool atoc_fix_depth_install(int samples, bool force16) {
+    g_depth_force16 = force16;
     const auto* table = reinterpret_cast<const uint32_t*>(kFormatTable);
     if (table[kIndexA8R8G8B8] != D3DFMT_A8R8G8B8 || table[kIndexR32F] != D3DFMT_R32F ||
         table[kIndexA16B16G16R16] != D3DFMT_A16B16G16R16) {
@@ -788,7 +790,7 @@ void atoc_fix_depth_check(IDirect3DDevice9* dev) {
                d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, f, TRUE, msaa, nullptr) == D3D_OK &&
                d3d->CheckDeviceMultiSampleType(cp.AdapterOrdinal, D3DDEVTYPE_HAL, f, FALSE, msaa, nullptr) == D3D_OK;
     };
-    const bool fl = can(D3DFMT_R32F, true);
+    const bool fl = !g_depth_force16 && can(D3DFMT_R32F, true);
     const bool u16 = !fl && can(D3DFMT_A16B16G16R16, false);
     d3d->Release();
     if (fl) {

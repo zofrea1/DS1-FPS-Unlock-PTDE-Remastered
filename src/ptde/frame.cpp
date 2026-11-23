@@ -563,7 +563,7 @@ bool frame_install(const Settings& settings) {
         atoc_set_msaa_samples(settings.antialiasing_samples);
         // Its packed depth through the multisampling (not beside DSfix, which reads the game's depth its own way).
         if (settings.fix_antialiasing_depth && !dsfix_loaded()) {
-            atoc_fix_depth_install(settings.antialiasing_samples);
+            atoc_fix_depth_install(settings.antialiasing_samples, settings.fix_antialiasing_depth_16);
         }
         // YieldToDSFix: the game's own 2048 map (DSfix decides the picture). Beside DSfix otherwise, the larger map's
         // scissor rectangles are put back beneath DSfix's device (shadowmap.cpp).
