@@ -178,6 +178,10 @@ ULONGLONG g_stick_until = 0;
 float g_walk[2] = {};
 float g_walk_sign = 1.0f;
 float g_walk_mag = 32000.0f;
+// `walkto X Z MS`: walked toward the point (x, z) and let go within 0.12 m of it.
+bool g_walk_to = false;
+float g_walk_target[2] = {};
+bool player_position(float* xyz);
 DWORD g_packet = 0;
 
 WORD parse_buttons(const std::string& s) {
@@ -2613,7 +2617,19 @@ void run(const std::string& line) {
         g_pad_lt = static_cast<BYTE>(num(3, 0));
         g_pad_rt = static_cast<BYTE>(num(4, 0));
         out("pad 0x%04X for %ld ms", g_pad_buttons, num(2, 150));
+    } else if (c == "walkto" && t.size() > 3) {
+        std::lock_guard<std::mutex> lock(g_pad_lock);
+        g_walk_target[0] = static_cast<float>(std::atof(t[1].c_str()));
+        g_walk_target[1] = static_cast<float>(std::atof(t[2].c_str()));
+        g_walk_to = true;
+        g_walk_sign = 1.0f;
+        g_walk[0] = 0.0f;
+        g_walk[1] = 1.0f;
+        for (int k = 0; k < 4; ++k) g_stick[k] = 0;
+        g_stick_until = GetTickCount64() + static_cast<ULONGLONG>(num(3, 5000));
+        out("walkto %.2f %.2f for up to %ld ms", g_walk_target[0], g_walk_target[1], num(3, 5000));
     } else if (c == "walkdir" && t.size() > 3) {
+        g_walk_to = false;
         // walkdir DX DZ MS [SIGN] [MAG]: see g_walk.
         std::lock_guard<std::mutex> lock(g_pad_lock);
         float dx = static_cast<float>(std::atof(t[1].c_str())), dz = static_cast<float>(std::atof(t[2].c_str()));
@@ -3273,6 +3289,22 @@ void remote_pad(DWORD index, void* state, DWORD* result) {
         s->buttons |= g_pad_buttons;
         if (g_pad_lt) s->lt = g_pad_lt;
         if (g_pad_rt) s->rt = g_pad_rt;
+    }
+    if (now < g_stick_until && g_walk_to) {
+        float pp[3];
+        if (player_position(pp)) {
+            const float dx = g_walk_target[0] - pp[0], dz = g_walk_target[1] - pp[2];
+            const float d = std::sqrt(dx * dx + dz * dz);
+            if (d < 0.12f) {
+                g_walk_to = false;
+                g_walk[0] = g_walk[1] = 0.0f;
+                g_stick_until = now;
+            } else {
+                g_walk[0] = dx / d;
+                g_walk[1] = dz / d;
+                g_walk_mag = d > 0.6f ? 32000.0f : 12000.0f;  // slower near the point (above the dead zone)
+            }
+        }
     }
     if (now < g_stick_until) {
         if (g_walk[0] || g_walk[1]) {
