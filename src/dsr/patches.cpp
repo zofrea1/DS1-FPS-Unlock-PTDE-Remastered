@@ -1774,12 +1774,16 @@ float ladder_snap_factor(const void* phys, float dt, bool lifted) {
 // window started, with the step info's time set to the whole window. That snap ends one frame of the window's length
 // that replaces the body's `replaced` last frames: they stop counting for the reach, and the wall-rise rule still
 // judges by the real frame time (`frame_dt`).
-struct StepRedo {
-    const void* phys = nullptr;
-    float frame_dt = 0.0f;
-    unsigned replaced = 0;
-};
-thread_local StepRedo t_step_redo;
+// Kept per body, not per thread (release builds have no TLS): a body is moved by one thread at a time, so its slot is
+// claimed for the one call and freed after it.
+constexpr size_t kStepRedoSlots = 64;
+std::atomic<const void*> g_step_redo_phys[kStepRedoSlots];
+float g_step_redo_frame_dt[kStepRedoSlots];
+unsigned g_step_redo_replaced[kStepRedoSlots];
+
+size_t step_redo_slot(const void* phys) {
+    return ((reinterpret_cast<uintptr_t>(phys) >> 4) * 2654435761u) & (kStepRedoSlots - 1);
+}
 
 // Called by the snap-apply cave once per physics update, right before the snap is
 // added to the proxy position. `snap` is the vertical offset about to be applied;
@@ -1825,15 +1829,16 @@ void ground_snap_step(const void* phys, float dt, float /*proxy_y*/, float start
     // (60 FPS, 30 with StepDownPtde) such a frame puts the lift back, as if no ground was found: the Lower Undead
     // Burg's door-ambush thief was carried up 0.31 m a frame by its door's wall, 1 m at 30 FPS but 12-16 m at 120
     // (the PTDE twin in src/ptde/snap.cpp has the measurements). Real ground below leaves the snap between -lift and 0.
-    const bool redo = t_step_redo.phys == phys;
-    const float frame_dt = redo ? t_step_redo.frame_dt : dt;
+    const size_t redo_slot = step_redo_slot(phys);
+    const bool redo = g_step_redo_phys[redo_slot].load(std::memory_order_acquire) == phys;
+    const float frame_dt = redo ? g_step_redo_frame_dt[redo_slot] : dt;
     if (lifted && lift > 0.0f && *snap > 0.0005f && frame_dt > 0.0f && frame_dt * step_down_rate() < 0.999f) {
         *snap = -lift;
         g_wall_rise.fetch_add(1, std::memory_order_relaxed);
     }
     const float pull = -*snap - lift;
     if (redo) {
-        for (unsigned i = 0; i < t_step_redo.replaced && i < kDropFrames; ++i) {
+        for (unsigned i = 0; i < g_step_redo_replaced[redo_slot] && i < kDropFrames; ++i) {
             const unsigned at = (state->head - 1 - i) % kDropFrames;
             state->drop[at] = 0.0f;
             state->drop_dt[at] = 0.0f;
@@ -2089,7 +2094,10 @@ void step_up_call(uint8_t* body, uint8_t* info, void* out) {
     }
     w->last_ms = now;
 
-    if (w->blocked && w->acc + dt >= reference - 0.25f * dt) {
+    const size_t redo_slot = step_redo_slot(body);
+    const void* redo_free = nullptr;
+    if (w->blocked && w->acc + dt >= reference - 0.25f * dt &&
+        g_step_redo_phys[redo_slot].compare_exchange_strong(redo_free, body, std::memory_order_acq_rel)) {
         const float window = w->acc + dt;
         std::memcpy(body + 0x10, w->anchor, sizeof(float) * 3);
         g_proxy_set_position(proxy, w->anchor);
@@ -2098,11 +2106,10 @@ void step_up_call(uint8_t* body, uint8_t* info, void* out) {
         f[2] = window;
         f[3] = 1.0f / window;
         ground_redo_reach(body);
-        t_step_redo.phys = body;
-        t_step_redo.frame_dt = dt;
-        t_step_redo.replaced = w->frames;
+        g_step_redo_frame_dt[redo_slot] = dt;
+        g_step_redo_replaced[redo_slot] = w->frames;
         g_lift_move_snap(body, info, out);
-        t_step_redo = StepRedo();
+        g_step_redo_phys[redo_slot].store(nullptr, std::memory_order_release);
         f[2] = saved_dt;
         f[3] = saved_inv;
         g_step_up_redone.fetch_add(1, std::memory_order_relaxed);
