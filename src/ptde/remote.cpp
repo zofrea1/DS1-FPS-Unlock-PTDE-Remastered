@@ -3211,16 +3211,17 @@ void remote_hook_device(IDirect3DDevice9* dev) {
         g_real_dev ? "; another device object lies under it (frame logs check its viewport and scissor)" : "");
 }
 
-void remote_pad(DWORD index, void* state, DWORD* result) {
-    if (g_on && state && result && *result == 0) {
-        // `ab`: any button, trigger or stick off its dead zone (XInput's) marks the window as touched.
-        const auto* r = static_cast<const XState*>(state);
-        const auto off = [](int v, int dead) { return v > dead || v < -dead; };
-        if (r->buttons || r->lt > 30 || r->rt > 30 || off(r->lx, 7849) || off(r->ly, 7849) || off(r->rx, 8689) ||
-            off(r->ry, 8689)) {
-            InterlockedExchange(&g_input_tick, static_cast<LONG>(GetTickCount()));
-        }
+// `ab`: any button, trigger or stick off its dead zone (XInput's) marks the window as touched.
+static void note_input(const XState* r) {
+    const auto off = [](int v, int dead) { return v > dead || v < -dead; };
+    if (r->buttons || r->lt > 30 || r->rt > 30 || off(r->lx, 7849) || off(r->ly, 7849) || off(r->rx, 8689) ||
+        off(r->ry, 8689)) {
+        InterlockedExchange(&g_input_tick, static_cast<LONG>(GetTickCount()));
     }
+}
+
+void remote_pad(DWORD index, void* state, DWORD* result) {
+    if (g_on && state && result && *result == 0) note_input(static_cast<const XState*>(state));
     if (!g_on || index != 0 || !state || !result) return;
     std::lock_guard<std::mutex> lock(g_pad_lock);
     const ULONGLONG now = GetTickCount64();
@@ -3244,6 +3245,7 @@ void remote_pad(DWORD index, void* state, DWORD* result) {
         if (g_stick[2] || g_stick[3]) { s->rx = g_stick[2]; s->ry = g_stick[3]; }
     }
     s->packet += ++g_packet;
+    note_input(s);  // RemoteControl's own input too (tests)
 }
 
 void remote_game_frame() {
