@@ -38,6 +38,7 @@ struct Episode {
 Episode g_episodes[16];
 volatile long g_capped = 0;
 volatile long g_enabled = 1;
+volatile long g_wall_rise = 0;  // frames whose rise up a wall was cut to the 30 FPS share (see snap_factor)
 
 // Ground snap reach. Each frame the body is lifted by the step height [body+0xD4] (0.3), moved,
 // then pulled down onto ground within reach of the lifted position; the probe length comes
@@ -204,10 +205,22 @@ float __cdecl snap_factor(const void* body, float proxy_y, float start_y) {
             if (e.body == body) e.applied = 0.0f;  // balanced frame: the next unbalanced run is a new episode
         }
     }
+    const float b4 = *reinterpret_cast<const float*>(static_cast<const uint8_t*>(body) + 0xB4);
+    float snap = b4 * result;
     if (g_enabled) {
-        const float b4 = *reinterpret_cast<const float*>(static_cast<const uint8_t*>(body) + 0xB4);
         const float lift = lifted && lifted_y > start_y ? lifted_y - start_y : 0.0f;
-        ground_reach_step(body, static_cast<float>(fixes_last_dt()), b4 * result, lift);
+        // A snap at or above the lifted height: the ground probe (a sphere cast down from just above the lifted body)
+        // started inside a wall beside it and reported "ground" at its start, so the frame's lift is not put back and
+        // the body ends a step higher. It keeps doing so while the wall is there: a thief of the Lower Undead Burg's
+        // door ambush (event 11010130), pressed against the wall by its door, was carried up 0.31 m a frame, 1 m in
+        // its few frames at 30 FPS and 12-16 m at 120 (user report 2026-11-22). Real ground below never gives this
+        // (a step up leaves the snap between -lift and 0), so here the frame keeps only the 30 FPS share of the rise.
+        const float dt = static_cast<float>(fixes_last_dt());
+        if (lifted && lift > 0.0f && snap > 0.0005f && dt > 0.0f && dt * 30.0f < 1.0f) {
+            snap = -lift + (lift + snap) * (dt * 30.0f);
+            InterlockedIncrement(&g_wall_rise);
+        }
+        ground_reach_step(body, dt, snap, lift);
     } else {
         ground_reach_restore(body);
     }
@@ -217,7 +230,7 @@ float __cdecl snap_factor(const void* body, float proxy_y, float start_y) {
     d->factor = result;
     d->lifted = lifted ? 1 : 0;
     ++d->calls;
-    return result;
+    return snap;
 }
 
 }  // namespace
@@ -269,7 +282,8 @@ bool snap_install() {
     emit({0xE9});                                      // jmp setPosition
     emit32(kSetPosition - (reinterpret_cast<uint32_t>(p) + 4));
 
-    // Snap stub: xmm1 = [ebx+0xB4] * snap_factor(body, proxy y, body y)
+    // Snap stub: xmm1 = snap_factor(body, proxy y, body y), the snap to apply ([ebx+0xB4] times the episode factor,
+    // or the wall rise's share)
     uint8_t* snap_stub = p;
     emit({0x9C});                                      // pushfd
     emit({0x60});                                      // pushad
@@ -289,7 +303,6 @@ bool snap_install() {
     emit({0x83, 0xC4, 0x0C});                          // add esp,0xC
     emit({0x0F, 0x10, 0x04, 0x24});                    // movups xmm0,[esp]
     emit({0x83, 0xC4, 0x10});                          // add esp,0x10
-    emit({0xF3, 0x0F, 0x59, 0x8B, 0xB4, 0x00, 0x00, 0x00});  // mulss xmm1,[ebx+0xB4]
     emit({0x61});                                      // popad
     emit({0x9D});                                      // popfd
     emit({0xE9});                                      // jmp back
@@ -320,6 +333,8 @@ bool snap_install() {
     LOG_INFO("Ladder/ledge snap cap installed (snap %08X, lift call %08X, cave %p)", kSite, kLiftCall, cave);
     return true;
 }
+
+long snap_wall_rise_count() { return g_wall_rise; }
 
 long snap_capped_count() {
     return g_capped;

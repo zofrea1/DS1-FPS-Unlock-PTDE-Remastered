@@ -6,6 +6,7 @@
 
 #include "camera.h"
 #include "stepup.h"
+#include "snap.h"
 #include "frame.h"
 #include "drawdist.h"
 #include "foliage.h"
@@ -2635,8 +2636,8 @@ void run(const std::string& line) {
     } else if (c == "stepup") {
         // stepup 0|1: FixStepUp off / on (comparisons); stepup alone reports.
         if (t.size() > 1) stepup_set_enabled(num(1, 1) != 0);
-        out("stepup %s, %ld frames boosted, last boost %.3f", stepup_enabled() ? "on" : "off", stepup_boosted_frames(),
-            stepup_last_boost());
+        out("stepup %s, %ld frames boosted, last boost %.3f; wall rise cut in %ld frames", stepup_enabled() ? "on" : "off",
+            stepup_boosted_frames(), stepup_last_boost(), snap_wall_rise_count());
     } else if (c == "walkto" && t.size() > 3) {
         std::lock_guard<std::mutex> lock(g_pad_lock);
         g_walk_target[0] = static_cast<float>(std::atof(t[1].c_str()));
