@@ -2511,7 +2511,8 @@ HRESULT WINAPI hk_set_scissor(IDirect3DDevice9* dev, const RECT* r) {
 // ---------------------------------------------------------------------------------------------------------------
 // The frame's last scale-down (shaders/present_reduce.hlsl): when the frame buffer is larger than the screen
 // (Supersampling, or RenderResolution above the display), the game's StretchRect of it onto the back buffer is drawn
-// as an exact area average in linear light instead of the driver's bilinear filter.
+// as an exact area average in linear light instead of the driver's bilinear filter. The shader converts to and from
+// linear light itself; the device's sRGB reads and writes are kept off (see present_reduce.hlsl).
 using StretchRectFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DSurface9*, const RECT*, IDirect3DSurface9*,
                                        const RECT*, D3DTEXTUREFILTERTYPE);
 StretchRectFn o_stretch = nullptr;
@@ -2523,7 +2524,6 @@ struct Reduce {
     IDirect3DPixelShader9* ps = nullptr;
     IDirect3DVertexDeclaration9* decl = nullptr;
     IDirect3DStateBlock9* state = nullptr;
-    bool srgb = false;
     bool failed = false;
     bool logged = false;
 };
@@ -2537,7 +2537,7 @@ void release_ptr(T*& p) {
     }
 }
 
-bool reduce_ready(IDirect3DDevice9* dev, D3DFORMAT src_format, D3DFORMAT dst_format) {
+bool reduce_ready(IDirect3DDevice9* dev) {
     if (g_reduce.dev != dev) {
         release_ptr(g_reduce.vs);
         release_ptr(g_reduce.ps);
@@ -2555,19 +2555,6 @@ bool reduce_ready(IDirect3DDevice9* dev, D3DFORMAT src_format, D3DFORMAT dst_for
                       "used");
             return false;
         }
-        // Linear-light averaging needs sRGB reads of the frame buffer and sRGB writes to the back buffer.
-        IDirect3D9* d3d = nullptr;
-        D3DDISPLAYMODE mode{};
-        g_reduce.srgb = false;
-        if (SUCCEEDED(dev->GetDirect3D(&d3d)) && d3d && SUCCEEDED(dev->GetDisplayMode(0, &mode))) {
-            const D3DFORMAT adapter = mode.Format == D3DFMT_UNKNOWN ? D3DFMT_X8R8G8B8 : mode.Format;
-            g_reduce.srgb =
-                SUCCEEDED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, adapter, D3DUSAGE_QUERY_SRGBREAD,
-                                                 D3DRTYPE_TEXTURE, src_format)) &&
-                SUCCEEDED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, adapter,
-                                                 D3DUSAGE_QUERY_SRGBWRITE, D3DRTYPE_SURFACE, dst_format));
-        }
-        if (d3d) d3d->Release();
     }
     if (g_reduce.failed) return false;
     if (!g_reduce.state && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_reduce.state))) return false;
@@ -2594,15 +2581,14 @@ HRESULT reduce_draw(IDirect3DDevice9* dev, IDirect3DTexture9* tex, const D3DSURF
                                             D3DRS_ALPHATESTENABLE,  D3DRS_CULLMODE,         D3DRS_STENCILENABLE,
                                             D3DRS_COLORWRITEENABLE, D3DRS_SCISSORTESTENABLE, D3DRS_FILLMODE,
                                             D3DRS_CLIPPLANEENABLE,  D3DRS_SRGBWRITEENABLE};
-    const DWORD rs_values[] = {FALSE, FALSE, FALSE, FALSE, D3DCULL_NONE, FALSE, 0xF, FALSE, D3DFILL_SOLID, 0,
-                               g_reduce.srgb ? TRUE : FALSE};
+    const DWORD rs_values[] = {FALSE, FALSE, FALSE, FALSE, D3DCULL_NONE, FALSE, 0xF, FALSE, D3DFILL_SOLID, 0, FALSE};
     for (size_t i = 0; i < sizeof(kRs) / sizeof(kRs[0]); ++i) dev->SetRenderState(kRs[i], rs_values[i]);
     dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
     dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
     dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
     dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
     dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
-    dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, g_reduce.srgb ? TRUE : FALSE);
+    dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
     o_set_texture(dev, 0, tex);
     dev->SetVertexShader(g_reduce.vs);
     o_set_ps(dev, g_reduce.ps);
@@ -2990,15 +2976,14 @@ HRESULT WINAPI hk_stretch(IDirect3DDevice9* dev, IDirect3DSurface9* src, const R
         if (dw > 0 && dh > 0 && sw >= dw && sh >= dh && (sw > dw || sh > dh)) {
             IDirect3DTexture9* tex = nullptr;
             if (SUCCEEDED(src->GetContainer(__uuidof(IDirect3DTexture9), reinterpret_cast<void**>(&tex))) && tex &&
-                reduce_ready(dev, sd.Format, dd.Format)) {
+                reduce_ready(dev)) {
                 const HRESULT hr = reduce_draw(dev, tex, sd, s, dst, d);
                 tex->Release();
                 if (SUCCEEDED(hr)) {
                     if (!g_reduce.logged) {
                         g_reduce.logged = true;
                         LOG_INFO("Resolution: the frame (%ldx%ld) is scaled down to the screen (%ldx%ld) as an exact "
-                                 "average of the pixels each screen pixel covers%s", sw, sh, dw, dh,
-                                 g_reduce.srgb ? ", in linear light" : "");
+                                 "average of the pixels each screen pixel covers, in linear light", sw, sh, dw, dh);
                     }
                     return hr;
                 }
