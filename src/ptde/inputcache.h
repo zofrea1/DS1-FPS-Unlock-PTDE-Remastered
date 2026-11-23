@@ -17,3 +17,7 @@ void inputcache_game_frame();
 int inputcache_set(int on);
 // For the log: reads answered from the cache and reads passed on, since the start.
 void inputcache_stats(unsigned long* cached, unsigned long* passed);
+// FPS Unlock Settings: the hook goes in whatever CacheInputReads says, and while blank the game reads no keyboard or
+// mouse input.
+void inputcache_require_hook();
+void inputcache_set_blank(bool on);

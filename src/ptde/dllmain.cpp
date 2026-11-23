@@ -22,6 +22,7 @@
 #include "inputcache.h"
 #include "log.h"
 #include "patches.h"
+#include "settingsmenu.h"
 #include "settings.h"
 #include "steamguard.h"
 #include "trace.h"
@@ -83,6 +84,12 @@ DWORD WINAPI worker(void*) {
     LOG_INFO("FixAspect: %s", settings.fix_aspect ? "true" : "false");
     dpi_aware_log(settings.fps_unlock && settings.dpi_aware);
 
+    // FPS Unlock Settings first, so that a bundled mod can add its page when it starts.
+    if (settings.fps_unlock && settings.settings_menu) {
+        wchar_t ini[MAX_PATH];
+        settings_ini_path(dll_path, ini, MAX_PATH);
+        settingsmenu_install(ini, settings.settings_menu_key);
+    }
     // A mod built into this DLL (see extension.h) and the start-up logos do not depend on the FPS unlock.
     if (ext && ext->start) ext->start(g_self);
     intro_install(settings.skip_intro);

@@ -1,4 +1,5 @@
 #include "xinput_proxy.h"
+#include "settingsmenu.h"
 #include "remote.h"
 
 #include "log.h"
@@ -150,6 +151,7 @@ DWORD xinput_get_state(DWORD index, void* state) {
     ensure();
     DWORD result = pGetState ? pGetState(index, state) : kNotConnected;
     remote_pad(index, state, &result);
+    settingsmenu_pad(index, state, result);
     return result;
 }
 

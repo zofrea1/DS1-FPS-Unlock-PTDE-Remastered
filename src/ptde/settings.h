@@ -147,6 +147,9 @@ struct Settings {
     int foliage_sway_speed = 100;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;
+    // FPS Unlock Settings (settingsmenu.cpp): the in-game page, and the key that opens it (0 = none).
+    bool settings_menu = true;
+    int settings_menu_key = 0x70;  // VK_F1
     // With DSfix's render resolution: the sun and moon no longer stay hidden after something passes in front.
     bool fix_sun_with_dsfix = true;
     // With DSfix 2.x's dofOverrideResolution and its resolution: the water surfaces no longer break into blocks (off
@@ -286,6 +289,8 @@ struct Settings {
 
 // Reads PTDE-FPS-Unlock.ini from the same directory as the DLL.
 Settings settings_load(const wchar_t* dll_path);
+// The INI file settings_load reads (beside the DLL).
+void settings_ini_path(const wchar_t* dll_path, wchar_t* full, size_t size);
 
 // Every key of PTDE-FPS-Unlock.ini in file order (key in lower case, value trimmed, # comments cut; section
 // headers carry no meaning). A mod built into this DLL keeps its own keys in the same file (see extension.h).

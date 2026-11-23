@@ -132,6 +132,8 @@ bool settings_read_keys(const wchar_t* dll_path,
     return true;
 }
 
+void settings_ini_path(const wchar_t* dll_path, wchar_t* full, size_t size) { ini_path(dll_path, full, size); }
+
 Settings settings_load(const wchar_t* dll_path) {
     Settings s;
     wchar_t full[MAX_PATH];
@@ -222,6 +224,12 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_water_with_dsfix = parse_bool(val);
         } else if (key == "hidemousecursor") {
             s.hide_mouse_cursor = parse_bool(val);
+        } else if (key == "settingsmenu") {
+            s.settings_menu = parse_bool(val);
+        } else if (key == "settingsmenukey") {
+            const std::string v = lower(trim(val));
+            const int n = (v.size() >= 2 && v[0] == 'f') ? std::atoi(v.c_str() + 1) : 0;
+            s.settings_menu_key = (n >= 1 && n <= 12) ? 0x70 + n - 1 : 0;
         } else if (key == "drawmappieces") {
             std::string v = val;
             for (auto& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));

@@ -5,6 +5,7 @@
 #if FPSU_DIAGNOSTICS
 
 #include "camera.h"
+#include "settingsmenu.h"
 #include "stepup.h"
 #include "snap.h"
 #include "frame.h"
@@ -2633,6 +2634,10 @@ void run(const std::string& line) {
         g_pad_lt = static_cast<BYTE>(num(3, 0));
         g_pad_rt = static_cast<BYTE>(num(4, 0));
         out("pad 0x%04X for %ld ms", g_pad_buttons, num(2, 150));
+    } else if (c == "settings") {
+        // settings 0|1: FPS Unlock Settings closed / open.
+        if (t.size() > 1) settingsmenu_set_open(num(1, 1) != 0);
+        out("settings %s", settingsmenu_is_open() ? "open" : "closed");
     } else if (c == "stepdown") {
         // stepdown 0|1: FixStepDown (the snap reach and the wall rise) off / on.
         if (t.size() > 1) snap_set_enabled(num(1, 1) != 0);

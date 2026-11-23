@@ -27,6 +27,7 @@
 #include "resolution.h"
 #include "vkprobe.h"
 #include "shadowmap.h"
+#include "settingsmenu.h"
 #include "settings.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -63,6 +64,7 @@ bool g_present_watch = false;  // the system Direct3D 9: ScanWatch is told when 
 
 HRESULT WINAPI hook_present(IDirect3DDevice9* device, const RECT* src, const RECT* dst, HWND window,
                             const RGNDATA* dirty) {
+    settingsmenu_present(device);
     if (g_present_dxgi) dxgipresent_frame_presented(frame_boundary_qpc());
     const HRESULT hr = g_present(device, src, dst, window, dirty);
 #if FPSU_DIAGNOSTICS
@@ -257,6 +259,7 @@ HRESULT WINAPI hook_reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pp) {
     occl_reset();
     passcull_reset();
     atoc_reset();
+    settingsmenu_reset();
     HRESULT hr = g_reset(device, pp);
     if (FAILED(hr) && pp && pp->BackBufferFormat == D3DFMT_A2R10G10B10) {
         pp->BackBufferFormat = asked == D3DFMT_A2R10G10B10 || asked == D3DFMT_UNKNOWN ? D3DFMT_X8R8G8B8 : asked;

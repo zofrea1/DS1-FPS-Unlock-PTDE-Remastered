@@ -21,6 +21,8 @@ using GetStateFn = HRESULT(WINAPI*)(void*, DWORD, void*);
 int g_mode = 0;          // configured
 bool g_on = false;       // in force
 bool g_hooked = false;
+bool g_need = false;     // hooked whatever the mode: FPS Unlock Settings blanks the game's input while open
+volatile LONG g_blank = 0;
 int g_tries = 0;
 uint32_t g_game_tid = 0;
 volatile uint32_t g_frame = 1;
@@ -65,6 +67,12 @@ HRESULT WINAPI hook_get_state(void* self, DWORD size, void* data) {
     const GetStateFn original = original_for(self);
     if (!original) return E_FAIL;  // cannot happen: only complete entries' tables lead here
     const int k = size == 20 ? 0 : size == 256 ? 1 : -1;
+    if (g_blank && k >= 0 && data) {
+        // FPS Unlock Settings is open: the device is still read (so nothing piles up), the game sees no key or move.
+        const HRESULT hr = original(self, size, data);
+        if (hr == 0) std::memset(data, 0, size);
+        return hr;
+    }
     if (!g_on || k < 0 || !data || GetCurrentThreadId() != g_game_tid) return original(self, size, data);
     Cached& c = g_cache[k];
     if (c.frame == g_frame && c.size == size) {
@@ -141,7 +149,7 @@ void inputcache_configure(int mode) {
 
 void inputcache_game_frame() {
     g_frame = g_frame + 1;
-    if (g_hooked || g_mode == 0 || g_tries > 200) return;
+    if (g_hooked || (g_mode == 0 && !g_need) || g_tries > 200) return;
     if ((g_frame & 31) != 0) return;
     ++g_tries;
     g_game_tid = GetCurrentThreadId();
@@ -164,6 +172,9 @@ int inputcache_set(int on) {
     }
     return g_on ? 1 : 0;
 }
+
+void inputcache_require_hook() { g_need = true; }
+void inputcache_set_blank(bool on) { InterlockedExchange(&g_blank, on ? 1 : 0); }
 
 void inputcache_stats(unsigned long* cached, unsigned long* passed) {
     *cached = static_cast<unsigned long>(g_cached);

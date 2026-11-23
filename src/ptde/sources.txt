@@ -44,6 +44,7 @@ src\ptde\watch.cpp
 src\ptde\fixes.cpp
 src\ptde\snap.cpp
 src\ptde\stepup.cpp
+src\ptde\settingsmenu.cpp
 src\ptde\camera.cpp
 src\ptde\deep.cpp
 src\ptde\ui.cpp
