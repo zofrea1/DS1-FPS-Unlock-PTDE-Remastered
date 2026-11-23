@@ -1770,6 +1770,17 @@ float ladder_snap_factor(const void* phys, float dt, bool lifted) {
     return factor;
 }
 
+// FixStepUp's redone window (step_up_call): the body's last frames are moved again as one retail frame from where the
+// window started, with the step info's time set to the whole window. That snap ends one frame of the window's length
+// that replaces the body's `replaced` last frames: they stop counting for the reach, and the wall-rise rule still
+// judges by the real frame time (`frame_dt`).
+struct StepRedo {
+    const void* phys = nullptr;
+    float frame_dt = 0.0f;
+    unsigned replaced = 0;
+};
+thread_local StepRedo t_step_redo;
+
 // Called by the snap-apply cave once per physics update, right before the snap is
 // added to the proxy position. `snap` is the vertical offset about to be applied;
 // `lifted_y` is the height the body was moved from (the lifted position, or the
@@ -1814,11 +1825,20 @@ void ground_snap_step(const void* phys, float dt, float /*proxy_y*/, float start
     // (60 FPS, 30 with StepDownPtde) such a frame puts the lift back, as if no ground was found: the Lower Undead
     // Burg's door-ambush thief was carried up 0.31 m a frame by its door's wall, 1 m at 30 FPS but 12-16 m at 120
     // (the PTDE twin in src/ptde/snap.cpp has the measurements). Real ground below leaves the snap between -lift and 0.
-    if (lifted && lift > 0.0f && *snap > 0.0005f && dt > 0.0f && dt * step_down_rate() < 0.999f) {
+    const bool redo = t_step_redo.phys == phys;
+    const float frame_dt = redo ? t_step_redo.frame_dt : dt;
+    if (lifted && lift > 0.0f && *snap > 0.0005f && frame_dt > 0.0f && frame_dt * step_down_rate() < 0.999f) {
         *snap = -lift;
         g_wall_rise.fetch_add(1, std::memory_order_relaxed);
     }
     const float pull = -*snap - lift;
+    if (redo) {
+        for (unsigned i = 0; i < t_step_redo.replaced && i < kDropFrames; ++i) {
+            const unsigned at = (state->head - 1 - i) % kDropFrames;
+            state->drop[at] = 0.0f;
+            state->drop_dt[at] = 0.0f;
+        }
+    }
     state->last_ms = now;
     state->drop[state->head % kDropFrames] = pull > 0.0f ? pull : 0.0f;
     state->drop_dt[state->head % kDropFrames] = dt;
@@ -1857,6 +1877,22 @@ void ground_snap_step(const void* phys, float dt, float /*proxy_y*/, float start
     }
     state->written = allowed;
     *reach = state->written;
+}
+
+// Before a redone window: a retail frame always has the full reach (no earlier frame falls inside it).
+void ground_redo_reach(const void* phys) {
+    if (g_fix_step_down.load(std::memory_order_relaxed) == 0) {
+        return;
+    }
+    GroundState* state = ground_slot(phys, GetTickCount64());
+    if (!state) {
+        return;
+    }
+    auto* reach = reinterpret_cast<float*>(const_cast<uint8_t*>(static_cast<const uint8_t*>(phys)) + kReachOffset);
+    if (state->written >= 0.0f && *reach == state->written && state->base > 0.0f && state->base <= 4.0f) {
+        *reach = state->base;
+        state->written = state->base;
+    }
 }
 
 bool patch_ground_snap() {
@@ -1937,52 +1973,201 @@ bool patch_ground_snap() {
 
 // FixStepUp: lips a little higher than the step height climbed as at the reference frame rate (the original
 // game's 30 FPS with StepHeightPtde, Remastered's 60 otherwise). The PTDE twin (src/ptde/stepup.cpp) has the
-// measurements: a lip above the step is climbed in the frame where the lifted proxy gets past its edge, so how far
-// it moves in that one frame decides it, and shorter frames climb less (the Great Hollow's Cloranthy Ring hollow
-// could not be left at 120 FPS). For the controller's lift-move-snap (fn 0x2BC650, (body, step info, out), called
-// once per body at 0x2BC5AD) the step height [body+0xE4] ([body+0xE8] with [body+0x6C]) is raised by
-// tan(60 degrees, the proxy's steepest walkable slope) * the horizontal speed set for the frame ([proxy+0x60],
-// written just before by 0x140A79B20) * (reference frame - frame time [info+8]), on a body that was on the ground
-// last frame ([body+0x1B4], its time in the air, is 0) and not on a ladder ([body+0x1F8]), and put back after
-// (unless the snap cave changed it meanwhile, as StepHeightPtde does once).
+// measurements: a lip above the step is climbed by creeping up its edge, and how far one frame's move gets decides
+// it, so shorter frames climbed nothing (the Great Hollow's Chloranthy Ring hollow could not be left at 120 FPS).
+// A body that is pushing but hardly moving (over the last reference frame it covered under 30% of the distance its
+// speed asked for) is moved as at the reference rate: its frames still run one by one, but at the end of each
+// reference frame's worth of time they are moved again as one, from where they started, with the whole time as the
+// step: the controller's lift-move-snap (fn 0x2BC650, (body, step info, out), called once per body at 0x2BC5AD) runs
+// with [info+8] (and its inverse at +0xC) set to the window's time, after the body ([body+0x10]) and its proxy
+// (setPosition 0x140A79AE0) are put back at the window's start. A window whose move covers half its distance or more
+// frees the body again. Only on the ground at the end of the last frame ([body+0x1B4], its time in the air, is 0) and
+// not on a ladder ([body+0x1F8]); the speed is the one set for the frame ([proxy+0x60], written just before by
+// 0x140A79B20). The step-down reach (ground_snap_step) counts the redone move as one retail frame.
 constexpr uint32_t kLiftMoveSnapCall = 0x2BC5AD;
 constexpr uint32_t kLiftMoveSnap = 0x2BC650;
+constexpr uint32_t kProxySetPosition = 0xA79AE0;  // (proxy, &vec4)
+constexpr uint32_t kProxyGetPosition = 0xA79AC0;  // [[proxy+0x80]+0x30]+0x30
 using LiftMoveSnapFn = void (*)(uint8_t* body, uint8_t* info, void* out);
+using ProxySetPositionFn = void (*)(void* proxy, const float* pos);
 LiftMoveSnapFn g_lift_move_snap = nullptr;
+ProxySetPositionFn g_proxy_set_position = nullptr;
 std::atomic<int> g_step_up_state{0};
-std::atomic<long> g_step_up_boosted{0};
+std::atomic<long> g_step_up_redone{0};
+std::atomic<long> g_step_up_entered{0};
 
-void step_up_call(uint8_t* body, uint8_t* info, void* out) {
-    float* step = nullptr;
-    float written = 0.0f, saved = 0.0f;
-    if (g_fix_step_up.load(std::memory_order_relaxed) != 0 && body && info) {
-        float dt = 0.0f, air = 1.0f;
-        std::memcpy(&dt, info + 8, sizeof(dt));
-        std::memcpy(&air, body + 0x1B4, sizeof(air));
-        const float reference = g_step_height_ptde.load(std::memory_order_relaxed) != 0 ? 1.0f / 30.0f : 1.0f / 60.0f;
-        const float short_by = reference - dt;
-        const uint8_t* proxy = *reinterpret_cast<uint8_t* const*>(body + 0x38);
-        if (dt > 0.0f && short_by > 0.0f && body[0x1F8] == 0 && air <= 0.0f && proxy) {
-            float v[3];
-            std::memcpy(v, proxy + 0x60, sizeof(v));
-            const float speed = std::sqrt(v[0] * v[0] + v[2] * v[2]);
-            float boost = speed > 0.05f && speed < 50.0f ? 1.7320508f * speed * short_by : 0.0f;
-            if (boost > 0.35f) boost = 0.35f;
-            if (boost > 0.001f) {
-                step = reinterpret_cast<float*>(body + (body[0x6C] ? 0xE8 : 0xE4));
-                saved = *step;
-                if (saved > 0.0f && saved < 2.0f) {
-                    written = saved + boost;
-                    *step = written;
-                    g_step_up_boosted.fetch_add(1, std::memory_order_relaxed);
-                } else {
-                    step = nullptr;
-                }
+constexpr unsigned kStepHist = 64;
+struct StepWin {
+    std::atomic<const uint8_t*> body{nullptr};
+    ULONGLONG last_ms = 0;
+    bool blocked = false;
+    alignas(16) float anchor[4] = {};  // body position at the start of the window
+    float acc = 0.0f;                  // time since the window started
+    unsigned frames = 0;               // frames done in the window (not counting the one that closes it)
+    float end[3] = {};                 // where the last frame left the body
+    float want[kStepHist] = {}, got[kStepHist] = {}, step[kStepHist] = {};
+    unsigned head = 0;
+};
+constexpr size_t kStepSlots = 512;
+StepWin g_step_win[kStepSlots];
+
+StepWin* step_win_slot(const uint8_t* body, ULONGLONG now, bool create) {
+    const size_t start = ((reinterpret_cast<uintptr_t>(body) >> 4) * 2654435761u) & (kStepSlots - 1);
+    for (size_t n = 0; n < 64; ++n) {
+        StepWin& w = g_step_win[(start + n) & (kStepSlots - 1)];
+        const uint8_t* cur = w.body.load(std::memory_order_acquire);
+        if (cur == body) {
+            return &w;
+        }
+        if (create && (!cur || now - w.last_ms > 60000)) {
+            const uint8_t* expected = cur;
+            if (w.body.compare_exchange_strong(expected, body)) {
+                w.blocked = false;
+                w.acc = 0.0f;
+                w.frames = 0;
+                w.head = 0;
+                std::memset(w.step, 0, sizeof(w.step));
+                std::memcpy(w.end, body + 0x10, sizeof(w.end));
+                w.last_ms = now;
+                return &w;
             }
         }
     }
+    return nullptr;
+}
+
+const float* proxy_position(const uint8_t* proxy) {
+    const uint8_t* a = *reinterpret_cast<const uint8_t* const*>(proxy + 0x80);
+    if (!a) {
+        return nullptr;
+    }
+    const uint8_t* b = *reinterpret_cast<const uint8_t* const*>(a + 0x30);
+    return b ? reinterpret_cast<const float*>(b + 0x30) : nullptr;
+}
+
+float step_dist_xz(const float* a, const float* b) {
+    const float dx = a[0] - b[0], dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dz * dz);
+}
+
+void step_up_call(uint8_t* body, uint8_t* info, void* out) {
+    if (g_fix_step_up.load(std::memory_order_relaxed) == 0 || !body || !info) {
+        g_lift_move_snap(body, info, out);
+        return;
+    }
+    const float reference = g_step_height_ptde.load(std::memory_order_relaxed) != 0 ? 1.0f / 30.0f : 1.0f / 60.0f;
+    float dt = 0.0f, air = 1.0f;
+    std::memcpy(&dt, info + 8, sizeof(dt));
+    std::memcpy(&air, body + 0x1B4, sizeof(air));
+    auto* proxy = *reinterpret_cast<uint8_t* const*>(body + 0x38);
+    float speed = -1.0f;
+    if (proxy) {
+        float v[3];
+        std::memcpy(v, proxy + 0x60, sizeof(v));
+        speed = std::sqrt(v[0] * v[0] + v[2] * v[2]);
+    }
+    const ULONGLONG now = GetTickCount64();
+    const bool eligible = dt > 0.0f && dt < reference * 0.999f && body[0x1F8] == 0 && air <= 0.0f && proxy &&
+                          speed >= 0.0f && speed < 50.0f;
+    StepWin* w = step_win_slot(body, now, eligible);
+    if (!eligible || !w) {
+        if (w) {
+            w->blocked = false;
+            w->head = 0;
+            std::memset(w->step, 0, sizeof(w->step));
+        }
+        g_lift_move_snap(body, info, out);
+        return;
+    }
+    alignas(16) float start[4];
+    std::memcpy(start, body + 0x10, sizeof(start));
+    // Not seen for a while, or moved since its last frame (a teleport, a warp): start over.
+    if (now - w->last_ms > 200 || step_dist_xz(start, w->end) > 0.5f || std::fabs(start[1] - w->end[1]) > 1.0f) {
+        w->blocked = false;
+        w->head = 0;
+        std::memset(w->step, 0, sizeof(w->step));
+    }
+    w->last_ms = now;
+
+    if (w->blocked && w->acc + dt >= reference - 0.25f * dt) {
+        const float window = w->acc + dt;
+        std::memcpy(body + 0x10, w->anchor, sizeof(float) * 3);
+        g_proxy_set_position(proxy, w->anchor);
+        auto* f = reinterpret_cast<float*>(info);
+        const float saved_dt = f[2], saved_inv = f[3];
+        f[2] = window;
+        f[3] = 1.0f / window;
+        ground_redo_reach(body);
+        t_step_redo.phys = body;
+        t_step_redo.frame_dt = dt;
+        t_step_redo.replaced = w->frames;
+        g_lift_move_snap(body, info, out);
+        t_step_redo = StepRedo();
+        f[2] = saved_dt;
+        f[3] = saved_inv;
+        g_step_up_redone.fetch_add(1, std::memory_order_relaxed);
+        if (const float* p = proxy_position(proxy)) {
+            std::memcpy(w->end, p, sizeof(w->end));
+        }
+        if (!(speed > 0.05f) || step_dist_xz(w->anchor, w->end) >= 0.5f * speed * window) {
+            w->blocked = false;
+        }
+        std::memcpy(w->anchor, w->end, sizeof(w->end));
+        w->anchor[3] = start[3];
+        w->acc = 0.0f;
+        w->frames = 0;
+        w->head = 0;
+        std::memset(w->step, 0, sizeof(w->step));
+        return;
+    }
+
     g_lift_move_snap(body, info, out);
-    if (step && *step == written) *step = saved;
+    if (const float* p = proxy_position(proxy)) {
+        std::memcpy(w->end, p, sizeof(w->end));
+    }
+    if (w->blocked) {
+        w->acc += dt;
+        ++w->frames;
+        return;
+    }
+    const unsigned at = w->head++ % kStepHist;
+    w->want[at] = speed * dt;
+    w->got[at] = step_dist_xz(start, w->end);
+    w->step[at] = dt;
+    float want = 0.0f, got = 0.0f, span = 0.0f;
+    for (unsigned i = 0; i < kStepHist && span < reference * 0.95f; ++i) {
+        const unsigned j = (w->head - 1 - i) % kStepHist;
+        if (!(w->step[j] > 0.0f)) {
+            break;
+        }
+        want += w->want[j];
+        got += w->got[j];
+        span += w->step[j];
+    }
+    if (span >= reference * 0.95f && want > 0.6f * reference && got < 0.3f * want) {
+        w->blocked = true;
+        g_step_up_entered.fetch_add(1, std::memory_order_relaxed);
+        std::memcpy(w->anchor, w->end, sizeof(w->end));
+        w->anchor[3] = start[3];
+        w->acc = 0.0f;
+        w->frames = 0;
+    }
+}
+
+// Whether the function at FN calls TARGET (rel32) within its first LEN bytes: the build check for the functions the
+// window relies on.
+bool calls_within(const uint8_t* fn, size_t len, const uint8_t* target) {
+    for (size_t i = 0; i + 5 <= len; ++i) {
+        if (fn[i] != 0xE8) {
+            continue;
+        }
+        int32_t rel = 0;
+        std::memcpy(&rel, fn + i + 1, sizeof(rel));
+        if (fn + i + 5 + rel == target) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool patch_step_up() {
@@ -2002,7 +2187,14 @@ bool patch_step_up() {
         LOG_ERROR("FixStepUp: could not allocate the relay (Win32=%lu)", GetLastError());
         return false;
     }
+    if (!calls_within(image_rva(kLiftMoveSnap), 0x300, image_rva(kProxySetPosition)) ||
+        !calls_within(image_rva(kLiftMoveSnap), 0x300, image_rva(kProxyGetPosition))) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("FixStepUp: the lift-move-snap does not call the proxy's setPosition/getPosition in this build");
+        return false;
+    }
     g_lift_move_snap = reinterpret_cast<LiftMoveSnapFn>(image_rva(kLiftMoveSnap));
+    g_proxy_set_position = reinterpret_cast<ProxySetPositionFn>(image_rva(kProxySetPosition));
     // mov rax, step_up_call ; jmp rax (the arguments stay in rcx, rdx, r8)
     page[0] = 0x48;
     page[1] = 0xB8;
@@ -2033,7 +2225,9 @@ bool patch_step_up() {
     FlushInstructionCache(GetCurrentProcess(), site, 5);
     DWORD ignored = 0;
     VirtualProtect(site, 5, old, &ignored);
-    LOG_INFO("FixStepUp: lips a little above the step height are climbed as at %d FPS",
+    LOG_INFO("FixStepUp: a character pushing against something without moving is moved as at %d FPS (every frame of "
+             "that rate its frames are moved again as one), so lips a little above the step height are climbed as at "
+             "that rate",
              g_step_height_ptde.load(std::memory_order_relaxed) != 0 ? 30 : 60);
     return true;
 }
