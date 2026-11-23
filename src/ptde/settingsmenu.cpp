@@ -77,6 +77,9 @@ volatile LONG g_swallow = 0;  // after closing: the game gets no input until eve
 int g_page = 0, g_row = 0, g_scroll = 0;
 bool g_editing = false;
 std::string g_edit;
+int g_edit_page = -1, g_edit_row = -1;  // the row being typed into
+bool g_was_key[0x5B] = {};
+bool g_was_space = false, g_was_minus = false;
 
 // The controller: each slot's latest reading (the game thread writes, the render thread reads).
 volatile LONG g_pad_buttons[4] = {};
@@ -742,7 +745,54 @@ void update_input() {
     }
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (g_pages.empty()) return;
-    Page& p = g_pages[g_page];
+    bool moved = false;
+    if (g_editing) {
+        // Typing: only the text, Backspace and Enter (keep it; Escape or B, above, drop it). Nothing else moves, so a
+        // letter that is also a key of the page (Q, E) is only a letter.
+        if (g_edit_page < 0 || g_edit_page >= static_cast<int>(g_pages.size()) || g_edit_row < 0 ||
+            g_edit_row >= static_cast<int>(g_pages[g_edit_page].rows.size())) {
+            g_editing = false;
+            return;
+        }
+        Row& r = g_pages[g_edit_page].rows[g_edit_row];
+        if (pressed(10, (pad & kA) || (kb && key(VK_RETURN)), false, now)) {
+            g_editing = false;
+            r.text = g_edit;
+            write_ini(r.def.key, r.text);
+            if (r.def.apply) r.def.apply(r.text.c_str());
+            InterlockedExchange(&g_dirty, 1);
+            return;
+        }
+        if (pressed(3, kb && key(VK_BACK), true, now) && !g_edit.empty()) {
+            g_edit.pop_back();
+            moved = true;
+        }
+        const bool shift = key(VK_SHIFT);
+        for (int vk = 0x30; vk <= 0x5A; ++vk) {
+            if (vk > 0x39 && vk < 0x41) continue;
+            const bool d = kb && key(vk);
+            if (d && !g_was_key[vk] && g_edit.size() < 63) {
+                char c = static_cast<char>(vk);
+                if (vk >= 0x41 && !shift) c = static_cast<char>(c + 32);
+                g_edit.push_back(c);
+                moved = true;
+            }
+            g_was_key[vk] = d;
+        }
+        const bool sp = kb && key(VK_SPACE), mi = kb && key(VK_OEM_MINUS);
+        if (sp && !g_was_space && g_edit.size() < 63) {
+            g_edit.push_back(' ');
+            moved = true;
+        }
+        if (mi && !g_was_minus && g_edit.size() < 63) {
+            g_edit.push_back(shift ? '_' : '-');
+            moved = true;
+        }
+        g_was_space = sp;
+        g_was_minus = mi;
+        if (moved) InterlockedExchange(&g_dirty, 1);
+        return;
+    }
     const bool up = (pad & kUp) || ly > 16000 || (kb && key(VK_UP));
     const bool down = (pad & kDown) || ly < -16000 || (kb && key(VK_DOWN));
     const bool left = (pad & kLeft) || lx < -16000 || (kb && key(VK_LEFT));
@@ -750,7 +800,6 @@ void update_input() {
     const bool prev_page = (pad & kLB) || (kb && (key('Q') || key(VK_PRIOR)));
     const bool next_page = (pad & kRB) || (kb && (key('E') || key(VK_NEXT)));
     const bool confirm = (pad & kA) || (kb && key(VK_RETURN));
-    bool moved = false;
     if (pressed(4, prev_page, false, now)) {
         g_page = (g_page + static_cast<int>(g_pages.size()) - 1) % static_cast<int>(g_pages.size());
         g_row = 0;
@@ -765,7 +814,7 @@ void update_input() {
     }
     Page& page = g_pages[g_page];
     const int rows = static_cast<int>(page.rows.size());
-    if (!g_editing && rows > 0) {
+    if (rows > 0) {
         if (pressed(6, up, true, now)) {
             g_row = (g_row + rows - 1) % rows;
             moved = true;
@@ -781,52 +830,18 @@ void update_input() {
             if (r.def.text) {
                 g_editing = true;
                 g_edit = r.text;
+                g_edit_page = g_page;
+                g_edit_row = g_row;
+                // Keys already down (the one that started it) do not type.
+                for (int vk = 0x30; vk <= 0x5A; ++vk) g_was_key[vk] = kb && key(vk);
+                g_was_space = kb && key(VK_SPACE);
+                g_was_minus = kb && key(VK_OEM_MINUS);
             } else {
                 change(r, +1);
             }
             moved = true;
         }
-    } else if (g_editing && rows > 0) {
-        Row& r = page.rows[g_row];
-        if (pressed(10, confirm, false, now)) {
-            g_editing = false;
-            r.text = g_edit;
-            write_ini(r.def.key, r.text);
-            if (r.def.apply) r.def.apply(r.text.c_str());
-            moved = true;
-        }
-        if (pressed(3, kb && key(VK_BACK), true, now) && !g_edit.empty()) {
-            g_edit.pop_back();
-            moved = true;
-        }
-        // Letters, digits, and a few marks; shift for capitals.
-        const bool shift = key(VK_SHIFT);
-        static bool was[0x5B] = {};
-        for (int vk = 0x30; vk <= 0x5A && g_edit.size() < 63; ++vk) {
-            if (vk > 0x39 && vk < 0x41) continue;
-            const bool d = kb && key(vk);
-            if (d && !was[vk]) {
-                char c = static_cast<char>(vk);
-                if (vk >= 0x41 && !shift) c = static_cast<char>(c + 32);
-                g_edit.push_back(c);
-                moved = true;
-            }
-            was[vk] = d;
-        }
-        static bool was_space = false, was_minus = false;
-        const bool sp = kb && key(VK_SPACE), mi = kb && key(VK_OEM_MINUS);
-        if (sp && !was_space) {
-            g_edit.push_back(' ');
-            moved = true;
-        }
-        if (mi && !was_minus) {
-            g_edit.push_back(shift ? '_' : '-');
-            moved = true;
-        }
-        was_space = sp;
-        was_minus = mi;
     }
-    (void)p;
     if (moved) InterlockedExchange(&g_dirty, 1);
 }
 
