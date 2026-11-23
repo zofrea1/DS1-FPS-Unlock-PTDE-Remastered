@@ -692,6 +692,8 @@ struct Ab {
     float moved = 0;         // the farthest from there so far (m)
     std::vector<AbWin> win;  // by window
     AbSide side[2];
+    double pair_diff = 0, pair_a = 0;  // neighbouring counted windows (one view): sum of B - A, of A
+    int pairs = 0;
 };
 Ab g_ab;
 std::mutex g_ab_lock;
@@ -711,6 +713,15 @@ void ab_fold(int w) {
     AbWin& x = g_ab.win[w];
     if (!x.ended || x.folded) return;
     x.folded = true;
+    if (x.still && x.frames && w > 0) {
+        const AbWin& y = g_ab.win[w - 1];
+        if (y.folded && y.still && y.frames) {
+            const double here = x.ms / x.frames, before = y.ms / y.frames;
+            g_ab.pair_diff += (w & 1) ? here - before : before - here;
+            g_ab.pair_a += (w & 1) ? before : here;
+            ++g_ab.pairs;
+        }
+    }
     if (x.still && x.frames) {
         AbSide& s = g_ab.side[w & 1];
         s.gpu_ms += x.ms;
@@ -736,6 +747,11 @@ void ab_summary(const char* when) {
         fps[k] = s[k].windows ? s[k].fps_sum / s[k].windows : 0.0;
         LOG_INFO("ab %s: %s \"%s\": GPU %.3f ms a frame (%ld frames), %.1f FPS (%d windows standing still)", when,
                  k ? "B" : "A", g_ab.cmd[k].c_str(), ms[k], s[k].gpu_frames, fps[k], s[k].windows);
+    }
+    if (g_ab.pairs) {
+        const double d = g_ab.pair_diff / g_ab.pairs, a = g_ab.pair_a / g_ab.pairs;
+        LOG_INFO("ab %s: B - A in neighbouring windows (the same view): GPU %+.3f ms a frame (%+.1f%%) over %d pairs",
+                 when, d, a > 0 ? 100.0 * d / a : 0.0, g_ab.pairs);
     }
     if (ms[0] > 0 && ms[1] > 0) {
         LOG_INFO("ab %s: B - A: GPU %+.3f ms a frame (%+.1f%%), %+.1f FPS", when, ms[1] - ms[0],
