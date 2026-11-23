@@ -173,6 +173,11 @@ BYTE g_pad_lt = 0, g_pad_rt = 0;
 ULONGLONG g_pad_until = 0;
 SHORT g_stick[4] = {};
 ULONGLONG g_stick_until = 0;
+// `walkdir DX DZ MS [SIGN]`: the left stick held toward a world direction (x, z), turned into the follow camera's
+// frame at every read (its right row at +0x10, its view row at +0x30), so the camera turning does not change it.
+float g_walk[2] = {};
+float g_walk_sign = 1.0f;
+float g_walk_mag = 32000.0f;
 DWORD g_packet = 0;
 
 WORD parse_buttons(const std::string& s) {
@@ -2608,8 +2613,21 @@ void run(const std::string& line) {
         g_pad_lt = static_cast<BYTE>(num(3, 0));
         g_pad_rt = static_cast<BYTE>(num(4, 0));
         out("pad 0x%04X for %ld ms", g_pad_buttons, num(2, 150));
+    } else if (c == "walkdir" && t.size() > 3) {
+        // walkdir DX DZ MS [SIGN] [MAG]: see g_walk.
+        std::lock_guard<std::mutex> lock(g_pad_lock);
+        float dx = static_cast<float>(std::atof(t[1].c_str())), dz = static_cast<float>(std::atof(t[2].c_str()));
+        const float l = std::sqrt(dx * dx + dz * dz);
+        g_walk[0] = l > 0 ? dx / l : 0.0f;
+        g_walk[1] = l > 0 ? dz / l : 0.0f;
+        g_walk_sign = t.size() > 4 ? static_cast<float>(std::atof(t[4].c_str())) : 1.0f;
+        g_walk_mag = t.size() > 5 ? static_cast<float>(std::atof(t[5].c_str())) : 32000.0f;
+        for (int k = 0; k < 4; ++k) g_stick[k] = 0;
+        g_stick_until = GetTickCount64() + static_cast<ULONGLONG>(num(3, 500));
+        out("walkdir %.3f %.3f for %ld ms", g_walk[0], g_walk[1], num(3, 500));
     } else if (c == "stick") {
         std::lock_guard<std::mutex> lock(g_pad_lock);
+        g_walk[0] = g_walk[1] = 0.0f;
         for (int k = 0; k < 4; ++k) g_stick[k] = static_cast<SHORT>(num(1 + k, 0));
         g_stick_until = GetTickCount64() + static_cast<ULONGLONG>(num(5, 500));
         out("stick %d %d %d %d for %ld ms", g_stick[0], g_stick[1], g_stick[2], g_stick[3], num(5, 500));
@@ -3257,7 +3275,23 @@ void remote_pad(DWORD index, void* state, DWORD* result) {
         if (g_pad_rt) s->rt = g_pad_rt;
     }
     if (now < g_stick_until) {
-        if (g_stick[0] || g_stick[1]) { s->lx = g_stick[0]; s->ly = g_stick[1]; }
+        if (g_walk[0] || g_walk[1]) {
+            const uint32_t cam = camera_follow_ptr();
+            float m[12];
+            if (cam && safe_read_any(cam + 0x10, m, sizeof(m))) {
+                float rx = m[0], rz = m[2], fx = m[8], fz = m[10];
+                const float rl = std::sqrt(rx * rx + rz * rz), fl = std::sqrt(fx * fx + fz * fz);
+                if (rl > 1e-3f && fl > 1e-3f) {
+                    rx /= rl; rz /= rl; fx /= fl; fz /= fl;
+                    const float a = (g_walk[0] * rx + g_walk[1] * rz) * g_walk_sign, b = g_walk[0] * fx + g_walk[1] * fz;
+                    s->lx = static_cast<SHORT>(a * g_walk_mag);
+                    s->ly = static_cast<SHORT>(b * g_walk_mag);
+                }
+            }
+        } else if (g_stick[0] || g_stick[1]) {
+            s->lx = g_stick[0];
+            s->ly = g_stick[1];
+        }
         if (g_stick[2] || g_stick[3]) { s->rx = g_stick[2]; s->ry = g_stick[3]; }
     }
     s->packet += ++g_packet;
