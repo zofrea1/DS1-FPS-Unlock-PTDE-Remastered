@@ -23,7 +23,7 @@
 // height that climbs it is 0.25-0.27 at 30 FPS and 0.40-0.42 at 120). The difference is the extra forward distance of
 // a 1/30 s frame, times about tan(60 degrees), the proxy's steepest walkable slope ([proxy+0xB0] = cos 60 = 0.5).
 // So for the call, the step height is raised by tan(steepest slope) * the frame's horizontal speed * (1/30 s - frame
-// time), on a body that was on the ground ([body+0x32], the last snap's result), and put back after: the lift, the
+// time), on a body that was on the ground last frame ([body+0x194], its time in the air, is 0), and put back after: the lift, the
 // stair probe (0xEBF3C0) and the snap's put-back all see the same height. At 30 FPS and below nothing changes. The
 // speed is the one the controller set for this frame ([proxy+0x40], written by 0xEC0BB0 just before the call, the
 // solver's own result only after it), so a body pressed against a lip, which hardly moves, still counts its run.
@@ -44,7 +44,12 @@ float boost_for(const uint8_t* body) {
     const double dt = fixes_last_dt();
     const double short_by = 1.0 / 30.0 - dt;
     if (!(short_by > 0.0)) return 0.0f;
-    if (body[0x1D4] != 0 || body[0x32] == 0) return 0.0f;  // on a ladder, or not on the ground
+    // On a ladder, or not on the ground at the end of the last frame: [body+0x194] is the time in the air, which the
+    // caller (0xEC2860) adds to after a frame without ground ([body+0x32], cleared just before this call) and zeroes
+    // after one with it.
+    float air = 0.0f;
+    std::memcpy(&air, body + 0x194, sizeof(air));
+    if (body[0x1D4] != 0 || !(air <= 0.0f)) return 0.0f;
     const uint8_t* proxy = *reinterpret_cast<const uint8_t* const*>(body + 0x38);
     if (!proxy) return 0.0f;
     float v[3];
