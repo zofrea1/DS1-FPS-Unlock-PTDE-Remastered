@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <string>
+
 struct IDirect3DDevice9;
 
 // Remote control for development (INI [Diagnostics] RemoteControl = true; diagnostics builds only, a release build
