@@ -36,6 +36,7 @@
 #include "slidesteer.h"
 #include "ladder.h"
 #include "snap.h"
+#include "stepup.h"
 #include "bullettrace.h"
 #include "sfxsway.h"
 #include "sfxwatch.h"
@@ -527,6 +528,9 @@ bool frame_install(const Settings& settings) {
         ui_install(settings);
         if (settings.fix_step_down) {
             snap_install();
+        }
+        if (settings.fix_step_up) {
+            stepup_install();
         }
         if (settings.fix_camera) {
             camera_install();

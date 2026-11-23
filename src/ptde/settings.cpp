@@ -187,6 +187,8 @@ Settings settings_load(const wchar_t* dll_path) {
             s.fix_script_memory = parse_bool(val);
         } else if (key == "fixcamera") {
             s.fix_camera = parse_bool(val);
+        } else if (key == "fixstepup") {
+            s.fix_step_up = parse_bool(val);
         } else if (key == "fixstepdown" || key == "fixladder") {
             s.fix_step_down = parse_bool(val);
         } else if (key == "fixlockonturn") {

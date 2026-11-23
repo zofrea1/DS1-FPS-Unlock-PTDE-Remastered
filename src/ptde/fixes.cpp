@@ -4,6 +4,7 @@
 #include "camera.h"
 #include "footik.h"
 #include "snap.h"
+#include "stepup.h"
 #include "turn.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -347,6 +348,13 @@ void fixes_poll_hotkeys() {
         LOG_INFO("Fix group 'camera' is now %s", camera_enabled() ? "ON" : "OFF");
     }
     camera_key = camera_down;
+    static bool stepup_key = false;
+    const bool stepup_down = ctrl && (GetAsyncKeyState('8') & 0x8000) != 0;
+    if (stepup_down && !stepup_key) {
+        stepup_set_enabled(!stepup_enabled());
+        LOG_INFO("Fix group 'step up (lips above the step height)' is now %s", stepup_enabled() ? "ON" : "OFF");
+    }
+    stepup_key = stepup_down;
     static bool turn_key = false;
     const bool turn_down = ctrl && (GetAsyncKeyState('9') & 0x8000) != 0;
     if (turn_down && !turn_key) {

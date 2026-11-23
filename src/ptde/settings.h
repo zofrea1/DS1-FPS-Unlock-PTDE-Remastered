@@ -58,6 +58,7 @@ struct Settings {
     bool fix_graze = true;
     // Ground snap-down reach and the ladder-exit cap (INI FixStepDown; FixLadder is the old name).
     bool fix_step_down = true;
+    bool fix_step_up = true;
     bool fix_camera = true;
     // Lock-on body turn: the torso, head and root bones turn toward the target at the original speed.
     bool fix_lock_on_turn = true;
