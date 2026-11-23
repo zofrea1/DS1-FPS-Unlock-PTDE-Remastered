@@ -151,39 +151,92 @@ bool ini_value(const std::string& text, const char* key, std::string* out) {
 }
 
 // Writes KEY = VALUE: the value on the key's line is replaced, or the line is added at the end.
+// Changes not yet in the INI, in the order made. Another program (an antivirus scan of the file just written, an
+// editor) can hold the INI for a moment so that it cannot be replaced (seen: Win32 5 while a row was changed several
+// times a second); what could not be written is kept and tried again every frame until it is (flush_ini).
+std::vector<std::pair<std::string, std::string>> g_pending;
+ULONGLONG g_retry_at = 0;
+DWORD g_failing = 0;        // the Win32 error of the current run of failures (0: none), logged once per run
+ULONGLONG g_fail_since = 0;  // when that run began; still failing 5 s later is an error
+bool g_fail_reported = false;
+
+bool flush_ini() {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (g_pending.empty()) return true;
+    std::string text;
+    DWORD err = 0;
+    const char* step = "read";
+    if (read_ini(&text)) {
+        for (const auto& kv : g_pending) {
+            size_t v = 0, e = 0;
+            if (find_key(text, kv.first.c_str(), &v, &e)) {
+                text.replace(v, e - v, kv.second);
+            } else {
+                const bool crlf = text.find("\r\n") != std::string::npos;
+                if (!text.empty() && text.back() != '\n') text += crlf ? "\r\n" : "\n";
+                text += kv.first + " = " + kv.second + (crlf ? "\r\n" : "\n");
+            }
+        }
+        const std::wstring tmp = g_ini + L".settingsmenu.tmp";
+        HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        step = "write";
+        if (f == INVALID_HANDLE_VALUE) {
+            err = GetLastError();
+        } else {
+            DWORD put = 0;
+            const BOOL ok = WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &put, nullptr);
+            if (!ok || put != text.size()) err = ok ? ERROR_WRITE_FAULT : GetLastError();
+            CloseHandle(f);
+            if (!err) {
+                step = "replace";
+                if (!MoveFileExW(tmp.c_str(), g_ini.c_str(), MOVEFILE_REPLACE_EXISTING)) err = GetLastError();
+            }
+            if (err) DeleteFileW(tmp.c_str());
+        }
+    } else {
+        err = ERROR_READ_FAULT;
+    }
+    if (err) {
+        const ULONGLONG now = GetTickCount64();
+        if (!g_failing) {
+            g_fail_since = now;
+            g_fail_reported = false;
+        }
+        if (g_failing != err) {
+            LOG_INFO("FPS Unlock Settings: could not %s the INI (Win32=%lu; another program may hold it for a "
+                     "moment); %zu change(s) kept and tried again",
+                     step, err, g_pending.size());
+        }
+        if (!g_fail_reported && now - g_fail_since > 5000) {
+            LOG_ERROR("FPS Unlock Settings: the INI could not be written for 5 s (Win32=%lu); %zu change(s) are not "
+                      "saved yet (still trying)",
+                      err, g_pending.size());
+            g_fail_reported = true;
+        }
+        g_failing = err;
+        g_retry_at = now + 100;
+        return false;
+    }
+    for (const auto& kv : g_pending) {
+        LOG_INFO("FPS Unlock Settings: %s = %s written to the INI%s", kv.first.c_str(), kv.second.c_str(),
+                 g_failing ? " (on a later try)" : "");
+    }
+    g_pending.clear();
+    g_failing = 0;
+    return true;
+}
+
 bool write_ini(const char* key, const std::string& value) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    std::string text;
-    if (!read_ini(&text)) {
-        LOG_ERROR("FPS Unlock Settings: could not read the INI to write %s", key);
-        return false;
+    bool found = false;
+    for (auto& kv : g_pending) {
+        if (kv.first == key) {
+            kv.second = value;
+            found = true;
+        }
     }
-    size_t v = 0, e = 0;
-    if (find_key(text, key, &v, &e)) {
-        text.replace(v, e - v, value);
-    } else {
-        const bool crlf = text.find("\r\n") != std::string::npos;
-        if (!text.empty() && text.back() != '\n') text += crlf ? "\r\n" : "\n";
-        text += std::string(key) + " = " + value + (crlf ? "\r\n" : "\n");
-    }
-    const std::wstring tmp = g_ini + L".settingsmenu.tmp";
-    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) {
-        LOG_ERROR("FPS Unlock Settings: could not write the INI (%s = %s; Win32=%lu)", key, value.c_str(),
-                  GetLastError());
-        return false;
-    }
-    DWORD put = 0;
-    const BOOL ok = WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &put, nullptr);
-    CloseHandle(f);
-    if (!ok || put != text.size() || !MoveFileExW(tmp.c_str(), g_ini.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        DeleteFileW(tmp.c_str());
-        LOG_ERROR("FPS Unlock Settings: could not replace the INI (%s = %s; Win32=%lu)", key, value.c_str(),
-                  GetLastError());
-        return false;
-    }
-    LOG_INFO("FPS Unlock Settings: %s = %s written to the INI", key, value.c_str());
-    return true;
+    if (!found) g_pending.emplace_back(key, value);
+    return flush_ini();
 }
 
 bool same_value(const std::string& a, const std::string& b) {
@@ -917,6 +970,7 @@ bool settingsmenu_is_open() { return g_open != 0; }
 
 void settingsmenu_present(IDirect3DDevice9* device) {
     if (!g_enabled || !device) return;
+    if (g_failing && GetTickCount64() >= g_retry_at) flush_ini();
     update_input();
     const bool open = g_open != 0;
     const bool hint = !open && GetTickCount64() - static_cast<ULONGLONG>(g_pcoption_seen) < 300;
