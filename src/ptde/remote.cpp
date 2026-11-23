@@ -635,6 +635,7 @@ struct GtFrame {
     IDirect3DQuery9* disjoint = nullptr;
     IDirect3DQuery9* freq = nullptr;
     std::vector<GtMark> marks;
+    int ab_window = -1;  // `ab`: the window this frame was drawn in (-1 none, or settling)
 };
 volatile LONG g_gt_request = 0;  // RemoteControl's ask (frames), taken at the next Present
 volatile LONG g_gt_left = 0;   // frames still to record
@@ -652,6 +653,147 @@ std::vector<GtSum> g_gt_sum;   // by the pass's index in the frame
 double g_gt_total_ms = 0;
 int g_gt_done = 0, g_gt_frames = 0;
 std::vector<IDirect3DQuery9*> g_gt_pool;
+
+// RemoteControl `ab SECONDS ROUNDS A|B` (A/B measurements): command A, then command B, each for SECONDS, ROUNDS times
+// (0: until `ab off`); the first second of each window is left out (shaders made, the picture settled). The GPU's time
+// of every other frame is recorded as gputime does (frames tagged with their window), and the log gets each window's
+// GPU time per frame and frame rate, then each side's averages and the passes that differ (every 10 rounds when
+// ROUNDS is 0). Render thread, except the request (poll thread, under g_ab_lock).
+struct AbSide {
+    double gpu_ms = 0;
+    long gpu_frames = 0;
+    double fps_sum = 0;
+    int windows = 0;
+    std::vector<GtSum> pass;
+};
+struct Ab {
+    bool on = false;
+    double secs = 10;
+    int rounds = 0;
+    std::string cmd[2];
+    int window = -1;
+    ULONGLONG start = 0, settle = 0;
+    long presents = 0;
+    std::vector<std::pair<double, long>> win;  // GPU ms and frames read back, by window
+    AbSide side[2];
+};
+Ab g_ab;
+std::mutex g_ab_lock;
+bool g_ab_requested = false;
+Ab g_ab_request;  // `ab` / `ab off` (on = false), taken at the next Present
+std::mutex g_queue_lock;
+std::vector<std::string> g_queue;  // commands for the poll thread (remote_queue, `ab`)
+
+void queue_command(const std::string& line) {
+    std::lock_guard<std::mutex> lock(g_queue_lock);
+    g_queue.push_back(line);
+}
+
+void ab_summary(const char* when) {
+    const AbSide* s = g_ab.side;
+    double ms[2] = {}, fps[2] = {};
+    for (int k = 0; k < 2; ++k) {
+        ms[k] = s[k].gpu_frames ? s[k].gpu_ms / s[k].gpu_frames : 0.0;
+        fps[k] = s[k].windows ? s[k].fps_sum / s[k].windows : 0.0;
+        LOG_INFO("ab %s: %s \"%s\": GPU %.3f ms a frame (%ld frames), %.1f FPS (%d windows)", when, k ? "B" : "A",
+                 g_ab.cmd[k].c_str(), ms[k], s[k].gpu_frames, fps[k], s[k].windows);
+    }
+    if (ms[0] > 0 && ms[1] > 0) {
+        LOG_INFO("ab %s: B - A: GPU %+.3f ms a frame (%+.1f%%), %+.1f FPS", when, ms[1] - ms[0],
+                 100.0 * (ms[1] - ms[0]) / ms[0], fps[1] - fps[0]);
+        out("ab %s: A %.3f ms %.1f FPS, B %.3f ms %.1f FPS (B - A %+.3f ms)", when, ms[0], fps[0], ms[1], fps[1],
+            ms[1] - ms[0]);
+    }
+    const size_t n = s[0].pass.size() < s[1].pass.size() ? s[0].pass.size() : s[1].pass.size();
+    for (size_t i = 0; i < n; ++i) {
+        const GtSum& a = s[0].pass[i];
+        const GtSum& b = s[1].pass[i];
+        if (!a.frames || !b.frames) continue;
+        const double ma = a.ms / a.frames, mb = b.ms / b.frames;
+        if (std::fabs(mb - ma) < 0.02) continue;
+        LOG_INFO("ab %s: pass #%zu %.3f -> %.3f ms (%ld / %ld draws) %s", when, i, ma, mb, a.draws / a.frames,
+                 b.draws / b.frames, a.label.c_str());
+    }
+}
+
+void ab_end_window(ULONGLONG now) {
+    const int w = g_ab.window;
+    const int k = w & 1;
+    const double secs = static_cast<double>(now - g_ab.settle) / 1000.0;
+    const double fps = secs > 0.1 ? static_cast<double>(g_ab.presents) / secs : 0.0;
+    double ms = 0;
+    long frames = 0;
+    if (w < static_cast<int>(g_ab.win.size())) {
+        ms = g_ab.win[w].first;
+        frames = g_ab.win[w].second;
+    }
+    if (frames) {
+        g_ab.side[k].fps_sum += fps;
+        ++g_ab.side[k].windows;
+    }
+    LOG_INFO("ab window %d %s \"%s\": GPU %.3f ms a frame (%ld frames), %.1f FPS", w, k ? "B" : "A",
+             g_ab.cmd[k].c_str(), frames ? ms / frames : 0.0, frames, fps);
+}
+
+// At Present (render thread): the request taken, windows switched, the GPU's recording kept going.
+void ab_present() {
+    {
+        std::lock_guard<std::mutex> lock(g_ab_lock);
+        if (g_ab_requested) {
+            g_ab_requested = false;
+            if (g_ab.on) {
+                ab_end_window(GetTickCount64());
+                ab_summary("stopped");
+            }
+            g_ab = g_ab_request;
+            if (!g_ab.on) {
+                g_gt_left = 0;
+                g_gt_frames = 0;
+            }
+        }
+    }
+    if (!g_ab.on) return;
+    const ULONGLONG now = GetTickCount64();
+    if (g_ab.window < 0 || static_cast<double>(now - g_ab.start) >= g_ab.secs * 1000.0) {
+        if (g_ab.window >= 0) ab_end_window(now);
+        ++g_ab.window;
+        if (g_ab.rounds > 0 && g_ab.window >= 2 * g_ab.rounds) {
+            ab_summary("done");
+            g_ab.on = false;
+            g_gt_left = 0;
+            g_gt_frames = 0;
+            return;
+        }
+        if (g_ab.rounds == 0 && g_ab.window > 0 && g_ab.window % 20 == 0) ab_summary("so far");
+        queue_command(g_ab.cmd[g_ab.window & 1]);
+        g_ab.start = now;
+        const double settle = g_ab.secs * 1000.0 / 4.0 < 1000.0 ? g_ab.secs * 1000.0 / 4.0 : 1000.0;
+        g_ab.settle = now + static_cast<ULONGLONG>(settle);
+        g_ab.presents = 0;
+    }
+    if (now >= g_ab.settle) ++g_ab.presents;
+    if (g_gt_left <= 0) g_gt_left = 1;
+}
+
+// A frame read back: its GPU time to its window and side.
+void ab_frame(const GtFrame& f, const std::vector<UINT64>& t, UINT64 freq) {
+    if (f.ab_window < 0 || t.size() < 2) return;
+    const double total = static_cast<double>(t.back() - t.front()) * 1000.0 / static_cast<double>(freq);
+    if (g_ab.win.size() <= static_cast<size_t>(f.ab_window)) g_ab.win.resize(f.ab_window + 1);
+    g_ab.win[f.ab_window].first += total;
+    ++g_ab.win[f.ab_window].second;
+    AbSide& s = g_ab.side[f.ab_window & 1];
+    s.gpu_ms += total;
+    ++s.gpu_frames;
+    for (size_t i = 0; i + 1 < f.marks.size(); ++i) {
+        if (s.pass.size() <= i) s.pass.resize(i + 1);
+        GtSum& p = s.pass[i];
+        p.ms += static_cast<double>(t[i + 1] - t[i]) * 1000.0 / static_cast<double>(freq);
+        p.draws += f.marks[i + 1].draws;
+        ++p.frames;
+        if (p.label.empty()) p.label = f.marks[i].label;
+    }
+}
 
 IDirect3DQuery9* gt_query(IDirect3DDevice9* dev, D3DQUERYTYPE type) {
     IDirect3DQuery9* q = nullptr;
@@ -733,6 +875,7 @@ void gt_present(IDirect3DDevice9* dev) {
             }
             g_gt_total_ms += static_cast<double>(t.back() - t.front()) * 1000.0 / static_cast<double>(freq);
             ++g_gt_done;
+            if (g_ab.on) ab_frame(f, t, freq);
         }
         gt_release(f);
         g_gt_pending.erase(g_gt_pending.begin() + static_cast<long>(k));
@@ -741,6 +884,7 @@ void gt_present(IDirect3DDevice9* dev) {
             g_gt_frames = 0;
         }
     }
+    ab_present();
     const LONG asked = InterlockedExchange(&g_gt_request, 0);
     if (asked > 0) {
         g_gt_sum.clear();
@@ -755,6 +899,7 @@ void gt_present(IDirect3DDevice9* dev) {
         ++g_gt_frames;
         g_gt_cur.disjoint = gt_query(dev, D3DQUERYTYPE_TIMESTAMPDISJOINT);
         g_gt_cur.freq = gt_query(dev, D3DQUERYTYPE_TIMESTAMPFREQ);
+        g_gt_cur.ab_window = g_ab.on && GetTickCount64() >= g_ab.settle ? g_ab.window : -1;
         if (g_gt_cur.disjoint) g_gt_cur.disjoint->Issue(D3DISSUE_BEGIN);
     }
 }
@@ -2264,7 +2409,42 @@ void run(const std::string& line) {
     if (t.empty()) return;
     const std::string& c = t[0];
     auto num = [&](size_t k, long dflt) { return k < t.size() ? std::strtol(t[k].c_str(), nullptr, 0) : dflt; };
-    if (c == "say") {
+    if (c == "ab" && t.size() > 1) {
+        // ab SECONDS ROUNDS A|B, or ab off (see struct Ab).
+        Ab r;
+        if (t[1] != "off") {
+            // The text after the third word: "commandA|commandB".
+            size_t p = 0;
+            for (int word = 0; word < 3; ++word) {
+                while (p < line.size() && isspace(static_cast<unsigned char>(line[p]))) ++p;
+                while (p < line.size() && !isspace(static_cast<unsigned char>(line[p]))) ++p;
+            }
+            const std::string rest = line.substr(p);
+            const size_t bar = rest.find('|');
+            if (t.size() < 4 || bar == std::string::npos) {
+                out("ab: usage ab SECONDS ROUNDS commandA|commandB");
+                return;
+            }
+            r.on = true;
+            r.secs = std::atof(t[1].c_str());
+            if (r.secs < 2) r.secs = 2;
+            r.rounds = static_cast<int>(num(2, 0));
+            r.cmd[0] = rest.substr(0, bar);
+            r.cmd[1] = rest.substr(bar + 1);
+            for (std::string* s : {&r.cmd[0], &r.cmd[1]}) {
+                while (!s->empty() && s->back() == ' ') s->pop_back();
+                while (!s->empty() && s->front() == ' ') s->erase(s->begin());
+            }
+            LOG_INFO("ab: A \"%s\" and B \"%s\" by turns, %.0f s each, %d rounds%s", r.cmd[0].c_str(),
+                     r.cmd[1].c_str(), r.secs, r.rounds, r.rounds ? "" : " (until ab off)");
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_ab_lock);
+            g_ab_request = r;
+            g_ab_requested = true;
+        }
+        out("ab %s", r.on ? "started" : "stopping");
+    } else if (c == "say") {
         out("say %s", line.size() > 4 ? line.c_str() + 4 : "");
     } else if (c == "fps") {
         limiter_set_fps(static_cast<int>(num(1, 0)));
@@ -2852,6 +3032,12 @@ DWORD WINAPI poll_thread(void*) {
     std::swprintf(path, MAX_PATH, L"%s\\fpsu-cmd.txt", g_dir);
     for (;;) {
         Sleep(100);
+        std::vector<std::string> queued;
+        {
+            std::lock_guard<std::mutex> lock(g_queue_lock);
+            queued.swap(g_queue);
+        }
+        for (const std::string& line : queued) run(line);
         FILE* f = _wfopen(path, L"rb");
         if (!f) continue;
         std::string text;
@@ -2899,6 +3085,22 @@ bool remote_start() {
 
 bool remote_enabled() { return g_on; }
 void remote_set_extension(RemoteExtension fn) { g_extension = fn; }
+
+void remote_queue(const std::string& commands) {
+    size_t i = 0;
+    while (i <= commands.size()) {
+        size_t j = commands.find(';', i);
+        if (j == std::string::npos) j = commands.size();
+        std::string line = commands.substr(i, j - i);
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        while (!line.empty() && line.front() == ' ') line.erase(line.begin());
+        if (!line.empty()) {
+            LOG_INFO("RemoteControlStartup: %s", line.c_str());
+            queue_command(line);
+        }
+        i = j + 1;
+    }
+}
 
 void remote_hook_device(IDirect3DDevice9* dev) {
     if (!g_on || !dev || !g_device_hooks) return;
@@ -3009,6 +3211,7 @@ bool remote_start() { return false; }
 void remote_set_shader_dumps(bool) {}
 void remote_set_device_hooks(int) {}
 bool remote_enabled() { return false; }
+void remote_queue(const std::string&) {}
 void remote_hook_device(IDirect3DDevice9*) {}
 void remote_pad(DWORD, void*, DWORD*) {}
 

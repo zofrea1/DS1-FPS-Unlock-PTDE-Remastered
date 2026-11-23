@@ -30,6 +30,8 @@ void remote_set_shader_dumps(bool on);
 // RemoteDeviceHooks (default true): false leaves the Direct3D device's methods unhooked (for speed measurements).
 void remote_set_device_hooks(int mode);  // 0 none, 1 all, 2 Present only (screenshots: `present` in the INI)
 bool remote_enabled();
+// Commands run on the poll thread as if read from fpsu-cmd.txt, separated by ';' (RemoteControlStartup).
+void remote_queue(const std::string& commands);
 // Commands of a module built together with this one (Prepare to Co-op's diagnostics): a line this file does not know
 // goes to `fn`, which writes its answer to `reply` (at most `size` bytes) and returns true when it knew the command.
 // Called on the remote control's poll thread (set flags there; act on the game thread).

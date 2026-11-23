@@ -734,6 +734,7 @@ bool frame_install(const Settings& settings) {
         remote_set_shader_dumps(settings.remote_shader_dumps);
         remote_set_device_hooks(settings.remote_device_hooks);
         remote_start();
+        if (!settings.remote_control_startup.empty()) remote_queue(settings.remote_control_startup);
         menuscale_install();
     }
     return true;

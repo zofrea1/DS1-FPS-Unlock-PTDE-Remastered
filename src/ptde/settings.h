@@ -41,7 +41,10 @@ struct Settings {
     // With RemoteControl: every new shader written to fpsu-shaders (slow on an SD card).
     bool remote_shader_dumps = true;
     // With RemoteControl: false leaves the Direct3D device unhooked (no frame logs or screenshots; for measurements).
-    int remote_device_hooks = 1;  // 0 none, 1 all, 2 Present only (screenshots, nothing per draw)
+    int remote_device_hooks = 1;
+    // RemoteControlStartup: RemoteControl commands run once at the start, separated by ';' (tests on machines where
+    // fpsu-cmd.txt is hard to write, such as the Steam Deck).
+    std::string remote_control_startup;  // 0 none, 1 all, 2 Present only (screenshots, nothing per draw)
     // Frame-rate independence fixes for constants tuned for 30 FPS (see fixes.h).
     bool fix_slide = true;
     bool fix_damping = true;

@@ -788,6 +788,22 @@ void atoc_hook_device(IDirect3DDevice9* dev) {
                                       static_cast<D3DFORMAT>(fourcc)) == D3D_OK;
     };
     g_method = supported(kNvOn) ? Method::Nvidia : (supported(kAmdOn) ? Method::Amd : Method::None);
+    // DXVK on AMD graphics (the Steam Deck, or DXVK = true on an AMD card) lists neither switch (it answers NVIDIA's
+    // only on other vendors and never AMD's) but takes AMD's: POINTSIZE = 'A2M1' turns coverage on when its device's
+    // vendor is AMD (D3D9DeviceEx::SetRenderState, DXVK 1.x to 3.x). Its device answers for ID3D9VkInteropDevice
+    // (DXVK 2.1 and later).
+    bool dxvk_amd = false;
+    if (g_method == Method::None) {
+        D3DADAPTER_IDENTIFIER9 id{};
+        static const GUID kVkInteropDevice = {0x2eaa4b89, 0x0107, 0x4bdb, {0x87, 0xf7, 0x0f, 0x54, 0x1c, 0x49, 0x3c, 0xe0}};
+        IUnknown* vk = nullptr;
+        const bool dxvk = SUCCEEDED(dev->QueryInterface(kVkInteropDevice, reinterpret_cast<void**>(&vk))) && vk;
+        if (vk) vk->Release();
+        if (dxvk && SUCCEEDED(d3d->GetAdapterIdentifier(cp.AdapterOrdinal, 0, &id)) && id.VendorId == 0x1002) {
+            g_method = Method::Amd;
+            dxvk_amd = true;
+        }
+    }
     d3d->Release();
     if (g_method == Method::None) {
         LOG_INFO("AlphaToCoverage: the graphics driver offers neither NVIDIA's nor AMD's switch for it; not used");
@@ -796,7 +812,8 @@ void atoc_hook_device(IDirect3DDevice9* dev) {
     install_hooks(dev);
     LOG_INFO("AlphaToCoverage: ready (%s switch, edges sharpened around the alpha test); takes effect when the game's "
              "anti-aliasing is on (Antialiasing = 1 in DarkSouls.ini, or the in-game option)",
-             g_method == Method::Nvidia ? "NVIDIA's" : "AMD's");
+             g_method == Method::Nvidia ? "NVIDIA's" : dxvk_amd ? "AMD's, which DXVK takes on AMD graphics without "
+             "listing it" : "AMD's");
 }
 
 void atoc_set_mode(int mode) { g_mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode); }
