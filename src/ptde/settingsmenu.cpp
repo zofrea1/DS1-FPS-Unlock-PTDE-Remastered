@@ -485,7 +485,10 @@ void build_panel(int screen_h) {
             text(s, rowf, kWhite, K(50), y, W / 2, row_h - K(4), label.c_str(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             std::wstring value;
             if (r.def.text) {
-                value = sel && g_editing ? widen(g_edit) + L"_" : (r.text.empty() ? L"(none)" : widen(r.text));
+                // Shown only while it is typed (a password on a stream or a screenshot stays private).
+                value = sel && g_editing ? widen(g_edit) + L"_"
+                        : r.text.empty() ? std::wstring(L"(none)")
+                                         : std::wstring(r.text.size(), L'\x2022');
             } else if (!r.choices.empty()) {
                 value = std::wstring(sel ? L"\x2039  " : L"") + r.choices[r.current].label + (sel ? L"  \x203A" : L"");
             }
