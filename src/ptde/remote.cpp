@@ -2362,6 +2362,20 @@ void run_game(const std::vector<std::string>& t) {
         }
         float p[3] = {fnum(1), fnum(2), fnum(3)};
         std::memcpy(reinterpret_cast<void*>(phys + 0x10), p, sizeof(p));
+        // The character proxy keeps its own position and writes it back every frame: set it the way the movement
+        // controller's step lift does (0xEC09BA: ecx = [body+0x38], thiscall setPosition(&vec4), 0x8F2380).
+        uintptr_t proxy = 0;
+        if (safe_read(phys + 0x38, &proxy, 4) && proxy) {
+            alignas(16) float p4[4] = {p[0], p[1], p[2], 1.0f};
+            float* arg = p4;
+            const uint32_t fn = 0x008F2380;
+            const uint32_t self = static_cast<uint32_t>(proxy);
+            __asm {
+                push arg
+                mov ecx, self
+                call fn
+            }
+        }
         // tp X Y Z MS: keep the player there for MS ms (the ground there may still be loading).
         std::memcpy(g_hold_pos, p, sizeof(p));
         g_hold_until = GetTickCount64() + static_cast<ULONGLONG>(num(4, 0));
