@@ -1,5 +1,6 @@
 #include "window.h"
 
+#include "d3d.h"
 #include "log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -46,10 +47,23 @@ bool same_rect(const RECT& a, const RECT& b) {
     return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
 }
 
+bool g_only_with_dxvk = false;
+
 DWORD WINAPI watcher(void*) {
     HWND applied_to = nullptr;
+    bool told = false;
     for (;;) {
         Sleep(500);
+        // auto: only once the game's Direct3D runs on this mod's DXVK (decided at its first Direct3DCreate9). With the
+        // game's own Direct3D 9, exclusive fullscreen keeps the best frame pacing and variable refresh.
+        if (g_only_with_dxvk && !d3d_dxvk_active()) {
+            if (!told && d3d_created()) {
+                told = true;
+                LOG_INFO("BorderlessFullscreen = auto: the game runs on Direct3D 9 (no DXVK), so its window is left as "
+                         "the game makes it");
+            }
+            continue;
+        }
         HWND window = find_game_window();
         if (!window || IsIconic(window)) {
             continue;
@@ -93,13 +107,15 @@ DWORD WINAPI watcher(void*) {
 
 }  // namespace
 
-bool borderless_start() {
+bool borderless_start(bool only_with_dxvk) {
+    g_only_with_dxvk = only_with_dxvk;
     HANDLE thread = CreateThread(nullptr, 0, watcher, nullptr, 0, nullptr);
     if (!thread) {
         return false;
     }
     CloseHandle(thread);
-    LOG_INFO("Borderless fullscreen enabled (needs the game in windowed mode)");
+    LOG_INFO("Borderless fullscreen enabled%s (needs the game in windowed mode)",
+             only_with_dxvk ? " while the game runs on DXVK (auto)" : "");
     return true;
 }
 

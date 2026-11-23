@@ -22,6 +22,9 @@ void d3d_install_early(HMODULE self);
 bool d3d_dxvk_expected();
 // Proton / Wine: the game's Direct3D 9 is the prefix's own (Proton's DXVK), whatever DXVK says.
 bool d3d_under_proton();
+// After the game's first Direct3DCreate9: whether it went to this mod's DXVK (BorderlessFullscreen = auto).
+bool d3d_created();
+bool d3d_dxvk_active();
 
 // Content-cadence probe: a hash of every vertex shader constant upload since the previous call
 // (matrices, skinning palettes). The present hooks compare consecutive frames to see how often

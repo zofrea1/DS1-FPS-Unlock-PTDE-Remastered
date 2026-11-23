@@ -186,11 +186,11 @@ DWORD WINAPI worker(void*) {
     } else {
         LOG_INFO("PreloadTextures is false. Textures reach the graphics card at their first draw.");
     }
-    if (settings.borderless) {
+    if (settings.borderless != 0) {
         if (dsfix.borderless) {
             LOG_INFO("DSfix's own borderlessFullscreen is on; leaving the window to DSfix.");
         } else {
-            borderless_start();
+            borderless_start(settings.borderless == 2);
         }
     }
     if (settings.hide_mouse_cursor) {

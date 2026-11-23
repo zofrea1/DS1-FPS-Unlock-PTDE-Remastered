@@ -7,7 +7,7 @@
 //
 // A watcher thread finds the game window, applies the change, and re-applies it if
 // the game (or anything else) restores the frame, for example after alt-tab.
-bool borderless_start();
+bool borderless_start(bool only_with_dxvk);
 
 // Per-monitor DPI awareness (INI DpiAware). On a display scaled above 100%, Windows otherwise has the DPI-unaware game
 // draw at the scaled-down ("logical") size and stretches its window up: a blurry picture, RenderResolution auto drawing

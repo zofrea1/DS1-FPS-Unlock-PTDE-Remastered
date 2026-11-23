@@ -257,7 +257,8 @@ struct Settings {
     bool render_math_relaxed = true;
     // Make the game window borderless and cover its monitor. Needs the game set to
     // windowed mode. Skipped if DSfix's own borderlessFullscreen is on.
-    bool borderless = false;
+    // 0 = false, 1 = true, 2 = auto (the default: only while the game runs on this mod's DXVK).
+    int borderless = 2;
     // Per-monitor DPI aware (set in DllMain before the game makes its window): real pixels on scaled displays.
     bool dpi_aware = true;
     // Keep a real XInput gamepad when the game's four Windows 7 device ids do not match.

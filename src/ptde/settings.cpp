@@ -427,7 +427,7 @@ Settings settings_load(const wchar_t* dll_path) {
         } else if (key == "dpiaware") {
             s.dpi_aware = parse_bool(val);
         } else if (key == "borderlessfullscreen") {
-            s.borderless = parse_bool(val);
+            s.borderless = lower(trim(val)) == "auto" ? 2 : (parse_bool(val) ? 1 : 0);
         } else if (key == "steampauseguard") {
             s.steam_pause_guard = parse_bool(val);
         } else if (key == "fixcontroller") {

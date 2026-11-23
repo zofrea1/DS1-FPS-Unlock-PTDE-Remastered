@@ -225,9 +225,55 @@ int __stdcall adopt_pad(uint8_t* self) {
     return picked;
 }
 
+// Which of the game's pad objects read each slot lately. The game makes one pad object per controller it binds, and
+// with two XInput slots it binds both (often one pad twice: Steam Input's virtual pad beside the pad itself, or a
+// DualSense through DS4Windows / DSX). An object whose slot is idle must not follow a slot another object already
+// reads: the game gets that pad's input through that object, and with one pad on two slots, a frame or so apart,
+// the objects swapped slots at every press and release, copying the other slot's state across: a press arrived
+// twice (one D-pad tap moved two items along the bar, one use press used the item twice). User report 2026-11-23:
+// the Cursed Pendant played five times in a row, with "following the pad in use" logged on every press.
+constexpr ULONGLONG kReaderMs = 250;
+struct SlotReader {
+    const void* object;
+    ULONGLONG at;
+};
+SlotReader g_readers[4][8] = {};
+
+void note_reader(DWORD index, const void* object, ULONGLONG now) {
+    if (index > 3 || !object) {
+        return;
+    }
+    SlotReader* oldest = &g_readers[index][0];
+    for (SlotReader& r : g_readers[index]) {
+        if (r.object == object) {
+            r.at = now;
+            return;
+        }
+        if (r.at < oldest->at) {
+            oldest = &r;
+        }
+    }
+    oldest->object = object;
+    oldest->at = now;
+}
+
+bool read_by_another(int index, const void* object, ULONGLONG now) {
+    if (index < 0 || index > 3) {
+        return false;
+    }
+    for (const SlotReader& r : g_readers[index]) {
+        if (r.object && r.object != object && now - r.at < kReaderMs) {
+            return true;
+        }
+    }
+    return false;
+}
+
 DWORD __stdcall poll_get_state(DWORD index, void* state) {
     DWORD result = xinput_get_state(index, state);
     uint8_t* self = g_poll_device;
+    const ULONGLONG polled_at = GetTickCount64();
+    note_reader(index, self, polled_at);
     // For reports: that the game's poll runs at all, and the first input it reads (another mod or overlay that keeps the
     // pad from the game shows as a poll that runs with no input, or none at all).
     static bool first_read = true, first_input = true;
@@ -254,8 +300,8 @@ DWORD __stdcall poll_get_state(DWORD index, void* state) {
         if (self && state && idle_pad(*static_cast<PadState*>(state))) {
             const int hot = pick_gamepad(static_cast<int>(index));
             // pick_gamepad also returns an idle slot. Only a pad that is actually
-            // being held may take over from the idle one.
-            if (hot >= 0 && hot != static_cast<int>(index)) {
+            // being held may take over from the idle one, and only one no other pad object of the game reads.
+            if (hot >= 0 && hot != static_cast<int>(index) && !read_by_another(hot, self, polled_at)) {
                 PadState other{};
                 if (read_slot(hot, &other) && !idle_pad(other)) {
                     std::memcpy(state, &other, sizeof(other));

@@ -51,6 +51,7 @@ using ResetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
 
 CreateFn g_create = nullptr;
 bool g_dxvk_active = false;  // Direct3DCreate9 leads to DXVK
+volatile bool g_d3d_created = false;  // the game's first Direct3DCreate9 has run (g_dxvk_active is decided)
 CreateDeviceFn g_create_device = nullptr;
 ResetFn g_reset = nullptr;
 using PresentFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
@@ -511,6 +512,7 @@ IDirect3D9* WINAPI hook_direct3d_create9(UINT sdk_version) {
         route_to_dxvk();
     }
     IDirect3D9* d3d = g_create(sdk_version);
+    g_d3d_created = true;
     const PtdeExtension* ext = ptde_extension();
     if (d3d && (settings().fps_unlock || (ext && ext->wants_device && ext->wants_device()))) {
         void* original = patch_slot(d3d, kCreateDeviceSlot, reinterpret_cast<void*>(&hook_create_device));
@@ -554,6 +556,8 @@ void** find_create_slot() {
 }  // namespace
 
 bool d3d_dxvk_expected() { return dxvk_expected(); }
+bool d3d_created() { return g_d3d_created; }
+bool d3d_dxvk_active() { return g_dxvk_active; }
 bool d3d_under_proton() {
     return settings().fps_unlock && GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
 }
