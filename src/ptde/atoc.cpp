@@ -67,7 +67,8 @@ bool g_logged_on = false;
 bool g_depth_float = false;
 bool g_depth_target = false;
 // RemoteControl `aadepth N` (diagnostics): bit 1 leaves the depth pre-pass's shaders the game's, bit 2 leaves the depth
-// copy the game's (comparisons only: either alone gives a wrong depth).
+// copy the game's (comparisons only: either alone gives a wrong depth); bits 4 / 8 raise / lower the alpha test's
+// reference by one for the pre-pass's alpha-tested draws (bits 16-23: the logged reference and function, read back).
 volatile LONG g_depth_diag = 0;
 constexpr UINT kDepthConst = 211;  // the conversion's constants (a def in the converted copy)
 constexpr UINT kEncodeConst = 212, kDecodeConst = 213;  // the depth copy's re-encoding (defs in its copy)
@@ -489,6 +490,29 @@ void after_draw(IDirect3DDevice9* dev, bool swapped) {
     if (swapped) o_set_ps(dev, g_game_ps);
 }
 
+// aadepth 4 / 8 (diagnostics): the pre-pass's alpha reference one step stricter / looser around the draw.
+DWORD g_diag_ref = 0;
+bool g_diag_ref_set = false;
+void diag_ref_begin(IDirect3DDevice9* dev) {
+    g_diag_ref_set = false;
+    const LONG d = g_depth_diag;
+    if (!(d & 12) || !g_depth_target || !render_state(dev, D3DRS_ALPHATESTENABLE)) return;
+    g_diag_ref = render_state(dev, D3DRS_ALPHAREF);
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        LOG_INFO("aadepth: pre-pass alpha test ref %lu func %lu", static_cast<unsigned long>(g_diag_ref),
+                 static_cast<unsigned long>(render_state(dev, D3DRS_ALPHAFUNC)));
+    }
+    const DWORD r = (d & 4) ? (g_diag_ref < 255 ? g_diag_ref + 1 : 255) : (g_diag_ref ? g_diag_ref - 1 : 0);
+    dev->SetRenderState(D3DRS_ALPHAREF, r);
+    g_diag_ref_set = true;
+}
+void diag_ref_end(IDirect3DDevice9* dev) {
+    if (g_diag_ref_set) dev->SetRenderState(D3DRS_ALPHAREF, g_diag_ref);
+    g_diag_ref_set = false;
+}
+
 HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* rt) {
     if (rt && rt == g_aliased_surface) {  // the game draws into the texture whose depth was in ours
         g_aliased = nullptr;
@@ -519,7 +543,9 @@ HRESULT WINAPI hk_set_ps(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps) {
 
 HRESULT WINAPI hk_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT start, UINT count) {
     const bool s = before_draw(dev);
+    diag_ref_begin(dev);
     const HRESULT hr = o_draw(dev, type, start, count);
+    diag_ref_end(dev);
     after_draw(dev, s);
     return hr;
 }
@@ -527,7 +553,9 @@ HRESULT WINAPI hk_draw(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, UINT start,
 HRESULT WINAPI hk_draw_indexed(IDirect3DDevice9* dev, D3DPRIMITIVETYPE type, INT base, UINT min_index, UINT vertices,
                                UINT start, UINT count) {
     const bool s = before_draw(dev);
+    diag_ref_begin(dev);
     const HRESULT hr = o_draw_indexed(dev, type, base, min_index, vertices, start, count);
+    diag_ref_end(dev);
     after_draw(dev, s);
     return hr;
 }
