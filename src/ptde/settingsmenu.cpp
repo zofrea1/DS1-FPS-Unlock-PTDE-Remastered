@@ -692,7 +692,38 @@ bool pressed(int i, bool down, bool repeats, ULONGLONG now) {
     return false;
 }
 
-bool key(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+// The keys, as the game's keyboard reads them (DirectInput key codes; no GetAsyncKeyState in the release DLL). Only
+// while the game window has the focus does the game read its keyboard.
+int dik_of(int vk) {
+    static const uint8_t kLetters[26] = {0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+                                         0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C};
+    if (vk >= 'A' && vk <= 'Z') return kLetters[vk - 'A'];
+    if (vk >= '1' && vk <= '9') return 0x02 + (vk - '1');
+    if (vk == '0') return 0x0B;
+    if (vk >= VK_F1 && vk <= VK_F10) return 0x3B + (vk - VK_F1);
+    switch (vk) {
+        case VK_F11: return 0x57;
+        case VK_F12: return 0x58;
+        case VK_ESCAPE: return 0x01;
+        case VK_BACK: return 0x0E;
+        case VK_RETURN: return 0x1C;
+        case VK_UP: return 0xC8;
+        case VK_DOWN: return 0xD0;
+        case VK_LEFT: return 0xCB;
+        case VK_RIGHT: return 0xCD;
+        case VK_PRIOR: return 0xC9;
+        case VK_NEXT: return 0xD1;
+        case VK_SPACE: return 0x39;
+        case VK_OEM_MINUS: return 0x0C;
+        default: return 0;
+    }
+}
+
+bool key(int vk) {
+    if (vk == VK_SHIFT) return inputcache_key(0x2A) || inputcache_key(0x36);
+    if (vk == VK_RETURN && inputcache_key(0x9C)) return true;  // the keypad's Enter
+    return inputcache_key(dik_of(vk));
+}
 
 void open_page(bool open) {
     InterlockedExchange(&g_open, open ? 1 : 0);

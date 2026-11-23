@@ -21,3 +21,5 @@ void inputcache_stats(unsigned long* cached, unsigned long* passed);
 // mouse input.
 void inputcache_require_hook();
 void inputcache_set_blank(bool on);
+// A key down in the keyboard state the game last read (a DirectInput key code, DIK_*).
+bool inputcache_key(int dik);

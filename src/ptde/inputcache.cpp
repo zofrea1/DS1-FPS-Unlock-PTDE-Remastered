@@ -23,6 +23,9 @@ bool g_on = false;       // in force
 bool g_hooked = false;
 bool g_need = false;     // hooked whatever the mode: FPS Unlock Settings blanks the game's input while open
 volatile LONG g_blank = 0;
+// The keyboard as the game last read it (DirectInput key codes; FPS Unlock Settings reads its keys from it, so the
+// release DLL needs no GetAsyncKeyState).
+volatile uint8_t g_keys[256] = {};
 int g_tries = 0;
 uint32_t g_game_tid = 0;
 volatile uint32_t g_frame = 1;
@@ -70,10 +73,17 @@ HRESULT WINAPI hook_get_state(void* self, DWORD size, void* data) {
     if (g_blank && k >= 0 && data) {
         // FPS Unlock Settings is open: the device is still read (so nothing piles up), the game sees no key or move.
         const HRESULT hr = original(self, size, data);
-        if (hr == 0) std::memset(data, 0, size);
+        if (hr == 0) {
+            if (k == 1) std::memcpy(const_cast<uint8_t*>(g_keys), data, 256);
+            std::memset(data, 0, size);
+        }
         return hr;
     }
-    if (!g_on || k < 0 || !data || GetCurrentThreadId() != g_game_tid) return original(self, size, data);
+    if (!g_on || k < 0 || !data || GetCurrentThreadId() != g_game_tid) {
+        const HRESULT hr = original(self, size, data);
+        if (hr == 0 && k == 1 && data) std::memcpy(const_cast<uint8_t*>(g_keys), data, 256);
+        return hr;
+    }
     Cached& c = g_cache[k];
     if (c.frame == g_frame && c.size == size) {
         std::memcpy(data, c.bytes, size);
@@ -83,6 +93,7 @@ HRESULT WINAPI hook_get_state(void* self, DWORD size, void* data) {
     const HRESULT hr = original(self, size, data);
     g_passed = g_passed + 1;
     if (hr == 0) {
+        if (k == 1) std::memcpy(const_cast<uint8_t*>(g_keys), data, 256);
         std::memcpy(c.bytes, data, size);
         c.size = size;
         c.frame = g_frame;
@@ -174,6 +185,7 @@ int inputcache_set(int on) {
 }
 
 void inputcache_require_hook() { g_need = true; }
+bool inputcache_key(int dik) { return dik > 0 && dik < 256 && (g_keys[dik] & 0x80) != 0; }
 void inputcache_set_blank(bool on) { InterlockedExchange(&g_blank, on ? 1 : 0); }
 
 void inputcache_stats(unsigned long* cached, unsigned long* passed) {
