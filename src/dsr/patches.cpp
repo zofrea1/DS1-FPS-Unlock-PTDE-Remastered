@@ -1643,6 +1643,7 @@ constexpr float kStepHeight = 0.31f;      // Remastered
 constexpr float kStepHeightPtde = 0.30f;  // the original game
 
 std::atomic<int> g_step_down_state{0};
+std::atomic<long> g_wall_rise{0};  // frames whose rise up a wall was put back (ground_snap_step)
 
 // The step height bodies get from the constructor with the current settings.
 float default_step_height() {
@@ -1808,6 +1809,15 @@ void ground_snap_step(const void* phys, float dt, float /*proxy_y*/, float start
     // Pull this frame: how far below the moved, unlifted position the snap puts the body.
     // The lift is exact (lifted_y is the position the body was moved from).
     const float lift = lifted ? lifted_y - start_y : 0.0f;
+    // A snap at or above the lifted height: the ground probe started inside a wall beside the body and reported
+    // "ground" at its start, so the frame's lift was not put back and the body rose a step. Above the retail rate
+    // (60 FPS, 30 with StepDownPtde) such a frame puts the lift back, as if no ground was found: the Lower Undead
+    // Burg's door-ambush thief was carried up 0.31 m a frame by its door's wall, 1 m at 30 FPS but 12-16 m at 120
+    // (the PTDE twin in src/ptde/snap.cpp has the measurements). Real ground below leaves the snap between -lift and 0.
+    if (lifted && lift > 0.0f && *snap > 0.0005f && dt > 0.0f && dt * step_down_rate() < 0.999f) {
+        *snap = -lift;
+        g_wall_rise.fetch_add(1, std::memory_order_relaxed);
+    }
     const float pull = -*snap - lift;
     state->last_ms = now;
     state->drop[state->head % kDropFrames] = pull > 0.0f ? pull : 0.0f;
