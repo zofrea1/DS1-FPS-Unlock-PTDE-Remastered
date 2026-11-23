@@ -810,10 +810,11 @@ void atoc_hook_device(IDirect3DDevice9* dev) {
         return;
     }
     install_hooks(dev);
-    LOG_INFO("AlphaToCoverage: ready (%s switch, edges sharpened around the alpha test); takes effect when the game's "
+    LOG_INFO("AlphaToCoverage: ready (%s, edges sharpened around the alpha test); takes effect when the game's "
              "anti-aliasing is on (Antialiasing = 1 in DarkSouls.ini, or the in-game option)",
-             g_method == Method::Nvidia ? "NVIDIA's" : dxvk_amd ? "AMD's, which DXVK takes on AMD graphics without "
-             "listing it" : "AMD's");
+             g_method == Method::Nvidia ? "NVIDIA's switch"
+             : dxvk_amd                 ? "AMD's switch, which DXVK takes on AMD graphics without listing it"
+                                        : "AMD's switch");
 }
 
 void atoc_set_mode(int mode) { g_mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode); }
