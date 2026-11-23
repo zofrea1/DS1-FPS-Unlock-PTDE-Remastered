@@ -38,7 +38,7 @@ struct Episode {
 Episode g_episodes[16];
 volatile long g_capped = 0;
 volatile long g_enabled = 1;
-volatile long g_wall_rise = 0;  // frames whose rise up a wall was cut to the 30 FPS share (see snap_factor)
+volatile long g_wall_rise = 0;  // frames whose rise up a wall was put back (see snap_factor)
 
 // Ground snap reach. Each frame the body is lifted by the step height [body+0xD4] (0.3), moved,
 // then pulled down onto ground within reach of the lifted position; the probe length comes
@@ -214,10 +214,13 @@ float __cdecl snap_factor(const void* body, float proxy_y, float start_y) {
         // the body ends a step higher. It keeps doing so while the wall is there: a thief of the Lower Undead Burg's
         // door ambush (event 11010130), pressed against the wall by its door, was carried up 0.31 m a frame, 1 m in
         // its few frames at 30 FPS and 12-16 m at 120 (user report 2026-11-22). Real ground below never gives this
-        // (a step up leaves the snap between -lift and 0), so here the frame keeps only the 30 FPS share of the rise.
+        // (a step up leaves the snap between -lift and 0), so above 30 FPS such a frame puts the lift back as if it
+        // had found no ground. Keeping the 30 FPS share of the rise per frame was tried first: the rise lasted longer
+        // at 120, and the thief then climbed the wall's ledges onto the door frame (3.3 m up instead of 1 m and back
+        // down). At 30 FPS and below the game's own behaviour stays.
         const float dt = static_cast<float>(fixes_last_dt());
-        if (lifted && lift > 0.0f && snap > 0.0005f && dt > 0.0f && dt * 30.0f < 1.0f) {
-            snap = -lift + (lift + snap) * (dt * 30.0f);
+        if (lifted && lift > 0.0f && snap > 0.0005f && dt > 0.0f && dt * 30.0f < 0.999f) {
+            snap = -lift;
             InterlockedIncrement(&g_wall_rise);
         }
         ground_reach_step(body, dt, snap, lift);
