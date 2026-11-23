@@ -9,6 +9,7 @@ inline std::atomic<int> g_scheduler_active{0};
 inline std::atomic<int> g_is_game{0};
 inline std::atomic<int> g_fix_move_dt{1};
 inline std::atomic<int> g_fix_step_down{1};
+inline std::atomic<int> g_fix_step_up{1};
 inline std::atomic<int> g_fix_camera{1};
 inline std::atomic<int> g_fix_graze{1};
 inline std::atomic<int> g_fix_ui{1};

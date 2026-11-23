@@ -171,6 +171,8 @@ Settings settings_read(const wchar_t* dll_path) {
             s.skip_intro = parse_bool(val);
         } else if (key == "trace") {
             s.trace = parse_bool(val);
+        } else if (key == "fixstepup") {
+            s.fix_step_up = parse_bool(val);
         } else if (key == "fixstepdown") {
             s.fix_step_down = parse_bool(val);
         } else if (key == "fixladderslide") {

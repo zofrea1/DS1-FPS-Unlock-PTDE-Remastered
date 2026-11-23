@@ -1925,6 +1925,109 @@ bool patch_ground_snap() {
     return true;
 }
 
+// FixStepUp: lips a little higher than the step height climbed as at the reference frame rate (the original
+// game's 30 FPS with StepHeightPtde, Remastered's 60 otherwise). The PTDE twin (src/ptde/stepup.cpp) has the
+// measurements: a lip above the step is climbed in the frame where the lifted proxy gets past its edge, so how far
+// it moves in that one frame decides it, and shorter frames climb less (the Great Hollow's Cloranthy Ring hollow
+// could not be left at 120 FPS). For the controller's lift-move-snap (fn 0x2BC650, (body, step info, out), called
+// once per body at 0x2BC5AD) the step height [body+0xE4] ([body+0xE8] with [body+0x6C]) is raised by
+// tan(60 degrees, the proxy's steepest walkable slope) * the horizontal speed set for the frame ([proxy+0x60],
+// written just before by 0x140A79B20) * (reference frame - frame time [info+8]), on a body that was on the ground
+// last frame ([body+0x1B4], its time in the air, is 0) and not on a ladder ([body+0x1F8]), and put back after
+// (unless the snap cave changed it meanwhile, as StepHeightPtde does once).
+constexpr uint32_t kLiftMoveSnapCall = 0x2BC5AD;
+constexpr uint32_t kLiftMoveSnap = 0x2BC650;
+using LiftMoveSnapFn = void (*)(uint8_t* body, uint8_t* info, void* out);
+LiftMoveSnapFn g_lift_move_snap = nullptr;
+std::atomic<int> g_step_up_state{0};
+std::atomic<long> g_step_up_boosted{0};
+
+void step_up_call(uint8_t* body, uint8_t* info, void* out) {
+    float* step = nullptr;
+    float written = 0.0f, saved = 0.0f;
+    if (g_fix_step_up.load(std::memory_order_relaxed) != 0 && body && info) {
+        float dt = 0.0f, air = 1.0f;
+        std::memcpy(&dt, info + 8, sizeof(dt));
+        std::memcpy(&air, body + 0x1B4, sizeof(air));
+        const float reference = g_step_height_ptde.load(std::memory_order_relaxed) != 0 ? 1.0f / 30.0f : 1.0f / 60.0f;
+        const float short_by = reference - dt;
+        const uint8_t* proxy = *reinterpret_cast<uint8_t* const*>(body + 0x38);
+        if (dt > 0.0f && short_by > 0.0f && body[0x1F8] == 0 && air <= 0.0f && proxy) {
+            float v[3];
+            std::memcpy(v, proxy + 0x60, sizeof(v));
+            const float speed = std::sqrt(v[0] * v[0] + v[2] * v[2]);
+            float boost = speed > 0.05f && speed < 50.0f ? 1.7320508f * speed * short_by : 0.0f;
+            if (boost > 0.35f) boost = 0.35f;
+            if (boost > 0.001f) {
+                step = reinterpret_cast<float*>(body + (body[0x6C] ? 0xE8 : 0xE4));
+                saved = *step;
+                if (saved > 0.0f && saved < 2.0f) {
+                    written = saved + boost;
+                    *step = written;
+                    g_step_up_boosted.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    step = nullptr;
+                }
+            }
+        }
+    }
+    g_lift_move_snap(body, info, out);
+    if (step && *step == written) *step = saved;
+}
+
+bool patch_step_up() {
+    auto* site = image_rva(kLiftMoveSnapCall);
+    if (site[0] != 0xE8) {
+        LOG_ERROR("FixStepUp: the lift-move-snap call opcode is %02X", site[0]);
+        return false;
+    }
+    int32_t disp = 0;
+    std::memcpy(&disp, site + 1, sizeof(disp));
+    if (site + 5 + disp != image_rva(kLiftMoveSnap)) {
+        LOG_ERROR("FixStepUp: the call at %p does not go to the lift-move-snap", site);
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("FixStepUp: could not allocate the relay (Win32=%lu)", GetLastError());
+        return false;
+    }
+    g_lift_move_snap = reinterpret_cast<LiftMoveSnapFn>(image_rva(kLiftMoveSnap));
+    // mov rax, step_up_call ; jmp rax (the arguments stay in rcx, rdx, r8)
+    page[0] = 0x48;
+    page[1] = 0xB8;
+    const uint64_t fn = reinterpret_cast<uint64_t>(&step_up_call);
+    std::memcpy(page + 2, &fn, sizeof(fn));
+    page[10] = 0xFF;
+    page[11] = 0xE0;
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("FixStepUp: could not protect the relay (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    const intptr_t rel = page - (site + 5);
+    if (rel < INT32_MIN || rel > INT32_MAX) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        return false;
+    }
+    const auto rel32 = static_cast<int32_t>(rel);
+    DWORD old = 0;
+    if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old)) {
+        VirtualFree(page, 0, MEM_RELEASE);
+        LOG_ERROR("FixStepUp: could not unprotect the call (Win32=%lu)", GetLastError());
+        return false;
+    }
+    std::memcpy(site + 1, &rel32, sizeof(rel32));
+    FlushInstructionCache(GetCurrentProcess(), site, 5);
+    DWORD ignored = 0;
+    VirtualProtect(site, 5, old, &ignored);
+    LOG_INFO("FixStepUp: lips a little above the step height are climbed as at %d FPS",
+             g_step_height_ptde.load(std::memory_order_relaxed) != 0 ? 30 : 60);
+    return true;
+}
+
 // Jump take-off. A running jump does not leave the ground: for its first frames ([body+0x1F2] set) the body
 // follows the jump's root motion, then ([body+0x1F3]) the controller (fn 0x2BBE40) keeps that speed.
 // The held velocity is two slots that swap every frame. 0x2BC290 outputs [body+0xD0]. At 0x2BC329 that slot
@@ -4628,6 +4731,11 @@ void try_delayed_patches() {
                          !g_step_height_ptde.load(std::memory_order_relaxed)) ||
                         patch_ground_snap();
         g_step_down_state.store(ok ? 2 : -1);
+    }
+    expected = 0;
+    if (g_step_up_state.compare_exchange_strong(expected, 1)) {
+        const bool ok = g_fix_step_up.load(std::memory_order_relaxed) == 0 || patch_step_up();
+        g_step_up_state.store(ok ? 2 : -1);
     }
     expected = 0;
     if (g_move_dt_state.compare_exchange_strong(expected, 1)) {

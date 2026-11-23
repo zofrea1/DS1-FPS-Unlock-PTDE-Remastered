@@ -40,8 +40,10 @@ volatile long g_boosted = 0;
 volatile long g_installed = 0;
 float g_last_boost = 0.0f;
 
-float boost_for(const uint8_t* body) {
-    const double dt = fixes_last_dt();
+float boost_for(const uint8_t* body, const uint8_t* info) {
+    float dt = 0.0f;  // the frame's step ([info+8], the proxy's own time step)
+    std::memcpy(&dt, info + 8, sizeof(dt));
+    if (!(dt > 0.0f)) return 0.0f;
     const double short_by = 1.0 / 30.0 - dt;
     if (!(short_by > 0.0)) return 0.0f;
     // On a ladder, or not on the ground at the end of the last frame: [body+0x194] is the time in the air, which the
@@ -68,8 +70,8 @@ float boost_for(const uint8_t* body) {
 void __stdcall hk_lift_move_snap(uint8_t* body, void* info, void* out) {
     float* step = nullptr;
     float saved = 0.0f;
-    if (g_on && body) {
-        const float boost = boost_for(body);
+    if (g_on && body && info) {
+        const float boost = boost_for(body, static_cast<const uint8_t*>(info));
         if (boost > 0.001f) {
             step = reinterpret_cast<float*>(body + (body[0x54] ? 0xD8 : 0xD4));
             saved = *step;
