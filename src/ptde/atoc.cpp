@@ -19,6 +19,7 @@
 // way (subroutines, no spare register) gets plain coverage.
 #include "atoc.h"
 
+#include "d3d.h"
 #include "d3dperf.h"
 
 #include "log.h"
@@ -68,9 +69,19 @@ bool g_depth_float = false;
 bool g_depth_target = false;
 // RemoteControl `aadepth N` (diagnostics): bit 1 leaves the depth pre-pass's shaders the game's, bit 2 leaves the depth
 // copy the game's (comparisons only: either alone gives a wrong depth); bits 4 / 8 raise / lower the alpha test's
-// reference by one for the pre-pass's alpha-tested draws (bits 16-23: the logged reference and function, read back).
+// reference by one for the pre-pass's alpha-tested draws; bit 16 leaves the pre-pass's alpha test DXVK's own (below).
 volatile LONG g_depth_diag = 0;
+// The pre-pass's alpha test made the colour pass's (under DXVK, see pre_pass_kind): DXVK is in use, the alpha test's
+// precision of the colour pass's target as DXVK picks it (-1 not seen yet), render target 0 as set last and the depth
+// target's size, and whether the colour pass's first alpha-tested draw is still to be seen.
+bool g_alpha_exact = false;
+int g_colour_prec = -1;
+D3DFORMAT g_rt_format = D3DFMT_UNKNOWN;
+UINT g_rt_w = 0, g_rt_h = 0, g_depth_w = 0, g_depth_h = 0;
+bool g_watch_colour = false;
+bool g_logged_exact = false;
 constexpr UINT kDepthConst = 211;  // the conversion's constants (a def in the converted copy)
+constexpr UINT kAlphaConst = 214;  // the colour pass's alpha test: its factor, threshold, 0.5, 1 (set for each draw)
 constexpr UINT kEncodeConst = 212, kDecodeConst = 213;  // the depth copy's re-encoding (defs in its copy)
 IDirect3DPixelShader9* g_copy_swap = nullptr;  // the bound shader's re-encoding copy, when it is the depth copy
 // The depth resolved into an 8-bit texture of the game's (see hk_stretch_depth).
@@ -87,11 +98,12 @@ IDirect3DSurface9* g_aliased_surface = nullptr; // its level 0 (not held)
 LONG g_alias_copies = 0;
 
 // The copies of a game shader (held, so its address is not reused for another), by kind: 1 the float depth, 2 the
-// sharpened alpha, 3 both, 4 the depth copy re-encoding the float depth. nullptr: not copyable (or, for 4, not the
+// sharpened alpha, 3 both, 4 the depth copy re-encoding the float depth, 5 the float depth with the colour pass's
+// alpha test. nullptr: not copyable (or, for 4, not the
 // depth copy).
 struct Variants {
-    IDirect3DPixelShader9* made[5] = {};
-    bool tried[5] = {};
+    IDirect3DPixelShader9* made[6] = {};
+    bool tried[6] = {};
 };
 std::mutex g_lock;
 std::unordered_map<IDirect3DPixelShader9*, Variants> g_variants;
@@ -195,7 +207,9 @@ DWORD float_bits(float f) {
 // red + green / 256 + blue / 65536 - (1/256 + 1/65536) to red, green and blue of oC0 and the alpha as it was. The
 // game's readers decode dot(rgb, (255/256, 255/65536, 255/16777216)), and a float target reads back (x, 1, 1), so
 // they get the depth the digits held, whole. False when the shader is not one this can copy.
-bool depth_float(const DWORD* code, size_t count, std::vector<DWORD>& out) {
+// exact_alpha (kind 5): the alpha becomes the colour pass's alpha test already made, 1 (drawn) or 0, from c214 =
+// (F, T, 0.5, 1): round(alpha * F) - T >= 0, T half a step off the reference (see pre_pass_kind).
+bool depth_float(const DWORD* code, size_t count, std::vector<DWORD>& out, bool exact_alpha = false) {
     if (count < 2 || code[0] != 0xFFFF0300) return false;
     int max_temp = -1;
     bool writes = false;
@@ -219,13 +233,13 @@ bool depth_float(const DWORD* code, size_t count, std::vector<DWORD>& out) {
             if (op == 0x1F && k == 1) continue;
             const DWORD type = reg_type(p);
             if (type == kRegTemp) max_temp = max_temp > static_cast<int>(p & 0x7FF) ? max_temp : static_cast<int>(p & 0x7FF);
-            if (type == kRegConst && (p & 0x7FF) == kDepthConst) return false;  // our register in use
+            if (type == kRegConst && ((p & 0x7FF) == kDepthConst || (p & 0x7FF) == kAlphaConst)) return false;
             if (type == kRegColorOut && (p & 0x7FF) == 0) writes = true;
         }
         i += 1 + len;
     }
-    if (!end || !writes || max_temp + 1 > 31) return false;
-    const DWORD n = static_cast<DWORD>(max_temp + 1);
+    if (!end || !writes || max_temp + (exact_alpha ? 2 : 1) > 31) return false;
+    const DWORD n = static_cast<DWORD>(max_temp + 1), u = static_cast<DWORD>(max_temp + 2);
     out.clear();
     out.push_back(code[0]);
     const DWORD def[] = {0x05000051, dst(kRegConst, kDepthConst, 0xF), float_bits(1.0f), float_bits(1.0f / 256.0f),
@@ -255,9 +269,26 @@ bool depth_float(const DWORD* code, size_t count, std::vector<DWORD>& out) {
     const DWORD tail[] = {
         0x03000008, dst(kRegTemp, n, 1), src(kRegTemp, n, kXYZW), src(kRegConst, kDepthConst, kXYZW),  // dp3 n.x
         0x03000002, dst(kRegColorOut, 0, 7), src(kRegTemp, n, kX), src(kRegConst, kDepthConst, kW),     // + offset
-        0x02000001, dst(kRegColorOut, 0, 8), src(kRegTemp, n, kW),                                     // alpha
     };
     out.insert(out.end(), std::begin(tail), std::end(tail));
+    if (exact_alpha) {
+        // DXVK's own steps (round(alpha * F), compared with the reference in the same units), the multiply and the
+        // rounding apart as there; round half up for its half to even (alpha * F lands on a half only by accident).
+        const DWORD A = kAlphaConst;
+        const DWORD test[] = {
+            0x03000005, dst(kRegTemp, u, 1), src(kRegTemp, n, kW), src(kRegConst, A, kX),              // a * F
+            0x03000002, dst(kRegTemp, u, 1), src(kRegTemp, u, kX), src(kRegConst, A, kZ),              // + 0.5
+            0x02000013, dst(kRegTemp, u, 2), src(kRegTemp, u, kX),                                     // frc
+            0x03000002, dst(kRegTemp, u, 1), src(kRegTemp, u, kX), src(kRegTemp, u, kY, kNeg),         // rounded
+            0x03000002, dst(kRegTemp, u, 1), src(kRegTemp, u, kX), src(kRegConst, A, kY, kNeg),        // - T
+            0x04000058, dst(kRegColorOut, 0, 8, true), src(kRegTemp, u, kX), src(kRegConst, A, kW),
+            src(kRegConst, A, kW, kNeg),                                                               // 1 or 0
+        };
+        out.insert(out.end(), std::begin(test), std::end(test));
+    } else {
+        const DWORD alpha[] = {0x02000001, dst(kRegColorOut, 0, 8), src(kRegTemp, n, kW)};             // alpha
+        out.insert(out.end(), std::begin(alpha), std::end(alpha));
+    }
     out.push_back(kEnd);
     return true;
 }
@@ -360,11 +391,12 @@ bool depth_copy_encode(const DWORD* code, size_t count, std::vector<DWORD>& out)
     return true;
 }
 
-// kind: 1 the float depth, 2 the sharpened alpha, 3 both (the float depth's copy, sharpened), 4 the depth copy.
+// kind: 1 the float depth, 2 the sharpened alpha, 3 both (the float depth's copy, sharpened), 4 the depth copy, 5 the
+// float depth with the colour pass's alpha test.
 IDirect3DPixelShader9* variant_slow(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps, int kind);
 
 IDirect3DPixelShader9* variant_of(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps, int kind) {
-    if (reinterpret_cast<uintptr_t>(ps) & 3u) return variant_slow(dev, ps, kind);  // the kind goes in those bits
+    if (reinterpret_cast<uintptr_t>(ps) & 7u) return variant_slow(dev, ps, kind);  // the kind goes in those bits
     const uint32_t key = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ps)) | static_cast<uint32_t>(kind - 1);
     uint64_t* slot = &g_variant_cache[(key * 2654435761u) >> 19];
     uint64_t e;  // one 8-byte read (movq)
@@ -399,6 +431,7 @@ IDirect3DPixelShader9* variant_slow(IDirect3DDevice9* dev, IDirect3DPixelShader9
             final = &b;
         }
         if (ok && kind == 4) ok = depth_copy_encode(code.data(), code.size(), a);
+        if (ok && kind == 5) ok = depth_float(code.data(), code.size(), a, true);
         if (!ok || FAILED(dev->CreatePixelShader(final->data(), &made))) made = nullptr;
     }
     v.made[kind] = made;
@@ -433,18 +466,77 @@ DWORD render_state(IDirect3DDevice9* dev, D3DRENDERSTATETYPE state) {
     return d;
 }
 
+// DXVK's alpha test precision for a render target format (D3D9DeviceEx::GetAlphaTestPrecision, DXVK 2.x and 3.x): the
+// bits above 8 the alpha and the reference are compared in, 0xF a float comparison.
+int alpha_precision(D3DFORMAT f) {
+    switch (f) {
+    case D3DFMT_A2B10G10R10: case D3DFMT_A2R10G10B10: case D3DFMT_A2W10V10U10: return 2;
+    case D3DFMT_R16F: case D3DFMT_G16R16F: case D3DFMT_A16B16G16R16F: return 7;
+    case D3DFMT_G16R16: case D3DFMT_A16B16G16R16: case D3DFMT_V16U16: case D3DFMT_L16: case D3DFMT_Q16W16V16U16:
+        return 8;
+    case D3DFMT_R32F: case D3DFMT_G32R32F: case D3DFMT_A32B32G32R32F: return 0xF;
+    default: return 0;
+    }
+}
+
+// The shader kind for a draw into the depth (pre-pass): 5 when its alpha test has to be the colour pass's (constants
+// set), else 1. Under DXVK the alpha test is made at the precision of the render target's format: round(alpha * 255)
+// against the reference for the game's 8-bit targets, round(alpha * 1023) against it times about 4 for the 10-bit
+// scene of HighPrecisionColor, but alpha against reference / 255 as floats for our R32F depth. So a pixel whose
+// alpha was just above the reference passed in the pre-pass and failed in the colour pass: the pre-pass wrote its
+// depth, the colour pass (depth test less-or-equal, no depth writes) then drew neither it nor the surface behind it,
+// and the pixel kept the scene's clear colour: grey specks on the hollows' robes and the Asylum's floor that crawled
+// while anything moved (2026-11-22: the Steam Deck, where DXVK offers neither coverage switch, and AlphaToCoverage
+// off; the game's 8-bit pre-pass, stricter than the 10-bit colour pass, never left any). With coverage DXVK makes no
+// alpha test; native Direct3D 9 compares the same way for every format (no specks there, checked).
+int pre_pass_kind(IDirect3DDevice9* dev, bool coverage) {
+    if (!g_alpha_exact || coverage || (g_depth_diag & 16)) return 1;
+    const int p = g_colour_prec;
+    if (p < 0 || p > 8) return 1;  // not seen yet, or a float colour target (the same comparison as ours)
+    if (!render_state(dev, D3DRS_ALPHATESTENABLE)) return 1;
+    const DWORD func = render_state(dev, D3DRS_ALPHAFUNC);
+    if (func != D3DCMP_GREATER && func != D3DCMP_GREATEREQUAL) return 1;  // the game's: GREATER 128
+    const uint32_t ref = render_state(dev, D3DRS_ALPHAREF) & 0xFF;
+    const uint32_t ref_int = (ref << p) | (ref >> (8 - p));
+    const float c[4] = {static_cast<float>((256u << p) - 1u),
+                        static_cast<float>(ref_int) + (func == D3DCMP_GREATER ? 0.5f : -0.5f), 0.5f, 1.0f};
+    dev->SetPixelShaderConstantF(kAlphaConst, c, 1);
+    if (!g_logged_exact) {
+        g_logged_exact = true;
+        LOG_INFO("FixAntialiasingDepth: under DXVK the depth pre-pass's alpha test is made as the colour pass's (%d-bit "
+                 "target, reference %u), so no pixel is drawn by one and not the other",
+                 8 + p, static_cast<unsigned>(ref));
+    }
+    return 5;
+}
+
+// The colour pass's target: render target 0 of the first alpha-tested draw after the pre-pass the size of the depth.
+void watch_colour(IDirect3DDevice9* dev) {
+    if (g_depth_target) {
+        g_watch_colour = true;
+        return;
+    }
+    if (!g_watch_colour || g_rt_w != g_depth_w || g_rt_h != g_depth_h) return;
+    if (!render_state(dev, D3DRS_ALPHATESTENABLE)) return;
+    g_watch_colour = false;
+    g_colour_prec = alpha_precision(g_rt_format);
+}
+
 // Before a draw: coverage on or off, and the sharpened shader in place (true: the game's goes back after the draw).
 bool before_draw(IDirect3DDevice9* dev) {
     if (g_copy_swap && o_set_ps && !(g_depth_diag & 2)) {
         o_set_ps(dev, g_copy_swap);
         return true;
     }
+    if (g_alpha_exact) watch_colour(dev);
     const LONG mode = g_mode;
     bool want = false;
     const bool depth = g_depth_float && g_depth_target && !(g_depth_diag & 1);
     if (g_method == Method::None) {
         if (!depth || !g_game_ps || !o_set_ps) return false;
-        IDirect3DPixelShader9* conv = variant_of(dev, g_game_ps, 1);
+        const int kind = pre_pass_kind(dev, false);
+        IDirect3DPixelShader9* conv = variant_of(dev, g_game_ps, kind);
+        if (!conv && kind != 1) conv = variant_of(dev, g_game_ps, 1);
         if (!conv) return false;
         o_set_ps(dev, conv);
         return true;
@@ -471,7 +563,10 @@ bool before_draw(IDirect3DDevice9* dev) {
         sharpen_it = func == D3DCMP_GREATEREQUAL || func == D3DCMP_GREATER;
     }
     if (!sharpen_it && !depth) return false;
-    IDirect3DPixelShader9* copy = variant_of(dev, g_game_ps, (depth ? 1 : 0) | (sharpen_it ? 2 : 0));
+    const int depth_kind = depth && !sharpen_it ? pre_pass_kind(dev, want) : 1;
+    IDirect3DPixelShader9* copy =
+        variant_of(dev, g_game_ps, depth_kind == 5 ? 5 : (depth ? 1 : 0) | (sharpen_it ? 2 : 0));
+    if (!copy && depth_kind == 5) copy = variant_of(dev, g_game_ps, 1);
     if (!copy && depth && sharpen_it) {
         copy = variant_of(dev, g_game_ps, 1);  // the depth right, the edge plain coverage
         sharpen_it = false;
@@ -524,6 +619,13 @@ HRESULT WINAPI hk_set_rt(IDirect3DDevice9* dev, DWORD index, IDirect3DSurface9* 
         g_multisampled = got && d.MultiSampleType != D3DMULTISAMPLE_NONE;
         // The game's own R32F targets are 64x64 and smaller (its exposure); the depth's are the scene's size.
         g_depth_target = got && d.Format == D3DFMT_R32F && d.Width >= 256;
+        g_rt_format = got ? d.Format : D3DFMT_UNKNOWN;
+        g_rt_w = got ? d.Width : 0;
+        g_rt_h = got ? d.Height : 0;
+        if (g_depth_target) {
+            g_depth_w = d.Width;
+            g_depth_h = d.Height;
+        }
         if (g_multisampled && !g_logged_target) {
             g_logged_target = true;
             const int samples = d.MultiSampleType == D3DMULTISAMPLE_NONMASKABLE ? 0 : static_cast<int>(d.MultiSampleType);
@@ -823,6 +925,13 @@ void atoc_fix_depth_check(IDirect3DDevice9* dev) {
     d3d->Release();
     if (fl) {
         g_depth_float = true;
+        // DXVK (its device answers for ID3D9VkInteropDevice, DXVK 2.1 and later; under Proton Direct3D 9 is DXVK's
+        // unless WineD3D was asked for): its alpha test depends on the target's format (pre_pass_kind).
+        static const GUID kVkInteropDevice = {0x2eaa4b89, 0x0107, 0x4bdb, {0x87, 0xf7, 0x0f, 0x54, 0x1c, 0x49, 0x3c, 0xe0}};
+        IUnknown* vk = nullptr;
+        const bool interop = SUCCEEDED(dev->QueryInterface(kVkInteropDevice, reinterpret_cast<void**>(&vk))) && vk;
+        if (vk) vk->Release();
+        g_alpha_exact = interop || d3d_under_proton();
         install_hooks(dev);
         hook(dev, 34, reinterpret_cast<void*>(&hk_stretch_depth), o_stretch);
         hook(dev, 65, reinterpret_cast<void*>(&hk_set_texture_depth), o_set_texture);
