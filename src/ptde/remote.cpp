@@ -656,15 +656,25 @@ std::vector<IDirect3DQuery9*> g_gt_pool;
 
 // RemoteControl `ab SECONDS ROUNDS A|B` (A/B measurements): command A, then command B, each for SECONDS, ROUNDS times
 // (0: until `ab off`); the first second of each window is left out (shaders made, the picture settled). The GPU's time
-// of every other frame is recorded as gputime does (frames tagged with their window), and the log gets each window's
-// GPU time per frame and frame rate, then each side's averages and the passes that differ (every 10 rounds when
-// ROUNDS is 0). Render thread, except the request (poll thread, under g_ab_lock).
+// of every frame is recorded as gputime does (frames tagged with their window), and the log gets each window's GPU
+// time per frame, frame rate and the player's position, then each side's averages and the passes that differ (every
+// 10 rounds when ROUNDS is 0). Only windows the player spent in the world without moving (under 0.25 m) count, so a
+// test on the Steam Deck (RemoteControlStartup) needs nothing but standing still where the view should be measured.
+// Render thread, except the request (poll thread, under g_ab_lock).
+bool player_position(float* xyz);
 struct AbSide {
     double gpu_ms = 0;
     long gpu_frames = 0;
     double fps_sum = 0;
     int windows = 0;
     std::vector<GtSum> pass;
+};
+struct AbWin {
+    double ms = 0;
+    long frames = 0;
+    std::vector<GtSum> pass;
+    double fps = 0;
+    bool ended = false, still = false, folded = false;
 };
 struct Ab {
     bool on = false;
@@ -674,7 +684,10 @@ struct Ab {
     int window = -1;
     ULONGLONG start = 0, settle = 0;
     long presents = 0;
-    std::vector<std::pair<double, long>> win;  // GPU ms and frames read back, by window
+    bool player = false;     // the player was there at every frame of the window so far
+    float at[3] = {};        // where the window started
+    float moved = 0;         // the farthest from there so far (m)
+    std::vector<AbWin> win;  // by window
     AbSide side[2];
 };
 Ab g_ab;
@@ -689,14 +702,37 @@ void queue_command(const std::string& line) {
     g_queue.push_back(line);
 }
 
+// A window that has ended, into its side's sums when it counts (once; its pass sums freed).
+void ab_fold(int w) {
+    if (w < 0 || w >= static_cast<int>(g_ab.win.size())) return;
+    AbWin& x = g_ab.win[w];
+    if (!x.ended || x.folded) return;
+    x.folded = true;
+    if (x.still && x.frames) {
+        AbSide& s = g_ab.side[w & 1];
+        s.gpu_ms += x.ms;
+        s.gpu_frames += x.frames;
+        s.fps_sum += x.fps;
+        ++s.windows;
+        if (s.pass.size() < x.pass.size()) s.pass.resize(x.pass.size());
+        for (size_t i = 0; i < x.pass.size(); ++i) {
+            s.pass[i].ms += x.pass[i].ms;
+            s.pass[i].draws += x.pass[i].draws;
+            s.pass[i].frames += x.pass[i].frames;
+            if (s.pass[i].label.empty()) s.pass[i].label = x.pass[i].label;
+        }
+    }
+    std::vector<GtSum>().swap(x.pass);
+}
+
 void ab_summary(const char* when) {
     const AbSide* s = g_ab.side;
     double ms[2] = {}, fps[2] = {};
     for (int k = 0; k < 2; ++k) {
         ms[k] = s[k].gpu_frames ? s[k].gpu_ms / s[k].gpu_frames : 0.0;
         fps[k] = s[k].windows ? s[k].fps_sum / s[k].windows : 0.0;
-        LOG_INFO("ab %s: %s \"%s\": GPU %.3f ms a frame (%ld frames), %.1f FPS (%d windows)", when, k ? "B" : "A",
-                 g_ab.cmd[k].c_str(), ms[k], s[k].gpu_frames, fps[k], s[k].windows);
+        LOG_INFO("ab %s: %s \"%s\": GPU %.3f ms a frame (%ld frames), %.1f FPS (%d windows standing still)", when,
+                 k ? "B" : "A", g_ab.cmd[k].c_str(), ms[k], s[k].gpu_frames, fps[k], s[k].windows);
     }
     if (ms[0] > 0 && ms[1] > 0) {
         LOG_INFO("ab %s: B - A: GPU %+.3f ms a frame (%+.1f%%), %+.1f FPS", when, ms[1] - ms[0],
@@ -718,24 +754,23 @@ void ab_summary(const char* when) {
 
 void ab_end_window(ULONGLONG now) {
     const int w = g_ab.window;
+    if (w < 0) return;
     const int k = w & 1;
-    const double secs = static_cast<double>(now - g_ab.settle) / 1000.0;
-    const double fps = secs > 0.1 ? static_cast<double>(g_ab.presents) / secs : 0.0;
-    double ms = 0;
-    long frames = 0;
-    if (w < static_cast<int>(g_ab.win.size())) {
-        ms = g_ab.win[w].first;
-        frames = g_ab.win[w].second;
-    }
-    if (frames) {
-        g_ab.side[k].fps_sum += fps;
-        ++g_ab.side[k].windows;
-    }
-    LOG_INFO("ab window %d %s \"%s\": GPU %.3f ms a frame (%ld frames), %.1f FPS", w, k ? "B" : "A",
-             g_ab.cmd[k].c_str(), frames ? ms / frames : 0.0, frames, fps);
+    if (g_ab.win.size() <= static_cast<size_t>(w)) g_ab.win.resize(w + 1);
+    AbWin& x = g_ab.win[w];
+    const double secs = now > g_ab.settle ? static_cast<double>(now - g_ab.settle) / 1000.0 : 0.0;
+    x.fps = secs > 0.1 ? static_cast<double>(g_ab.presents) / secs : 0.0;
+    x.still = g_ab.player && g_ab.moved < 0.25f;
+    x.ended = true;
+    LOG_INFO("ab window %d %s \"%s\": GPU %.3f ms a frame (%ld frames), %.1f FPS%s at %.1f %.1f %.1f", w, k ? "B" : "A",
+             g_ab.cmd[k].c_str(), x.frames ? x.ms / x.frames : 0.0, x.frames, x.fps,
+             !g_ab.player ? " (not in the world, not counted)" : x.still ? "" : " (moved, not counted)", g_ab.at[0],
+             g_ab.at[1], g_ab.at[2]);
+    ab_fold(w - 1);  // its last frames are read back by now
 }
 
-// At Present (render thread): the request taken, windows switched, the GPU's recording kept going.
+// At Present (render thread): the request taken, windows switched, the player's stillness followed, the GPU's
+// recording kept going.
 void ab_present() {
     {
         std::lock_guard<std::mutex> lock(g_ab_lock);
@@ -743,6 +778,7 @@ void ab_present() {
             g_ab_requested = false;
             if (g_ab.on) {
                 ab_end_window(GetTickCount64());
+                ab_fold(g_ab.window);
                 ab_summary("stopped");
             }
             g_ab = g_ab_request;
@@ -754,10 +790,13 @@ void ab_present() {
     }
     if (!g_ab.on) return;
     const ULONGLONG now = GetTickCount64();
+    float p[3];
+    const bool here = player_position(p);
     if (g_ab.window < 0 || static_cast<double>(now - g_ab.start) >= g_ab.secs * 1000.0) {
         if (g_ab.window >= 0) ab_end_window(now);
         ++g_ab.window;
         if (g_ab.rounds > 0 && g_ab.window >= 2 * g_ab.rounds) {
+            ab_fold(g_ab.window - 1);
             ab_summary("done");
             g_ab.on = false;
             g_gt_left = 0;
@@ -770,28 +809,36 @@ void ab_present() {
         const double settle = g_ab.secs * 1000.0 / 4.0 < 1000.0 ? g_ab.secs * 1000.0 / 4.0 : 1000.0;
         g_ab.settle = now + static_cast<ULONGLONG>(settle);
         g_ab.presents = 0;
+        g_ab.player = here;
+        g_ab.moved = 0;
+        if (here) std::memcpy(g_ab.at, p, sizeof(p));
+        if (g_ab.win.size() <= static_cast<size_t>(g_ab.window)) g_ab.win.resize(g_ab.window + 1);
+    } else if (!here) {
+        g_ab.player = false;
+    } else if (g_ab.player) {
+        const float dx = p[0] - g_ab.at[0], dy = p[1] - g_ab.at[1], dz = p[2] - g_ab.at[2];
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > g_ab.moved) g_ab.moved = d;
     }
     if (now >= g_ab.settle) ++g_ab.presents;
     if (g_gt_left <= 0) g_gt_left = 1;
 }
 
-// A frame read back: its GPU time to its window and side.
+// A frame read back: its GPU time to its window.
 void ab_frame(const GtFrame& f, const std::vector<UINT64>& t, UINT64 freq) {
     if (f.ab_window < 0 || t.size() < 2) return;
-    const double total = static_cast<double>(t.back() - t.front()) * 1000.0 / static_cast<double>(freq);
     if (g_ab.win.size() <= static_cast<size_t>(f.ab_window)) g_ab.win.resize(f.ab_window + 1);
-    g_ab.win[f.ab_window].first += total;
-    ++g_ab.win[f.ab_window].second;
-    AbSide& s = g_ab.side[f.ab_window & 1];
-    s.gpu_ms += total;
-    ++s.gpu_frames;
+    AbWin& x = g_ab.win[f.ab_window];
+    if (x.folded) return;
+    x.ms += static_cast<double>(t.back() - t.front()) * 1000.0 / static_cast<double>(freq);
+    ++x.frames;
     for (size_t i = 0; i + 1 < f.marks.size(); ++i) {
-        if (s.pass.size() <= i) s.pass.resize(i + 1);
-        GtSum& p = s.pass[i];
-        p.ms += static_cast<double>(t[i + 1] - t[i]) * 1000.0 / static_cast<double>(freq);
-        p.draws += f.marks[i + 1].draws;
-        ++p.frames;
-        if (p.label.empty()) p.label = f.marks[i].label;
+        if (x.pass.size() <= i) x.pass.resize(i + 1);
+        GtSum& q = x.pass[i];
+        q.ms += static_cast<double>(t[i + 1] - t[i]) * 1000.0 / static_cast<double>(freq);
+        q.draws += f.marks[i + 1].draws;
+        ++q.frames;
+        if (q.label.empty()) q.label = f.marks[i].label;
     }
 }
 
