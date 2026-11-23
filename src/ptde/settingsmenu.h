@@ -2,9 +2,6 @@
 
 // FPS Unlock Settings: an in-game page with the settings a player would change while playing (see settingsmenu.cpp).
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
 struct IDirect3DDevice9;
 
 // After the settings are read (start-up thread). key: the virtual key that opens the page (0 = none); the
@@ -16,7 +13,7 @@ void settingsmenu_present(IDirect3DDevice9* device);
 // Before the device's Reset.
 void settingsmenu_reset();
 // Every XInput read (xinput_proxy.cpp): takes the buttons for the page, and gives the game none while it is open.
-void settingsmenu_pad(DWORD index, void* state, DWORD result);
+void settingsmenu_pad(unsigned long index, void* state, unsigned long result);
 bool settingsmenu_is_open();
 void settingsmenu_set_open(bool open);  // RemoteControl `settings 0|1`
 

@@ -1,5 +1,9 @@
 #include "settingsmenu.h"
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 #include "atoc.h"
 #include "drawdist.h"
 #include "inputcache.h"
@@ -878,7 +882,7 @@ void settingsmenu_reset() {
     g_sb_dev = nullptr;
 }
 
-void settingsmenu_pad(DWORD index, void* state, DWORD result) {
+void settingsmenu_pad(unsigned long index, void* state, unsigned long result) {
     if (!g_enabled || index > 3) return;
     if (result != 0 || !state) {
         InterlockedExchange(&g_pad_buttons[index], 0);
