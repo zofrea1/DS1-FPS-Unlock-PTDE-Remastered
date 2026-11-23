@@ -24,6 +24,8 @@ bool d3d_dxvk_expected();
 bool d3d_under_proton();
 // After the game's first Direct3DCreate9: whether it went to this mod's DXVK (BorderlessFullscreen = auto).
 bool d3d_created();
+// FullscreenRefreshRate: the PC settings screen's Frequency lists every rate the display offers (not only 59/60).
+bool d3d_refresh_list_patch();
 bool d3d_dxvk_active();
 
 // Content-cadence probe: a hash of every vertex shader constant upload since the previous call

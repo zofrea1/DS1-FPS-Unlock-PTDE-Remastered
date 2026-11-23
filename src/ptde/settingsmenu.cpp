@@ -283,7 +283,7 @@ const SettingsMenuChoice kFps[] = {{"30", L"30"},   {"40", L"40"},   {"45", L"45
                                    {"90", L"90"},   {"100", L"100"}, {"120", L"120"}, {"144", L"144"}, {"165", L"165"},
                                    {"180", L"180"}, {"200", L"200"}, {"225", L"225"}, {"240", L"240"}, {"288", L"288"},
                                    {"300", L"300"}, {"360", L"360"}, {"480", L"480"}};
-const SettingsMenuChoice kRefresh[] = {{"0", L"Highest"}, {"-1", L"The game's own (60 Hz)"}, {"60", L"60 Hz"},
+const SettingsMenuChoice kRefresh[] = {{"0", L"PC settings (else highest)"}, {"-1", L"The game's own"}, {"60", L"60 Hz"},
                                        {"75", L"75 Hz"},  {"100", L"100 Hz"}, {"120", L"120 Hz"}, {"144", L"144 Hz"},
                                        {"165", L"165 Hz"}, {"240", L"240 Hz"}, {"360", L"360 Hz"}};
 const SettingsMenuChoice kAutoOnOff[] = {{"auto", L"Auto"}, {"true", L"On"}, {"false", L"Off"}};
@@ -307,8 +307,8 @@ const SettingsMenuChoice kLod[] = {{"100", L"100% (the game's)"}, {"125", L"125%
 const SettingsMenuRow kDisplay[] = {
     {"MaxFPS", L"Frame rate cap", L"The highest frame rate the game runs at. Keep it a little below what your PC holds "
      L"in busy places, and below your display's refresh rate.", kFps, _countof(kFps), apply_max_fps, false},
-    {"FullscreenRefreshRate", L"Fullscreen refresh rate", L"In fullscreen the game asks for 60 Hz; Highest uses your "
-     L"display's fastest rate at the game's resolution.", kRefresh, _countof(kRefresh), nullptr, false},
+    {"FullscreenRefreshRate", L"Fullscreen refresh rate", L"In fullscreen: the Frequency chosen in the game's PC settings (which now lists every rate), or your "
+     L"display's fastest rate while that is the game's own 60 Hz.", kRefresh, _countof(kRefresh), nullptr, false},
     {"BorderlessFullscreen", L"Borderless fullscreen", L"With the game set to windowed: the window without its frame, "
      L"over the whole screen. Auto: only with DXVK.", kAutoOnOff, _countof(kAutoOnOff), nullptr, false},
     {"UIScale", L"HUD size", L"The size of the HUD and the menus.", kPercentUi, _countof(kPercentUi), apply_ui_scale,

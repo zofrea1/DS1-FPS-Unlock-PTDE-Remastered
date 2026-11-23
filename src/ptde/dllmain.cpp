@@ -120,6 +120,9 @@ DWORD WINAPI worker(void*) {
         LOG_INFO("DSfix not detected");
     }
     dsfix_set_yield(settings.yield_to_dsfix);
+    // The PC settings screen's Frequency: every rate the display offers (FullscreenRefreshRate decides which is used;
+    // DSfix's fullscreenHz does under YieldToDSFix, and -1 keeps the game's own).
+    if (settings.fps_unlock && settings.fullscreen_refresh >= 0 && !dsfix_yields()) d3d_refresh_list_patch();
     if (dsfix_yields()) {
         LOG_INFO("YieldToDSFix: DSfix decides the picture where it has settings of its own: RenderResolution, "
                  "Supersampling, DepthOfFieldStrength, DepthOfFieldResolution, EffectsResolution, WaterResolution, "

@@ -137,6 +137,19 @@ bool aspect_wanted() {
     return settings().fps_unlock && settings().fix_aspect && !dsfix_yields();
 }
 
+// The game's own settings: [[0x1378700]+0x34], the refresh rate (setting 9, DarkSouls.ini [DisplaySettingFullScreen]
+// RefreshRate) at +0xE0 (the PC settings screen's apply writes it through 0xBFE010, its getter reads +0xE0).
+constexpr uintptr_t kGameSettingsHolder = 0x01378700;
+
+void set_game_refresh_rate(UINT rate) {
+    __try {
+        const uintptr_t holder = *reinterpret_cast<const uintptr_t*>(kGameSettingsHolder);
+        const uintptr_t obj = holder ? *reinterpret_cast<const uintptr_t*>(holder + 0x34) : 0;
+        if (obj) *reinterpret_cast<UINT*>(obj + 0xE0) = rate;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 // Fullscreen modes the display offers at the requested size, and the one to use.
 void adjust_present_parameters(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMETERS* pp, const char* where) {
     const Settings& cfg = settings();
@@ -186,6 +199,15 @@ void adjust_present_parameters(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMET
         return;
     }
     UINT chosen = 0;
+    // 0 (auto): the rate chosen in the game's PC settings (Frequency, which lists every rate the display offers with
+    // refresh_list_patch), or the highest while that is still the game's own 59/60 Hz; the game's setting then says
+    // the rate in use, so its screen shows it (and the game keeps it in DarkSouls.ini).
+    const bool game_default = requested == 0 || requested == 59 || requested == 60;
+    if (cfg.fullscreen_refresh == 0 && !game_default) {
+        for (int r = 0; r < rate_count; ++r) {
+            if (rates[r] == requested) chosen = requested;
+        }
+    }
     if (cfg.fullscreen_refresh > 0) {
         // Exact match if offered, otherwise the highest rate not above the request.
         for (int r = 0; r < rate_count; ++r) {
@@ -210,6 +232,7 @@ void adjust_present_parameters(IDirect3D9* d3d, UINT adapter, D3DPRESENT_PARAMET
     }
     LOG_INFO("%s: fullscreen %ux%u offers [%s] Hz; game asked for %u Hz, using %u Hz", where, pp->BackBufferWidth,
              pp->BackBufferHeight, list, requested, chosen);
+    if (cfg.fullscreen_refresh == 0 && game_default && chosen != requested) set_game_refresh_rate(chosen);
     pp->FullScreen_RefreshRateInHz = chosen;
 }
 
@@ -559,6 +582,26 @@ void** find_create_slot() {
 }  // namespace
 
 bool d3d_dxvk_expected() { return dxvk_expected(); }
+
+// The PC settings screen's Frequency: the game lists a fullscreen resolution's modes only at 59 and 60 Hz (its list
+// builder 0xC154D0 keeps a mode whose rate is in {59, 60}: `je 0xC15964` at 0xC15862 skips the others). With the
+// jump gone every rate the display offers at that resolution is listed (the format check stays).
+bool d3d_refresh_list_patch() {
+    static const uint8_t kExpect[6] = {0x0F, 0x84, 0xFC, 0x00, 0x00, 0x00};
+    auto* site = reinterpret_cast<uint8_t*>(0x00C15862);
+    if (std::memcmp(site, kExpect, sizeof(kExpect)) != 0) {
+        LOG_ERROR("FullscreenRefreshRate: the PC settings screen's rate filter does not match this build; it keeps "
+                  "59 and 60 Hz");
+        return false;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(site, sizeof(kExpect), PAGE_EXECUTE_READWRITE, &old)) return false;
+    std::memset(site, 0x90, sizeof(kExpect));
+    VirtualProtect(site, sizeof(kExpect), old, &old);
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(kExpect));
+    LOG_INFO("FullscreenRefreshRate: the PC settings screen's Frequency lists every rate the display offers");
+    return true;
+}
 bool d3d_created() { return g_d3d_created; }
 bool d3d_dxvk_active() { return g_dxvk_active; }
 bool d3d_under_proton() {
