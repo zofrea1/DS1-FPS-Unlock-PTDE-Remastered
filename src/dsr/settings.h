@@ -165,7 +165,15 @@ struct Settings {
     bool fix_script_memory = true;
     // Hardware write-watch on character height (implies trace). Diagnostic only.
     bool watch = false;
+    // FPS Unlock Settings: the in-game page (settingsmenu.h), opened with SettingsMenuKey (a virtual key, F1 by
+    // default; 0 = none) or Y on a controller in the game's PC settings screen.
+    bool settings_menu = true;
+    int settings_menu_key = 0x70;
 };
+
+// Whether the Prepare to Die Edition effects mod is installed in the game folder DIR (more than half of Remastered's
+// effect archives replaced): what auto means for SfxDistortionPtdeSpeed, SfxSwayPtdeSpeed and SfxTrailsPtdeSpeed.
+bool settings_effects_mod_installed(const wchar_t* dir);
 
 // Reads DSR-FPS-Unlock.ini from the same directory as the DLL.
 Settings settings_load(const wchar_t* dll_path);

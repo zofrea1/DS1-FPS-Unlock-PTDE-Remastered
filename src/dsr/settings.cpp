@@ -157,6 +157,13 @@ Settings settings_read(const wchar_t* dll_path) {
         const std::string val = trim(line.substr(eq + 1));
         if (key == "fpsunlock") {
             s.fps_unlock = parse_bool(val);
+        } else if (key == "settingsmenu") {
+            s.settings_menu = parse_bool(val);
+        } else if (key == "settingsmenukey") {
+            // F1 to F12, or none.
+            const std::string v = lower(trim(val));
+            const int n = (v.size() >= 2 && v[0] == 'f') ? std::atoi(v.c_str() + 1) : 0;
+            s.settings_menu_key = (n >= 1 && n <= 12) ? 0x70 + n - 1 : 0;
         } else if (key == "maxfps" || key == "targetfps") {
             s.target_fps = parse_max_fps(val, s.target_fps);
         } else if (key == "variableframetime") {
@@ -274,6 +281,19 @@ Settings settings_read(const wchar_t* dll_path) {
         }
     }
     return s;
+}
+
+bool settings_effects_mod_installed(const wchar_t* dir) {
+    int replaced = 0;
+    for (const EffectArchive& a : kEffectArchives) {
+        wchar_t file[MAX_PATH];
+        _snwprintf_s(file, _TRUNCATE, L"%ssfx\\%s", dir, a.name);
+        WIN32_FILE_ATTRIBUTE_DATA info{};
+        if (!GetFileAttributesExW(file, GetFileExInfoStandard, &info)) continue;
+        const unsigned long long size = (static_cast<unsigned long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+        if (size != a.size) ++replaced;
+    }
+    return replaced * 2 > kEffectArchiveCount;
 }
 
 Settings settings_load(const wchar_t* dll_path) {

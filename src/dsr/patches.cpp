@@ -71,6 +71,12 @@ constexpr uint32_t kPacerMeasureReturn = 0xCE35C2;
 // Frame pacer clock (see hook_qpc_pacer): our anchor in real counts and the game's anchor it belongs to.
 int64_t g_pacer_anchor = 0;
 int64_t g_pacer_game_anchor = -1;
+// The pacer's clock reads g_pacer_value + (counter - g_pacer_anchor) * TargetFPS / 60: g_pacer_value is what it read at
+// g_pacer_anchor, when it started or the cap last changed (FPS Unlock Settings changes it while the game runs), so it
+// goes on from where it was at the new rate instead of jumping to where the new rate would have put it since the start
+// (a lower cap jumped it back by every frame the higher one had run ahead, and the game waited that long).
+int64_t g_pacer_value = 0;
+int64_t g_pacer_target = 0;
 int64_t g_qpc_freq = 0;
 std::atomic<uint64_t> g_pacer_on_time{0};
 void* g_qpc_thunk = nullptr;
@@ -279,9 +285,19 @@ BOOL hook_qpc_pacer(LARGE_INTEGER* counter, uint8_t* loop) {
         }
         g_pacer_game_anchor = game_anchor;
         g_pacer_anchor = real;
+        g_pacer_value = real;
     }
     const int64_t target = g_target_fps.load(std::memory_order_relaxed);
-    int64_t value = g_pacer_anchor + (real - g_pacer_anchor) * target / 60;
+    if (target != g_pacer_target) {
+        if (g_pacer_target != 0) {
+            g_pacer_value += (real - g_pacer_anchor) * g_pacer_target / 60;
+            g_pacer_anchor = real;
+            LOG_INFO("Frame pacer: cap %lld -> %lld FPS", static_cast<long long>(g_pacer_target),
+                     static_cast<long long>(target));
+        }
+        g_pacer_target = target;
+    }
+    int64_t value = g_pacer_value + (real - g_pacer_anchor) * target / 60;
     if (measure && g_qpc_freq > 0) {
         const int64_t frames = (value - game_anchor) * static_cast<int64_t>(rate) / g_qpc_freq;
         const int64_t late = frames - static_cast<int64_t>(next);

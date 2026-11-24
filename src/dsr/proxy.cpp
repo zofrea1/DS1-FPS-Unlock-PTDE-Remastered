@@ -15,7 +15,7 @@ using GetDeviceStateFn = HRESULT(WINAPI*)(void*, DWORD, void*);
 using GetDeviceDataFn = HRESULT(WINAPI*)(void*, DWORD, void*, DWORD*, DWORD);
 
 constexpr int kMaxInterfaces = 4;
-constexpr int kMaxVtables = 4;
+constexpr int kMaxVtables = 16;
 constexpr int kMaxDevices = 32;
 
 struct InterfaceHook {
@@ -58,6 +58,14 @@ std::atomic<uint64_t> g_mouse_report_ms{0};
 // GUID_SysMouse. The keyboard and gamepad are left alone.
 constexpr GUID kSystemMouse = {
     0x6F1D2B60, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+// GUID_SysKeyboard: only watched for FPS Unlock Settings (its keys; nothing for the game while the page is open).
+constexpr GUID kSystemKeyboard = {
+    0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+constexpr int kMaxKeyboards = 8;
+void* volatile g_keyboards[kMaxKeyboards] = {};
+volatile uint8_t g_keys[256] = {};        // the keyboard as the game last read it (DirectInput key codes, 0x80 = down)
+std::atomic<int> g_blank{0};              // the game gets no keyboard or mouse input
+std::atomic<int> g_keyboard_logged{0};
 
 void spin_lock(std::atomic<int>& lock) {
     while (lock.exchange(1, std::memory_order_acquire) != 0) {
@@ -69,10 +77,16 @@ void spin_unlock(std::atomic<int>& lock) {
     lock.store(0, std::memory_order_release);
 }
 
-bool same_guid(const GUID* guid) {
-    return guid && guid->Data1 == kSystemMouse.Data1 && guid->Data2 == kSystemMouse.Data2 &&
-           guid->Data3 == kSystemMouse.Data3 &&
-           memcmp(guid->Data4, kSystemMouse.Data4, sizeof(guid->Data4)) == 0;
+bool same_guid(const GUID* guid, const GUID& want = kSystemMouse) {
+    return guid && guid->Data1 == want.Data1 && guid->Data2 == want.Data2 && guid->Data3 == want.Data3 &&
+           memcmp(guid->Data4, want.Data4, sizeof(guid->Data4)) == 0;
+}
+
+bool is_keyboard(void* device) {
+    for (void* k : g_keyboards) {
+        if (k && k == device) return true;
+    }
+    return false;
 }
 
 bool executable(const void* address) {
@@ -199,6 +213,17 @@ HRESULT WINAPI hook_get_device_state(void* device, DWORD size, void* state) {
         return E_FAIL;
     }
     const HRESULT result = original(device, size, state);
+    if (SUCCEEDED(result) && state && size == 256 && is_keyboard(device)) {
+        const auto* keys = static_cast<const uint8_t*>(state);
+        for (int i = 0; i < 256; ++i) g_keys[i] = keys[i];
+        if (g_keyboard_logged.exchange(1) == 0) LOG_INFO("FPS Unlock Settings: the game reads its keyboard (state)");
+        if (g_blank.load(std::memory_order_acquire) != 0) memset(state, 0, size);
+        return result;
+    }
+    if (SUCCEEDED(result) && state && mouse && g_blank.load(std::memory_order_acquire) != 0) {
+        memset(state, 0, size);
+        return result;
+    }
     if (SUCCEEDED(result) && state && mouse && (size == 16 || size == 20) &&
         g_scheduler_active.load(std::memory_order_acquire) != 0) {
         auto* axes = static_cast<LONG*>(state);
@@ -230,6 +255,25 @@ HRESULT WINAPI hook_get_device_data(void* device, DWORD object_size, void* objec
         return E_FAIL;
     }
     const HRESULT result = original(device, object_size, objects, count, flags);
+    if (SUCCEEDED(result) && count && is_keyboard(device)) {
+        // Buffered key events: the keys follow them (a press and release inside one frame still counts as a press
+        // until the next read).
+        if (objects && object_size >= 8 && !(flags & 1)) {
+            const auto* object = static_cast<const uint8_t*>(objects);
+            for (DWORD i = 0; i < *count; ++i, object += object_size) {
+                const DWORD offset = *reinterpret_cast<const DWORD*>(object);
+                const DWORD data = *reinterpret_cast<const DWORD*>(object + sizeof(DWORD));
+                if (offset < 256) g_keys[offset] = (data & 0x80) ? 0x80 : 0;
+            }
+        }
+        if (g_keyboard_logged.exchange(1) == 0) LOG_INFO("FPS Unlock Settings: the game reads its keyboard (buffered)");
+        if (g_blank.load(std::memory_order_acquire) != 0) *count = 0;
+        return result;
+    }
+    if (SUCCEEDED(result) && count && mouse && g_blank.load(std::memory_order_acquire) != 0) {
+        *count = 0;
+        return result;
+    }
     if (SUCCEEDED(result) && objects && count && object_size >= 8 && mouse &&
         g_scheduler_active.load(std::memory_order_acquire) != 0) {
         auto* object = static_cast<uint8_t*>(objects);
@@ -257,7 +301,7 @@ HRESULT WINAPI hook_get_device_data(void* device, DWORD object_size, void* objec
     return result;
 }
 
-bool hook_mouse_device(void* device) {
+bool hook_mouse_device(void* device, bool keyboard = false) {
     if (!device) {
         return false;
     }
@@ -293,6 +337,18 @@ bool hook_mouse_device(void* device) {
             spin_unlock(g_mouse_lock);
             return false;
         }
+    }
+    if (keyboard) {
+        // Its reads go through the same hooked methods (the device class's table is shared); kept apart by pointer.
+        bool placed = is_keyboard(device);
+        for (auto& k : g_keyboards) {
+            if (!placed && !k) {
+                k = device;
+                placed = true;
+            }
+        }
+        spin_unlock(g_mouse_lock);
+        return placed;
     }
     for (auto& mouse : g_devices) {
         if (mouse.device == device) {
@@ -333,6 +389,13 @@ HRESULT WINAPI hook_create_device(void* direct_input, const GUID* guid, void** o
     const HRESULT result = original(direct_input, guid, output, outer);
     if (SUCCEEDED(result) && output && *output && same_guid(guid) && !hook_mouse_device(*output)) {
         LOG_ERROR("Could not scale the system mouse (Win32=%lu)", GetLastError());
+    }
+    if (SUCCEEDED(result) && output && *output && same_guid(guid, kSystemKeyboard) &&
+        !hook_mouse_device(*output, true)) {
+        void** vt = *reinterpret_cast<void***>(*output);
+        LOG_ERROR("Could not watch a system keyboard device for FPS Unlock Settings (device %p, method table %p, "
+                  "reads at %p / %p)",
+                  *output, static_cast<void*>(vt), vt ? vt[9] : nullptr, vt ? vt[10] : nullptr);
     }
     return result;
 }
@@ -388,6 +451,9 @@ BOOL CALLBACK load_system(PINIT_ONCE, PVOID, PVOID*) {
 }
 
 }  // namespace
+
+bool proxy_key(int dik) { return dik > 0 && dik < 256 && (g_keys[dik] & 0x80) != 0; }
+void proxy_set_blank(bool on) { g_blank.store(on ? 1 : 0, std::memory_order_release); }
 
 extern "C" HRESULT WINAPI DirectInput8Create(HINSTANCE instance, DWORD version,
                                               const GUID* interface_id, void** output, void* outer) {

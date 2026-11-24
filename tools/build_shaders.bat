@@ -11,6 +11,11 @@ if not defined FXC (
 )
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kDofCompositePs /Fh src\ptde\shaders\dof_composite_ps.h src\ptde\shaders\dof_composite.hlsl
 if errorlevel 1 exit /b 1
+rem Remastered (Direct3D 11): FPS Unlock Settings' overlay.
+%FXC% /nologo /T vs_4_0 /E vs_main /O3 /Vn kOverlayVs /Fh src\dsr\shaders\overlay_vs.h src\dsr\shaders\overlay.hlsl
+if errorlevel 1 exit /b 1
+%FXC% /nologo /T ps_4_0 /E ps_main /O3 /Vn kOverlayPs /Fh src\dsr\shaders\overlay_ps.h src\dsr\shaders\overlay.hlsl
+if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /D SIDE_ALPHA=1 /Vn kDofCompositeSidePs /Fh src\ptde\shaders\dof_composite_side_ps.h src\ptde\shaders\dof_composite.hlsl
 if errorlevel 1 exit /b 1
 %FXC% /nologo /T ps_3_0 /E main /O3 /Vn kHdrColAdjPs /Fh src\ptde\shaders\hdr_coladj_ps.h src\ptde\shaders\hdr_coladj.hlsl

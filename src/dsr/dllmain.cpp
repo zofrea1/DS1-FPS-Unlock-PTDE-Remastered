@@ -4,6 +4,8 @@
 #include "log.h"
 #include "patches.h"
 #include "settings.h"
+#include "settingsmenu.h"
+#include "overlay.h"
 #include "state.h"
 #include "trace.h"
 #include "fpsu_version.h"
@@ -151,6 +153,7 @@ DWORD WINAPI worker(void*) {
     LOG_INFO("FixTimers: %s, FixSmoothing: %s, FixVelocity: %s, FixScriptMemory: %s", settings.fix_timers ? "true" : "false",
              settings.fix_smoothing ? "true" : "false", settings.fix_velocity ? "true" : "false",
              settings.fix_script_memory ? "true" : "false");
+    settingsmenu_install(dll_path, settings);
     if (!patches_apply()) {
         LOG_ERROR("FPS unlock was not installed.");
     } else if (settings.bonfire_unstick) {
@@ -171,6 +174,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
             return TRUE;
         }
         g_is_game.store(1, std::memory_order_release);
+        // FPS Unlock Settings draws in the game's swap chain: its DXGI factory is watched from the start (the
+        // game makes it early; only that import is changed here, and what it leads to passes straight on unless
+        // the page is on).
+        overlay_early();
         HANDLE thread = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
         if (thread) {
             CloseHandle(thread);

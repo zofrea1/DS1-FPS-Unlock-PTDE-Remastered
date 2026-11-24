@@ -238,7 +238,7 @@ Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is wel
 
 **Prepare to Co-op Edition.** Prepare to Co-op Edition, a co-op mod for Prepare to Die Edition by the same author, is a separate mod with [its own repository](https://github.com/zofrea1/DS1-Prepare-to-Coop-PTDE). It is built on this mod and includes it: its `xinput1_3.dll` is this mod plus the co-op, and its settings file, `PTDE-Coop-FPS-Unlock.ini`, has this mod's settings as well as its own (that build also reads a `PTDE-FPS-Unlock.ini`, but only when no `PTDE-Coop-FPS-Unlock.ini` is there). If you have Prepare to Co-op, you have the FPS Unlock; do not install both.
 
-## FPS Unlock Settings (Prepare to Die Edition)
+## FPS Unlock Settings
 
 An in-game page with the settings you may want to change while playing: press **F1** (`SettingsMenuKey`, F1 to F12 or none), or **Y** on a controller in the game's PC settings screen (a line at the bottom of that screen says so). Up/down chooses a row, left/right changes it, LB/RB (or Q/E) turns the page, B or Esc closes it; while it is open the game gets no controller, keyboard or mouse input.
 
@@ -249,6 +249,14 @@ An in-game page with the settings you may want to change while playing: press **
 
 Each change is written to the INI at once (only the value on that setting's line changes). The page says when a row applies: at once (the frame rate cap, the HUD size, depth of field, smooth foliage edges, the draw distance rows), after a restart of the game (the rest), or, for the co-op rows, at once when no session runs and otherwise when the current one ends. The fixes, speed-ups and diagnostics stay in the INI only. `SettingsMenu = false` turns the page off.
 
+
+**Remastered** has the same page (F1, or Y in the game's PC settings screen; the same controls), with its own rows:
+
+- **Frame rate**: the frame rate cap (at once), real time when the frame rate dips (`VariableFrameTime`, at once), menu presses counted once, standing up from a stuck bonfire, starting offline, skipping the start-up logos.
+- **Movement**: for each movement switch, the original game's feel or Remastered's: lock-on turn speed, sliding off a slope, walls and corners, ground that drops away, step height, momentum in the air, feet on stairs and slopes, slides, stick timing.
+- **Timing**: the same for the HUD bars, poison and other effects, scripted waits, crawling and repeating attacks, heat haze, swaying particles and trails (the last three also Auto: the original game's with the PTDE effects mod installed).
+
+All of them apply at once except menu presses, the bonfire, stick timing, heat haze and trails (after a restart) and starting offline and the logos (at the next start). Changing the cap while the game runs keeps the frame pacer's clock continuous (before, a lower cap set the clock back by every frame the higher one had run ahead, and the game waited that long). The page is drawn in the swap chain's Present with Direct3D 11 (every piece of state it touches is put back); the controller is read through the game's own XInput import, the keyboard through its DirectInput keyboard and its user32 key reads, and while the page is open the game gets none of them.
 ## Recommended display mode
 
 - **Remastered: borderless fullscreen** gives the best compatibility with monitors, frame pacing and VRR.

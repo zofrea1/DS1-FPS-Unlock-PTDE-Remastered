@@ -20,23 +20,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
-#include <mutex>
 #include <string>
-#include <vector>
 
-#pragma comment(lib, "gdi32.lib")
-
-// FPS Unlock Settings: a page drawn over the game with the settings a player would reasonably change while playing
-// (the frame cap, the display, the picture, the draw distance; a bundled mod adds its own page). The fixes, speed-ups
-// and diagnostics stay in the INI only. Opened with a key (SettingsMenuKey, F1 by default) or, on a controller, with Y
-// while the game's PC settings screen is up; while it is open the game gets no controller, keyboard or mouse input.
-// Every change is written to the INI at once (only the value on that key's line changes); a row the mod can apply
-// while the game runs takes effect at once, the others say they apply after a restart.
+// FPS Unlock Settings in Prepare to Die Edition (the page itself, the INI and the controls: src/common/settingspage.cpp).
+// Here: its rows, the Direct3D 9 drawing and the game's controls.
 //
-// The page is text drawn with GDI into a bitmap, uploaded to a texture when it changes, and drawn over the finished
-// frame in the device's Present (state saved and put back with a state block, the render target and depth buffer by
-// hand). The PC settings screen (NS_FRPG::FrpgMenuDlgPcOption, method table 0x11D28E4) is noticed by its Draw (slot
-// 0x48, thiscall(dlg, dc), on the game thread): while it draws, Y opens the page and a line at the bottom says so.
+// The page's picture is uploaded to a texture when it changes and drawn over the finished frame in the device's
+// Present (state saved and put back with a state block, the render target and depth buffer by hand). The PC settings
+// screen (NS_FRPG::FrpgMenuDlgPcOption, method table 0x11D28E4) is noticed by its Draw (slot 0x48, thiscall(dlg, dc),
+// on the game thread): while it draws, Y opens the page and a line at the bottom says so. The keys come from the
+// game's DirectInput keyboard state (inputcache.cpp; no GetAsyncKeyState in the release DLL), the controller from
+// every XInput read (xinput_proxy.cpp), and while the page is open (until every button is let go after closing) the
+// game gets neither.
 namespace {
 
 constexpr uintptr_t kPcOptionVtable = 0x011D28E4;
@@ -51,261 +46,19 @@ void* __fastcall hk_pcoption_draw(void* dlg, void* edx, void* dc) {
     return g_pcoption_draw(dlg, edx, dc);
 }
 
-// ---------------------------------------------------------------- model
-struct Row {
-    SettingsMenuRow def{};
-    std::vector<SettingsMenuChoice> choices;
-    std::string custom;          // an INI value not among the choices (kept as the first entry)
-    std::wstring custom_label;
-    int current = 0;
-    bool restart = false;        // changed, applies after a restart
-    std::string text;            // text rows
-};
-struct Page {
-    std::wstring title;
-    std::vector<Row> rows;
-};
-
-std::recursive_mutex g_lock;  // pages, rows, the INI file
-std::vector<Page> g_pages;
-std::wstring g_ini;
-int g_key = VK_F1;
-bool g_enabled = false;
-
-volatile LONG g_open = 0;
-volatile LONG g_swallow = 0;  // after closing: the game gets no input until every button is let go
-int g_page = 0, g_row = 0, g_scroll = 0;
-bool g_editing = false;
-std::string g_edit;
-int g_edit_page = -1, g_edit_row = -1;  // the row being typed into
-bool g_was_key[0x5B] = {};
-bool g_was_space = false, g_was_minus = false;
-
-// The controller: each slot's latest reading (the game thread writes, the render thread reads).
-volatile LONG g_pad_buttons[4] = {};
-volatile LONG g_pad_stick[4] = {};  // lx in the low 16 bits, ly in the high 16
-
-volatile LONG g_dirty = 1;
-
 std::string lower(std::string s) {
     for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
 }
-std::string trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && (s[a] == ' ' || s[a] == '\t')) ++a;
-    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) --b;
-    return s.substr(a, b - a);
-}
-std::wstring widen(const std::string& s) {
-    std::wstring w(s.size(), L' ');
-    for (size_t i = 0; i < s.size(); ++i) w[i] = static_cast<unsigned char>(s[i]);
-    return w;
-}
 
-// ---------------------------------------------------------------- the INI
-bool read_ini(std::string* text) {
-    HANDLE f = CreateFileW(g_ini.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0,
-                           nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-    const DWORD size = GetFileSize(f, nullptr);
-    text->assign(size, '\0');
-    DWORD got = 0;
-    const BOOL ok = size == 0 || ReadFile(f, &(*text)[0], size, &got, nullptr);
-    CloseHandle(f);
-    text->resize(got);
-    return ok != FALSE;
-}
+// The controller: each slot's latest reading (the game thread writes, the render thread reads).
+volatile LONG g_pad_buttons[4] = {};
+volatile LONG g_pad_stick[4] = {};  // lx in the low 16 bits, ly in the high 16
+volatile LONG g_blank = 0;          // the page has the controls (settingspage's blank callback)
 
-// The line of KEY (the first that is not a comment or a section): its start and the start/end of its value.
-bool find_key(const std::string& text, const char* key, size_t* value_at, size_t* value_end) {
-    const std::string want = lower(key);
-    size_t at = 0;
-    while (at < text.size()) {
-        size_t end = text.find('\n', at);
-        if (end == std::string::npos) end = text.size();
-        size_t p = at;
-        while (p < end && (text[p] == ' ' || text[p] == '\t')) ++p;
-        if (p < end && text[p] != '#' && text[p] != ';' && text[p] != '[') {
-            const size_t eq = text.find('=', p);
-            if (eq != std::string::npos && eq < end && lower(trim(text.substr(p, eq - p))) == want) {
-                size_t v = eq + 1;
-                while (v < end && (text[v] == ' ' || text[v] == '\t')) ++v;
-                size_t e = end;
-                while (e > v && (text[e - 1] == '\r' || text[e - 1] == ' ' || text[e - 1] == '\t')) --e;
-                *value_at = v;
-                *value_end = e;
-                return true;
-            }
-        }
-        at = end + 1;
-    }
-    return false;
-}
-
-bool ini_value(const std::string& text, const char* key, std::string* out) {
-    size_t v = 0, e = 0;
-    if (!find_key(text, key, &v, &e)) return false;
-    *out = text.substr(v, e - v);
-    return true;
-}
-
-// Writes KEY = VALUE: the value on the key's line is replaced, or the line is added at the end.
-// Changes not yet in the INI, in the order made. Another program (an antivirus scan of the file just written, an
-// editor) can hold the INI for a moment so that it cannot be replaced (seen: Win32 5 while a row was changed several
-// times a second); what could not be written is kept and tried again every frame until it is (flush_ini).
-std::vector<std::pair<std::string, std::string>> g_pending;
-ULONGLONG g_retry_at = 0;
-DWORD g_failing = 0;        // the Win32 error of the current run of failures (0: none), logged once per run
-ULONGLONG g_fail_since = 0;  // when that run began; still failing 5 s later is an error
-bool g_fail_reported = false;
-
-bool flush_ini() {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    if (g_pending.empty()) return true;
-    std::string text;
-    DWORD err = 0;
-    const char* step = "read";
-    if (read_ini(&text)) {
-        for (const auto& kv : g_pending) {
-            size_t v = 0, e = 0;
-            if (find_key(text, kv.first.c_str(), &v, &e)) {
-                text.replace(v, e - v, kv.second);
-            } else {
-                const bool crlf = text.find("\r\n") != std::string::npos;
-                if (!text.empty() && text.back() != '\n') text += crlf ? "\r\n" : "\n";
-                text += kv.first + " = " + kv.second + (crlf ? "\r\n" : "\n");
-            }
-        }
-        const std::wstring tmp = g_ini + L".settingsmenu.tmp";
-        HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        step = "write";
-        if (f == INVALID_HANDLE_VALUE) {
-            err = GetLastError();
-        } else {
-            DWORD put = 0;
-            const BOOL ok = WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &put, nullptr);
-            if (!ok || put != text.size()) err = ok ? ERROR_WRITE_FAULT : GetLastError();
-            CloseHandle(f);
-            if (!err) {
-                step = "replace";
-                if (!MoveFileExW(tmp.c_str(), g_ini.c_str(), MOVEFILE_REPLACE_EXISTING)) err = GetLastError();
-            }
-            if (err) DeleteFileW(tmp.c_str());
-        }
-    } else {
-        err = ERROR_READ_FAULT;
-    }
-    if (err) {
-        const ULONGLONG now = GetTickCount64();
-        if (!g_failing) {
-            g_fail_since = now;
-            g_fail_reported = false;
-        }
-        if (g_failing != err) {
-            LOG_INFO("FPS Unlock Settings: could not %s the INI (Win32=%lu; another program may hold it for a "
-                     "moment); %zu change(s) kept and tried again",
-                     step, err, g_pending.size());
-        }
-        if (!g_fail_reported && now - g_fail_since > 5000) {
-            LOG_ERROR("FPS Unlock Settings: the INI could not be written for 5 s (Win32=%lu); %zu change(s) are not "
-                      "saved yet (still trying)",
-                      err, g_pending.size());
-            g_fail_reported = true;
-        }
-        g_failing = err;
-        g_retry_at = now + 100;
-        return false;
-    }
-    for (const auto& kv : g_pending) {
-        LOG_INFO("FPS Unlock Settings: %s = %s written to the INI%s", kv.first.c_str(), kv.second.c_str(),
-                 g_failing ? " (on a later try)" : "");
-    }
-    g_pending.clear();
-    g_failing = 0;
-    return true;
-}
-
-bool write_ini(const char* key, const std::string& value) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    bool found = false;
-    for (auto& kv : g_pending) {
-        if (kv.first == key) {
-            kv.second = value;
-            found = true;
-        }
-    }
-    if (!found) g_pending.emplace_back(key, value);
-    return flush_ini();
-}
-
-bool same_value(const std::string& a, const std::string& b) {
-    const std::string x = lower(trim(a)), y = lower(trim(b));
-    if (x == y) return true;
-    char* ea = nullptr;
-    char* eb = nullptr;
-    const double da = std::strtod(x.c_str(), &ea), db = std::strtod(y.c_str(), &eb);
-    return ea != x.c_str() && eb != y.c_str() && *ea == 0 && *eb == 0 && da == db;
-}
-
-void load_row(Row& row, const std::string& text) {
-    std::string value;
-    const bool found = ini_value(text, row.def.key, &value);
-    if (row.def.text) {
-        row.text = found ? value : "";
-        return;
-    }
-    row.current = 0;
-    if (!found) return;  // the first choice is the default
-    for (size_t i = 0; i < row.choices.size(); ++i) {
-        if (same_value(row.choices[i].ini, value)) {
-            row.current = static_cast<int>(i);
-            return;
-        }
-    }
-    row.custom = value;
-    row.custom_label = widen(value);
-    row.choices.insert(row.choices.begin(), SettingsMenuChoice{row.custom.c_str(), row.custom_label.c_str()});
-    row.current = 0;
-}
-
-void add_page(const wchar_t* title, const SettingsMenuRow* rows, int count) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    std::string text;
-    read_ini(&text);
-    Page page;
-    page.title = title;
-    page.rows.reserve(count);
-    for (int i = 0; i < count; ++i) {
-        Row row;
-        row.def = rows[i];
-        row.choices.assign(rows[i].choices, rows[i].choices + rows[i].choice_count);
-        page.rows.push_back(row);
-    }
-    g_pages.push_back(std::move(page));
-    for (Row& row : g_pages.back().rows) {
-        load_row(row, text);
-        // custom points into the row's own string: fix up after the row has its final place
-        if (!row.custom.empty()) {
-            row.choices[0].ini = row.custom.c_str();
-            row.choices[0].label = row.custom_label.c_str();
-        }
-    }
-    InterlockedExchange(&g_dirty, 1);
-}
-
-void change(Row& row, int step) {
-    if (row.def.text || row.choices.empty()) return;
-    const int n = static_cast<int>(row.choices.size());
-    row.current = ((row.current + step) % n + n) % n;
-    const char* value = row.choices[row.current].ini;
-    write_ini(row.def.key, value);
-    if (row.def.apply) {
-        row.def.apply(value);
-    } else {
-        row.restart = true;
-    }
-    InterlockedExchange(&g_dirty, 1);
+void blank(bool on) {
+    InterlockedExchange(&g_blank, on ? 1 : 0);
+    inputcache_set_blank(on);
 }
 
 // ---------------------------------------------------------------- the FPS Unlock's rows
@@ -411,224 +164,52 @@ const SettingsMenuRow kDistance[] = {
 };
 
 // ---------------------------------------------------------------- drawing
-struct Surface {
-    int w = 0, h = 0;
-    HDC dc = nullptr;
-    HBITMAP bmp = nullptr;
-    HGDIOBJ old = nullptr;
-    uint32_t* bits = nullptr;
+struct Tex {
     IDirect3DTexture9* tex = nullptr;
-    bool uploaded = false;
+    unsigned version = 0;
+    int w = 0, h = 0;
 };
-Surface g_panel, g_hint;
+Tex g_panel_tex, g_hint_tex;
 IDirect3DStateBlock9* g_sb = nullptr;
 IDirect3DDevice9* g_sb_dev = nullptr;
-int g_built_h = 0;
 
-bool make_surface(Surface& s, int w, int h) {
-    if (s.w == w && s.h == h && s.dc) return true;
-    if (s.dc) {
-        SelectObject(s.dc, s.old);
-        DeleteObject(s.bmp);
-        DeleteDC(s.dc);
-        s.dc = nullptr;
-    }
-    if (s.tex) {
-        s.tex->Release();
-        s.tex = nullptr;
-    }
-    BITMAPINFO bi{};
-    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = -h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    s.dc = CreateCompatibleDC(nullptr);
-    s.bmp = s.dc ? CreateDIBSection(s.dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
-    if (!s.bmp) {
-        if (s.dc) DeleteDC(s.dc);
-        s.dc = nullptr;
-        return false;
-    }
-    s.old = SelectObject(s.dc, s.bmp);
-    s.bits = static_cast<uint32_t*>(bits);
-    s.w = w;
-    s.h = h;
-    s.uploaded = false;
-    return true;
+void drop(Tex& t) {
+    if (t.tex) t.tex->Release();
+    t = Tex{};
 }
 
-HFONT font(int px, bool bold) {
-    return CreateFontW(-px, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, VARIABLE_PITCH | FF_ROMAN,
-                       L"Georgia");
-}
-
-void fill(Surface& s, int x, int y, int w, int h, COLORREF c) {
-    RECT r{x, y, x + w, y + h};
-    HBRUSH b = CreateSolidBrush(c);
-    FillRect(s.dc, &r, b);
-    DeleteObject(b);
-}
-
-void text(Surface& s, HFONT f, COLORREF c, int x, int y, int w, int h, const wchar_t* str, UINT flags) {
-    HGDIOBJ was = SelectObject(s.dc, f);
-    SetTextColor(s.dc, c);
-    SetBkMode(s.dc, TRANSPARENT);
-    RECT r{x, y, x + w, y + h};
-    DrawTextW(s.dc, str, -1, &r, flags | DT_NOPREFIX);
-    SelectObject(s.dc, was);
-}
-
-// Every pixel gets the alpha (GDI leaves it 0).
-void set_alpha(Surface& s, uint8_t a) {
-    const size_t n = static_cast<size_t>(s.w) * s.h;
-    for (size_t i = 0; i < n; ++i) s.bits[i] = (s.bits[i] & 0x00FFFFFFu) | (static_cast<uint32_t>(a) << 24);
-}
-
-constexpr COLORREF kColBack = RGB(14, 12, 10), kEdge = RGB(120, 96, 58), kGold = RGB(214, 186, 128),
-                   kWhite = RGB(232, 228, 218), kGrey = RGB(150, 144, 132), kSel = RGB(96, 34, 14),
-                   kLive = RGB(150, 196, 140), kLater = RGB(222, 164, 92);
-
-void build_panel(int screen_h) {
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    const float k = static_cast<float>(screen_h) / 1080.0f;
-    auto K = [k](int v) { return static_cast<int>(v * k + 0.5f); };
-    const int W = K(1160), H = K(860);
-    if (!make_surface(g_panel, W, H)) return;
-    Surface& s = g_panel;
-    fill(s, 0, 0, W, H, kColBack);
-    fill(s, 0, 0, W, K(2), kEdge);
-    fill(s, 0, H - K(2), W, K(2), kEdge);
-    fill(s, 0, 0, K(2), H, kEdge);
-    fill(s, W - K(2), 0, K(2), H, kEdge);
-    HFONT title = font(K(40), true), tab = font(K(26), false), rowf = font(K(29), false), smallf = font(K(23), false);
-    text(s, title, kGold, K(40), K(22), W - K(80), K(56), L"FPS Unlock Settings", DT_LEFT | DT_SINGLELINE);
-    // Page tabs, right-aligned on the title line.
-    std::wstring tabs;
-    for (size_t i = 0; i < g_pages.size(); ++i) {
-        if (i) tabs += L"     ";
-        tabs += g_pages[i].title;
-    }
-    {
-        // The current page in gold: draw all grey, then the current one over it at its place.
-        HGDIOBJ was = SelectObject(s.dc, tab);
-        SIZE total{};
-        GetTextExtentPoint32W(s.dc, tabs.c_str(), static_cast<int>(tabs.size()), &total);
-        int x = W - K(40) - total.cx;
-        for (size_t i = 0; i < g_pages.size(); ++i) {
-            const std::wstring& t = g_pages[i].title;
-            SIZE sz{};
-            GetTextExtentPoint32W(s.dc, t.c_str(), static_cast<int>(t.size()), &sz);
-            text(s, tab, static_cast<int>(i) == g_page ? kGold : kGrey, x, K(36), sz.cx + K(4), K(36), t.c_str(),
-                 DT_LEFT | DT_SINGLELINE);
-            if (static_cast<int>(i) == g_page) fill(s, x, K(70), sz.cx, K(2), kGold);
-            SIZE gap{};
-            GetTextExtentPoint32W(s.dc, L"     ", 5, &gap);
-            x += sz.cx + gap.cx;
-        }
-        SelectObject(s.dc, was);
-    }
-    fill(s, K(30), K(92), W - K(60), K(1), kEdge);
-
-    const int top = K(110), row_h = K(50), help_top = H - K(210);
-    const int visible = (help_top - top) / row_h;
-    if (g_page >= 0 && g_page < static_cast<int>(g_pages.size())) {
-        Page& p = g_pages[g_page];
-        if (g_row < g_scroll) g_scroll = g_row;
-        if (g_row >= g_scroll + visible) g_scroll = g_row - visible + 1;
-        for (int i = g_scroll; i < static_cast<int>(p.rows.size()) && i < g_scroll + visible; ++i) {
-            Row& r = p.rows[i];
-            const int y = top + (i - g_scroll) * row_h;
-            const bool sel = i == g_row;
-            if (sel) fill(s, K(30), y, W - K(60), row_h - K(4), kSel);
-            std::wstring label = r.def.label;
-            text(s, rowf, kWhite, K(50), y, W / 2, row_h - K(4), label.c_str(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            std::wstring value;
-            if (r.def.text) {
-                // Shown only while it is typed (a password on a stream or a screenshot stays private).
-                value = sel && g_editing ? widen(g_edit) + L"_"
-                        : r.text.empty() ? std::wstring(L"(none)")
-                                         : std::wstring(r.text.size(), L'\x2022');
-            } else if (!r.choices.empty()) {
-                value = std::wstring(sel ? L"\x2039  " : L"") + r.choices[r.current].label + (sel ? L"  \x203A" : L"");
-            }
-            text(s, rowf, sel ? kGold : kWhite, W / 2, y, W / 2 - K(50), row_h - K(4), value.c_str(),
-                 DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-            if (r.restart) {
-                text(s, smallf, kLater, W / 2 - K(140), y, K(160), row_h - K(4), L"restart", DT_RIGHT | DT_VCENTER |
-                     DT_SINGLELINE);
-            }
-        }
-        fill(s, K(30), help_top, W - K(60), K(1), kEdge);
-        if (g_row >= 0 && g_row < static_cast<int>(p.rows.size())) {
-            const Row& r = p.rows[g_row];
-            text(s, smallf, kWhite, K(50), help_top + K(14), W - K(100), K(84), r.def.help, DT_LEFT | DT_WORDBREAK);
-            text(s, smallf, r.def.apply && !r.def.when ? kLive : kLater, K(50), help_top + K(104), W - K(100), K(32),
-                 r.def.when  ? r.def.when
-                 : r.def.apply ? L"Applies at once"
-                               : L"Applies after a restart of the game",
-                 DT_LEFT | DT_SINGLELINE);
-        }
-    }
-    text(s, smallf, kGrey, K(40), H - K(52), W - K(80), K(34),
-         L"Controller: \x2191\x2193 choose   \x2190\x2192 change   LB/RB page   B close          "
-         L"Keys: arrows   Q/E page   Esc close",
-         DT_CENTER | DT_SINGLELINE);
-    DeleteObject(title);
-    DeleteObject(tab);
-    DeleteObject(rowf);
-    DeleteObject(smallf);
-    set_alpha(s, 238);
-    s.uploaded = false;
-}
-
-void build_hint(int screen_h) {
-    const float k = static_cast<float>(screen_h) / 1080.0f;
-    auto K = [k](int v) { return static_cast<int>(v * k + 0.5f); };
-    const int W = K(520), H = K(44);
-    if (g_hint.w == W && g_hint.h == H && g_hint.dc) return;
-    if (!make_surface(g_hint, W, H)) return;
-    fill(g_hint, 0, 0, W, H, kColBack);
-    HFONT f = font(K(24), false);
-    std::wstring line = L"Y: FPS Unlock Settings";
-    if (g_key >= VK_F1 && g_key <= VK_F12) line += L"   (keyboard: F" + std::to_wstring(g_key - VK_F1 + 1) + L")";
-    text(g_hint, f, kGold, 0, 0, W, H, line.c_str(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    DeleteObject(f);
-    set_alpha(g_hint, 200);
-    g_hint.uploaded = false;
-}
-
-bool upload(IDirect3DDevice9* dev, Surface& s) {
-    if (!s.tex) {
-        if (FAILED(dev->CreateTexture(s.w, s.h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &s.tex, nullptr))) {
-            s.tex = nullptr;
+bool upload(IDirect3DDevice9* dev, Tex& t, const SettingsPageImage* img) {
+    if (!img || !img->bits) return false;
+    if (t.tex && (t.w != img->w || t.h != img->h)) drop(t);
+    if (!t.tex) {
+        if (FAILED(dev->CreateTexture(img->w, img->h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t.tex, nullptr))) {
+            t.tex = nullptr;
             return false;
         }
-        s.uploaded = false;
+        t.w = img->w;
+        t.h = img->h;
+        t.version = img->version - 1;
     }
-    if (!s.uploaded) {
+    if (t.version != img->version) {
         D3DLOCKED_RECT lr{};
-        if (FAILED(s.tex->LockRect(0, &lr, nullptr, 0))) return false;
-        for (int y = 0; y < s.h; ++y) {
-            std::memcpy(static_cast<uint8_t*>(lr.pBits) + static_cast<size_t>(y) * lr.Pitch, s.bits + static_cast<size_t>(y) * s.w,
-                        static_cast<size_t>(s.w) * 4);
+        if (FAILED(t.tex->LockRect(0, &lr, nullptr, 0))) return false;
+        for (int y = 0; y < img->h; ++y) {
+            std::memcpy(static_cast<uint8_t*>(lr.pBits) + static_cast<size_t>(y) * lr.Pitch,
+                        img->bits + static_cast<size_t>(y) * img->w, static_cast<size_t>(img->w) * 4);
         }
-        s.tex->UnlockRect(0);
-        s.uploaded = true;
+        t.tex->UnlockRect(0);
+        t.version = img->version;
     }
     return true;
 }
 
-void draw(IDirect3DDevice9* dev, Surface& s, float x, float y) {
+void draw(IDirect3DDevice9* dev, const Tex& t, float x, float y) {
     struct V {
         float x, y, z, rhw, u, v;
     };
-    const float x0 = x - 0.5f, y0 = y - 0.5f, x1 = x + s.w - 0.5f, y1 = y + s.h - 0.5f;
+    const float x0 = x - 0.5f, y0 = y - 0.5f, x1 = x + t.w - 0.5f, y1 = y + t.h - 0.5f;
     const V v[4] = {{x0, y0, 0, 1, 0, 0}, {x1, y0, 0, 1, 1, 0}, {x0, y1, 0, 1, 0, 1}, {x1, y1, 0, 1, 1, 1}};
-    dev->SetTexture(0, s.tex);
+    dev->SetTexture(0, t.tex);
     dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(V));
 }
 
@@ -647,10 +228,14 @@ void render(IDirect3DDevice9* dev, bool panel, bool hint) {
     D3DSURFACE_DESC bd{};
     bb->GetDesc(&bd);
     const int sh = static_cast<int>(bd.Height);
-    if (panel && (InterlockedExchange(&g_dirty, 0) != 0 || g_built_h != sh)) build_panel(sh);
-    if (hint) build_hint(sh);
-    g_built_h = sh;
-    if ((panel && !upload(dev, g_panel)) || (hint && !upload(dev, g_hint))) {
+    if (panel && !upload(dev, g_panel_tex, settingspage_panel(static_cast<int>(bd.Width), sh))) panel = false;
+    if (hint) {
+        std::wstring line = L"Y: FPS Unlock Settings";
+        const int key = settingspage_key();
+        if (key >= VK_F1 && key <= VK_F12) line += L"   (keyboard: F" + std::to_wstring(key - VK_F1 + 1) + L")";
+        if (!upload(dev, g_hint_tex, settingspage_hint(static_cast<int>(bd.Width), sh, line.c_str()))) hint = false;
+    }
+    if (!panel && !hint) {
         bb->Release();
         return;
     }
@@ -695,12 +280,12 @@ void render(IDirect3DDevice9* dev, bool panel, bool hint) {
         dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
         dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
         if (panel) {
-            draw(dev, g_panel, static_cast<float>((static_cast<int>(bd.Width) - g_panel.w) / 2),
-                 static_cast<float>((sh - g_panel.h) / 2));
+            draw(dev, g_panel_tex, static_cast<float>((static_cast<int>(bd.Width) - g_panel_tex.w) / 2),
+                 static_cast<float>((sh - g_panel_tex.h) / 2));
         }
         if (hint) {
-            draw(dev, g_hint, static_cast<float>((static_cast<int>(bd.Width) - g_hint.w) / 2),
-                 static_cast<float>(sh - g_hint.h - sh / 54));
+            draw(dev, g_hint_tex, static_cast<float>((static_cast<int>(bd.Width) - g_hint_tex.w) / 2),
+                 static_cast<float>(sh - g_hint_tex.h - sh / 54));
         }
         dev->SetTexture(0, nullptr);
         dev->EndScene();
@@ -720,36 +305,6 @@ bool game_window_focused() {
     if (!fg) return false;
     GetWindowThreadProcessId(fg, &pid);
     return pid == GetCurrentProcessId();
-}
-
-constexpr WORD kUp = 0x0001, kDown = 0x0002, kLeft = 0x0004, kRight = 0x0008, kStart = 0x0010, kBack = 0x0020,
-               kLB = 0x0100, kRB = 0x0200, kA = 0x1000, kB = 0x2000, kY = 0x8000;
-
-// One logical control: pressed now, and the time it went down (for repeats).
-struct Held {
-    bool down = false;
-    ULONGLONG since = 0, next = 0;
-};
-Held g_held[16];
-
-// True on the press and then on repeats (after 0.38 s, every 0.11 s) for the arrows.
-bool pressed(int i, bool down, bool repeats, ULONGLONG now) {
-    Held& h = g_held[i];
-    if (!down) {
-        h.down = false;
-        return false;
-    }
-    if (!h.down) {
-        h.down = true;
-        h.since = now;
-        h.next = now + 380;
-        return true;
-    }
-    if (repeats && now >= h.next) {
-        h.next = now + 110;
-        return true;
-    }
-    return false;
 }
 
 // The keys, as the game's keyboard reads them (DirectInput key codes; no GetAsyncKeyState in the release DLL). Only
@@ -785,171 +340,32 @@ bool key(int vk) {
     return inputcache_key(dik_of(vk));
 }
 
-void open_page(bool open) {
-    InterlockedExchange(&g_open, open ? 1 : 0);
-    InterlockedExchange(&g_swallow, 1);
-    inputcache_set_blank(true);
-    g_editing = false;
-    InterlockedExchange(&g_dirty, 1);
-    LOG_INFO("FPS Unlock Settings: %s", open ? "opened" : "closed");
-}
-
-void update_input() {
-    const ULONGLONG now = GetTickCount64();
-    WORD pad = 0;
-    int lx = 0, ly = 0;
+SettingsPageInput read_input() {
+    SettingsPageInput in;
     for (int i = 0; i < 4; ++i) {
-        pad |= static_cast<WORD>(g_pad_buttons[i]);
+        in.pad = static_cast<uint16_t>(in.pad | static_cast<uint16_t>(g_pad_buttons[i]));
         const LONG st = g_pad_stick[i];
         const int x = static_cast<int16_t>(st & 0xFFFF), y = static_cast<int16_t>((st >> 16) & 0xFFFF);
-        if (std::abs(x) > std::abs(lx)) lx = x;
-        if (std::abs(y) > std::abs(ly)) ly = y;
+        if (std::abs(x) > std::abs(in.lx)) in.lx = x;
+        if (std::abs(y) > std::abs(in.ly)) in.ly = y;
     }
-    const bool focus = game_window_focused();
-    const bool open = g_open != 0;
-    const bool kb = focus;
-    // Opening and closing.
-    const bool open_key = kb && g_key != 0 && key(g_key);
-    const bool pc_screen = now - static_cast<ULONGLONG>(g_pcoption_seen) < 300;
-    if (pressed(0, open_key, false, now)) {
-        open_page(!open);
-        return;
-    }
-    if (!open) {
-        if (pressed(1, (pad & kY) != 0, false, now) && pc_screen) open_page(true);
-        if (g_swallow && pad == 0 && !(kb && (key(VK_ESCAPE) || key(VK_BACK) || key(VK_RETURN)))) {
-            InterlockedExchange(&g_swallow, 0);
-            inputcache_set_blank(false);
-        }
-        return;
-    }
-    pressed(1, (pad & kY) != 0, false, now);
-    if (pressed(2, (pad & (kB | kBack | kStart)) != 0 || (kb && key(VK_ESCAPE)), false, now) ||
-        (!g_editing && pressed(3, kb && key(VK_BACK), false, now))) {
-        if (g_editing) {
-            g_editing = false;
-            InterlockedExchange(&g_dirty, 1);
-        } else {
-            open_page(false);
-        }
-        return;
-    }
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    if (g_pages.empty()) return;
-    bool moved = false;
-    if (g_editing) {
-        // Typing: only the text, Backspace and Enter (keep it; Escape or B, above, drop it). Nothing else moves, so a
-        // letter that is also a key of the page (Q, E) is only a letter.
-        if (g_edit_page < 0 || g_edit_page >= static_cast<int>(g_pages.size()) || g_edit_row < 0 ||
-            g_edit_row >= static_cast<int>(g_pages[g_edit_page].rows.size())) {
-            g_editing = false;
-            return;
-        }
-        Row& r = g_pages[g_edit_page].rows[g_edit_row];
-        if (pressed(10, (pad & kA) || (kb && key(VK_RETURN)), false, now)) {
-            g_editing = false;
-            r.text = g_edit;
-            write_ini(r.def.key, r.text);
-            if (r.def.apply) r.def.apply(r.text.c_str());
-            InterlockedExchange(&g_dirty, 1);
-            return;
-        }
-        if (pressed(3, kb && key(VK_BACK), true, now) && !g_edit.empty()) {
-            g_edit.pop_back();
-            moved = true;
-        }
-        const bool shift = key(VK_SHIFT);
-        for (int vk = 0x30; vk <= 0x5A; ++vk) {
-            if (vk > 0x39 && vk < 0x41) continue;
-            const bool d = kb && key(vk);
-            if (d && !g_was_key[vk] && g_edit.size() < 63) {
-                char c = static_cast<char>(vk);
-                if (vk >= 0x41 && !shift) c = static_cast<char>(c + 32);
-                g_edit.push_back(c);
-                moved = true;
-            }
-            g_was_key[vk] = d;
-        }
-        const bool sp = kb && key(VK_SPACE), mi = kb && key(VK_OEM_MINUS);
-        if (sp && !g_was_space && g_edit.size() < 63) {
-            g_edit.push_back(' ');
-            moved = true;
-        }
-        if (mi && !g_was_minus && g_edit.size() < 63) {
-            g_edit.push_back(shift ? '_' : '-');
-            moved = true;
-        }
-        g_was_space = sp;
-        g_was_minus = mi;
-        if (moved) InterlockedExchange(&g_dirty, 1);
-        return;
-    }
-    const bool up = (pad & kUp) || ly > 16000 || (kb && key(VK_UP));
-    const bool down = (pad & kDown) || ly < -16000 || (kb && key(VK_DOWN));
-    const bool left = (pad & kLeft) || lx < -16000 || (kb && key(VK_LEFT));
-    const bool right = (pad & kRight) || lx > 16000 || (kb && key(VK_RIGHT));
-    const bool prev_page = (pad & kLB) || (kb && (key('Q') || key(VK_PRIOR)));
-    const bool next_page = (pad & kRB) || (kb && (key('E') || key(VK_NEXT)));
-    const bool confirm = (pad & kA) || (kb && key(VK_RETURN));
-    if (pressed(4, prev_page, false, now)) {
-        g_page = (g_page + static_cast<int>(g_pages.size()) - 1) % static_cast<int>(g_pages.size());
-        g_row = 0;
-        g_scroll = 0;
-        moved = true;
-    }
-    if (pressed(5, next_page, false, now)) {
-        g_page = (g_page + 1) % static_cast<int>(g_pages.size());
-        g_row = 0;
-        g_scroll = 0;
-        moved = true;
-    }
-    Page& page = g_pages[g_page];
-    const int rows = static_cast<int>(page.rows.size());
-    if (rows > 0) {
-        if (pressed(6, up, true, now)) {
-            g_row = (g_row + rows - 1) % rows;
-            moved = true;
-        }
-        if (pressed(7, down, true, now)) {
-            g_row = (g_row + 1) % rows;
-            moved = true;
-        }
-        Row& r = page.rows[g_row];
-        if (pressed(8, left, true, now)) change(r, -1);
-        if (pressed(9, right, true, now)) change(r, +1);
-        if (pressed(10, confirm, false, now)) {
-            if (r.def.text) {
-                g_editing = true;
-                g_edit = r.text;
-                g_edit_page = g_page;
-                g_edit_row = g_row;
-                // Keys already down (the one that started it) do not type.
-                for (int vk = 0x30; vk <= 0x5A; ++vk) g_was_key[vk] = kb && key(vk);
-                g_was_space = kb && key(VK_SPACE);
-                g_was_minus = kb && key(VK_OEM_MINUS);
-            } else {
-                change(r, +1);
-            }
-            moved = true;
-        }
-    }
-    if (moved) InterlockedExchange(&g_dirty, 1);
+    in.keyboard = game_window_focused();
+    in.key = key;
+    in.pad_opens = GetTickCount64() - static_cast<ULONGLONG>(g_pcoption_seen) < 300;
+    return in;
 }
 
 }  // namespace
 
 void settingsmenu_add_page(const wchar_t* title, const SettingsMenuRow* rows, int count) {
-    if (!g_enabled) return;
-    add_page(title, rows, count);
+    settingspage_add_page(title, rows, count);
 }
 
 void settingsmenu_install(const wchar_t* ini_path, int key) {
-    g_ini = ini_path;
-    g_key = key;
-    g_enabled = true;
-    add_page(L"Display", kDisplay, _countof(kDisplay));
-    add_page(L"Picture", kPicture, _countof(kPicture));
-    add_page(L"Draw distance", kDistance, _countof(kDistance));
+    settingspage_init(ini_path, key, blank);
+    settingspage_add_page(L"Display", kDisplay, _countof(kDisplay));
+    settingspage_add_page(L"Picture", kPicture, _countof(kPicture));
+    settingspage_add_page(L"Draw distance", kDistance, _countof(kDistance));
     inputcache_require_hook();
     // The PC settings screen's Draw: its own method table entry (every dialog class has one).
     auto** slot = reinterpret_cast<void**>(kPcOptionVtable) + kDrawSlot;
@@ -969,17 +385,14 @@ void settingsmenu_install(const wchar_t* ini_path, int key) {
              g_pcoption_draw ? "" : " (the PC settings screen was not found: the key only)");
 }
 
-bool settingsmenu_enabled() { return g_enabled; }
-void settingsmenu_set_open(bool open) {
-    if (g_enabled && (g_open != 0) != open) open_page(open);
-}
-bool settingsmenu_is_open() { return g_open != 0; }
+bool settingsmenu_enabled() { return settingspage_enabled(); }
+void settingsmenu_set_open(bool open) { settingspage_set_open(open); }
+bool settingsmenu_is_open() { return settingspage_is_open(); }
 
 void settingsmenu_present(IDirect3DDevice9* device) {
-    if (!g_enabled || !device) return;
-    if (g_failing && GetTickCount64() >= g_retry_at) flush_ini();
-    update_input();
-    const bool open = g_open != 0;
+    if (!settingspage_enabled() || !device) return;
+    settingspage_frame(read_input());
+    const bool open = settingspage_is_open();
     const bool hint = !open && GetTickCount64() - static_cast<ULONGLONG>(g_pcoption_seen) < 300;
     if (open || hint) render(device, open, hint);
 }
@@ -993,7 +406,7 @@ void settingsmenu_reset() {
 }
 
 void settingsmenu_pad(unsigned long index, void* state, unsigned long result) {
-    if (!g_enabled || index > 3) return;
+    if (!settingspage_enabled() || index > 3) return;
     if (result != 0 || !state) {
         InterlockedExchange(&g_pad_buttons[index], 0);
         InterlockedExchange(&g_pad_stick[index], 0);
@@ -1009,5 +422,5 @@ void settingsmenu_pad(unsigned long index, void* state, unsigned long result) {
     InterlockedExchange(&g_pad_buttons[index], buttons);
     InterlockedExchange(&g_pad_stick[index], static_cast<LONG>((static_cast<uint32_t>(static_cast<uint16_t>(ly)) << 16) |
                                                                static_cast<uint16_t>(lx)));
-    if (g_open || g_swallow) std::memset(b + 4, 0, 12);
+    if (g_blank) std::memset(b + 4, 0, 12);
 }
