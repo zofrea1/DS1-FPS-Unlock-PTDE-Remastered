@@ -316,7 +316,18 @@ Settings settings_load(const wchar_t* dll_path) {
             const std::string v = lower(trim(val));
             s.high_precision_output = v == "auto" ? 2 : parse_bool(val) ? 1 : 0;
         } else if (key == "antialiasingsamples") {
-            s.antialiasing_samples = std::atoi(val.c_str());
+            // 2, 4, 8: on with that many samples (the game's option not needed); off; game: the game's option decides.
+            const std::string v = lower(trim(val));
+            if (v == "game") {
+                s.antialiasing_mode = 0;
+                s.antialiasing_samples = 2;
+            } else if (v == "off" || v == "false" || v == "none" || v == "0" || v == "1") {
+                s.antialiasing_mode = 2;
+                s.antialiasing_samples = 2;
+            } else {
+                s.antialiasing_mode = 1;
+                s.antialiasing_samples = std::atoi(v.c_str());
+            }
         } else if (key == "alphatocoverage") {
             // force (a 2.3.0 test value for the Steam Deck) counts as true.
             s.alpha_to_coverage = parse_bool(val) || lower(trim(val)) == "force";
@@ -460,9 +471,18 @@ Settings settings_load(const wchar_t* dll_path) {
     const bool translated = cpu_translated(&cpu);
     if (!phone_keys.empty() && (s.phone_profile == 1 || (s.phone_profile == 0 && translated))) {
         std::string list;
+        bool phone_aa = false;
         for (const auto& kv : phone_keys) {
             apply(kv.first, kv.second);
             list += (list.empty() ? "" : ", ") + kv.first + " = " + trim(kv.second);
+            phone_aa = phone_aa || kv.first == "antialiasingsamples";
+        }
+        // A phone's graphics chip is at its limit already: the game's own Antialiasing option decides there,
+        // unless PhoneAntialiasingSamples says otherwise (as on every PC before AntialiasingSamples switched it on).
+        if (!phone_aa && s.antialiasing_mode == 1) {
+            s.antialiasing_mode = 0;
+            s.antialiasing_samples = 2;
+            list += (list.empty() ? "" : ", ") + std::string("antialiasingsamples = game (phones' default)");
         }
         s.phone_applied = true;
         static bool logged = false;
@@ -496,7 +516,7 @@ Settings settings_load(const wchar_t* dll_path) {
                 // The picture: the game's own render path.
                 {"renderresolution", "off"}, {"supersampling", "1"}, {"depthoffieldstrength", "100"},
                 {"depthoffieldresolution", "game"}, {"effectsresolution", "game"}, {"waterresolution", "game"},
-                {"highprecisioncolor", "false"}, {"highprecisionoutput", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "2"},
+                {"highprecisioncolor", "false"}, {"highprecisionoutput", "false"}, {"alphatocoverage", "false"}, {"antialiasingsamples", "game"},
                 {"fixantialiasingdepth", "false"},
                 {"shadowmapresolution", "2048"}, {"anisotropicfiltering", "0"},
                 {"drawmappieces", "game"}, {"loddistance", "100"}, {"effectloddistance", "100"},

@@ -108,8 +108,11 @@ struct Settings {
     // float a sample), so it stays right at the edges of grass (atoc.h).
     bool fix_antialiasing_depth = true;
     bool fix_antialiasing_depth_16 = false;  // FixAntialiasingDepth = 16bit (tests): the 16-bit variant even where float works
-    // The samples of the game's own anti-aliasing when it is on: 2 (the game's), 4 or 8 (atoc.h).
+    // AntialiasingSamples: the scene's multisampling, 2 (the game's own count), 4 or 8 (atoc.h).
     int antialiasing_samples = 2;
+    // Who switches it on: 1 = this mod (AntialiasingSamples 2/4/8: on whatever the game's Antialiasing option says),
+    // 2 = off (AntialiasingSamples = off), 0 = the game's option (AntialiasingSamples = game; phones by default).
+    int antialiasing_mode = 1;
     bool render_scale_post = false;  // experiment: scale the post-processing targets too
     // Anisotropic filtering level for surface textures (0/1 = the game's own filtering).
     int anisotropic_filtering = 16;

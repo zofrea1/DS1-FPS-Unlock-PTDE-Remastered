@@ -136,8 +136,10 @@ DWORD WINAPI worker(void*) {
     }
     // DSfix's resolution needs the game's own anti-aliasing off: with it on the game draws the scene through 1024x720
     // multisampled surfaces DSfix does not enlarge, and the 3D picture fills only a corner of the screen (seen
-    // 2026-11-14 with DSfix 3840x2160, Direct3D 9 and DXVK alike; the multisample type alone is not the cause).
-    if (dsfix_changes_resolution() && (dsfix_yields() || settings.render_width == 0 || settings.render_height == 0)) {
+    // 2026-11-14 with DSfix 3840x2160, Direct3D 9 and DXVK alike; the multisample type alone is not the cause). With
+    // FPSUnlock on, the anti-aliasing switch keeps it off then (atoc_set_aa_mode, frame.cpp); without, say so.
+    if (!settings.fps_unlock && dsfix_changes_resolution() &&
+        (dsfix_yields() || settings.render_width == 0 || settings.render_height == 0)) {
         wchar_t local[MAX_PATH] = {}, game_ini[MAX_PATH] = {};
         if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) {
             _snwprintf_s(game_ini, _TRUNCATE, L"%s\\NBGI\\DarkSouls\\DarkSouls.ini", local);

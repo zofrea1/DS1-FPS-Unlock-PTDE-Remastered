@@ -1,6 +1,6 @@
 // AlphaToCoverage. Grass, leaves, hair and fences are alpha-tested: each pixel is either drawn or not by its
 // texture's alpha, so their edges are stair-stepped and thin blades far away break up into dots. Multisampling (the
-// game's own Antialiasing option: a 2x multisampled scene, AntialiasingSamples for more) smooths the edges of
+// game's own anti-aliasing: a 2x multisampled scene, switched on by AntialiasingSamples, 4x or 8x) smooths the edges of
 // geometry but not these: the test is made once per pixel. Alpha to coverage turns the alpha into the share of the
 // pixel's samples covered instead, so those edges come out as smooth as any other.
 //
@@ -810,8 +810,8 @@ void atoc_hook_device(IDirect3DDevice9* dev) {
         return;
     }
     install_hooks(dev);
-    LOG_INFO("AlphaToCoverage: ready (%s, edges sharpened around the alpha test); takes effect when the game's "
-             "anti-aliasing is on (Antialiasing = 1 in DarkSouls.ini, or the in-game option)",
+    LOG_INFO("AlphaToCoverage: ready (%s, edges sharpened around the alpha test); takes effect while the "
+             "anti-aliasing is on (AntialiasingSamples)",
              g_method == Method::Nvidia ? "NVIDIA's switch"
              : dxvk_amd                 ? "AMD's switch, which DXVK takes on AMD graphics without listing it"
                                         : "AMD's switch");
@@ -837,6 +837,112 @@ bool atoc_set_msaa_samples(int samples) {
     LOG_INFO("AntialiasingSamples: the game's anti-aliasing (when on) multisamples the scene %dx (the game's own: 2x)",
              samples);
     return true;
+}
+
+// The anti-aliasing's on/off switch. The game decides every frame whether the scene is multisampled from its
+// Antialiasing option, read live from its settings ([[0x1378700]+0x34]+0xE5, setting 11 of the PC settings screen;
+// DarkSouls.ini [DisplaySettingFilter] Antialiasing): 0xEAE440 ("is the scene's anti-aliasing on": the frame's own
+// flag at +0x22C and the option) and the frame's scene setup at 0xEB0312 each test it with
+// `cmp byte ptr [ecx+0xE5],0` / `setne al` (a third read, 0xEB5166, only picks a debug menu label). The multisampled
+// targets are made whether or not the option is on (only the game's ForceDisableAA leaves them out: 0x100A1F1, and its
+// frame flag at 0xEB0302), so the option takes effect at once. With AntialiasingSamples on or off, both tests read
+// this mod's switch instead (`cmp byte ptr [g_aa_on],0`, the same 7 bytes); the game's option, its row on the PC
+// settings screen and DarkSouls.ini stay as the player left them. DSfix's resolution needs the game's anti-aliasing
+// off (dllmain.cpp), so the switch stays off beside DSfix when DSfix makes the resolution.
+namespace {
+constexpr uintptr_t kAaTests[] = {0x00EAE457, 0x00EB032D};
+constexpr uint8_t kAaTestBytes[7] = {0x80, 0xB9, 0xE5, 0x00, 0x00, 0x00, 0x00};  // cmp byte ptr [ecx+0xE5],0
+constexpr uintptr_t kGameSettingsHolder = 0x01378700;                            // [+0x34] = the game's settings
+volatile uint8_t g_aa_on = 0;
+bool g_aa_patched = false;
+
+// The game's Antialiasing option as it stands (-1 while its settings are not there yet).
+int game_aa_option() {
+    __try {
+        const uintptr_t holder = *reinterpret_cast<const uintptr_t*>(kGameSettingsHolder);
+        if (!holder) return -1;
+        const uintptr_t s = *reinterpret_cast<const uintptr_t*>(holder + 0x34);
+        if (!s) return -1;
+        return *reinterpret_cast<const uint8_t*>(s + 0xE5) != 0 ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// DarkSouls.ini's [DisplaySettingFilter] KEY (the game reads it at start), or -1 without the file.
+int game_ini_filter(const wchar_t* key) {
+    wchar_t local[MAX_PATH] = {}, ini[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) return -1;
+    _snwprintf_s(ini, _TRUNCATE, L"%s\\NBGI\\DarkSouls\\DarkSouls.ini", local);
+    if (GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) return -1;
+    return static_cast<int>(GetPrivateProfileIntW(L"DisplaySettingFilter", key, 0, ini));
+}
+}  // namespace
+
+bool atoc_set_aa_mode(int mode, int samples, bool dsfix_resolution) {
+    if (dsfix_resolution) mode = 2;
+    const int option = game_ini_filter(L"Antialiasing");
+    const char* option_text = option < 0 ? "no DarkSouls.ini yet" : option ? "on in DarkSouls.ini" : "off in DarkSouls.ini";
+    if (mode == 0) {
+        LOG_INFO("Anti-aliasing: the game's own Antialiasing option decides (AntialiasingSamples = game; %s)%s",
+                 option_text, option > 0 ? "" : ": none while it is off");
+        return true;
+    }
+    for (uintptr_t site : kAaTests) {
+        if (std::memcmp(reinterpret_cast<const void*>(site), kAaTestBytes, sizeof(kAaTestBytes)) != 0) {
+            LOG_ERROR("Anti-aliasing: the game's test of its Antialiasing option at %08X is not the expected "
+                      "instruction in this build; the game's option decides (AntialiasingSamples has no say).",
+                      static_cast<unsigned>(site));
+            return false;
+        }
+    }
+    g_aa_on = mode == 1 ? 1 : 0;
+    const uint32_t flag = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_aa_on));
+    for (uintptr_t site : kAaTests) {
+        uint8_t code[7] = {0x80, 0x3D, 0, 0, 0, 0, 0x00};  // cmp byte ptr [g_aa_on],0
+        std::memcpy(code + 2, &flag, 4);
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(site), sizeof(code), PAGE_EXECUTE_READWRITE, &old)) {
+            LOG_ERROR("Anti-aliasing: could not change the game's code at %08X (%lu)", static_cast<unsigned>(site),
+                      GetLastError());
+            return false;
+        }
+        std::memcpy(reinterpret_cast<void*>(site), code, sizeof(code));
+        DWORD ignored = 0;
+        VirtualProtect(reinterpret_cast<void*>(site), sizeof(code), old, &ignored);
+    }
+    FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
+    g_aa_patched = true;
+    if (dsfix_resolution) {
+        LOG_INFO("Anti-aliasing: the game's own kept off while DSfix makes the resolution (it needs it off; DSfix's "
+                 "aaType smooths the picture). The game's option: %s", option_text);
+    } else if (mode == 1) {
+        LOG_INFO("Anti-aliasing: on, the scene multisampled %dx (AntialiasingSamples), whatever the game's own "
+                 "Antialiasing option says (%s)", samples, option_text);
+    } else {
+        LOG_INFO("Anti-aliasing: off (AntialiasingSamples = off; the game's own option, %s, is not used)", option_text);
+    }
+    if (mode == 1 && game_ini_filter(L"ForceDisableAA") > 0) {
+        LOG_INFO("Anti-aliasing: ForceDisableAA = 1 in DarkSouls.ini, so the game makes no multisampled targets and "
+                 "the picture has none; set it to 0 for AntialiasingSamples to work");
+    }
+    return true;
+}
+
+bool atoc_aa_switch(int mode) {
+    if (!g_aa_patched) return false;
+    if (mode == 0) {
+        const int option = game_aa_option();
+        g_aa_on = option > 0 ? 1 : 0;
+    } else {
+        g_aa_on = mode == 1 ? 1 : 0;
+    }
+    return true;
+}
+
+bool atoc_aa_on() {
+    if (g_aa_patched) return g_aa_on != 0;
+    return game_aa_option() > 0;
 }
 
 // FixAntialiasingDepth. With the game's own anti-aliasing on, the depth that the post-processing reads is drawn in a

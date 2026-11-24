@@ -324,6 +324,11 @@ void apply_ui_scale_world(const char* v) {
 }
 void apply_dof(const char* v) { resolution_set_dof_strength(static_cast<float>(std::atof(v) / 100.0)); }
 void apply_atoc(const char* v) { atoc_set_mode(lower(v) == "false" ? 0 : 2); }
+// AntialiasingSamples: off and on at once (the switch in atoc.cpp); a new sample count needs the targets made again.
+void apply_aa(const char* v) {
+    const std::string s = lower(v);
+    atoc_aa_switch(s == "game" ? 0 : (s == "off" || s == "false" || s == "0" || s == "1") ? 2 : 1);
+}
 void apply_draw_pieces(const char* v) {
     const std::string s = lower(v);
     drawdist_set_mode(s == "all" ? 2 : s == "adjacent+" ? 3 : s == "adjacent" ? 1 : 0);
@@ -346,7 +351,8 @@ const SettingsMenuChoice kPercentUi[] = {{"100", L"100%"}, {"95", L"95%"}, {"90"
                                          {"60", L"60%"},   {"55", L"55%"}, {"50", L"50%"}};
 const SettingsMenuChoice kDof[] = {{"100", L"100% (the game's)"}, {"75", L"75%"}, {"50", L"50%"}, {"25", L"25%"},
                                    {"0", L"Off"}, {"125", L"125%"}, {"150", L"150%"}, {"200", L"200%"}};
-const SettingsMenuChoice kSamples[] = {{"2", L"2x (the game's)"}, {"4", L"4x"}, {"8", L"8x"}};
+const SettingsMenuChoice kSamples[] = {{"off", L"Off"}, {"2", L"2x"}, {"4", L"4x"}, {"8", L"8x"},
+                                       {"game", L"The game's option"}};
 const SettingsMenuChoice kAniso[] = {{"16", L"16x"}, {"8", L"8x"}, {"4", L"4x"}, {"2", L"2x"}, {"0", L"The game's"}};
 const SettingsMenuChoice kShadow[] = {{"4096", L"4096"}, {"8192", L"8192"}, {"2048", L"2048 (the game's)"}};
 const SettingsMenuChoice kSuper[] = {{"1", L"Off"}, {"1.25", L"1.25x"}, {"1.5", L"1.5x"}, {"1.75", L"1.75x"},
@@ -374,9 +380,10 @@ const SettingsMenuRow kDisplay[] = {
 const SettingsMenuRow kPicture[] = {
     {"DepthOfFieldStrength", L"Depth of field", L"How strongly distant things blur.", kDof, _countof(kDof), apply_dof,
      false},
-    {"AntialiasingSamples", L"Anti-aliasing samples", L"Samples of the game's own anti-aliasing (its Antialiasing "
-     L"option). More: smoother edges, more GPU time.", kSamples, _countof(kSamples), nullptr, false},
-    {"AlphaToCoverage", L"Smooth foliage edges", L"Grass, leaves and hair get smooth edges with the game's "
+    {"AntialiasingSamples", L"Anti-aliasing", L"Smooth edges (multisampling), whatever the game's own Antialiasing "
+     L"option says. More samples: smoother, more GPU time. The game's option: that option decides, 2x.", kSamples,
+     _countof(kSamples), apply_aa, false, L"Off and on at once; a new sample count after a restart"},
+    {"AlphaToCoverage", L"Smooth foliage edges", L"Grass, leaves and hair get smooth edges with the "
      L"anti-aliasing on.", kOnOff, _countof(kOnOff), apply_atoc, false},
     {"AnisotropicFiltering", L"Texture filtering", L"Anisotropic filtering: sharper ground and walls at an angle.",
      kAniso, _countof(kAniso), nullptr, false},

@@ -565,6 +565,11 @@ bool frame_install(const Settings& settings) {
         }
         // Before the game makes its render targets: its anti-aliasing's sample count (it multisamples only when on).
         atoc_set_msaa_samples(settings.antialiasing_samples);
+        // And who switches it on: AntialiasingSamples (whatever the game's option says), off, or the game's option.
+        // Kept off while DSfix makes the resolution, which needs the game's anti-aliasing off (dllmain.cpp).
+        atoc_set_aa_mode(settings.antialiasing_mode, settings.antialiasing_samples,
+                         dsfix_changes_resolution() &&
+                             (dsfix_yields() || settings.render_width == 0 || settings.render_height == 0));
         // Its packed depth through the multisampling (not beside DSfix, which reads the game's depth its own way).
         if (settings.fix_antialiasing_depth && !dsfix_loaded()) {
             atoc_fix_depth_install(settings.antialiasing_samples, settings.fix_antialiasing_depth_16);

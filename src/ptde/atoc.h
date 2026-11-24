@@ -14,6 +14,16 @@ void atoc_set_depth_diag(int bits);
 // AntialiasingSamples: the samples of the game's anti-aliasing (2 = the game's, 4 or 8). Before the game makes its
 // render targets. False when the game's table does not match this build.
 bool atoc_set_msaa_samples(int samples);
+// The anti-aliasing's on/off switch (AntialiasingSamples = 2/4/8 on, off, game): the game's two per-frame tests of
+// its Antialiasing option read this mod's switch instead, so the scene is multisampled (or not) whatever that option
+// says, and DarkSouls.ini stays as it is (atoc.cpp). mode 0 = the game's option decides (nothing changed), 1 = on,
+// 2 = off. dsfix_resolution: DSfix makes the resolution, which needs the game's anti-aliasing off (kept off).
+bool atoc_set_aa_mode(int mode, int samples, bool dsfix_resolution);
+// FPS Unlock Settings: the switch at once (mode as above; 0 = what the game's option says now). False when the tests
+// were left as the game's (started with AntialiasingSamples = game): a restart then.
+bool atoc_aa_switch(int mode);
+// Whether the scene is multisampled now (the switch, or the game's option while it decides).
+bool atoc_aa_on();
 // FixAntialiasingDepth: the game's multisampled packed depth and the texture it is resolved into hold one float a
 // sample, written by converted copies of the shaders that draw it (16 bits a channel where the driver cannot use a
 // float target; see atoc.cpp), so the resolve's average is the right depth at the edges of grass and leaves. Install

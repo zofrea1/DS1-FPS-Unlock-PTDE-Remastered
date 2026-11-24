@@ -3079,6 +3079,11 @@ void run(const std::string& line) {
         // atoc 0/1/2: AlphaToCoverage off, plain coverage, sharpened coverage (the default) for this session.
         atoc_set_mode(static_cast<int>(num(1, 2)));
         out("atoc %ld", num(1, 2));
+    } else if (c == "aa") {
+        // aa 0/1/2: the anti-aliasing switch (atoc.h): what the game's option says now, on, off.
+        const bool live = atoc_aa_switch(static_cast<int>(num(1, 1)));
+        out("aa %ld: %s, scene multisampled now: %s", num(1, 1), live ? "switched" : "the game's tests are its own",
+            atoc_aa_on() ? "yes" : "no");
     } else if (c == "dofforce") {
         resolution_force_dof_level(static_cast<int>(num(1, 0)));
         out("dofforce %ld", num(1, 0));
