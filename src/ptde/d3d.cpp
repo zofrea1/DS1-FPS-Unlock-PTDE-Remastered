@@ -64,6 +64,7 @@ bool g_present_watch = false;  // the system Direct3D 9: ScanWatch is told when 
 
 HRESULT WINAPI hook_present(IDirect3DDevice9* device, const RECT* src, const RECT* dst, HWND window,
                             const RGNDATA* dirty) {
+    atoc_aa_tick();
     settingsmenu_present(device);
     if (g_present_dxgi) dxgipresent_frame_presented(frame_boundary_qpc());
     const HRESULT hr = g_present(device, src, dst, window, dirty);

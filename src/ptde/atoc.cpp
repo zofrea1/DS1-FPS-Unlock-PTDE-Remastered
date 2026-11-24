@@ -845,16 +845,19 @@ bool atoc_set_msaa_samples(int samples) {
 // flag at +0x22C and the option) and the frame's scene setup at 0xEB0312 each test it with
 // `cmp byte ptr [ecx+0xE5],0` / `setne al` (a third read, 0xEB5166, only picks a debug menu label). The multisampled
 // targets are made whether or not the option is on (only the game's ForceDisableAA leaves them out: 0x100A1F1, and its
-// frame flag at 0xEB0302), so the option takes effect at once. With AntialiasingSamples on or off, both tests read
-// this mod's switch instead (`cmp byte ptr [g_aa_on],0`, the same 7 bytes); the game's option, its row on the PC
-// settings screen and DarkSouls.ini stay as the player left them. DSfix's resolution needs the game's anti-aliasing
-// off (dllmain.cpp), so the switch stays off beside DSfix when DSfix makes the resolution.
+// frame flag at 0xEB0302), so the option takes effect at once. Both tests read this mod's switch instead
+// (`cmp byte ptr [g_aa_on],0`, the same 7 bytes): on with AntialiasingSamples 2/4/8, off with "off", and with "game"
+// a copy of the game's option made every frame (atoc_aa_tick), so the game behaves as without the switch and FPS Unlock
+// Settings can still turn it on or off at once. The game's option, its row on the PC settings screen and DarkSouls.ini
+// stay as the player left them. DSfix's resolution needs the game's anti-aliasing off (dllmain.cpp), so the switch
+// stays off beside DSfix when DSfix makes the resolution.
 namespace {
 constexpr uintptr_t kAaTests[] = {0x00EAE457, 0x00EB032D};
 constexpr uint8_t kAaTestBytes[7] = {0x80, 0xB9, 0xE5, 0x00, 0x00, 0x00, 0x00};  // cmp byte ptr [ecx+0xE5],0
 constexpr uintptr_t kGameSettingsHolder = 0x01378700;                            // [+0x34] = the game's settings
 volatile uint8_t g_aa_on = 0;
 bool g_aa_patched = false;
+volatile LONG g_aa_follow_game = 0;  // AntialiasingSamples = game: g_aa_on copies the game's option every frame
 
 // The game's Antialiasing option as it stands (-1 while its settings are not there yet).
 int game_aa_option() {
@@ -883,11 +886,6 @@ bool atoc_set_aa_mode(int mode, int samples, bool dsfix_resolution) {
     if (dsfix_resolution) mode = 2;
     const int option = game_ini_filter(L"Antialiasing");
     const char* option_text = option < 0 ? "no DarkSouls.ini yet" : option ? "on in DarkSouls.ini" : "off in DarkSouls.ini";
-    if (mode == 0) {
-        LOG_INFO("Anti-aliasing: the game's own Antialiasing option decides (AntialiasingSamples = game; %s)%s",
-                 option_text, option > 0 ? "" : ": none while it is off");
-        return true;
-    }
     for (uintptr_t site : kAaTests) {
         if (std::memcmp(reinterpret_cast<const void*>(site), kAaTestBytes, sizeof(kAaTestBytes)) != 0) {
             LOG_ERROR("Anti-aliasing: the game's test of its Antialiasing option at %08X is not the expected "
@@ -896,7 +894,8 @@ bool atoc_set_aa_mode(int mode, int samples, bool dsfix_resolution) {
             return false;
         }
     }
-    g_aa_on = mode == 1 ? 1 : 0;
+    g_aa_on = mode == 1 ? 1 : mode == 0 && option > 0 ? 1 : 0;
+    InterlockedExchange(&g_aa_follow_game, mode == 0 ? 1 : 0);
     const uint32_t flag = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_aa_on));
     for (uintptr_t site : kAaTests) {
         uint8_t code[7] = {0x80, 0x3D, 0, 0, 0, 0, 0x00};  // cmp byte ptr [g_aa_on],0
@@ -916,6 +915,9 @@ bool atoc_set_aa_mode(int mode, int samples, bool dsfix_resolution) {
     if (dsfix_resolution) {
         LOG_INFO("Anti-aliasing: the game's own kept off while DSfix makes the resolution (it needs it off; DSfix's "
                  "aaType smooths the picture). The game's option: %s", option_text);
+    } else if (mode == 0) {
+        LOG_INFO("Anti-aliasing: the game's own Antialiasing option decides (AntialiasingSamples = game; %s)%s",
+                 option_text, option > 0 ? "" : ": none while it is off");
     } else if (mode == 1) {
         LOG_INFO("Anti-aliasing: on, the scene multisampled %dx (AntialiasingSamples), whatever the game's own "
                  "Antialiasing option says (%s)", samples, option_text);
@@ -931,13 +933,15 @@ bool atoc_set_aa_mode(int mode, int samples, bool dsfix_resolution) {
 
 bool atoc_aa_switch(int mode) {
     if (!g_aa_patched) return false;
-    if (mode == 0) {
-        const int option = game_aa_option();
-        g_aa_on = option > 0 ? 1 : 0;
-    } else {
-        g_aa_on = mode == 1 ? 1 : 0;
-    }
+    InterlockedExchange(&g_aa_follow_game, mode == 0 ? 1 : 0);
+    g_aa_on = mode == 0 ? (game_aa_option() > 0 ? 1 : 0) : mode == 1 ? 1 : 0;
     return true;
+}
+
+void atoc_aa_tick() {
+    if (!g_aa_follow_game) return;
+    const int option = game_aa_option();
+    if (option >= 0) g_aa_on = static_cast<uint8_t>(option);
 }
 
 bool atoc_aa_on() {

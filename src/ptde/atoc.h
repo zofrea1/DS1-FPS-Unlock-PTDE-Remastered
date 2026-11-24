@@ -16,12 +16,14 @@ void atoc_set_depth_diag(int bits);
 bool atoc_set_msaa_samples(int samples);
 // The anti-aliasing's on/off switch (AntialiasingSamples = 2/4/8 on, off, game): the game's two per-frame tests of
 // its Antialiasing option read this mod's switch instead, so the scene is multisampled (or not) whatever that option
-// says, and DarkSouls.ini stays as it is (atoc.cpp). mode 0 = the game's option decides (nothing changed), 1 = on,
+// says, and DarkSouls.ini stays as it is (atoc.cpp). mode 0 = the game's option decides (copied every frame), 1 = on,
 // 2 = off. dsfix_resolution: DSfix makes the resolution, which needs the game's anti-aliasing off (kept off).
 bool atoc_set_aa_mode(int mode, int samples, bool dsfix_resolution);
-// FPS Unlock Settings: the switch at once (mode as above; 0 = what the game's option says now). False when the tests
-// were left as the game's (started with AntialiasingSamples = game): a restart then.
+// FPS Unlock Settings: the switch at once (mode as above; 0 = the game's option from now on). False when the game's
+// tests could not be changed (this build of the game differs).
 bool atoc_aa_switch(int mode);
+// Every frame (Present): with AntialiasingSamples = game, the switch takes the game's option as it stands.
+void atoc_aa_tick();
 // Whether the scene is multisampled now (the switch, or the game's option while it decides).
 bool atoc_aa_on();
 // FixAntialiasingDepth: the game's multisampled packed depth and the texture it is resolved into hold one float a

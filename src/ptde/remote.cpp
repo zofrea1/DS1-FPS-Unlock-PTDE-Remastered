@@ -3080,7 +3080,7 @@ void run(const std::string& line) {
         atoc_set_mode(static_cast<int>(num(1, 2)));
         out("atoc %ld", num(1, 2));
     } else if (c == "aa") {
-        // aa 0/1/2: the anti-aliasing switch (atoc.h): what the game's option says now, on, off.
+        // aa 0/1/2: the anti-aliasing switch (atoc.h): the game's option (followed every frame), on, off.
         const bool live = atoc_aa_switch(static_cast<int>(num(1, 1)));
         out("aa %ld: %s, scene multisampled now: %s", num(1, 1), live ? "switched" : "the game's tests are its own",
             atoc_aa_on() ? "yes" : "no");
