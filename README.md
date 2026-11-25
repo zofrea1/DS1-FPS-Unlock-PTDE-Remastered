@@ -244,7 +244,7 @@ Back up your saves. **Remastered is well tested with Seamless Co-op; PTDE is wel
 
 ## FPS Unlock Settings
 
-An in-game page with the settings you may want to change while playing: press **F1** (`SettingsMenuKey`, F1 to F12 or none), or **Y** on a controller in the game's PC settings screen (a line at the bottom of that screen says so). Up/down chooses a row, left/right changes it, LB/RB (or Q/E) turns the page, B or Esc closes it; while it is open the game gets no controller, keyboard or mouse input.
+An in-game page with the settings you may want to change while playing: press **F1** (`SettingsMenuKey`, F1 to F12 or none), or **Y** on a controller anywhere in the game's System menu (Start, then the book tab: its list and every screen in it, PC settings included; a line at the bottom says so). Up/down chooses a row, left/right changes it, LB/RB (or Q/E) turns the page, B or Esc closes it; while it is open the game gets no controller, keyboard or mouse input.
 
 - **Display**: the frame rate cap, the fullscreen refresh rate, borderless fullscreen, the HUD size and the size of the marks over the world, the mouse pointer.
 - **Picture**: depth of field strength, anti-aliasing (off, 2x, 4x, 8x or the game's option; off and on at once), smooth foliage edges, texture filtering, shadow detail, supersampling, colour precision, 10-bit output, swaying foliage, NPCs' feet on the ground.

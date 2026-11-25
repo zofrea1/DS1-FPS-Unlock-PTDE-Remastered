@@ -29,19 +29,33 @@
 //
 // The page's picture is uploaded to a texture when it changes and drawn over the finished frame in the device's
 // Present (state saved and put back with a state block, the render target and depth buffer by hand). The PC settings
-// screen (NS_FRPG::FrpgMenuDlgPcOption, method table 0x11D28E4) is noticed by its Draw (slot 0x48, thiscall(dlg, dc),
-// on the game thread): while it draws, Y opens the page and a line at the bottom says so. The keys come from the
+// screen and the rest of the System menu (kSystemDialogs) are noticed by their Draw (slot 0x48, thiscall(dlg, dc), on
+// the game thread): while one draws, Y opens the page and a line at the bottom says so. The keys come from the
 // game's DirectInput keyboard state (inputcache.cpp; no GetAsyncKeyState in the release DLL), the controller from
 // every XInput read (xinput_proxy.cpp), and while the page is open (until every button is let go after closing) the
 // game gets neither.
 namespace {
 
-constexpr uintptr_t kPcOptionVtable = 0x011D28E4;
+// The System menu (2026-11-25, the user: the hint "whenever the player is in the system menu", for more visibility):
+// the System tab's list and each of its screens. Every dialog class has its own method table; slot 0x48 is the base
+// class's Draw (0x787E90) in all of them, so each class's entry is swapped for ours.
+struct SystemDialog {
+    uintptr_t vtable;
+    const char* name;
+};
+constexpr SystemDialog kSystemDialogs[] = {
+    {0x011D0A1C, "the System tab"},        // FrpgMenuDlgSystem
+    {0x011D251C, "Options"},               // FrpgMenuDlgEnvOption
+    {0x011D1CFC, "Brightness"},            // FrpgMenuDlgDispOption
+    {0x011D1EF4, "the sound options"},     // FrpgMenuDlgSoundOption
+    {0x011D28E4, "PC settings"},           // FrpgMenuDlgPcOption
+    {0x011D2C14, "Key settings"},          // FrpgMenuDlgKeyOption
+};
 constexpr int kDrawSlot = 0x48 / 4;
 
 using DrawFn = void*(__fastcall*)(void* dlg, void* edx, void* dc);
-DrawFn g_pcoption_draw = nullptr;
-volatile LONGLONG g_pcoption_seen = 0;
+DrawFn g_pcoption_draw = nullptr;  // the base class's Draw, the same for every one of them
+volatile LONGLONG g_pcoption_seen = 0;  // the last time a System menu dialog drew
 
 // Diagnostics (a Steam Deck player saw neither the hint nor the page, 2026-11-25): the first time the PC settings
 // screen draws, the first controller buttons the page reads, and each way its drawing can fail, once.
@@ -57,7 +71,7 @@ void tell_fail(int i, const char* what, HRESULT hr) {
 void* __fastcall hk_pcoption_draw(void* dlg, void* edx, void* dc) {
     InterlockedExchange64(&g_pcoption_seen, static_cast<LONGLONG>(GetTickCount64()));
     if (InterlockedExchange(&g_told_pcoption, 1) == 0) {
-        LOG_INFO("FPS Unlock Settings: the PC settings screen is up: its hint is shown and Y opens the page");
+        LOG_INFO("FPS Unlock Settings: the System menu is up: its hint is shown and Y opens the page");
     }
     return g_pcoption_draw(dlg, edx, dc);
 }
@@ -409,22 +423,32 @@ void settingsmenu_install(const wchar_t* ini_path, int key) {
     settingspage_add_page(L"Picture", kPicture, _countof(kPicture));
     settingspage_add_page(L"Draw distance", kDistance, _countof(kDistance));
     inputcache_require_hook();
-    // The PC settings screen's Draw: its own method table entry (every dialog class has one).
-    auto** slot = reinterpret_cast<void**>(kPcOptionVtable) + kDrawSlot;
-    DWORD old = 0;
-    __try {
-        if (VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
-            g_pcoption_draw = reinterpret_cast<DrawFn>(*slot);
-            *slot = reinterpret_cast<void*>(&hk_pcoption_draw);
-            VirtualProtect(slot, sizeof(void*), old, &old);
+    // Each System menu dialog's Draw: its own method table entry. All of them hold the base class's Draw; one that
+    // holds anything else (another build, another mod) is left alone.
+    int hooked = 0;
+    for (const auto& d : kSystemDialogs) {
+        auto** slot = reinterpret_cast<void**>(d.vtable) + kDrawSlot;
+        DWORD old = 0;
+        __try {
+            if (*slot == reinterpret_cast<void*>(&hk_pcoption_draw)) {
+                ++hooked;
+                continue;
+            }
+            if (g_pcoption_draw && *slot != reinterpret_cast<void*>(g_pcoption_draw)) continue;
+            if (VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
+                if (!g_pcoption_draw) g_pcoption_draw = reinterpret_cast<DrawFn>(*slot);
+                *slot = reinterpret_cast<void*>(&hk_pcoption_draw);
+                VirtualProtect(slot, sizeof(void*), old, &old);
+                ++hooked;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_pcoption_draw = nullptr;
     }
     char k[16] = "none";
     if (key >= VK_F1 && key <= VK_F24) std::snprintf(k, sizeof(k), "F%d", key - VK_F1 + 1);
-    LOG_INFO("FPS Unlock Settings: open with %s, or Y on a controller in the PC settings screen%s", k,
-             g_pcoption_draw ? "" : " (the PC settings screen was not found: the key only)");
+    LOG_INFO("FPS Unlock Settings: open with %s, or Y on a controller anywhere in the System menu (%d of %d of its "
+             "screens)%s", k, hooked, static_cast<int>(sizeof(kSystemDialogs) / sizeof(kSystemDialogs[0])),
+             hooked ? "" : " (not found: the key only)");
 }
 
 bool settingsmenu_enabled() { return settingspage_enabled(); }
