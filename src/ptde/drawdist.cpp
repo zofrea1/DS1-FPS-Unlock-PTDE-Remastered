@@ -1043,6 +1043,12 @@ void detail_tick_body() {
     // for pairs only the gap pass found (no surface in one plane: crossing at an angle). In those two cases a piece is
     // left out only when enough of it lies on the other (the pair's bits), so a big piece is not dropped for a small
     // one near it; otherwise the depth levels stay. Only a piece the player's room does not draw is ever left out.
+    // The gap pass leaves foliage out (Remastered's foliage meshes, foliage_data.h): a grass, flower or bush card lying
+    // within 0.5 m of a coarse ground is detail on it, not another version of it, and the game draws the two together
+    // from the rooms that show both. Counted, Darkroot Garden's cliff path detail m1621B0 (its grass, flowers and two
+    // bushes) ran "apart" from the coarse ground m3001B0 and was hidden from the rooms drawing only that ground, so the
+    // bushes came and went with a step across a room boundary (user report 2026-11-25, adjacent+); 63 pairs, most of
+    // them such detail layers (Darkroot, Firelink, the Undead Burg's grass), no longer hide a piece.
     for (size_t k = 0; k < kDetPairs; ++k) {
         const auto& pr = D::kPairs[k];
         if (pr.winner > 1 || !drawn[pr.a] || !drawn[pr.b]) continue;
