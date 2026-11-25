@@ -618,7 +618,8 @@ bool frame_install(const Settings& settings) {
                          "game's own too)");
             }
         }
-        foliage_configure(settings.foliage_sway, settings.foliage_sway_strength, settings.foliage_sway_speed);
+        foliage_configure(settings.foliage_sway, settings.foliage_sway_strength, settings.foliage_sway_speed,
+                          settings.foliage_tree_sway);
         foliage_install();
         int rw = settings.render_width, rh = settings.render_height;
         // YieldToDSFix: DSfix's renderWidth/renderHeight decide, and with them its anti-aliasing, SSAO and depth of

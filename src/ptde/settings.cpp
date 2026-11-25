@@ -160,6 +160,10 @@ Settings settings_load(const wchar_t* dll_path) {
             s.foot_ik_npcs = parse_bool(val);
             return;
         }
+        if (key == "foliagetreesway") {
+            s.foliage_tree_sway = parse_bool(val);
+            return;
+        }
         if (key == "fpsunlock") {
             s.fps_unlock = parse_bool(val);
         } else if (key == "maxfps" || key == "targetfps") {

@@ -152,6 +152,9 @@ const SettingsMenuRow kPicture[] = {
      L"dither.", kAutoOnOff, _countof(kAutoOnOff), nullptr, false},
     {"FoliageSway", L"Swaying foliage", L"Grass, bushes and leaves move in the wind, as in Remastered.", kOnOff,
      _countof(kOnOff), nullptr, false},
+    {"FoliageTreeSway", L"Swaying trees", L"With swaying foliage: the trees of the Undead Burg and Parish, the way to "
+     L"Sen's Fortress, Anor Londo and Firelink Shrine's great tree sway in the wind too.", kOnOff, _countof(kOnOff),
+     nullptr, false},
     {"FootIkNpcs", L"NPCs' feet on the ground", L"Human NPCs and summoned phantoms place their feet on stairs and "
      L"slopes, as your character does.", kOnOff, _countof(kOnOff), apply_foot_ik_npcs, false},
 };
