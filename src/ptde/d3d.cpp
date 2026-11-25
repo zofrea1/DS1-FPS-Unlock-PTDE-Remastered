@@ -375,7 +375,12 @@ HRESULT WINAPI hook_create_device(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type
             g_present_watch = !g_present_dxgi;
         }
 #endif
-        if (g_present_dxgi || g_present_watch) {
+        // Present is hooked in every mode: the FPS Unlock Settings page (its hint, its controls and its drawing) and the
+        // anti-aliasing that follows the game's own option (atoc_aa_tick) run there each frame. Until 3.0.1 it was
+        // hooked only for DXVK through DXGI or ScanWatch, so with DXVK = false (the Steam Deck under Proton, whose
+        // own DXVK draws) the page never showed and its hint never came (2026-11-25 Deck log: the PC settings screen
+        // seen, no controller buttons ever read by the page).
+        {
             void* present = patch_slot(*out, kPresentSlot, reinterpret_cast<void*>(&hook_present));
             if (present && !g_present) g_present = reinterpret_cast<PresentFn>(present);
         }
