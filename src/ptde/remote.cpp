@@ -11,6 +11,7 @@
 #include "frame.h"
 #include "drawdist.h"
 #include "foliage.h"
+#include "footik.h"
 #include "dxgipresent.h"
 #include "limiter.h"
 #include "profile.h"
@@ -2903,6 +2904,22 @@ void run(const std::string& line) {
     } else if (c == "eventwaits" && t.size() > 1) {
         eventwaits_set(num(1, 1) != 0);
         out("eventwaits %s", num(1, 1) != 0 ? "fixed" : "the game's own");
+    } else if (c == "footikprof") {
+        // footikprof: start (again) timing the foot placement of every human character; footikprof report: its time
+        // per call and per frame, for our character, the others placed (FootIkNpcs / FootIkPlayers) and the others left.
+        if (t.size() > 1 && t[1] == "report") {
+            char buf[480] = {};
+            footik_profile_report(buf, sizeof(buf));
+            out("%s", buf);
+        } else {
+            footik_profile_start();
+            out("footikprof: started");
+        }
+    } else if (c == "footik") {
+        // footik npcs|players 0|1: foot placement for the human NPCs / the other players while the game runs.
+        if (t.size() > 2 && t[1] == "npcs") footik_set_npcs(num(2, 1) != 0);
+        if (t.size() > 2 && t[1] == "players") footik_set_players(num(2, 1) != 0);
+        out("footik npcs %d players %d", footik_npcs() ? 1 : 0, footik_players() ? 1 : 0);
     } else if (c == "uiscale" && t.size() > 1) {
         // uiscale N: the HUD at N percent for this session (at the menus' source, menuscale.cpp; else the layout's
         // corner groups, which need UIScale below 100 or FixAspectUI active at start for their hooks).

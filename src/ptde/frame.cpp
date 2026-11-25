@@ -541,6 +541,10 @@ bool frame_install(const Settings& settings) {
         if (settings.fix_foot_ik) {
             footik_install();
         }
+        // Always in place (the settings page and Prepare to Co-op switch it while the game runs); with both off it
+        // gives the game's own answer.
+        footik_set_npcs(settings.foot_ik_npcs);
+        footik_others_install();
         if (settings.fix_ghosts) {
             ghost_install();
         }

@@ -155,6 +155,11 @@ Settings settings_load(const wchar_t* dll_path) {
             phone_keys.emplace_back(key.substr(5), val);
             return;
         }
+        // Kept out of the chain below (the compiler allows only so many nested blocks).
+        if (key == "footiknpcs") {
+            s.foot_ik_npcs = parse_bool(val);
+            return;
+        }
         if (key == "fpsunlock") {
             s.fps_unlock = parse_bool(val);
         } else if (key == "maxfps" || key == "targetfps") {

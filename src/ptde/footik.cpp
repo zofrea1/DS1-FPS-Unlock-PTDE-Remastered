@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 
@@ -75,6 +76,97 @@ bool write_bytes(uint32_t va, const void* bytes, size_t size) {
     DWORD ignored = 0;
     VirtualProtect(reinterpret_cast<void*>(va), size, old, &ignored);
     return true;
+}
+
+// ---------------------------------------------------------------- other characters
+constexpr uint32_t kOthersSite = 0x00FE1798;  // mov edx, dword ptr [eax+0A4h]  (the "is this our player" slot)
+constexpr uint32_t kWorldChrManVar = 0x0137D644;
+constexpr uint32_t kPlayerCtrlPlace = 0x0118CEC8;  // PlayerCtrl vtable slot 0x6C: 0xFE1740
+constexpr uint32_t kPlace = 0x00FE1740;
+volatile long g_npcs = 0;     // FootIkNpcs
+volatile long g_players = 0;  // FootIkPlayers (Prepare to Co-op)
+bool g_others_installed = false;
+volatile long g_last_others = 0;  // the decision of the last call (for the profile)
+
+// Another player's character: WorldChrMan+0x24 {count, entries of 0x20, character first}, entry 0 being ours.
+bool other_player(uint32_t wcm, uint32_t chr) {
+    const uint32_t n = *reinterpret_cast<const uint32_t*>(wcm + 0x24);
+    const uint32_t entries = *reinterpret_cast<const uint32_t*>(wcm + 0x28);
+    if (!entries || n > 256) return false;
+    for (uint32_t i = 1; i < n; ++i) {
+        if (*reinterpret_cast<const uint32_t*>(entries + i * 0x20) == chr) return true;
+    }
+    return false;
+}
+
+uint32_t ctrl_at(uint32_t ctrl, uint32_t off) { return *reinterpret_cast<const uint32_t*>(ctrl + off); }
+
+// cdecl(chr, ctrl), asked only when the game said no: place this character's feet too.
+int __cdecl others_wanted(uint32_t chr, uint32_t ctrl) {
+    const long npcs = g_npcs, players = g_players;
+    int yes = 0;
+    if (npcs || players) {
+        __try {
+            // What 0xFE1740 reads past the question with no check (+0x1C, +0x2C), and the legs' solvers.
+            const uint32_t wcm = *reinterpret_cast<const uint32_t*>(kWorldChrManVar);
+            if (chr && wcm && ctrl_at(ctrl, 0x1C) && ctrl_at(ctrl, 0x2C) &&
+                (ctrl_at(ctrl, 0x2BC) || ctrl_at(ctrl, 0x2C0))) {
+                yes = other_player(wcm, chr) ? (players ? 1 : 0) : (npcs ? 1 : 0);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            yes = 0;
+        }
+    }
+    g_last_others = yes;
+    return yes;
+}
+
+// In place of the slot's address: ecx = the character, esi = its controller (0xFE1740's this). Returns al.
+__declspec(naked) void others_check() {
+    __asm {
+        push ecx
+        mov eax, [ecx]
+        call dword ptr [eax + 0xA4]  // the game's own answer: our player
+        pop ecx
+        test al, al
+        jnz done
+        push esi
+        push ecx
+        call others_wanted
+        add esp, 8
+    done:
+        ret
+    }
+}
+
+// ---------------------------------------------------------------- profile (diagnostics)
+using PlaceFn = float(__thiscall*)(void* ctrl, uint32_t dt_bits, uint32_t arg, uint32_t arg2);  // ret 0xC
+PlaceFn g_place_orig = reinterpret_cast<PlaceFn>(kPlace);
+bool g_prof_on = false;
+LARGE_INTEGER g_prof_freq{};
+struct ProfBucket {
+    long long calls = 0;
+    long long ticks = 0;
+};
+ProfBucket g_prof[3];  // 0: ours, 1: others placed, 2: others left (the question said no)
+long long g_prof_frames = 0;
+
+// Both arguments pass through as raw dwords: the second is a pointer, and one handed on as a float would go through
+// the x87 stack, which changes a NaN pattern's bits (the first try crashed on a pointer so mangled).
+float __fastcall place_timed(void* ctrl, void*, uint32_t dt_bits, uint32_t arg, uint32_t arg2) {
+    LARGE_INTEGER t0, t1;
+    g_last_others = 0;
+    QueryPerformanceCounter(&t0);
+    const float r = g_place_orig(ctrl, dt_bits, arg, arg2);
+    QueryPerformanceCounter(&t1);
+    const uint32_t chr = ctrl_at(reinterpret_cast<uint32_t>(ctrl), 0x10);
+    const uint32_t wcm = *reinterpret_cast<const uint32_t*>(kWorldChrManVar);
+    const bool ours = wcm && *reinterpret_cast<const uint32_t*>(wcm + 0x3C) == chr;
+    ProfBucket& b = g_prof[ours ? 0 : g_last_others ? 1 : 2];
+    ++b.calls;
+    b.ticks += t1.QuadPart - t0.QuadPart;
+    if (ours) ++g_prof_frames;
+    return r;
 }
 
 }  // namespace
@@ -166,4 +258,77 @@ void footik_set_enabled(bool on) {
 
 bool footik_enabled() {
     return g_installed && g_enabled != 0;
+}
+
+bool footik_others_install() {
+    if (g_others_installed) return true;
+    static const uint8_t kExpect[6] = {0x8B, 0x90, 0xA4, 0x00, 0x00, 0x00};
+    if (std::memcmp(reinterpret_cast<const void*>(kOthersSite), kExpect, sizeof(kExpect)) != 0 ||
+        *reinterpret_cast<const uint32_t*>(kPlayerCtrlPlace) != kPlace) {
+        LOG_ERROR("Foot IK for other characters: the code is not this build's; only your character's feet are placed");
+        return false;
+    }
+    uint8_t code[6] = {0xBA, 0, 0, 0, 0, 0x90};  // mov edx, others_check ; nop
+    const uint32_t fn = reinterpret_cast<uint32_t>(&others_check);
+    std::memcpy(code + 1, &fn, 4);
+    if (!write_bytes(kOthersSite, code, sizeof(code))) {
+        LOG_ERROR("Could not patch the foot IK question (Win32=%lu)", GetLastError());
+        return false;
+    }
+    g_others_installed = true;
+    LOG_INFO("Foot IK for other characters in place: human NPCs %s (FootIkNpcs), other players %s (FootIkPlayers)",
+             g_npcs ? "on" : "off", g_players ? "on" : "off");
+    return true;
+}
+
+void footik_set_npcs(bool on) {
+    const long was = InterlockedExchange(&g_npcs, on ? 1 : 0);
+    if (g_others_installed && was != (on ? 1 : 0)) {
+        LOG_INFO("FootIkNpcs = %s: %s", on ? "true" : "false",
+                 on ? "human NPCs (summoned phantoms too) place their feet on stairs and slopes"
+                    : "only your character's feet are placed among the NPCs (the game's own)");
+    }
+}
+
+void footik_set_players(bool on) {
+    const long was = InterlockedExchange(&g_players, on ? 1 : 0);
+    if (g_others_installed && was != (on ? 1 : 0)) {
+        LOG_INFO("FootIkPlayers = %s: %s", on ? "true" : "false",
+                 on ? "the other players' characters place their feet on stairs and slopes"
+                    : "the other players' characters keep their animation's feet (the game's own)");
+    }
+}
+
+bool footik_npcs() { return g_others_installed && g_npcs != 0; }
+bool footik_players() { return g_others_installed && g_players != 0; }
+
+void footik_profile_start() {
+    if (!g_prof_on) {
+        DWORD old = 0;
+        const uint32_t wrapper = reinterpret_cast<uint32_t>(&place_timed);
+        if (!VirtualProtect(reinterpret_cast<void*>(kPlayerCtrlPlace), 4, PAGE_READWRITE, &old)) return;
+        *reinterpret_cast<uint32_t*>(kPlayerCtrlPlace) = wrapper;
+        VirtualProtect(reinterpret_cast<void*>(kPlayerCtrlPlace), 4, old, &old);
+        QueryPerformanceFrequency(&g_prof_freq);
+        g_prof_on = true;
+    }
+    for (auto& b : g_prof) b = ProfBucket{};
+    g_prof_frames = 0;
+}
+
+void footik_profile_report(char* out, size_t size) {
+    if (!g_prof_on || !g_prof_freq.QuadPart) {
+        std::snprintf(out, size, "footikprof: not started");
+        return;
+    }
+    const double us = 1e6 / static_cast<double>(g_prof_freq.QuadPart);
+    const double frames = g_prof_frames ? static_cast<double>(g_prof_frames) : 1.0;
+    auto per_call = [&](const ProfBucket& b) { return b.calls ? b.ticks * us / b.calls : 0.0; };
+    auto per_frame = [&](const ProfBucket& b) { return b.ticks * us / frames; };
+    std::snprintf(out, size,
+                  "footikprof %lld frames: ours %lld calls %.2f us/call %.2f us/frame; others placed %lld calls %.2f "
+                  "us/call %.2f us/frame (%.2f a frame); others left %lld calls %.2f us/call %.2f us/frame",
+                  g_prof_frames, g_prof[0].calls, per_call(g_prof[0]), per_frame(g_prof[0]), g_prof[1].calls,
+                  per_call(g_prof[1]), per_frame(g_prof[1]), g_prof[1].calls / frames, g_prof[2].calls,
+                  per_call(g_prof[2]), per_frame(g_prof[2]));
 }

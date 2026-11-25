@@ -18,3 +18,19 @@ bool footik_install();
 void footik_update(double dt);
 void footik_set_enabled(bool on);
 bool footik_enabled();
+
+// Foot placement for every human character, not only yours (FootIkNpcs; Prepare to Co-op's FootIkPlayers). The
+// placement above is a method of the human characters' controller (PlayerCtrl, slot 0x6C = 0xFE1740: your character,
+// the other players' and the human NPCs'; enemies have none), and the game runs it for your character only: at
+// 0xFE1798 it asks the character's vt+0xA4 (0xE67B00, chr == WorldChrMan+0x3C), and for anyone else it leaves the
+// feet as the animation has them (flat ground), so on stairs and slopes their feet floated or sank. The question now
+// also says yes for the human NPCs (summoned phantoms among them) and, when set, the other players' characters
+// (WorldChrMan+0x24's set past entry 0), when their controller has the legs' solvers (+0x2BC, +0x2C0).
+bool footik_others_install();
+void footik_set_npcs(bool on);
+void footik_set_players(bool on);
+bool footik_npcs();
+bool footik_players();
+// RemoteControl `footikprof`: the placement's own time per call and per frame, for yours and the others (diagnostics).
+void footik_profile_start();
+void footik_profile_report(char* out, size_t size);

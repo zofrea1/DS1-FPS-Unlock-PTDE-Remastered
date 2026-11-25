@@ -64,6 +64,8 @@ struct Settings {
     bool fix_lock_on_turn = true;
     // Foot IK (feet on stairs and slopes, the pelvis lowered to reach them) at the original speed (see footik.h).
     bool fix_foot_ik = true;
+    // Foot placement for the human NPCs too (summoned phantoms among them), not only your character (see footik.h).
+    bool foot_ik_npcs = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
     bool fix_ghosts = true;
     // Effect particle spawn intervals below 1/30 s are raised to just under 1/30 s as effects load (Remastered's
