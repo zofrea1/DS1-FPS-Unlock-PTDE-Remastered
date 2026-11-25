@@ -3076,6 +3076,10 @@ void run(const std::string& line) {
     } else if (c == "swayspeed") {
         foliage_set_speed(static_cast<int>(num(1, 100)));
         out("swayspeed %ld", num(1, 100));
+    } else if (c == "treesway") {
+        // treesway 0|1: FoliageTreeSway off / on (at once); treesway alone reports.
+        if (t.size() > 1) foliage_set_trees(num(1, 1) != 0);
+        out("treesway %s", foliage_trees() ? "on" : "off");
     } else if (c == "swaystats") {
         foliage_log_stats();
         out("swaystats: see the log");

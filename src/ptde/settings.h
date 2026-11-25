@@ -150,8 +150,8 @@ struct Settings {
     bool foliage_sway = true;
     int foliage_sway_strength = 100;
     int foliage_sway_speed = 100;
-    // Trees sway too (contributed; off by default): the Undead Burg and Parish, the way to Sen's Fortress, Anor Londo,
-    // Firelink Shrine's great tree's crown (foliage.h).
+    // The leaves of trees sway too (contributed; off by default): Firelink Shrine, the Undead Burg and Parish, the way
+    // to Sen's Fortress, Anor Londo (foliage.h). Switched at once on the settings page.
     bool foliage_tree_sway = false;
     // The mouse pointer hides over the game window after two seconds without moving (cursor.h).
     bool hide_mouse_cursor = true;

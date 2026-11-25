@@ -6,6 +6,7 @@
 
 #include "atoc.h"
 #include "drawdist.h"
+#include "foliage.h"
 #include "footik.h"
 #include "inputcache.h"
 #include "layout.h"
@@ -88,6 +89,7 @@ void apply_draw_pieces(const char* v) {
     drawdist_set_mode(s == "all" ? 2 : s == "adjacent+" ? 3 : s == "adjacent" ? 1 : 0);
 }
 void apply_foot_ik_npcs(const char* v) { footik_set_npcs(lower(v) != "false"); }
+void apply_tree_sway(const char* v) { foliage_set_trees(lower(v) == "true"); }
 void apply_draw_objects(const char* v) { drawdist_set_widen(lower(v) == "false" ? 7 : 15); }
 void apply_lod(const char* v) { drawdist_set_lod(to_int(v)); }
 void apply_fx_lod(const char* v) { drawdist_set_effect_lod(to_int(v)); }
@@ -152,9 +154,9 @@ const SettingsMenuRow kPicture[] = {
      L"dither.", kAutoOnOff, _countof(kAutoOnOff), nullptr, false},
     {"FoliageSway", L"Swaying foliage", L"Grass, bushes and leaves move in the wind, as in Remastered.", kOnOff,
      _countof(kOnOff), nullptr, false},
-    {"FoliageTreeSway", L"Swaying trees", L"With swaying foliage: the trees of the Undead Burg and Parish, the way to "
-     L"Sen's Fortress, Anor Londo and Firelink Shrine's great tree sway in the wind too.", kOnOff, _countof(kOnOff),
-     nullptr, false},
+    {"FoliageTreeSway", L"Swaying trees", L"With swaying foliage on: the leaves of the trees around Firelink Shrine, in "
+     L"the Undead Burg and Parish, on the way to Sen's Fortress and in Anor Londo sway in the wind too.", kOnOff,
+     _countof(kOnOff), apply_tree_sway, false},
     {"FootIkNpcs", L"NPCs' feet on the ground", L"Human NPCs and summoned phantoms place their feet on stairs and "
      L"slopes, as your character does.", kOnOff, _countof(kOnOff), apply_foot_ik_npcs, false},
 };

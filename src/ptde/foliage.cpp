@@ -56,23 +56,27 @@
 // with the wind in c250/c251 as Remastered's W0/W1 (no shader of the game's uses c242-c245 or c249-c255) and its
 // constants in c252-c255.
 //
-// FoliageTreeSway (contributed, off by default): trees, which Remastered does not sway (its maps draw tree wood with
-// ordinary static materials). Their vertices are marked 166 instead of 165, and the shader copy then holds a second
-// block, the same instructions testing 166 (c249.x), with the amplitude times kTreeScale (c249.y) and the phase times
-// kTreeSlow (c249.z): ten times as far and a fifth as fast as a blade of grass, so a tree sways instead of shivering.
-// Without FoliageTreeSway nothing of it is in the shaders or the models. Which trees:
-//  - Firelink Shrine's great tree: its leafy crown, two models of their own (kTreeCrowns: m7010B2A10, m7011B2A10),
-//    every mesh, one height range and one phase for the whole piece: still in its bottom kTreeStill, where it meets
-//    the wood, rising to 2 units at its top. Its trunk (m7000B2A10, bark and bare branches, the crow's nest) is not
-//    named and stays as the game draws it.
+// FoliageTreeSway (contributed, off by default, switched at once): the leaves of trees, which Remastered does not sway
+// (its maps draw trees with ordinary static materials). Their vertices are marked 166 instead of 165, and each static
+// shader gets a second copy holding, after the grass's block, the same instructions testing 166 (c249.x), with the
+// amplitude times kTreeScale (c249.y) and the phase times kTreeSlow (c249.z): ten times as far and a fifth as fast as a
+// blade of grass, so a tree sways instead of shivering. With FoliageSway on the leaves are always marked as the maps
+// load and both copies are made; FoliageTreeSway only picks the copy SetVertexShader sets, so the switch shows at once.
+// With it off the grass's copy draws, exactly as without trees (the marks 166 are then read by nothing).
+// Which leaves: alpha-tested leaf cards only ("_Edge" materials), so solid wood never moves:
+//  - Firelink Shrine: the leaf cards of all the trees around the shrine, the great tree's among them, are two models
+//    of their own (kFirelinkLeaves: m7010B2A10, m7011B2A10; their trunks and branches, m7000B2A10, are not named). Each
+//    vertex moves kLeafAmpFirelink, whatever its height: the models span every tree of the area (270 units across), so
+//    a height range over them would make high trees sway and low ones not. (The models also hold an additive light
+//    shaft, A10_BG_shaft[Dn]_Add, which is no leaf card and stays as the game draws it.)
 //  - The Undead Burg and Parish (m10_01, models ending b1a10), the way up to Sen's Fortress (m15_00, b0a15) and Anor
 //    Londo (m15_01, b1a15): their trees are meshes inside batch map pieces that also hold walls and ground (the
-//    Parish's m2500B1A10 holds its trees, the church wall m10_01_wall_30 and the ground), so the meshes drawing with a
-//    tree texture ("tree_" or "tree.": not "street") are marked, and the rest of the piece is left alone. Every vertex
-//    of them moves kAreaTreeAmp (a batch holds trees at every height of the map, so a height range over a mesh would
-//    leave its low trees still), with one phase per piece (FNV-1a of the model's name) and the shader's own phase by
-//    position.
-// The wind's wrap (send_wind) then lands on whole cycles of both phases: 4 pi * kTreeSlowBy / speed.
+//    Parish's m2500B1A10 holds its trees, the church wall m10_01_wall_30 and the ground), so the leaf-card meshes
+//    drawing with a tree texture ("tree_" or "tree.": not "street") are marked, and the rest of the piece is left alone
+//    (the solid tree wood of the Lower Burg's ground pieces, m10_tree_01 in M[DB] materials, among it). Each vertex
+//    moves kLeafAmpArea.
+// One phase per model (FNV-1a of its name), plus the shader's own phase by position. The wind's wrap (send_wind) lands
+// on whole cycles of both blocks' phases: 4 pi * kTreeSlowBy / speed.
 namespace {
 
 constexpr uint32_t kFlverCtor = 0x00F33D40;
@@ -82,14 +86,15 @@ constexpr uint8_t kMarkTree = 166;              // FoliageTreeSway's vertices
 constexpr float kTreeScale = 10.0f;             // a tree's amplitude: ten times a blade of grass's
 constexpr int kTreeSlowBy = 5;                  // its phase at a fifth of the grass's speed (a whole number: the wrap)
 constexpr float kTreeSlow = 1.0f / kTreeSlowBy;
-constexpr float kTreeStill = 0.3f;              // the bottom of a crown piece that does not move
-constexpr float kCrownTop = 2.0f;               // a crown's top: 2 units (times kTreeScale and the strength)
-constexpr float kAreaTreeAmp = 0.5f;            // every vertex of a batch piece's tree meshes
-// Firelink Shrine's great tree: its crown's two models (its trunk, m7000b2a10, is not named).
-constexpr const char* kTreeCrowns[] = {"m7010b2a10", "m7011b2a10"};
+// Each leaf vertex's amplitude (times kTreeScale and the strength in the shader). Firelink's: the mean of the height
+// ramp first contributed for those models (0 in their bottom 30%, 2 at their top), so the area sways as much in all.
+constexpr float kLeafAmpFirelink = 1.0f;
+constexpr float kLeafAmpArea = 0.5f;            // the batch pieces' trees: a slight sway of their branches
+// The leaf cards of the trees around Firelink Shrine (their trunks and branches, m7000b2a10, are not named).
+constexpr const char* kFirelinkLeaves[] = {"m7010b2a10", "m7011b2a10"};
 
 bool g_on = false;
-bool g_tree_sway = false;  // FoliageTreeSway (under FoliageSway's switch)
+volatile bool g_trees_on = false;  // FoliageTreeSway: which shader copy draws (foliage_set_trees, any time)
 float g_strength = 0.1f;  // Remastered's g_WindStrength
 float g_speed = 0.3f;     // g_WindSpeed
 constexpr float kVerticality = 0.4f;
@@ -98,10 +103,10 @@ constexpr float kDirX = 1.0f, kDirZ = 0.0f;  // Remastered's wind direction (its
 
 uint32_t g_ctor_back = kFlverCtor + 7;
 std::unordered_map<std::string, int> g_pairs;  // "model|texture" -> the weight rule (foliage_data.h)
-std::unordered_set<std::string> g_tree_crowns;  // kTreeCrowns
+std::unordered_set<std::string> g_firelink_leaves;  // kFirelinkLeaves
 std::unordered_map<std::string, const foliage_data::Linear*> g_linear;
 std::unordered_set<std::string> g_textures;
-std::atomic<int> g_models{0}, g_meshes{0}, g_vertices{0}, g_names_logged{0};
+std::atomic<int> g_models{0}, g_meshes{0}, g_vertices{0}, g_names_logged{0}, g_tree_meshes{0}, g_tree_vertices{0};
 std::atomic<long long> g_work_ticks{0};  // QueryPerformanceCounter ticks spent in on_flver (the loading threads)
 
 // --- the FLVER (FLVER2, 0x2000C) -------------------------------------------------------------------------------------
@@ -172,15 +177,6 @@ bool tree_map_piece(const std::string& model) {
 // A tree texture: "tree_" or "tree." (not "tree", which is in "street").
 bool tree_texture(const std::string& texture) {
     return texture.find("tree_") != std::string::npos || texture.find("tree.") != std::string::npos;
-}
-
-// A crown's amplitude up its height: 0 in its bottom kTreeStill, rising to kCrownTop at its top.
-uint8_t crown_amp(float y, float lo, float hi) {
-    const float span = hi - lo;
-    float t = span < 1e-4f ? 0.0f : (y - lo) / span;
-    t = (t - kTreeStill) / (1.0f - kTreeStill);
-    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-    return amp_byte(t * kCrownTop);
 }
 
 // Amplitude and phase for one mesh's vertices (kind and linear rule from foliage_data.h).
@@ -335,19 +331,16 @@ void process_flver(uint8_t* d, const std::string& model) {
     const size_t tex_off = lay_off + static_cast<size_t>(layouts) * 0x10;
     if (tex_off + static_cast<size_t>(textures) * 0x20 > size) return;
 
-    // FoliageTreeSway: a crown takes every mesh; a batch piece of the tree maps its tree-textured meshes. They are
-    // marked after the model has been read: a crown's meshes share one height range, and every tree mesh of a piece one
-    // phase.
-    const bool tree_crown = g_tree_sway && g_tree_crowns.count(model) != 0;
-    const bool tree_area = g_tree_sway && tree_map_piece(model);
-    struct PendingTree {
-        uint8_t* base;
-        int stride, bi, mesh;
-        std::string texture;
-        std::vector<float> y;
-    };
-    std::vector<PendingTree> tree_pending;
-    float tree_lo = 1e30f, tree_hi = -1e30f;
+    // FoliageTreeSway: Firelink's leaf models, and the batch pieces of the trees' maps (their tree-textured meshes).
+    // One phase for the whole model, from its name: every mesh of it, and every load of it, in step.
+    const bool firelink_leaves = g_firelink_leaves.count(model) != 0;
+    const bool tree_area = tree_map_piece(model);
+    uint8_t tree_phase = 0;
+    if (firelink_leaves || tree_area) {
+        uint32_t h = 2166136261u;
+        for (const char c : model) h = (h ^ static_cast<unsigned char>(c)) * 16777619u;
+        tree_phase = static_cast<uint8_t>(h >> 24);
+    }
 
     for (int mi = 0; mi < meshes; ++mi) {
         const size_t mo = mesh_off + static_cast<size_t>(mi) * 0x30;
@@ -373,16 +366,32 @@ void process_flver(uint8_t* d, const std::string& model) {
             }
         }
         if (diffuse.empty()) continue;
-        const bool tree = tree_crown || (tree_area && tree_texture(diffuse));
+        bool tree = firelink_leaves || (tree_area && tree_texture(diffuse));
+        if (tree) {
+            // Leaf cards only (alpha-tested: "_Edge" materials): not the light shaft drawn in Firelink's leaf models
+            // nor the solid wood of the Lower Burg's stumps.
+            uint32_t mtd_off = 0;
+            rd(d, size, mat_off + static_cast<size_t>(mat) * 0x20 + 4, &mtd_off);
+            const std::string mtd = base_name(d, size, mtd_off, wide);
+            if (mtd.find("_edge") == std::string::npos) {
+                static std::atomic<int> told_solid{0};
+                if (told_solid < 12) {
+                    ++told_solid;
+                    LOG_INFO("FoliageSway: %s mesh %d (%s, %s) is no leaf card: it does not sway with the trees",
+                             model.c_str(), mi, diffuse.c_str(), mtd.c_str());
+                }
+                tree = false;
+            }
+        }
         int kind = 0;
         const foliage_data::Linear* lin = nullptr;
         if (!tree) {
-            if (g_tree_sway && tree_texture(diffuse)) {
+            if (!firelink_leaves && !tree_area && tree_texture(diffuse)) {
                 static std::atomic<int> told_elsewhere{0};
-                if (told_elsewhere < 12) {
+                if (told_elsewhere < 6) {
                     ++told_elsewhere;
                     LOG_INFO("FoliageSway: %s mesh %d draws with a tree texture (%s) outside the trees' maps (b1a10, "
-                             "b0a15, b1a15): left still", model.c_str(), mi, diffuse.c_str());
+                             "b0a15, b1a15): it does not sway with the trees", model.c_str(), mi, diffuse.c_str());
                 }
             }
             if (!g_textures.count(diffuse)) continue;
@@ -433,7 +442,7 @@ void process_flver(uint8_t* d, const std::string& model) {
                 uv_type = mem.type;
             }
         }
-        // A tree needs a position and its bone indices only (it sways by height, not by texture coordinates).
+        // A tree's leaves need a position and their bone indices only (one amplitude for every vertex).
         if (pos < 0 || bi < 0 || weighted || (!tree && uv < 0)) {
             if (tree) {
                 LOG_INFO("FoliageSway: tree %s mesh %d (%s) cannot sway: %s", model.c_str(), mi, diffuse.c_str(),
@@ -442,29 +451,33 @@ void process_flver(uint8_t* d, const std::string& model) {
             }
             continue;
         }
+        if (tree) {
+            const float units = firelink_leaves ? kLeafAmpFirelink : kLeafAmpArea;
+            const uint8_t amp = amp_byte(units);
+            for (int i = 0; i < vcount; ++i) {
+                uint8_t* b = d + vbase + static_cast<size_t>(i) * vsize + bi;
+                b[1] = amp;
+                b[2] = tree_phase;
+                b[3] = kMarkTree;
+            }
+            ++g_tree_meshes;
+            g_tree_vertices += vcount;
+            static std::atomic<int> told_trees{0};
+            if (told_trees < 40) {
+                ++told_trees;
+                LOG_INFO("FoliageSway: tree leaves %s mesh %d (%s): %d vertices marked 166, %.2f units each",
+                         model.c_str(), mi, diffuse.c_str(), vcount, units);
+            }
+            continue;
+        }
         std::vector<Vtx> vs(static_cast<size_t>(vcount));
         for (int i = 0; i < vcount; ++i) {
             const uint8_t* p = d + vbase + static_cast<size_t>(i) * vsize;
             std::memcpy(&vs[i].x, p + pos, 12);
-            if (uv >= 0) {
-                int16_t uvv[2];
-                std::memcpy(uvv, p + uv, 4);
-                vs[i].u = uvv[0] / 1024.0f;
-                vs[i].v = uvv[1] / 1024.0f;
-            }
-        }
-        if (tree) {
-            PendingTree pt{d + vbase, vsize, bi, mi, diffuse, {}};
-            pt.y.resize(static_cast<size_t>(vcount));
-            for (int i = 0; i < vcount; ++i) {
-                pt.y[static_cast<size_t>(i)] = vs[i].y;
-                if (tree_crown) {
-                    tree_lo = std::min(tree_lo, vs[i].y);
-                    tree_hi = std::max(tree_hi, vs[i].y);
-                }
-            }
-            tree_pending.push_back(std::move(pt));
-            continue;
+            int16_t uvv[2];
+            std::memcpy(uvv, p + uv, 4);
+            vs[i].u = uvv[0] / 1024.0f;
+            vs[i].v = uvv[1] / 1024.0f;
         }
         // Its first face set (the full detail): a triangle list or strip.
         int32_t fsi;
@@ -514,35 +527,6 @@ void process_flver(uint8_t* d, const std::string& model) {
         }
         ++g_meshes;
         g_vertices += vcount;
-    }
-    if (!tree_pending.empty()) {
-        // One phase for the whole model, from its name: every mesh of it, and every load of it, in step.
-        uint32_t h = 2166136261u;
-        for (const char c : model) h = (h ^ static_cast<unsigned char>(c)) * 16777619u;
-        const uint8_t ph = static_cast<uint8_t>(h >> 24);
-        for (const auto& pt : tree_pending) {
-            if (tree_crown && !(tree_hi > tree_lo)) continue;
-            for (size_t i = 0; i < pt.y.size(); ++i) {
-                uint8_t* b = pt.base + i * static_cast<size_t>(pt.stride) + pt.bi;
-                b[1] = tree_crown ? crown_amp(pt.y[i], tree_lo, tree_hi) : amp_byte(kAreaTreeAmp);
-                b[2] = ph;
-                b[3] = kMarkTree;
-            }
-            ++g_meshes;
-            g_vertices += static_cast<int>(pt.y.size());
-            static std::atomic<int> told_trees{0};
-            if (told_trees < 80) {
-                ++told_trees;
-                if (tree_crown) {
-                    LOG_INFO("FoliageSway: tree crown %s mesh %d (%s): %d vertices marked 166, still in the bottom "
-                             "%.0f%% of its %.1f units", model.c_str(), pt.mesh, pt.texture.c_str(),
-                             static_cast<int>(pt.y.size()), kTreeStill * 100.0f, tree_hi - tree_lo);
-                } else {
-                    LOG_INFO("FoliageSway: tree %s mesh %d (%s): %d vertices marked 166, %.2f units each",
-                             model.c_str(), pt.mesh, pt.texture.c_str(), static_cast<int>(pt.y.size()), kAreaTreeAmp);
-                }
-            }
-        }
     }
 }
 
@@ -621,11 +605,11 @@ DWORD fbits(float f) {
 }
 DWORD op(DWORD code, DWORD len) { return code | (len << 24); }
 
-// A copy of a static model's vertex shader with the sway in front. False when it is not one (no bone indices, bone
-// weights, or our registers in use).
+// A copy of a static model's vertex shader with the sway in front (trees: the trees' block after the grass's). False
+// when it is not one (no bone indices, bone weights, or our registers in use).
 std::atomic<int> g_why_logged{0};
 
-bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
+bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out, bool trees) {
     if (count < 2 || code[0] != 0xFFFE0300) return false;
     const char* why = nullptr;
     int pos = -1, bi = -1, max_temp = -1;
@@ -660,8 +644,8 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
             if (o == 0x1F && k == 1) continue;                               // dcl usage
             const DWORD type = reg_type(p), num = p & 0x7FF;
             if (type == kTemp) max_temp = std::max(max_temp, static_cast<int>(num));
-            if (type == kConst && num >= (g_tree_sway ? kKTree : kWind0)) {
-                why = g_tree_sway ? "constants c249-c255" : "constants c250-c255";
+            if (type == kConst && num >= (trees ? kKTree : kWind0)) {
+                why = trees ? "constants c249-c255 (the trees' copy)" : "constants c250-c255";
             }
         }
         i += 1 + len;
@@ -688,7 +672,7 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
         op(0x51, 5), dst(kConst, kK3, 0xF), fbits(1.0f / two_pi), fbits(0.5f), fbits(two_pi), fbits(-3.14159265359f),
     };
     out.insert(out.end(), std::begin(defs), std::end(defs));
-    if (g_tree_sway) {
+    if (trees) {
         const DWORD tree_def[] = {op(0x51, 5), dst(kConst, kKTree, 0xF), fbits(static_cast<float>(kMarkTree)),
                                   fbits(kTreeScale), fbits(kTreeSlow), fbits(0.0f)};
         out.insert(out.end(), std::begin(tree_def), std::end(tree_def));
@@ -748,7 +732,7 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
     };
     out.insert(out.end(), head.begin(), head.end());
     out.insert(out.end(), s.begin(), s.end());
-    if (g_tree_sway) {
+    if (trees) {
         // The trees' block: the same, testing 166 (c249.x), the amplitude times kTreeScale (c249.y) after the strength,
         // the phase times kTreeSlow (c249.z) after the phase scale.
         std::vector<DWORD> tree = s;
@@ -774,7 +758,8 @@ bool patch_vs(const DWORD* code, size_t count, std::vector<DWORD>& out) {
                 break;
             }
         }
-        if (scaled && slowed) out.insert(out.end(), tree.begin(), tree.end());
+        if (!scaled || !slowed) return false;
+        out.insert(out.end(), tree.begin(), tree.end());
     }
     const size_t body = out.size();
     out.insert(out.end(), code + after_dcl, code + end);
@@ -811,11 +796,17 @@ PresentFn o_present = nullptr;
 // colour pass that draws only where its depth equals the pre-pass's, the shadows) has to move a blade the same.
 volatile double g_frame_t = 0.0;
 
+// A game shader's two copies: the grass's, and the grass's and the trees' (FoliageTreeSway; null where it could not be
+// made: the grass's then draws).
+struct Swap {
+    IDirect3DVertexShader9* grass = nullptr;
+    IDirect3DVertexShader9* trees = nullptr;
+};
 SRWLOCK g_lock = SRWLOCK_INIT;
-std::unordered_map<IDirect3DVertexShader9*, IDirect3DVertexShader9*> g_swaps;
+std::unordered_map<IDirect3DVertexShader9*, Swap> g_swaps;
 volatile LONG g_gen = 1;
-__declspec(align(64)) uint64_t g_cache[4096][2];  // key | gen << 32, swap
-std::atomic<int> g_patched{0}, g_refused{0};
+__declspec(align(64)) uint64_t g_cache[4096][4];  // key | gen << 32, grass copy, trees copy, -
+std::atomic<int> g_patched{0}, g_refused{0}, g_patched_trees{0};
 LARGE_INTEGER g_freq{}, g_t0{};
 
 void* patch_slot_here(void* object, int slot, void* replacement) {
@@ -845,13 +836,13 @@ size_t shader_size(const DWORD* code) {
     return 0;
 }
 
-IDirect3DVertexShader9* make_swap(IDirect3DDevice9* dev, const DWORD* code) {
+IDirect3DVertexShader9* make_swap(IDirect3DDevice9* dev, const DWORD* code, bool trees) {
     IDirect3DVertexShader9* swap = nullptr;
     const size_t n = shader_size(code);
     std::vector<DWORD> patched;
-    if (n && patch_vs(code, n, patched)) {
+    if (n && patch_vs(code, n, patched, trees)) {
         if (SUCCEEDED(o_create_vs(dev, patched.data(), &swap)) && swap) {
-            ++g_patched;
+            ++(trees ? g_patched_trees : g_patched);
         } else {
             swap = nullptr;
             ++g_refused;
@@ -860,20 +851,27 @@ IDirect3DVertexShader9* make_swap(IDirect3DDevice9* dev, const DWORD* code) {
     return swap;
 }
 
-IDirect3DVertexShader9* make_swap_guarded(IDirect3DDevice9* dev, const DWORD* code) {
+Swap make_swaps(IDirect3DDevice9* dev, const DWORD* code) {
+    Swap sw;
+    sw.grass = make_swap(dev, code, false);
+    if (sw.grass) sw.trees = make_swap(dev, code, true);
+    return sw;
+}
+
+Swap make_swaps_guarded(IDirect3DDevice9* dev, const DWORD* code) {
     __try {
-        return make_swap(dev, code);
+        return make_swaps(dev, code);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
+        return Swap{};
     }
 }
 
 HRESULT WINAPI hk_create_vs(IDirect3DDevice9* dev, const DWORD* code, IDirect3DVertexShader9** out) {
     const HRESULT hr = o_create_vs(dev, code, out);
     if (FAILED(hr) || !out || !*out || !code) return hr;
-    IDirect3DVertexShader9* swap = g_on ? make_swap_guarded(dev, code) : nullptr;
+    const Swap swap = g_on ? make_swaps_guarded(dev, code) : Swap{};
     AcquireSRWLockExclusive(&g_lock);
-    if (swap) {
+    if (swap.grass) {
         g_swaps[*out] = swap;
     } else {
         g_swaps.erase(*out);
@@ -900,8 +898,10 @@ void send_wind(IDirect3DDevice9* dev) {
     const float speed = g_speed;
     if (speed > 1e-6f) {
         if (t != g_wrap_in || speed != g_wrap_speed) {
-            // Every cosine back where it started; with trees also the trees' phase (kTreeSlow of it) on whole cycles.
-            const double period = 4.0 * 3.14159265358979 * (g_tree_sway ? kTreeSlowBy : 1) / speed;
+            // Every cosine back where it started, the trees' too (their phase runs at kTreeSlow of the grass's): the
+            // grass's cosines are the same at any whole number of its own periods, so the longer wrap changes nothing
+            // for them, and the trees can be switched on at any moment.
+            const double period = 4.0 * 3.14159265358979 * kTreeSlowBy / speed;
             g_wrap_in = t;
             g_wrap_speed = speed;
             g_wrap_out = std::fmod(t, period);
@@ -920,16 +920,19 @@ HRESULT WINAPI hk_set_vs(IDirect3DDevice9* dev, IDirect3DVertexShader9* vs) {
         uint64_t* slot = g_cache[(key * 2654435761u) >> 20];
         const uint32_t gen = static_cast<uint32_t>(g_gen);
         IDirect3DVertexShader9* swap = nullptr;
-        if (slot[0] == (key | (static_cast<uint64_t>(gen) << 32))) {
-            swap = reinterpret_cast<IDirect3DVertexShader9*>(static_cast<uintptr_t>(slot[1]));
-        } else {
+        if (slot[0] != (key | (static_cast<uint64_t>(gen) << 32))) {
+            Swap sw;
             AcquireSRWLockShared(&g_lock);
             const auto it = g_swaps.find(vs);
-            if (it != g_swaps.end()) swap = it->second;
+            if (it != g_swaps.end()) sw = it->second;
             ReleaseSRWLockShared(&g_lock);
-            slot[1] = reinterpret_cast<uintptr_t>(swap);
+            slot[1] = reinterpret_cast<uintptr_t>(sw.grass);
+            slot[2] = reinterpret_cast<uintptr_t>(sw.trees);
             slot[0] = key | (static_cast<uint64_t>(gen) << 32);
         }
+        // FoliageTreeSway picks the copy (the grass's where the trees' could not be made).
+        const uint64_t pick = g_trees_on && slot[2] ? slot[2] : slot[1];
+        swap = reinterpret_cast<IDirect3DVertexShader9*>(static_cast<uintptr_t>(pick));
         if (swap) {
             send_wind(dev);
             return o_set_vs(dev, swap);
@@ -942,10 +945,19 @@ HRESULT WINAPI hk_set_vs(IDirect3DDevice9* dev, IDirect3DVertexShader9* vs) {
 
 void foliage_configure(bool on, int strength_percent, int speed_percent, bool trees_on) {
     g_on = on;
-    g_tree_sway = on && trees_on;
+    g_trees_on = trees_on;
     foliage_set_strength(strength_percent);
     foliage_set_speed(speed_percent);
 }
+
+void foliage_set_trees(bool on) {
+    if (g_trees_on == on) return;
+    g_trees_on = on;
+    LOG_INFO("FoliageTreeSway: the trees' leaves %s%s", on ? "sway" : "are still",
+             g_on ? "" : " (with FoliageSway off nothing sways until a restart with it on)");
+}
+
+bool foliage_trees() { return g_trees_on; }
 
 void foliage_set_strength(int percent) {
     if (percent < 0) percent = 0;
@@ -968,7 +980,7 @@ bool foliage_install() {
         g_textures.insert(p.texture);
     }
     for (const auto& l : foliage_data::kLinear) g_linear[l.texture] = &l;
-    for (const char* m : kTreeCrowns) g_tree_crowns.insert(m);
+    for (const char* m : kFirelinkLeaves) g_firelink_leaves.insert(m);
     auto* site = reinterpret_cast<uint8_t*>(kFlverCtor);
     if (std::memcmp(site, kCtorHead, sizeof(kCtorHead)) != 0) {
         LOG_ERROR("FoliageSway: the model loader at %08X does not match this build; foliage does not sway",
@@ -989,10 +1001,9 @@ bool foliage_install() {
     LOG_INFO("FoliageSway: grass, flowers, bushes, ivy and leaves sway in the wind as in Remastered (%zu models' "
              "foliage, strength %.0f%%, speed %.0f%%)",
              g_pairs.size(), g_strength / 0.1f * 100.0f, g_speed / 0.3f * 100.0f);
-    if (g_tree_sway) {
-        LOG_INFO("FoliageTreeSway: the trees of the Undead Burg and Parish, the way to Sen's Fortress and Anor Londo, and "
-                 "Firelink Shrine's great tree's crown sway too");
-    }
+    LOG_INFO("FoliageTreeSway: the leaves of the trees of Firelink Shrine, the Undead Burg and Parish, the way to Sen's "
+             "Fortress and Anor Londo are marked as the maps load; they %s (switched at once)",
+             g_trees_on ? "sway" : "stay still");
     return true;
 }
 
@@ -1011,4 +1022,7 @@ void foliage_log_stats() {
     LOG_INFO("FoliageSway: %d models loaded, %d meshes sway (%d vertices, %.1f ms on the loading threads); %d vertex "
              "shaders have a swaying copy, %d refused by the device",
              g_models.load(), g_meshes.load(), g_vertices.load(), ms, g_patched.load(), g_refused.load());
+    LOG_INFO("FoliageTreeSway: %d tree leaf meshes marked (%d vertices); %d vertex shaders have the trees' copy; the "
+             "leaves %s", g_tree_meshes.load(), g_tree_vertices.load(), g_patched_trees.load(),
+             g_trees_on ? "sway" : "are still");
 }
