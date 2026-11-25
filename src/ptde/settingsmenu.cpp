@@ -43,8 +43,22 @@ using DrawFn = void*(__fastcall*)(void* dlg, void* edx, void* dc);
 DrawFn g_pcoption_draw = nullptr;
 volatile LONGLONG g_pcoption_seen = 0;
 
+// Diagnostics (a Steam Deck player saw neither the hint nor the page, 2026-11-25): the first time the PC settings
+// screen draws, the first controller buttons the page reads, and each way its drawing can fail, once.
+volatile LONG g_told_pcoption = 0, g_told_pad = 0;
+volatile LONG g_told_fail[6] = {};
+
+void tell_fail(int i, const char* what, HRESULT hr) {
+    if (InterlockedExchange(&g_told_fail[i], 1) == 0) {
+        LOG_ERROR("FPS Unlock Settings: the page cannot be drawn: %s (0x%08lX)", what, static_cast<unsigned long>(hr));
+    }
+}
+
 void* __fastcall hk_pcoption_draw(void* dlg, void* edx, void* dc) {
     InterlockedExchange64(&g_pcoption_seen, static_cast<LONGLONG>(GetTickCount64()));
+    if (InterlockedExchange(&g_told_pcoption, 1) == 0) {
+        LOG_INFO("FPS Unlock Settings: the PC settings screen is up: its hint is shown and Y opens the page");
+    }
     return g_pcoption_draw(dlg, edx, dc);
 }
 
@@ -191,7 +205,9 @@ bool upload(IDirect3DDevice9* dev, Tex& t, const SettingsPageImage* img) {
     if (!img || !img->bits) return false;
     if (t.tex && (t.w != img->w || t.h != img->h)) drop(t);
     if (!t.tex) {
-        if (FAILED(dev->CreateTexture(img->w, img->h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t.tex, nullptr))) {
+        const HRESULT hr = dev->CreateTexture(img->w, img->h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t.tex, nullptr);
+        if (FAILED(hr)) {
+            tell_fail(0, "its texture was not made", hr);
             t.tex = nullptr;
             return false;
         }
@@ -201,7 +217,11 @@ bool upload(IDirect3DDevice9* dev, Tex& t, const SettingsPageImage* img) {
     }
     if (t.version != img->version) {
         D3DLOCKED_RECT lr{};
-        if (FAILED(t.tex->LockRect(0, &lr, nullptr, 0))) return false;
+        const HRESULT hr = t.tex->LockRect(0, &lr, nullptr, 0);
+        if (FAILED(hr)) {
+            tell_fail(1, "its texture could not be written", hr);
+            return false;
+        }
         for (int y = 0; y < img->h; ++y) {
             std::memcpy(static_cast<uint8_t*>(lr.pBits) + static_cast<size_t>(y) * lr.Pitch,
                         img->bits + static_cast<size_t>(y) * img->w, static_cast<size_t>(img->w) * 4);
@@ -228,12 +248,20 @@ void render(IDirect3DDevice9* dev, bool panel, bool hint) {
         g_sb = nullptr;
         g_sb_dev = dev;
     }
-    if (!g_sb && FAILED(dev->CreateStateBlock(D3DSBT_ALL, &g_sb))) {
-        g_sb = nullptr;
-        return;
+    if (!g_sb) {
+        const HRESULT hr = dev->CreateStateBlock(D3DSBT_ALL, &g_sb);
+        if (FAILED(hr)) {
+            tell_fail(2, "the device's state could not be saved (CreateStateBlock)", hr);
+            g_sb = nullptr;
+            return;
+        }
     }
     IDirect3DSurface9* bb = nullptr;
-    if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return;
+    const HRESULT hr_bb = dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb);
+    if (FAILED(hr_bb) || !bb) {
+        tell_fail(3, "no back buffer", hr_bb);
+        return;
+    }
     D3DSURFACE_DESC bd{};
     bb->GetDesc(&bd);
     const int sh = static_cast<int>(bd.Height);
@@ -257,7 +285,9 @@ void render(IDirect3DDevice9* dev, bool panel, bool hint) {
     dev->SetDepthStencilSurface(nullptr);
     D3DVIEWPORT9 vp{0, 0, bd.Width, bd.Height, 0.0f, 1.0f};
     dev->SetViewport(&vp);
-    if (SUCCEEDED(dev->BeginScene())) {
+    const HRESULT hr_begin = dev->BeginScene();
+    if (FAILED(hr_begin)) tell_fail(4, "BeginScene failed", hr_begin);
+    if (SUCCEEDED(hr_begin)) {
         dev->SetVertexShader(nullptr);
         dev->SetPixelShader(nullptr);
         dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
@@ -361,6 +391,9 @@ SettingsPageInput read_input() {
     in.keyboard = game_window_focused();
     in.key = key;
     in.pad_opens = GetTickCount64() - static_cast<ULONGLONG>(g_pcoption_seen) < 300;
+    if (in.pad && InterlockedExchange(&g_told_pad, 1) == 0) {
+        LOG_INFO("FPS Unlock Settings: the controller's buttons reach the page (first seen: 0x%04X)", in.pad);
+    }
     return in;
 }
 
