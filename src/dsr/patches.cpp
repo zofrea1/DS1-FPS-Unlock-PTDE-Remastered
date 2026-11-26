@@ -3754,6 +3754,114 @@ bool patch_foot_ik() {
     return true;
 }
 
+// Foot placement for the human NPCs and summoned phantoms too (FootIkNpcs, as in Prepare to Die Edition). The placement
+// above (0x382500, a method of the human characters' controller, rbx = the controller, its character at +0x10) asks
+// the character's vt+0x150 (our player) at 0x382584 and leaves anyone else's feet as the animation has them (flat
+// ground), so on stairs and slopes an NPC's feet floated or sank. The question now also says yes for a character
+// whose controller has what the method reads past it with no check (+0x28, +0x48) and a leg (+0x318 or +0x320), unless
+// it is another player's character (WorldChrMan's player set past its first entry, ours): those are left as the game
+// has them. Human NPCs are of our class (PlayerIns) too, so the set decides, as in Prepare to Die Edition.
+constexpr uint32_t kFootOthersSite = 0x382584;  // call qword ptr [rax+0x150] (rcx = the character)
+constexpr uint32_t kWorldChrManRva = 0x1C77E50;  // WorldChrMan: +0x38 the player set's entries (6), +0x40 the set
+constexpr uintptr_t kPlayerEntry = 0x38;         // one entry of the set, its character first (entry 0 = ours)
+std::atomic<int> g_foot_npcs_state{0};
+std::atomic<int> g_foot_npcs_told{0};
+
+uint64_t read_q(uintptr_t at) {
+    return *reinterpret_cast<const uint64_t*>(at);
+}
+
+// Another player's character: in WorldChrMan's player set past entry 0 (ours).
+bool other_player(uintptr_t world, uintptr_t chr) {
+    const uint32_t n = *reinterpret_cast<const uint32_t*>(world + 0x38);
+    const uintptr_t set = static_cast<uintptr_t>(read_q(world + 0x40));
+    if (!set || n > 16) return false;
+    for (uint32_t i = 1; i < n; ++i) {
+        if (read_q(set + i * kPlayerEntry) == chr) return true;
+    }
+    return false;
+}
+
+// After the game said no (rcx = the character, rdx = its controller): place this character's feet too.
+extern "C" int foot_npcs_wanted(uintptr_t chr, uintptr_t ctrl) {
+    if (!g_foot_ik_npcs.load(std::memory_order_relaxed)) return 0;
+    int yes = 0;
+    __try {
+        if (chr && read_q(ctrl + 0x28) && read_q(ctrl + 0x48) && (read_q(ctrl + 0x318) || read_q(ctrl + 0x320))) {
+            const uintptr_t world = static_cast<uintptr_t>(read_q(reinterpret_cast<uintptr_t>(image_rva(kWorldChrManRva))));
+            if (!world) {
+                yes = 0;
+            } else if (other_player(world, chr)) {
+                g_foot_ik_npcs_players.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                yes = 1;
+                g_foot_ik_npcs_placed.fetch_add(1, std::memory_order_relaxed);
+                int expected = 0;
+                if (g_foot_npcs_told.compare_exchange_strong(expected, 1)) {
+                    LOG_INFO("FootIkNpcs: the first other character placed: %p (ours %p)", reinterpret_cast<void*>(chr),
+                             reinterpret_cast<void*>(static_cast<uintptr_t>(read_q(world + 0x68))));
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        yes = 0;
+    }
+    return yes;
+}
+
+bool patch_foot_ik_npcs() {
+    auto* site = image_rva(kFootOthersSite);
+    static constexpr uint8_t kExpect[6] = {0xFF, 0x90, 0x50, 0x01, 0x00, 0x00};
+    if (std::memcmp(site, kExpect, sizeof(kExpect)) != 0 || site[-3] != 0x48 || site[-2] != 0x8B || site[-1] != 0x01) {
+        LOG_ERROR("FootIkNpcs: the site does not match this build");
+        return false;
+    }
+    auto* page = static_cast<uint8_t*>(alloc_near(site));
+    if (!page) {
+        LOG_ERROR("FootIkNpcs: could not allocate its page (Win32=%lu)", GetLastError());
+        return false;
+    }
+    CaveEmitter e{page};
+    // rcx = the character, rax = its vtable, rbx = the controller; rsp = 8 mod 16 here.
+    e.b(0x51);                                                            // push rcx
+    for (uint8_t b : {0x48, 0x83, 0xEC, 0x20}) e.b(b);                    // sub rsp,20h
+    for (uint8_t b : {0xFF, 0x90, 0x50, 0x01, 0x00, 0x00}) e.b(b);        // call [rax+150h]: the game's answer
+    for (uint8_t b : {0x84, 0xC0}) e.b(b);                                // test al,al
+    e.b(0x75);                                                            // jnz done
+    const size_t jnz_at = e.len;
+    e.b(0);
+    for (uint8_t b : {0x48, 0x8B, 0x4C, 0x24, 0x20}) e.b(b);              // mov rcx,[rsp+20h]  (the character)
+    for (uint8_t b : {0x48, 0x8B, 0xD3}) e.b(b);                          // mov rdx,rbx        (the controller)
+    for (uint8_t b : {0x48, 0xB8}) e.b(b);                                // mov rax,foot_npcs_wanted
+    e.q(reinterpret_cast<uint64_t>(&foot_npcs_wanted));
+    for (uint8_t b : {0xFF, 0xD0}) e.b(b);                                // call rax
+    e.buf[jnz_at] = static_cast<uint8_t>(e.len - (jnz_at + 1));
+    for (uint8_t b : {0x48, 0x83, 0xC4, 0x20}) e.b(b);                    // done: add rsp,20h
+    e.b(0x59);                                                            // pop rcx
+    e.b(0xC3);                                                            // ret
+    DWORD protect = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &protect)) {
+        LOG_ERROR("FootIkNpcs: could not make its stub executable (Win32=%lu)", GetLastError());
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    const intptr_t rel = page - (site + 5);
+    if (rel < INT32_MIN || rel > INT32_MAX) {
+        LOG_ERROR("FootIkNpcs: its stub is out of range");
+        return false;
+    }
+    uint8_t patch[6] = {0xE8, 0, 0, 0, 0, 0x90};
+    const auto rel32 = static_cast<int32_t>(rel);
+    std::memcpy(patch + 1, &rel32, 4);
+    if (!write_code(site, patch, sizeof(patch))) {
+        LOG_ERROR("FootIkNpcs: could not patch");
+        return false;
+    }
+    LOG_INFO("FootIkNpcs: human NPCs and summoned phantoms place their feet on stairs and slopes (%s now)",
+             g_foot_ik_npcs.load(std::memory_order_relaxed) ? "on" : "off");
+    return true;
+}
+
 // The three Prepare to Die Edition fixes of 1.9.0 that Remastered shares (src/ptde/slidecontact.cpp,
 // slidesteer.cpp, soulcounter.cpp). Remastered's code is the same FromSoftware code, so each site is the
 // twin of the PTDE one. The cutscene camera is not ported: Remastered's cutscenes already run at the frame
@@ -4951,6 +5059,11 @@ void try_delayed_patches() {
     if (g_foot_state.compare_exchange_strong(expected, 1)) {
         const bool ok = g_fix_foot_ik.load(std::memory_order_relaxed) == 0 || patch_foot_ik();
         g_foot_state.store(ok ? 2 : -1);
+    }
+    // Always in place (the settings page switches FootIkNpcs live); with it off the question is the game's.
+    expected = 0;
+    if (g_foot_npcs_state.compare_exchange_strong(expected, 1)) {
+        g_foot_npcs_state.store(patch_foot_ik_npcs() ? 2 : -1);
     }
     expected = 0;
     if (g_step_down_state.compare_exchange_strong(expected, 1)) {

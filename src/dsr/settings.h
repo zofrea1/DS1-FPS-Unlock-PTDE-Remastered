@@ -152,6 +152,9 @@ struct Settings {
     // Foot IK at the original game's speed: Remastered kept its per-frame pelvis and on/off gains, so at 60 FPS
     // the pelvis followed the feet twice as fast (INI FootIkPtdeSpeed). Needs FixFootIk.
     bool foot_ik_ptde_speed = true;
+    // Human NPCs and summoned phantoms place their feet on stairs and slopes too; the game does it for your character
+    // only (INI FootIkNpcs).
+    bool foot_ik_npcs = true;
     // Bloodstain and wandering ghost replays play, and the player's replay data is recorded, in real time.
     bool fix_ghosts = true;
     // Per-frame 1/60 timers and fades: weapon buff glow, ragdoll blend-in, item glow, a load queue countdown.

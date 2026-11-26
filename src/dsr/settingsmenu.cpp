@@ -58,6 +58,7 @@ void apply_step_down(const char* v) { g_step_down_ptde.store(on(v) ? 1 : 0, std:
 void apply_step_height(const char* v) { g_step_height_ptde.store(on(v) ? 1 : 0, std::memory_order_relaxed); }
 void apply_air(const char* v) { g_air_damping_ptde.store(on(v) ? 1 : 0, std::memory_order_relaxed); }
 void apply_foot_ik(const char* v) { g_foot_ik_ptde_speed.store(on(v) ? 1 : 0, std::memory_order_relaxed); }
+void apply_foot_ik_npcs(const char* v) { g_foot_ik_npcs.store(on(v) ? 1 : 0, std::memory_order_relaxed); }
 void apply_slide(const char* v) { g_slide_ptde_speed.store(on(v) ? 1 : 0, std::memory_order_relaxed); }
 void apply_hud(const char* v) { g_hud_ptde_speed.store(on(v) ? 1 : 0, std::memory_order_relaxed); }
 void apply_speffect(const char* v) { g_speffect_ptde_speed.store(on(v) ? 1 : 0, std::memory_order_relaxed); }
@@ -106,6 +107,8 @@ const SettingsMenuRow kMovement[] = {
      L"game's rate (about 2% faster over a second than Remastered's).", kFeel, _countof(kFeel), apply_air, false},
     {"FootIkPtdeSpeed", L"Feet on stairs and slopes", L"The hips settle onto stairs and slopes at the original game's "
      L"speed; Remastered settles them twice as fast.", kFeel, _countof(kFeel), apply_foot_ik, false},
+    {"FootIkNpcs", L"NPCs' feet on the ground", L"Human NPCs and summoned phantoms place their feet on stairs and "
+     L"slopes, as your character does.", kOnOff, _countof(kOnOff), apply_foot_ik_npcs, false},
     {"SlidePtdeSpeed", L"Slides", L"A slide's contact and its turns as in the original game (30 FPS) or as in "
      L"Remastered (60 FPS), where a turn carries a quarter of the weight.", kFeel, _countof(kFeel), apply_slide, false},
     {"StickInputPtdeSpeed", L"Stick timing", L"Kicks, jumping attacks, a roll's direction and switchbacks follow the "
@@ -451,6 +454,13 @@ void poll_commands() {
             probe_install();
         } else if (cmd == "pcreport") {
             probe_report();
+        } else if (cmd == "footik npcs 1" || cmd == "footik npcs 0") {
+            g_foot_ik_npcs.store(cmd.back() == '1' ? 1 : 0, std::memory_order_relaxed);
+            LOG_INFO("[cmd] FootIkNpcs %c", cmd.back());
+        } else if (cmd == "footik") {
+            LOG_INFO("[cmd] FootIkNpcs %d: %lld calls placed another character's feet, %lld left to the game (another "
+                     "player's character)", g_foot_ik_npcs.load(), g_foot_ik_npcs_placed.load(),
+                     g_foot_ik_npcs_players.load());
         } else if (cmd == "rate") {
             LOG_INFO("[cmd] rate %.1f presents a second (cap %u)", overlay_present_rate(), g_target_fps.load());
         } else if (!cmd.empty()) {

@@ -83,6 +83,10 @@ inline std::atomic<int> g_fix_lock_on_turn{1};
 // Foot IK follows the frame time (INI FixFootIk), at the original game's speed with FootIkPtdeSpeed.
 inline std::atomic<int> g_fix_foot_ik{1};
 inline std::atomic<int> g_foot_ik_ptde_speed{1};
+// Human NPCs and summoned phantoms place their feet too (INI FootIkNpcs; patches.cpp patch_foot_ik_npcs). Live.
+inline std::atomic<int> g_foot_ik_npcs{1};
+inline std::atomic<long long> g_foot_ik_npcs_placed{0};  // calls that placed an NPC's feet (diagnostics)
+inline std::atomic<long long> g_foot_ik_npcs_players{0};  // calls left to the game: another player's character
 inline std::atomic<int> g_fix_ghosts{1};
 // 1 = the game's step is the measured frame time (TargetFPS only caps the frame rate);
 // 0 = the game's step is a fixed 1/TargetFPS (the game slows down when the rate is not held).

@@ -266,6 +266,8 @@ Settings settings_read(const wchar_t* dll_path) {
             s.fix_foot_ik = parse_bool(val);
         } else if (key == "footikptdespeed") {
             s.foot_ik_ptde_speed = parse_bool(val);
+        } else if (key == "footiknpcs") {
+            s.foot_ik_npcs = parse_bool(val);
         } else if (key == "fixghosts") {
             s.fix_ghosts = parse_bool(val);
         } else if (key == "fixtimers") {
