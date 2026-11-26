@@ -11,7 +11,7 @@ Looking for quality-of-life features in Prepare to Die Edition? [DSfix 3.0](http
 | | Remastered | Prepare to Die Edition |
 | --- | --- | --- |
 | Native frame rate | 60 | 30 |
-| Release | `v3.0.0-REMASTERED-DX11` | `v3.0.0-PTDE-DX9` |
+| Release | `v3.1.0-REMASTERED-DX11` | `v3.1.0-PTDE-DX9` |
 | Files | `dinput8.dll`, `DSR-FPS-Unlock.ini` | `xinput1_3.dll`, `PTDE-FPS-Unlock.ini`, `dxvk_d3d9.dll` (DXVK) |
 | Install next to | `DarkSoulsRemastered.exe` | `DARKSOULS.exe` |
 | Architecture | 64-bit | 32-bit |
@@ -396,6 +396,8 @@ Both mods check the bytes they patch before writing, so on an unsupported build 
 - `BonfireFix` and `BonfireUnstick`: the idea, the Prepare to Die Edition addresses and the three bonfire sit animation ids come from [FPSFix+](https://github.com/SeanPesce/FPSFix-Plus) by Sean Pesce, itself a remake of NullBy7e's FPSFix, both for this same bug. Remastered uses that idea and those animation ids. Its local player, the animation id and the menu-open fields were read from the 2022 Steam executable. The world-character and menu-manager globals are the ones [DSR-Gadget](https://github.com/JKAnderson/DSR-Gadget) finds with its signatures. FPSFix+ and DSR-Gadget are GPL-3.0. The code here is written from scratch and no code was copied.
 
 - `FixSlideContact`, `FixSlideSteer`, `FixCutsceneCamera` and `FixSoulCounter`: the problems, the Prepare to Die Edition patch sites and the approach were first published by DDTM in DSfix 3.0 for Prepare to Die Edition ([Nexus Mods](https://www.nexusmods.com/darksouls/mods/1985)), GPL-3.0. The Remastered `FixSlideContact`, `FixSlideSteer` and `FixSoulCounter` port the same fixes to Remastered's own code ([DSfix 3.0 source on GitHub](https://github.com/DDTM-bit/DSfix-3.0---Dark-Souls-PTDE)). The code here was written separately.
+
+- `FoliageTreeSway` (PTDE): thanks to mattjames2010 for the original swaying trees implementation this is adapted from.
 
 - `DXVK` (PTDE): [DXVK](https://github.com/doitsujin/dxvk) by Philip Rebohle and contributors, included unmodified (`x32/d3d9.dll` from the v3.1.1 release, renamed `dxvk_d3d9.dll`) under the zlib/libpng license; see `DXVK-LICENSE.txt` in the PTDE release or [third_party/dxvk/LICENSE](third_party/dxvk/LICENSE).
 
