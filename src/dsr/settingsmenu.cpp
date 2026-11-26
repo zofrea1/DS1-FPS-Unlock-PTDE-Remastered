@@ -507,7 +507,7 @@ void frame(int width, int height) {
 
 void settingsmenu_install(const wchar_t* dll_path, const Settings& settings) {
     if (!settings.settings_menu) {
-        LOG_INFO("FPS Unlock Settings: off (SettingsMenu = false)");
+        LOG_INFO("FPS Unlock Settings: off (SettingsMenu = false); the game's swap chain is left alone");
         return;
     }
     wchar_t dir[MAX_PATH];

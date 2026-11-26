@@ -180,3 +180,8 @@ bool settings_effects_mod_installed(const wchar_t* dir);
 
 // Reads DSR-FPS-Unlock.ini from the same directory as the DLL.
 Settings settings_load(const wchar_t* dll_path);
+
+// DllMain, before the log is open: whether FPS Unlock Settings will be wanted (FPSUnlock and SettingsMenu both on), so
+// the watch on the game's DXGI factory and swap chain goes in only then. Reads the INI with Win32 calls only, logs
+// nothing.
+bool settings_overlay_wanted(const wchar_t* dll_path);

@@ -251,7 +251,7 @@ An in-game page with the settings you may want to change while playing: press **
 - **Draw distance**: map pieces (the game's, adjacent, adjacent+, all), the objects of nearby rooms, the detail and effect distances.
 - **Co-op** (Prepare to Co-op Edition): the password (typed on the keyboard, shown as dots), players in a session, invaders, the invasion cooldown, the health bars over players, players' feet on the ground, Crimson Blossoms, Bloody Mary, enemies scaled by nearby players, network updates, shared drops.
 
-Each change is written to the INI at once (only the value on that setting's line changes). The page says when a row applies: at once (the frame rate cap, the HUD size, depth of field, smooth foliage edges, the draw distance rows), after a restart of the game (the rest), or, for the co-op rows, at once when no session runs and otherwise when the current one ends. The fixes, speed-ups and diagnostics stay in the INI only. `SettingsMenu = false` turns the page off.
+Each change is written to the INI at once (only the value on that setting's line changes). The page says when a row applies: at once (the frame rate cap, the HUD size, depth of field, smooth foliage edges, the draw distance rows), after a restart of the game (the rest), or, for the co-op rows, at once when no session runs and otherwise when the current one ends. The fixes, speed-ups and diagnostics stay in the INI only. `SettingsMenu = false` turns the page off; in Remastered it then also leaves the game's DXGI factory and swap chain alone, for an overlay that does not get on with the page.
 
 
 **Remastered** has the same page (F1, or Y in the game's PC settings screen; the same controls), with its own rows:

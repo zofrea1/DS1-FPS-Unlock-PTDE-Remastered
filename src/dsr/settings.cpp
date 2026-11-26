@@ -298,6 +298,44 @@ bool settings_effects_mod_installed(const wchar_t* dir) {
     return replaced * 2 > kEffectArchiveCount;
 }
 
+bool settings_overlay_wanted(const wchar_t* dll_path) {
+    const Settings defaults;
+    bool fps_unlock = defaults.fps_unlock;
+    bool menu = defaults.settings_menu;
+    wchar_t full[MAX_PATH];
+    lstrcpynW(full, dll_path, MAX_PATH);
+    wchar_t* slash = wcsrchr(full, L'\\');
+    if (slash) slash[1] = 0;
+    wcsncat_s(full, L"DSR-FPS-Unlock.ini", _TRUNCATE);
+    const HANDLE f = CreateFileW(full, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return fps_unlock && menu;
+    std::string text;
+    char buf[4096];
+    DWORD got = 0;
+    while (text.size() < (1u << 20) && ReadFile(f, buf, sizeof(buf), &got, nullptr) && got) text.append(buf, got);
+    CloseHandle(f);
+    // The same reading as settings_read: '#' starts a comment, sections do not matter.
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) line.resize(hash);
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = lower(trim(line.substr(0, eq)));
+        if (key == "fpsunlock") {
+            fps_unlock = parse_bool(line.substr(eq + 1));
+        } else if (key == "settingsmenu") {
+            menu = parse_bool(line.substr(eq + 1));
+        }
+    }
+    return fps_unlock && menu;
+}
+
 Settings settings_load(const wchar_t* dll_path) {
     Settings s = settings_read(dll_path);
     // The game folder (the DLL sits in it).

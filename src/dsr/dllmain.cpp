@@ -177,8 +177,11 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         g_is_game.store(1, std::memory_order_release);
         // FPS Unlock Settings draws in the game's swap chain: its DXGI factory is watched from the start (the
         // game makes it early; only that import is changed here, and what it leads to passes straight on unless
-        // the page is on).
-        overlay_early();
+        // the page is on). With SettingsMenu or FPSUnlock off nothing of it goes in, so a player whose overlay
+        // does not get on with it has a way out.
+        wchar_t dll_path[MAX_PATH];
+        GetModuleFileNameW(instance, dll_path, MAX_PATH);
+        if (settings_overlay_wanted(dll_path)) overlay_early();
         HANDLE thread = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
         if (thread) {
             CloseHandle(thread);
