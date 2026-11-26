@@ -254,7 +254,7 @@ An in-game page with the settings you may want to change while playing: press **
 Each change is written to the INI at once (only the value on that setting's line changes). The page says when a row applies: at once (the frame rate cap, the HUD size, depth of field, smooth foliage edges, the draw distance rows), after a restart of the game (the rest), or, for the co-op rows, at once when no session runs and otherwise when the current one ends. The fixes, speed-ups and diagnostics stay in the INI only. `SettingsMenu = false` turns the page off; in Remastered it then also leaves the game's DXGI factory and swap chain alone, for an overlay that does not get on with the page.
 
 
-**Remastered** has the same page (F1, or Y in the game's PC settings screen; the same controls), with its own rows:
+**Remastered** has the same page (F1, or Y anywhere in the game's System menu: its list and every screen in it; the same controls), with its own rows:
 
 - **Frame rate**: the frame rate cap (at once), real time when the frame rate dips (`VariableFrameTime`, at once), menu presses counted once, standing up from a stuck bonfire, starting offline, skipping the start-up logos.
 - **Movement**: for each movement switch, the original game's feel or Remastered's: lock-on turn speed, sliding off a slope, walls and corners, ground that drops away, step height, momentum in the air, feet on stairs and slopes, slides, stick timing.

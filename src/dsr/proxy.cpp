@@ -63,6 +63,11 @@ constexpr GUID kSystemKeyboard = {
     0x6F1D2B61, 0xD5A0, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
 constexpr int kMaxKeyboards = 8;
 void* volatile g_keyboards[kMaxKeyboards] = {};
+// The slot the next keyboard takes once every slot is taken: the oldest. The game can make a new keyboard device again
+// and again, releasing the old one (every 0.34 s on 2026-11-26 while its window was not in front or a virtual pad was
+// plugged in): with the slots only filled and never freed, the newest went unwatched and F1 came through only by
+// chance (a new device at a released one's address).
+int g_keyboard_next = 0;
 volatile uint8_t g_keys[256] = {};        // the keyboard as the game last read it (DirectInput key codes, 0x80 = down)
 std::atomic<int> g_blank{0};              // the game gets no keyboard or mouse input
 std::atomic<int> g_keyboard_logged{0};
@@ -347,8 +352,17 @@ bool hook_mouse_device(void* device, bool keyboard = false) {
                 placed = true;
             }
         }
+        if (!placed) {
+            g_keyboards[g_keyboard_next] = device;  // in the oldest one's place
+            g_keyboard_next = (g_keyboard_next + 1) % kMaxKeyboards;
+            placed = true;
+        }
         spin_unlock(g_mouse_lock);
         return placed;
+    }
+    // A mouse at a released keyboard's address is not that keyboard.
+    for (auto& k : g_keyboards) {
+        if (k == device) k = nullptr;
     }
     for (auto& mouse : g_devices) {
         if (mouse.device == device) {

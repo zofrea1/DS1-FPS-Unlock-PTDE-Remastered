@@ -23,9 +23,9 @@
 //   * the controller: the game reads it with XInputGetState from XINPUT1_3.dll (imported by ordinal 2); that import is
 //     pointed at a wrapper, which notes each pad and gives the game none while the page has the controls;
 //   * the keyboard and mouse: the game's DirectInput devices (proxy.cpp, which watches their reads);
-//   * the PC settings screen (NS_FRPG::FrpgMenuDlgPcOption, found by its run-time type information): a method of it
-//     that runs once a frame while the screen is up is counted (hook_pc_option); while it runs, Y opens the page and
-//     a line at the bottom says so.
+//   * the System menu's screens (the System list and each screen it opens: NS_FRPG::FrpgMenuDlgSystem, ...Option,
+//     found by their run-time type information): each one's method that runs once a frame while it is up is counted
+//     (hook_system_screens); while one runs, Y opens the page and a line at the bottom says so.
 // The rows: the frame rate cap and the switches that pick the original game's or Remastered's own behaviour. Most of
 // those are read by the fixes every time (the atomics in state.h), so they apply at once; the few that are set into
 // the game's code at start say they apply after a restart. The fixes themselves stay in the INI.
@@ -240,15 +240,32 @@ void hook_user32_keys() {
              a ? "yes" : "no", b ? "yes" : "no");
 }
 
-// ---------------------------------------------------------------- the PC settings screen
-// Its method table slot 16 (+0x80), the screen's own method, runs once a frame while the screen is up and not
-// otherwise (counted with `pcprobe` on 2026-11-23: slots 16, 19 and 31 once a frame, 23 and 25 twice, 15 forty times,
-// all only while it is up). It goes through a thunk that only counts (lock inc [count]; jmp [original]: no register
-// changed, whatever the method takes); the count is watched every frame.
-constexpr int kPcSlot = 16;
-volatile LONG* g_pc_count = nullptr;
-LONG g_pc_seen_calls = 0;
-ULONGLONG g_pc_seen = 0;
+// ---------------------------------------------------------------- the System menu's screens
+// The PC settings screen's method table slot 16 (+0x80), the screen's own method, runs once a frame while the screen is
+// up and not otherwise (counted with `pcprobe` on 2026-11-23: slots 16, 19 and 31 once a frame, 23 and 25 twice, 15
+// forty times, all only while it is up). Every screen of the System menu has the same layout (slots 15 and 19 their
+// base class's, 16 each its own), so each one's slot 16 is counted (the user, 2026-11-26: the page from the whole
+// System menu, as in Prepare to Die Edition). Each goes through a thunk that only counts (lock inc [count];
+// jmp [original]: no register changed, whatever the method takes); the counts are watched every frame.
+constexpr int kScreenSlot = 16;
+struct SystemScreen {
+    const char* rtti;
+    const char* what;
+};
+constexpr SystemScreen kSystemScreens[] = {
+    {".?AVFrpgMenuDlgSystem@NS_FRPG@@", "System list"},
+    {".?AVFrpgMenuDlgEnvOption@NS_FRPG@@", "game options"},
+    {".?AVFrpgMenuDlgDispOption@NS_FRPG@@", "display"},
+    {".?AVFrpgMenuDlgSoundOption@NS_FRPG@@", "sound"},
+    {".?AVFrpgMenuDlgPcOption@NS_FRPG@@", "PC settings"},
+    {".?AVFrpgMenuDlgKeyOption@NS_FRPG@@", "key config"},
+    {".?AVFrpgMenuDlgNetworkOption@NS_FRPG@@", "network"},
+};
+constexpr int kScreenCount = sizeof(kSystemScreens) / sizeof(kSystemScreens[0]);
+volatile LONG* g_screen_counts = nullptr;  // one a screen (0 for a screen not found)
+LONG g_screen_seen_calls[kScreenCount] = {};
+LONG g_screen_report[kScreenCount] = {};
+ULONGLONG g_screen_seen = 0;
 
 const uint8_t* find_bytes(const uint8_t* from, const uint8_t* to, const void* what, size_t n) {
     const auto* w = static_cast<const uint8_t*>(what);
@@ -336,45 +353,71 @@ void probe_report() {
     LOG_INFO("[pcprobe] since last:%s", line.empty() ? " none" : line.c_str());
 }
 
-bool hook_pc_option() {
-    void** vtable = nullptr;
+void** safe_find_vtable(const char* name) {
     __try {
-        vtable = find_vtable(".?AVFrpgMenuDlgPcOption@NS_FRPG@@");
+        return find_vtable(name);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        vtable = nullptr;
+        return nullptr;
     }
-    if (!vtable) return false;
-    g_pc_vtable = vtable;
-    // The thunk's code page (then read and execute only) and, right after it, its count and the original method.
+}
+
+// One page: a 16-byte thunk a screen, then their counts (+0x1000) and the original methods (+0x1400).
+int hook_system_screens() {
     auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-    if (!page) return false;
-    auto* count = reinterpret_cast<volatile LONG*>(page + 0x1000);
-    auto* original = reinterpret_cast<void**>(page + 0x1008);
-    void** slot = vtable + kPcSlot;
-    *original = *slot;
-    const int32_t to_count = static_cast<int32_t>(page + 0x1000 - (page + 7));
-    const int32_t to_orig = static_cast<int32_t>(page + 0x1008 - (page + 13));
-    page[0] = 0xF0;  // lock inc dword ptr [rip+to_count]
-    page[1] = 0xFF;
-    page[2] = 0x05;
-    std::memcpy(page + 3, &to_count, 4);
-    page[7] = 0xFF;  // jmp qword ptr [rip+to_orig]
-    page[8] = 0x25;
-    std::memcpy(page + 9, &to_orig, 4);
+    if (!page) return 0;
+    auto* counts = reinterpret_cast<volatile LONG*>(page + 0x1000);
+    auto* originals = reinterpret_cast<void**>(page + 0x1400);
+    void** slots[kScreenCount] = {};
+    std::string found, missing;
+    for (int i = 0; i < kScreenCount; ++i) {
+        void** vtable = safe_find_vtable(kSystemScreens[i].rtti);
+        if (!vtable) {
+            missing += std::string(missing.empty() ? "" : ", ") + kSystemScreens[i].what;
+            continue;
+        }
+        if (i == 4) g_pc_vtable = vtable;  // `pcprobe`
+        slots[i] = vtable + kScreenSlot;
+        originals[i] = *slots[i];
+        uint8_t* code = page + i * 16;
+        const int32_t to_count =
+            static_cast<int32_t>(reinterpret_cast<uint8_t*>(const_cast<LONG*>(&counts[i])) - (code + 7));
+        const int32_t to_orig = static_cast<int32_t>(reinterpret_cast<uint8_t*>(&originals[i]) - (code + 13));
+        code[0] = 0xF0;  // lock inc dword ptr [rip+to_count]
+        code[1] = 0xFF;
+        code[2] = 0x05;
+        std::memcpy(code + 3, &to_count, 4);
+        code[7] = 0xFF;  // jmp qword ptr [rip+to_orig]
+        code[8] = 0x25;
+        std::memcpy(code + 9, &to_orig, 4);
+        found += std::string(found.empty() ? "" : ", ") + kSystemScreens[i].what;
+    }
     DWORD old = 0;
-    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) return false;
+    if (found.empty() || !VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) return 0;
     FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
-    InterlockedExchangePointer(reinterpret_cast<void* volatile*>(slot), page);
-    VirtualProtect(slot, sizeof(void*), old, &old);
-    g_pc_count = count;
-    const auto rva = [](const void* p) {
-        return static_cast<unsigned long long>(reinterpret_cast<const uint8_t*>(p) -
-                                               reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr)));
-    };
-    LOG_INFO("FPS Unlock Settings: PC settings screen's method table at +%llX, slot %d (+%llX) counted", rva(vtable),
-             kPcSlot, rva(*original));
-    return true;
+    int hooked = 0;
+    for (int i = 0; i < kScreenCount; ++i) {
+        if (!slots[i] || !VirtualProtect(slots[i], sizeof(void*), PAGE_READWRITE, &old)) continue;
+        InterlockedExchangePointer(reinterpret_cast<void* volatile*>(slots[i]), page + i * 16);
+        VirtualProtect(slots[i], sizeof(void*), old, &old);
+        ++hooked;
+    }
+    g_screen_counts = counts;
+    LOG_INFO("FPS Unlock Settings: the System menu's screens watched (slot %d of each): %s%s%s", kScreenSlot,
+             found.c_str(), missing.empty() ? "" : "; not found: ", missing.c_str());
+    return hooked;
+}
+
+// Diagnostics (`screens`): which screens' methods ran since the last report.
+void screens_report() {
+    std::string line;
+    for (int i = 0; i < kScreenCount && g_screen_counts; ++i) {
+        const LONG n = g_screen_counts[i];
+        if (n != g_screen_report[i]) {
+            line += std::string(" ") + kSystemScreens[i].what + " +" + std::to_string(n - g_screen_report[i]);
+        }
+        g_screen_report[i] = n;
+    }
+    LOG_INFO("[screens] since last:%s", line.empty() ? " none" : line.c_str());
 }
 
 // ---------------------------------------------------------------- the keyboard
@@ -454,6 +497,8 @@ void poll_commands() {
             probe_install();
         } else if (cmd == "pcreport") {
             probe_report();
+        } else if (cmd == "screens") {
+            screens_report();
         } else if (cmd == "footik npcs 1" || cmd == "footik npcs 0") {
             g_foot_ik_npcs.store(cmd.back() == '1' ? 1 : 0, std::memory_order_relaxed);
             LOG_INFO("[cmd] FootIkNpcs %c", cmd.back());
@@ -473,12 +518,14 @@ void poll_commands() {
 void frame(int width, int height) {
     if (FPSU_DIAGNOSTICS) poll_commands();
     const ULONGLONG now = GetTickCount64();
-    const LONG calls = g_pc_count ? *g_pc_count : 0;
-    if (calls != g_pc_seen_calls) {
-        g_pc_seen_calls = calls;
-        g_pc_seen = now;
+    for (int i = 0; i < kScreenCount && g_screen_counts; ++i) {
+        const LONG calls = g_screen_counts[i];
+        if (calls != g_screen_seen_calls[i]) {
+            g_screen_seen_calls[i] = calls;
+            g_screen_seen = now;
+        }
     }
-    const bool pc_screen = g_pc_seen && now - g_pc_seen < 300;
+    const bool system_screen = g_screen_seen && now - g_screen_seen < 300;
     SettingsPageInput in;
     for (int i = 0; i < 4; ++i) {
         in.pad = static_cast<uint16_t>(in.pad | static_cast<uint16_t>(g_pad_buttons[i]));
@@ -489,12 +536,12 @@ void frame(int width, int height) {
     }
     in.keyboard = game_window_focused();
     in.key = key;
-    in.pad_opens = pc_screen;
+    in.pad_opens = system_screen;
     settingspage_frame(in);
     if (settingspage_is_open()) {
         const SettingsPageImage* img = settingspage_panel(width, height);
         if (img) overlay_draw(0, img, (width - img->w) / 2, (height - img->h) / 2);
-    } else if (pc_screen) {
+    } else if (system_screen) {
         std::wstring line = L"Y: FPS Unlock Settings";
         const int k = settingspage_key();
         if (k >= VK_F1 && k <= VK_F12) line += L"   (keyboard: F" + std::to_wstring(k - VK_F1 + 1) + L")";
@@ -522,14 +569,14 @@ void settingsmenu_install(const wchar_t* dll_path, const Settings& settings) {
     settingspage_add_page(L"Timing", kTiming, _countof(kTiming));
     const bool pad = hook_xinput();
     hook_user32_keys();
-    const bool pc = hook_pc_option();
+    const bool pc = hook_system_screens() > 0;
     if (!overlay_install(frame)) return;
     char k[16] = "none";
     const int key_vk = settings.settings_menu_key;
     if (key_vk >= VK_F1 && key_vk <= VK_F24) std::snprintf(k, sizeof(k), "F%d", key_vk - VK_F1 + 1);
     LOG_INFO("FPS Unlock Settings: open with %s%s%s", k,
-             pad && pc ? ", or Y on a controller in the PC settings screen" : "",
+             pad && pc ? ", or Y on a controller in the System menu" : "",
              !pad ? " (the controller's import was not found: keyboard only)"
-             : !pc ? " (the PC settings screen was not found: the key only)"
+             : !pc ? " (the System menu's screens were not found: the key only)"
                    : "");
 }
